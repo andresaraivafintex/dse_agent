@@ -130,6 +130,34 @@ Portas reservadas (evite conflito):
   no meio. Nunca "silenciar" um erro.
 - **P8 evidence over assertion**: toda decisão consequente gera uma linha no audit ledger.
 
+## Ambiente Python para build/teste em paralelo
+
+A fundação já validou `packages/*` num venv em `.venv/` (Python 3.12, via
+`python3.12 -m venv .venv`). **Cada workstream cria o próprio venv isolado**
+(`.venv-wsa`, `.venv-wsb`, `.venv-wsc`, `.venv-wsd`, `.venv-wse`, `.venv-wsf`
+na raiz do repo) para instalar suas dependências e rodar `pytest` sem
+interferir em instalações concorrentes de outro workstream — 6 builds andam
+em paralelo neste momento. Exemplo:
+
+```
+python3.12 -m venv .venv-wsa
+source .venv-wsa/bin/activate
+pip install -e ../../packages/contracts -e ../../packages/dse_audit -e ../../packages/dse_identity  # ajuste o path
+pip install -e .   # o pyproject.toml do seu próprio service
+pip install pytest
+pytest -q
+```
+
+Infra já está no ar (`docker compose up -d` já rodou: Postgres em `localhost:5432`
+com a migração `0001_foundation.sql` aplicada, Temporal em `localhost:7233`,
+Redis em `localhost:6379`, Vault dev em `localhost:8200` com root token
+`dse_dev_root`). Não rode `make up`/`make down` você mesmo (derrubaria a infra
+para os outros workstreams rodando em paralelo) — apenas conecte nela. Se
+precisar de uma tabela própria, escreva-a em `migrations/000X_wsY.sql`
+(seu número reservado) e aplique você mesmo com
+`DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse python3 scripts/migrate.py`
+(idempotente, só aplica o que for novo).
+
 ## Como rodar localmente
 
 ```
