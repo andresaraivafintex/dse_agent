@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-gateway-client"
+version = "0.1.0"
+description = "Cliente Python do model-gateway (LiteLLM) do Fintex DSE — virtual keys, chamadas instrumentadas com OTel, export de custo (WSD-E1/WSD-E3)."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "httpx>=0.27",
+    "psycopg2-binary>=2.9",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-http>=1.24",
+    "fastapi>=0.110",
+    "dse-contracts",
+    "dse-audit",
+]
+
+[tool.setuptools.packages.find]
+include = ["model_gateway_client*"]

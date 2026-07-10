@@ -1,0 +1,51 @@
+# WS-D — model-gateway (LiteLLM). Ver CONVENTIONS.md — conectado à rede
+# externa `dse_net` já criada pela fundação. Não editar docker-compose.yml.
+#
+# Version pinning (WSD-E1-T1): a imagem do LiteLLM é fixada por DIGEST, não
+# por tag flutuante (`main-latest` muda de conteúdo silenciosamente). O
+# digest abaixo corresponde à imagem litellm==1.93.0 puxada em 2026-07-09.
+# Procedimento de upgrade: ver services/model-gateway/README.md
+# §"Version pinning e upgrade simulado" — troque o digest, rode
+# `services/model-gateway/scripts/smoke_test.py` contra o modelo eco, compare
+# byte-a-byte com a baseline antes de promover.
+
+services:
+  model-gateway-echo:
+    build:
+      context: ./services/model-gateway/echo_provider
+    image: dse-model-gateway-echo:local
+    container_name: dse_model_gateway_echo
+    environment:
+      ECHO_PORT: "9000"
+    networks: [dse_net]
+
+  model-gateway:
+    image: ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b236757f0f69b71392722
+    container_name: dse_model_gateway
+    depends_on:
+      - model-gateway-echo
+    environment:
+      LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
+      # Banco DEDICADO do LiteLLM (schema interno do proxy p/ /key/generate,
+      # spend tracking etc.) — uma database própria `dse_litellm` na MESMA
+      # instância Postgres da fundação, NUNCA o schema/database `dse`
+      # compartilhado do control-plane. Criada uma vez via:
+      #   docker exec dse_postgres psql -U dse -d dse -c "CREATE DATABASE dse_litellm OWNER dse;"
+      DATABASE_URL: ${DSE_LITELLM_DATABASE_URL:-postgresql://dse:dse_dev_only@dse_postgres:5432/dse_litellm}
+      DSE_ECHO_PROVIDER_URL: "http://model-gateway-echo:9000"
+      DSE_ECHO_PROVIDER_API_KEY: ${DSE_ECHO_PROVIDER_API_KEY:-sk-eco-local-dev-not-a-real-key}
+      # Placeholders de produção (Bedrock/PrivateLink) — sem valor real
+      # disponível nesta sessão de dev; ver litellm_config.yaml e README.
+      DSE_AWS_REGION: ${DSE_AWS_REGION:-us-east-1}
+      DSE_BEDROCK_PRIVATELINK_ENDPOINT: ${DSE_BEDROCK_PRIVATELINK_ENDPOINT:-https://vpce-PLACEHOLDER.bedrock-runtime.us-east-1.vpce.amazonaws.com}
+      DSE_BEDROCK_IAM_ROLE_ARN: ${DSE_BEDROCK_IAM_ROLE_ARN:-arn:aws:iam::000000000000:role/dse-model-gateway-PLACEHOLDER}
+    volumes:
+      - ./services/model-gateway/litellm_config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    networks: [dse_net]
+
+networks:
+  dse_net:
+    external: true

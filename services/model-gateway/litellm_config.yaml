@@ -1,0 +1,76 @@
+# Fintex DSE — WS-D — Config do LiteLLM proxy (model-gateway).
+#
+# Version pinning: ver docker-compose.wsd.yml na raiz do repo — a imagem é
+# fixada por DIGEST (não por tag "main-latest"), para que "upgrade" seja um
+# ato explícito (trocar o digest + rodar scripts/smoke_test.py antes de subir
+# em qualquer ambiente compartilhado). Ver README.md §"Version pinning e
+# upgrade simulado" para o procedimento completo.
+#
+# Dois tiers de model registrados:
+#   1. `bedrock/*`  — tier de produção via AWS Bedrock por VPC PrivateLink.
+#      Não há conta AWS disponível nesta sessão de desenvolvimento — os
+#      valores abaixo são PLACEHOLDERS documentando exatamente a forma
+#      esperada da config real (ver README).
+#   2. `eco/echo-model` — tier local/dev: um provider "custom" real, apontando
+#      para o echo_provider/server.py (processo HTTP próprio, sem custo, sem
+#      dependência externa), registrado como um provider OpenAI-compatível
+#      qualquer (o mesmo mecanismo usado para vLLM/Ollama/etc. em produção).
+#      Permite testar o gateway fim-a-fim sem nenhuma credencial paga.
+
+model_list:
+  # --- Tier 1: Bedrock / PrivateLink (produção — placeholders, ver README) ---
+  - model_name: bedrock/anthropic.claude-3-5-sonnet
+    litellm_params:
+      model: bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
+      aws_region_name: os.environ/DSE_AWS_REGION
+      # VPC endpoint da PrivateLink para bedrock-runtime — substituir pelo ID
+      # real provisionado pelo time de infra (WS-F/plataforma AWS do cliente).
+      aws_bedrock_runtime_endpoint: os.environ/DSE_BEDROCK_PRIVATELINK_ENDPOINT
+      # IAM role assumida pelo gateway (via IRSA/web-identity se em EKS, ou
+      # instance profile se em EC2) — nunca uma access key estática.
+      aws_role_name: os.environ/DSE_BEDROCK_IAM_ROLE_ARN
+      aws_web_identity_token: os.environ/AWS_WEB_IDENTITY_TOKEN_FILE
+    model_info:
+      dse_tier: 1
+      dse_requires_infra: "aws_bedrock_privatelink"
+
+  - model_name: bedrock/anthropic.claude-3-haiku
+    litellm_params:
+      model: bedrock/anthropic.claude-3-haiku-20240307-v1:0
+      aws_region_name: os.environ/DSE_AWS_REGION
+      aws_bedrock_runtime_endpoint: os.environ/DSE_BEDROCK_PRIVATELINK_ENDPOINT
+      aws_role_name: os.environ/DSE_BEDROCK_IAM_ROLE_ARN
+      aws_web_identity_token: os.environ/AWS_WEB_IDENTITY_TOKEN_FILE
+    model_info:
+      dse_tier: 1
+      dse_requires_infra: "aws_bedrock_privatelink"
+
+  # --- Tier local/dev: modelo eco, funcional agora, sem custo ---
+  - model_name: eco/echo-model
+    litellm_params:
+      model: openai/echo-model
+      api_base: os.environ/DSE_ECHO_PROVIDER_URL
+      # Achado da integração da Fase 1 (scanner do WS-F,
+      # scripts/scan_for_plaintext_secrets.py): esta era a única entrada do
+      # arquivo com valor literal em vez de indireção `os.environ/...` — o
+      # echo provider não exige credencial real (não é um secret de
+      # verdade), mas por consistência com o resto do arquivo e para o
+      # scanner não precisar de uma exceção especial, movida para env var
+      # com default não-sensível.
+      api_key: os.environ/DSE_ECHO_PROVIDER_API_KEY
+    model_info:
+      dse_tier: "local-dev"
+      dse_requires_infra: "none"
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Sem `database_url`: o LiteLLM guarda virtual keys em memória do processo
+  # (perdidas em restart do container). Aceitável para Fase 1 local — ver
+  # README para o plano de produção (Postgres dedicado, NUNCA o schema
+  # compartilhado `dse` usado pelo control-plane).
+  allow_requests_on_db_unavailable: true
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  request_timeout: 30
