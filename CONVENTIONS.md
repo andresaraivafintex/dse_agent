@@ -1,0 +1,140 @@
+# Convenções do monorepo — Fintex DSE, Fase 1 (Core loop)
+
+Lido por: todo agente/engenheiro que for construir dentro de `services/*`. Este documento é o
+"contracts sprint" das semanas 1-2 do plano mestre (D1, D2, D3, D5, D6, D7, D10, D11, D12):
+define o que já está construído (fundação) e as regras para não colidir com os outros
+workstreams enquanto trabalham em paralelo.
+
+## Escopo desta Fase 1 ("Core loop")
+
+Conforme `plano-desenvolvimento/00-PLANO-MESTRE.md` §3: o ciclo completo Slack/GitHub →
+clarificação → **Coder único** em sandbox → L1 → PR determinístico → review humano → merge
+humano, durável e auditável. **Não fazem parte da Fase 1**: split Planner/Tester/Reviewer
+(Fase 2), gate de aprovação de plano por risk class (Fase 2), Jira (Fase 2), L2 fresh-context
+review (Fase 2), previews Argo CD / evidência Playwright (Fase 3), skill registry (Fases 2/4).
+
+## Stack
+
+- **Linguagem: Python 3.11+** em todos os serviços (containers usam `python:3.11-slim`; não
+  depende da versão do host). Motivo: OpenHands SDK e LiteLLM são nativos em Python — minimiza
+  atrito de integração entre o runtime de sandbox e o model gateway.
+- Empacotamento: `pyproject.toml` (PEP 621) + `setuptools`, sem Poetry/uv (P7 — boring-first,
+  menos uma dependência de tooling).
+- Validação de dados: **pydantic v2**.
+- Orquestração durável: **Temporal** (Python SDK), self-hosted via docker-compose local.
+- Banco: **Postgres 16**. Migrações SQL puras e numeradas (ver abaixo), aplicadas por
+  `make migrate` (script simples em `scripts/migrate.py`, sem framework de migration).
+- Testes: **pytest**, com fixtures que sobem contra o Postgres/Temporal do `docker-compose.yml`
+  (nunca mocks para as garantias de durabilidade/idempotência — são o próprio ponto do sistema).
+- HTTP: **FastAPI** para qualquer serviço que recebe webhooks.
+
+## Propriedade de diretórios (nenhum agente edita fora do seu escopo)
+
+| Diretório | Workstream | Conteúdo |
+|---|---|---|
+| `packages/contracts/` | Fundação (não editar sem avisar o arquiteto) | `ConversationEvent`, `WorkItem`/`DseTaskRequest`/`DseTaskStatus`, `PlanArtifact` (stub), contrato de consumo do gateway, biblioteca de comentário mutável único por surface |
+| `packages/dse_audit/` | Fundação (mínimo) → **WS-F estende** | Cliente de escrita do audit ledger + queries de reconstrução/export |
+| `packages/dse_identity/` | Fundação (mínimo) → **WS-F estende na Fase 2** | Resolução `platform_user_id` → principal único |
+| `services/adapter-slack/` | **WS-A** | Inbound (menções/replies/botões) + outbound (status message única editada in-place) |
+| `services/adapter-github/` | **WS-A** | Inbound (issues/PR comments) + outbound (status comment único) via GitHub App |
+| `services/ingest-gateway/` | **WS-A** | Gateway transacional (outbox), dispatcher (`SELECT…FOR UPDATE SKIP LOCKED` → `StartWorkflow`), 4 defesas (assinatura, TOCTOU snapshot, sanitização, idempotência), correlação Path A/B, steering allowlist fallback |
+| `services/orchestrator/` | **WS-B** | Worker Temporal, workflow da máquina de estados §9.3, pause points, budgets, checkpoint/recovery, controles de operador, suíte de chaos |
+| `services/sandbox-runtime/` | **WS-C** | Lifecycle do sandbox (provision/teardown/checkpoint) como Activities, driver Docker rootless, interface de substrato + adapter OpenHands, sessão Coder |
+| `services/egress-proxy/` | **WS-C** (WS-F assina o aceite de política) | Proxy default-deny + injeção de credenciais efêmeras |
+| `services/model-gateway/` | **WS-D** | Config LiteLLM, tier Bedrock/PrivateLink como allowlist entry, virtual keys por tenant/task/stage, contrato de consumo |
+| `services/validation/` | **WS-E** | Pipeline L1 (lint/typecheck/test/build + SAST/secret-scan + diff-budget/forbidden-paths), PR finalizer idempotente, consumo mínimo de status checks (L3 fatiado) |
+| `services/platform/` | **WS-F** | Wiring Vault/ESO, IaC skeleton (`infra/`), parâmetros de fairness/budget por tenant, scaffolding da suíte de isolamento, observabilidade |
+
+**Regra de ouro:** cada workstream só cria/edita arquivos dentro do seu próprio diretório
+(mais o arquivo de migração e o fragment de docker-compose reservados abaixo). Se precisar de
+algo em `packages/contracts` que não existe, adicione um campo/tipo novo sem remover ou renomear
+o que já existe — funções e classes públicas listadas neste documento são um contrato estável.
+
+## Migrações — numeração reservada (evita colisão em paralelo)
+
+`migrations/0001_foundation.sql` já existe (work_items, ingest_events, audit_log particionado
+append-only, principals/identity_links). Se seu workstream precisar de tabela própria na Fase 1,
+use exclusivamente o arquivo abaixo (não edite o 0001):
+
+| Arquivo | Workstream |
+|---|---|
+| `migrations/0002_wsa.sql` | WS-A |
+| `migrations/0003_wsb.sql` | WS-B |
+| `migrations/0004_wsc.sql` | WS-C |
+| `migrations/0005_wsd.sql` | WS-D (ex.: tabela de virtual keys emitidas) |
+| `migrations/0006_wse.sql` | WS-E (ex.: tabela de validation runs) |
+| `migrations/0007_wsf.sql` | WS-F (ex.: tenant_config — budgets/fairness/kill switches) |
+
+Rode `make migrate` para aplicar todas as migrações em ordem (idempotente — usa uma tabela
+`schema_migrations` para não reaplicar).
+
+## docker-compose — cada workstream escreve seu próprio fragment
+
+`docker-compose.yml` (fundação) já sobe: `postgres`, `temporal` (+ `temporal-ui`), `redis`,
+`vault` (dev mode). **Não edite este arquivo.** Se seu serviço precisa rodar em container,
+crie `docker-compose.wsX.yml` (ex.: `docker-compose.wsa.yml`) com apenas os seus serviços,
+conectados à rede externa `dse_net` (já declarada na fundação). O `Makefile` já faz o merge de
+todos os fragments existentes em `make up`.
+
+Portas reservadas (evite conflito):
+
+| Porta | Serviço |
+|---|---|
+| 5432 | Postgres |
+| 7233 / 8088 | Temporal frontend / Temporal UI |
+| 6379 | Redis |
+| 8200 | Vault (dev) |
+| 4000 | LiteLLM (model-gateway, WS-D) |
+| 8801 | adapter-slack (WS-A) |
+| 8802 | adapter-github (WS-A) |
+| 8803 | ingest-gateway (WS-A) |
+| 8805 | sandbox-runtime control API (WS-C, se exposta) |
+| 8806 | egress-proxy (WS-C) |
+| 8807 | validation / PR finalizer webhook receiver (WS-E, se exposto) |
+| 8900 | orchestrator health endpoint (WS-B) |
+
+## Contratos já publicados (não reinvente — importe)
+
+- `dse_contracts.conversation_event.ConversationEvent` — evento normalizado único que todo
+  adapter produz (FR-01/§10.2). Campos: `event_id` (sha256 platform+thread+message),
+  `platform`, `kind` (`task_request|clarification_answer|approval|review_comment|steering`),
+  `source_ref` (thread_ts/ticket/pr), `actor` (platform_user_id + principal resolvido),
+  `content_snapshot`, `received_at`, `signature_verified`.
+- `dse_contracts.work_item.WorkItem`, `DseTaskRequest`, `DseTaskStatus` — schema de §10.3 e a
+  API pública (status grosseiro: `running|blocked|done|failed`) de FR-01-04 na tabela.
+- `dse_contracts.plan_artifact.PlanArtifact` — stub do artefato de plano (steps, files,
+  diff_budget, test_plan, risk_class) — usado já na Fase 1 pelo diff-budget enforcement do
+  WS-E mesmo sem sessão Planner separada (o Coder da Fase 1 preenche um `PlanArtifact` mínimo
+  antes de implementar).
+- `dse_contracts.gateway_contract` — contrato de consumo do model-gateway: base URL única,
+  headers obrigatórios (`tenant_id`, `work_item_id`, `stage`, `task_class`, `data_class`),
+  formato de erro de recusa de política/budget.
+- `dse_contracts.mutable_comment.MutableCommentWriter` — biblioteca compartilhada de
+  "exatamente 1 comentário/mensagem de status por surface, editado in-place, crash-consistent"
+  (WSA-E3-T2/E4-T2, reutilizada por WSE-E3-T7). Adapters do WS-A e o PR finalizer do WS-E
+  usam a mesma classe com back-ends diferentes (Slack API / GitHub API / Jira API).
+- `dse_audit.client.emit(actor, action, work_item_id, tenant_id, details)` — único caminho de
+  escrita no audit ledger. Nunca escreva em `audit_log` por fora desta função.
+- `dse_identity.resolve_principal(platform, platform_user_id, display_name=None)` — resolve
+  (e, se necessário, cria) o principal único de um usuário visto pela primeira vez numa
+  plataforma. Fase 1: resolução simples por auto-registro (sem SSO/SCIM — isso é ADR-22,
+  Fase 2/WSF-E3-T3). Toda superfície deve chamar isto antes de gravar `actor` em qualquer lugar.
+
+## Princípios não-negociáveis (P1-P8 da proposta) — todo código deve respeitar
+
+- **P1 deterministic-or-human**: nenhuma decisão de fluxo (aprovar, mergear, abrir PR,
+  transicionar estado) é tomada por um LLM. Código determinístico ou humano nomeado, sempre.
+- **P3 no producer approves its own work**: nenhuma sessão de agente pode aprovar/mergear o
+  próprio diff.
+- **P6 decline-never-truncate**: excedeu budget/cap → falha limpa em fronteira, nunca corta
+  no meio. Nunca "silenciar" um erro.
+- **P8 evidence over assertion**: toda decisão consequente gera uma linha no audit ledger.
+
+## Como rodar localmente
+
+```
+make up        # sobe infra (postgres, temporal, redis, vault) + fragments de cada workstream
+make migrate   # aplica todas as migrações em ordem
+make test      # roda a suíte de testes de todos os serviços (requer `make up` rodando)
+make down      # derruba tudo
+```
