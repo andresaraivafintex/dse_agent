@@ -1,0 +1,40 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    container_name: dse_orchestrator
+    environment:
+      DSE_TEMPORAL_ADDRESS: temporal:7233
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_IDENTITY_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-dev}
+      DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
+      DSE_OTEL_EXPORTER: ${DSE_OTEL_EXPORTER:-console}
+      # Consumidos pelas Activities cross-workstream registradas neste worker
+      # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
+      DSE_MODEL_GATEWAY_URL: http://model-gateway:4000
+      DSE_SANDBOX_STATE_DIR: /tmp/dse-sandboxes
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+    ports:
+      - "8900:8900"
+    volumes:
+      # Docker-outside-of-Docker: o worker (control plane confiavel) precisa
+      # do socket do host para provisionar/destruir os containers de sandbox
+      # via sandbox_runtime.docker_driver. Isto e' distinto e nao contradiz a
+      # regra do proprio sandbox nao ter socket (P2/ADR-11) — o sandbox em si
+      # nunca recebe este mount, so o processo que o cria.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - postgres
+      - temporal
+    networks: [dse_net]
+    restart: unless-stopped
+
+networks:
+  dse_net:
+    external: true
