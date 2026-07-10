@@ -1,0 +1,17 @@
+# Imagem base do sandbox efêmero (WSC-E1-T1). `python:3.11-slim` não traz
+# `git` — precisamos dele tanto para o Coder quanto para o hook pre-receive
+# do checkpoint (invocado no lado que recebe o `git push`, que roda dentro
+# deste mesmo container quando o "origin" é um bare repo bind-mounted).
+#
+# Não cria usuário fixo na imagem: o uid/gid não-root é aplicado em runtime
+# via `docker run --user <uid>:<gid>` (docker_driver.py), então qualquer uid
+# numérico funciona sem precisar existir em /etc/passwd (git usa apenas
+# config local do repo, nunca lookup de passwd, para name/email — ver
+# scoped_git.ScopedGitSession.ensure_identity).
+FROM python:3.11-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace

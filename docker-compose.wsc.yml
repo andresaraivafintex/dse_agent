@@ -1,0 +1,44 @@
+# WS-C — sandbox-runtime (não expõe porta; chamado in-process pelo worker
+# Temporal do WS-B) + egress-proxy (porta reservada 8806).
+#
+# Modo dev (P7 boring-first): a imagem do egress-proxy é `python:3.11-slim`
+# de cima com o código-fonte bind-mountado (`egress_proxy` depende só de
+# stdlib + imports opcionais) — evita precisar de um passo de build para
+# subir o serviço em dev. Produção deve trocar por uma imagem própria com
+# `pip install -e services/egress-proxy` congelado (ver README).
+#
+# A rede `dse_sandbox_net` é interna (sem gateway de internet) — todo
+# container de sandbox efêmero (criado programaticamente pelo
+# `docker_driver.py`, não por este compose) se conecta SÓ a ela. O
+# egress-proxy é o único participante conectado tanto a `dse_sandbox_net`
+# quanto a `dse_net` (que tem rota de internet padrão do Docker), fazendo a
+# ponte controlada.
+networks:
+  # dse_sandbox_net é criada programaticamente por
+  # sandbox_runtime/docker_driver.py (SANDBOX_NETWORK_NAME) na primeira vez
+  # que um sandbox é provisionado — não pelo compose. Referenciada aqui como
+  # external para o egress-proxy poder se conectar a ela sem colidir com essa
+  # criação dinâmica. Rode `docker network create --internal dse_sandbox_net`
+  # manualmente (ou provisione um sandbox de teste) antes do primeiro `make up`
+  # se ela ainda não existir.
+  dse_sandbox_net:
+    external: true
+
+services:
+  egress-proxy:
+    image: python:3.11-slim
+    container_name: dse_egress_proxy
+    working_dir: /app
+    command: ["python", "-m", "egress_proxy.server"]
+    volumes:
+      - ./services/egress-proxy:/app:ro
+    environment:
+      PYTHONPATH: /app
+      DSE_EGRESS_PORT: "8806"
+      DSE_EGRESS_TENANT_ID: "dev"
+      DSE_EGRESS_MODEL_GATEWAY_HOST: "model-gateway"
+      DSE_EGRESS_MODEL_GATEWAY_PORT: "4000"
+      DSE_EGRESS_REPO_HOST: "github.com"
+    ports:
+      - "8806:8806"
+    networks: [dse_net, dse_sandbox_net]

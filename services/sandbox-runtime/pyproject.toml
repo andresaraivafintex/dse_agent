@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dse-sandbox-runtime"
+version = "0.1.0"
+description = "WS-C: sandbox efemero por tarefa (Docker rootless), lifecycle Temporal Activities, adapter de substrato de agente (OpenHands) e sessao Coder com git de escopo limitado"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "docker>=7.0",
+    "temporalio>=1.7",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "httpx>=0.27",
+    "psycopg2-binary>=2.9",
+    "dse-contracts",
+    "dse-audit",
+]
+
+[tool.setuptools.packages.find]
+include = ["sandbox_runtime*"]
