@@ -1,0 +1,19 @@
+apiVersion: v2
+name: dse
+description: >-
+  Fintex DSE — chart de empacotamento "topologia A" (self-hosted, single-tenant
+  por instalação, dentro do VPC/K8s do cliente regulado — ADR-23). Cobre o
+  steady-state completo da Fase 1: Postgres, Temporal (+ UI), Redis, Vault
+  (opcional — produção deve usar o Vault do cliente ou um cluster HA externo,
+  ver values.yaml `vault.externallyManaged`), egress-proxy, model-gateway,
+  orchestrator e os adapters (Slack/GitHub) + ingest-gateway.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - dse
+  - fintex
+  - self-hosted
+  - regulated-fintech
+maintainers:
+  - name: WS-F (Plataforma, Segurança e Operações)

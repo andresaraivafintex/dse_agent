@@ -1,0 +1,200 @@
+# Fintex DSE — values.yaml (topologia A: uma instalação = um tenant = um
+# namespace dentro do VPC/K8s do próprio cliente). Parametrizado por tenant:
+# rode `helm install dse-<tenant> infra/helm/dse -f values-<tenant>.yaml`
+# com um arquivo de overrides por cliente (nunca commitar valores reais de
+# produção — usar `--set` a partir do secrets backend/CI em vez disso).
+
+tenant:
+  id: "acme-dev"            # usado em labels, nomes de recurso e como tenant_id default
+  dataClass: "internal"     # internal | confidential | restricted (mapeia para NFR de residência)
+
+global:
+  namespace: dse
+  imageRegistry: ""          # ex.: "123456789.dkr.ecr.us-east-1.amazonaws.com/" (com barra final) — vazio = Docker Hub/registro público
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets: []       # nomes de Secret docker-registry, se o registry do cliente exigir
+  labels: {}                 # labels extra aplicadas a todos os recursos (ex.: cost-center)
+
+# ---------------------------------------------------------------------------
+# Postgres — control plane (work_items/audit_log/etc.) reside no VPC do
+# cliente na topologia A (decisão fixada em WSF-E5-T1). Produção deve preferir
+# um Postgres gerenciado (RDS/CloudSQL) com PITR em vez deste StatefulSet —
+# ver infra/RUNBOOK-UPGRADE.md e infra/OSS-BOM.md. Este chart cobre o caso
+# self-managed-in-cluster para ambientes sem serviço gerenciado disponível.
+# ---------------------------------------------------------------------------
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+  auth:
+    # Dev/local apenas — produção DEVE usar existingSecret (populado via
+    # ExternalSecret/Vault, nunca valores em texto plano neste values.yaml).
+    existingSecret: ""
+    username: dse
+    password: dse_dev_only
+    database: dse
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+
+# ---------------------------------------------------------------------------
+# Temporal — orquestração durável (WS-B). auto-setup para Fase 1/piloto;
+# produção deve migrar para Temporal Cloud ou um cluster self-hosted
+# multi-nó dedicado (ver RUNBOOK-UPGRADE.md, Worker Versioning).
+# ---------------------------------------------------------------------------
+temporal:
+  enabled: true
+  image:
+    repository: temporalio/auto-setup
+    tag: "1.24"
+  ui:
+    enabled: true
+    image:
+      repository: temporalio/ui
+      tag: "2.31.2"
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+
+# ---------------------------------------------------------------------------
+# Vault — em produção, `externallyManaged: true` e apontar `secrets.vaultAddr`
+# para o Vault/HSM do próprio cliente (ou um cluster Vault HA dedicado) — o
+# `dev mode` deste chart (mesma imagem do docker-compose da fundação) NUNCA
+# deve rodar em produção (dados em memória, um único unseal key).
+# ---------------------------------------------------------------------------
+vault:
+  externallyManaged: false
+  devMode: true
+  image:
+    repository: hashicorp/vault
+    tag: "1.17"
+  devRootToken: ""  # produção: nunca setar aqui — gerar e guardar fora do chart
+
+# ---------------------------------------------------------------------------
+# Secrets backend (WSF-E2-T3a) — como os demais serviços obtêm credenciais.
+# `externalSecrets.enabled: true` requer o External Secrets Operator (ESO)
+# já instalado no cluster; caso contrário os serviços leem VAULT_ADDR/
+# VAULT_TOKEN diretamente via env (dev/staging apenas).
+# ---------------------------------------------------------------------------
+secrets:
+  vaultAddr: "http://dse-vault:8200"
+  externalSecrets:
+    enabled: false
+    secretStoreRef: "dse-vault-backend"
+    refreshInterval: "1h"
+
+# ---------------------------------------------------------------------------
+# Egress proxy (WS-C constrói, WS-F assina a política/aceite — WSF-E2).
+# `allowlist` é injetada como ConfigMap montado pelo proxy; nunca hardcode
+# tokens aqui (o proxy busca credenciais efêmeras do secrets backend).
+# ---------------------------------------------------------------------------
+egressProxy:
+  enabled: true
+  image:
+    repository: dse/egress-proxy
+    tag: "0.1.0"
+  replicas: 2
+  port: 8806
+  allowlist:
+    - host: "api.github.com"
+      purpose: "GitHub App API (PR finalizer, status comments)"
+    - host: "slack.com"
+      purpose: "Slack Web API (mensagem de status)"
+    - host: "*.amazonaws.com"
+      purpose: "Bedrock PrivateLink (model-gateway tier 1)"
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+
+# ---------------------------------------------------------------------------
+# Model gateway (WS-D) — LiteLLM. Chave virtual por tenant/task/stage vem do
+# secrets backend, nunca deste values.yaml.
+# ---------------------------------------------------------------------------
+modelGateway:
+  enabled: true
+  image:
+    repository: dse/model-gateway
+    tag: "0.1.0"
+  replicas: 1
+  port: 4000
+  resources:
+    requests: { cpu: "250m", memory: "256Mi" }
+    limits: { cpu: "1", memory: "512Mi" }
+
+# ---------------------------------------------------------------------------
+# Orchestrator (WS-B) — worker Temporal. Escala horizontal segura (Temporal
+# faz o balanceamento de tasks entre workers do mesmo task queue).
+# ---------------------------------------------------------------------------
+orchestrator:
+  enabled: true
+  image:
+    repository: dse/orchestrator
+    tag: "0.1.0"
+  replicas: 2
+  healthPort: 8900
+  resources:
+    requests: { cpu: "250m", memory: "256Mi" }
+    limits: { cpu: "1", memory: "512Mi" }
+
+# ---------------------------------------------------------------------------
+# Adapters + ingest-gateway (WS-A)
+# ---------------------------------------------------------------------------
+adapters:
+  slack:
+    enabled: true
+    image: { repository: dse/adapter-slack, tag: "0.1.0" }
+    port: 8801
+  github:
+    enabled: true
+    image: { repository: dse/adapter-github, tag: "0.1.0" }
+    port: 8802
+  ingestGateway:
+    enabled: true
+    image: { repository: dse/ingest-gateway, tag: "0.1.0" }
+    port: 8803
+
+validation:
+  enabled: true
+  image: { repository: dse/validation, tag: "0.1.0" }
+  port: 8807
+
+# ---------------------------------------------------------------------------
+# Observabilidade (WSF-E7-T1)
+# ---------------------------------------------------------------------------
+otelCollector:
+  enabled: true
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.105.0"
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+
+ingress:
+  enabled: false
+  className: "nginx"
+  host: "dse.example.com"
+  tls:
+    enabled: true
+    secretName: "dse-tls"
+
+# Default-deny de egress a nível de NetworkPolicy — defesa em profundidade
+# ADICIONAL ao egress-proxy (o proxy é a linha de defesa primária no data
+# path da aplicação; a NetworkPolicy é uma segunda camada estrutural que
+# nem depende do proxy estar corretamente configurado para valer).
+networkPolicy:
+  enabled: true

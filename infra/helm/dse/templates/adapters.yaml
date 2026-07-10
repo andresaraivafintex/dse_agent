@@ -1,0 +1,207 @@
+{{/*
+Adapters (WS-A) + ingest-gateway (WS-A) + validation/PR finalizer (WS-E) —
+todos são serviços HTTP simples (webhook receivers), mesmo shape de
+Deployment+Service. Secrets de webhook (signing secret Slack, GitHub App
+private key) vêm do secrets backend (WSF-E2-T3a) via env var referenciando
+um Secret populado por ExternalSecret — nunca hardcoded aqui.
+*/}}
+{{- if .Values.adapters.slack.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-slack
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "adapter-slack" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "adapter-slack" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "adapter-slack" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: adapter-slack
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.slack.image.repository "tag" .Values.adapters.slack.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.adapters.slack.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.secrets.vaultAddr | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-slack
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "adapter-slack" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.adapters.slack.port }}
+      targetPort: {{ .Values.adapters.slack.port }}
+      name: http
+{{- end }}
+
+{{- if .Values.adapters.github.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-github
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "adapter-github" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "adapter-github" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "adapter-github" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: adapter-github
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.github.image.repository "tag" .Values.adapters.github.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.adapters.github.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.secrets.vaultAddr | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-github
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "adapter-github" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.adapters.github.port }}
+      targetPort: {{ .Values.adapters.github.port }}
+      name: http
+{{- end }}
+
+{{- if .Values.adapters.ingestGateway.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-ingest-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "ingest-gateway" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "ingest-gateway" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "ingest-gateway" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: ingest-gateway
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.ingestGateway.image.repository "tag" .Values.adapters.ingestGateway.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.adapters.ingestGateway.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.fullname" . }}-postgres-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-ingest-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "ingest-gateway" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.adapters.ingestGateway.port }}
+      targetPort: {{ .Values.adapters.ingestGateway.port }}
+      name: http
+{{- end }}
+
+{{- if .Values.validation.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-validation
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "validation" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "validation" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "validation" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: validation
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.validation.image.repository "tag" .Values.validation.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.validation.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.fullname" . }}-postgres-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-validation
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "validation" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.validation.port }}
+      targetPort: {{ .Values.validation.port }}
+      name: http
+{{- end }}

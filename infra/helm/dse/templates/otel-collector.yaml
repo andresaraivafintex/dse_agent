@@ -1,0 +1,105 @@
+{{/*
+OTel collector (WSF-E7-T1). Config inline mínima: recebe OTLP grpc/http de
+todos os serviços (dse_contracts.constants.OTEL_ATTR_* nos atributos de
+span) e exporta via `logging` exporter por default (stdout — visível em
+`kubectl logs`); produção deve trocar o exporter para o backend real do
+cliente (Datadog/Grafana Cloud/Honeycomb/etc. — ver infra/ALERTING-RULES.md
+para o que cada alerta precisa do backend escolhido).
+*/}}
+{{- if .Values.otelCollector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dse.fullname" . }}-otel-collector-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch: {}
+      attributes/tenant:
+        actions:
+          - key: dse.tenant_id
+            value: {{ .Values.tenant.id | quote }}
+            action: upsert
+    exporters:
+      debug:
+        verbosity: detailed
+      # Produção: substituir/adicionar exporter real (otlphttp para o
+      # backend do cliente) — ver infra/ALERTING-RULES.md.
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [attributes/tenant, batch]
+          exporters: [debug]
+        metrics:
+          receivers: [otlp]
+          processors: [attributes/tenant, batch]
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-otel-collector
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "otel-collector" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "otel-collector" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "otel-collector" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: otel-collector
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.otelCollector.image.repository "tag" .Values.otelCollector.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["--config=/etc/otel/otel-collector-config.yaml"]
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+          resources:
+            {{- toYaml .Values.otelCollector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dse.fullname" . }}-otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-otel-collector
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "otel-collector" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 4317
+      targetPort: 4317
+      name: otlp-grpc
+    - port: 4318
+      targetPort: 4318
+      name: otlp-http
+{{- end }}

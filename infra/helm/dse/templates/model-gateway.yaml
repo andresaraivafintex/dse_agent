@@ -1,0 +1,60 @@
+{{- if .Values.modelGateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-model-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "model-gateway" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: {{ .Values.modelGateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "model-gateway" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "model-gateway" "Release" .Release) | nindent 8 }}
+    spec:
+      # Todo tráfego de saída deste pod para providers de modelo (Bedrock/
+      # PrivateLink) DEVE passar pelo egress-proxy — nunca chamada direta ao
+      # SDK do provider (D6: WS-C registra o endpoint na allowlist).
+      containers:
+        - name: model-gateway
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.modelGateway.image.repository "tag" .Values.modelGateway.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.modelGateway.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+          env:
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: VAULT_ADDR
+              value: {{ .Values.secrets.vaultAddr | quote }}
+          resources:
+            {{- toYaml .Values.modelGateway.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.modelGateway.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-model-gateway
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "model-gateway" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.modelGateway.port }}
+      targetPort: {{ .Values.modelGateway.port }}
+      name: http
+{{- end }}

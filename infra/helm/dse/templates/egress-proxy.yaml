@@ -1,0 +1,63 @@
+{{- if .Values.egressProxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-egress-proxy
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: {{ .Values.egressProxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: egress-proxy
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.egressProxy.image.repository "tag" .Values.egressProxy.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.egressProxy.port }}
+              name: proxy
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.secrets.vaultAddr | quote }}
+          volumeMounts:
+            - name: allowlist
+              mountPath: /etc/dse/egress-proxy
+              readOnly: true
+          resources:
+            {{- toYaml .Values.egressProxy.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.egressProxy.port }} }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: allowlist
+          configMap:
+            name: {{ include "dse.fullname" . }}-egress-allowlist
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-egress-proxy
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.egressProxy.port }}
+      targetPort: {{ .Values.egressProxy.port }}
+      name: proxy
+{{- end }}

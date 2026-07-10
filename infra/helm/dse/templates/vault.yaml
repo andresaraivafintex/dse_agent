@@ -1,0 +1,65 @@
+{{/*
+Vault — só desenhado por este chart quando `externallyManaged: false` (dev/
+staging descartável). Em produção (topologia A, VPC do cliente), o Vault
+deve ser o do próprio cliente ou um cluster Vault HA dedicado fora deste
+chart — setar `vault.externallyManaged: true` e apontar
+`secrets.vaultAddr` para ele; este template inteiro não é renderizado nesse
+caso. `devMode: true` NUNCA deve ser usado fora de dev/smoke-test (dados só
+em memória, unseal automático, sem HA).
+*/}}
+{{- if and .Values.vault.devMode (not .Values.vault.externallyManaged) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-vault
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "vault" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "vault" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "vault" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: vault
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.vault.image.repository "tag" .Values.vault.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK"]
+          ports:
+            - containerPort: 8200
+              name: http
+          env:
+            - name: VAULT_DEV_LISTEN_ADDRESS
+              value: "0.0.0.0:8200"
+            {{- if .Values.vault.devRootToken }}
+            - name: VAULT_DEV_ROOT_TOKEN_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dse.fullname" . }}-vault-dev-token
+                  key: token
+            {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-vault
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "vault" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 8200
+      targetPort: 8200
+      name: http
+{{- end }}

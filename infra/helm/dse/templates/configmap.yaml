@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dse.fullname" . }}-config
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+data:
+  DSE_TENANT_ID: {{ .Values.tenant.id | quote }}
+  DSE_DATA_CLASS: {{ .Values.tenant.dataClass | quote }}
+  DSE_DATABASE_HOST: {{ include "dse.fullname" . }}-postgres
+  DSE_DATABASE_PORT: "5432"
+  DSE_DATABASE_NAME: {{ .Values.postgres.auth.database | quote }}
+  DSE_TEMPORAL_HOST: {{ include "dse.fullname" . }}-temporal
+  DSE_TEMPORAL_PORT: "7233"
+  DSE_TEMPORAL_TASK_QUEUE: "dse-core-task-queue"
+  DSE_REDIS_HOST: {{ include "dse.fullname" . }}-redis
+  DSE_REDIS_PORT: "6379"
+  VAULT_ADDR: {{ .Values.secrets.vaultAddr | quote }}
+  DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+  DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dse.fullname" . }}-egress-allowlist
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+data:
+  allowlist.yaml: |
+    # Consumido pelo egress-proxy (WS-C) como fonte de verdade da política
+    # default-deny — WS-F assina o aceite desta lista (WSF-E2).
+    hosts:
+      {{- range .Values.egressProxy.allowlist }}
+      - host: {{ .host | quote }}
+        purpose: {{ .purpose | quote }}
+      {{- end }}

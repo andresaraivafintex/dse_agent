@@ -1,0 +1,48 @@
+Fintex DSE ({{ .Values.tenant.id }}) instalado no namespace {{ .Values.global.namespace }}.
+
+Componentes ativos:
+{{- if .Values.postgres.enabled }}
+  - postgres        (control plane: work_items/audit_log/tenant_config)
+{{- end }}
+{{- if .Values.temporal.enabled }}
+  - temporal{{ if .Values.temporal.ui.enabled }} + temporal-ui{{ end }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+  - redis
+{{- end }}
+{{- if and .Values.vault.devMode (not .Values.vault.externallyManaged) }}
+  - vault (dev mode — NÃO usar em produção)
+{{- end }}
+{{- if .Values.egressProxy.enabled }}
+  - egress-proxy     ({{ len .Values.egressProxy.allowlist }} host(s) na allowlist)
+{{- end }}
+{{- if .Values.modelGateway.enabled }}
+  - model-gateway
+{{- end }}
+{{- if .Values.orchestrator.enabled }}
+  - orchestrator     ({{ .Values.orchestrator.replicas }} réplica(s))
+{{- end }}
+{{- if .Values.adapters.slack.enabled }}
+  - adapter-slack
+{{- end }}
+{{- if .Values.adapters.github.enabled }}
+  - adapter-github
+{{- end }}
+{{- if .Values.adapters.ingestGateway.enabled }}
+  - ingest-gateway
+{{- end }}
+{{- if .Values.validation.enabled }}
+  - validation
+{{- end }}
+{{- if .Values.otelCollector.enabled }}
+  - otel-collector
+{{- end }}
+
+Próximos passos:
+1. Verifique os pods:  kubectl -n {{ .Values.global.namespace }} get pods
+2. Popule os secrets reais no Vault do cliente (ou no Vault de dev deste
+   chart) ANTES de apontar tráfego real — ver services/platform/dse_secrets
+   e infra/RUNBOOK-UPGRADE.md.
+3. Aplique a migração de schema (`scripts/migrate.py`) contra o Postgres
+   deste namespace antes do primeiro uso.
+4. Revise infra/OSS-BOM.md para a lista de licenças dos componentes OSS.

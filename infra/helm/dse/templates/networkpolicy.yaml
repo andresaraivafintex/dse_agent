@@ -1,0 +1,57 @@
+{{/*
+Defesa em profundidade: default-deny de egress a nível de rede para todo o
+namespace, com exceções explícitas para DNS, o Postgres/Temporal/Redis
+internos, e o egress-proxy (única rota de saída permitida para qualquer
+outro destino). Isto é ADICIONAL ao proxy de aplicação (WS-C) — mesmo que
+um pod tenha um bug que ignore HTTPS_PROXY, a NetworkPolicy ainda bloqueia a
+conexão direta a nível de kernel/CNI (requer um CNI que aplique
+NetworkPolicy, ex. Calico/Cilium — anotar isso no runbook de instalação).
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-default-deny-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Serviços internos do namespace (Postgres/Temporal/Redis/model-gateway/
+    # egress-proxy/vault) — comunicação interna permitida livremente.
+    - to:
+        - podSelector: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-egress-proxy-only-external
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  # Aplica-se especificamente aos componentes que executam código de agente
+  # (orchestrator/sandboxes) — apenas o egress-proxy pode iniciar conexões
+  # fora do cluster; todo o resto do tráfego externo destes pods é negado.
+  podSelector:
+    matchLabels:
+      dse.egress-restricted: "true"
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.egressProxy.port }}
+{{- end }}

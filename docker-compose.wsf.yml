@@ -1,0 +1,26 @@
+# WS-F — fragment de docker-compose (ver CONVENTIONS.md). Conecta à rede
+# externa `dse_net` já declarada na fundação (docker-compose.yml). `make up`
+# faz o merge de todos os fragments `docker-compose.ws*.yml` presentes.
+#
+# otel-collector (WSF-E7-T1): recebe spans/métricas OTLP dos outros serviços
+# (WS-D instrumenta o lado de quem emite, usando os atributos
+# dse_contracts.constants.OTEL_ATTR_*) e exporta para stdout via `debug`
+# exporter (nenhum backend de observabilidade real está provisionado nesta
+# sessão de dev — ver infra/ALERTING-RULES.md para o que trocar em produção).
+
+networks:
+  dse_net:
+    external: true
+    name: dse_net
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.105.0
+    container_name: dse_otel_collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./infra/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    networks: [dse_net]

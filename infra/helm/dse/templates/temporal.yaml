@@ -1,0 +1,104 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "temporal" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "temporal" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "temporal" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: temporal
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.image.repository "tag" .Values.temporal.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 7233
+              name: frontend
+          env:
+            - name: DB
+              value: "postgres12"
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: {{ include "dse.fullname" . }}-postgres
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: "config/dynamicconfig/development-sql.yaml"
+          envFrom:
+            - secretRef:
+                name: {{ include "dse.fullname" . }}-postgres-credentials
+          resources:
+            {{- toYaml .Values.temporal.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "temporal" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 7233
+      targetPort: 7233
+      name: frontend
+{{- if .Values.temporal.ui.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal-ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: temporal-ui
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.ui.image.repository "tag" .Values.temporal.ui.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: TEMPORAL_ADDRESS
+              value: "{{ include "dse.fullname" . }}-temporal:7233"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal-ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+{{- end }}
+{{- end }}
