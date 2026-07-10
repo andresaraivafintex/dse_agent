@@ -37,7 +37,13 @@ services:
       POSTGRES_USER: dse
       POSTGRES_PWD: dse_dev_only
       POSTGRES_SEEDS: postgres
-      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      # Achado da integração da Fase 1: "development-sql.yaml" não existe na
+      # imagem temporalio/auto-setup:1.24 (o container ficava Exited(1) até
+      # alguém copiar um arquivo vazio manualmente pra dentro dele — um fix
+      # que só "colava" enquanto ninguém recriasse o container). O próprio
+      # image já ships um "docker.yaml" vazio-mas-válido para este exato
+      # propósito — usar esse em vez de inventar um path.
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
     ports:
       - "7233:7233"
     networks: [dse_net]
