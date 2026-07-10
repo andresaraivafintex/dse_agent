@@ -1,0 +1,70 @@
+# WS-A — Ingestão e adaptadores (ver CONVENTIONS.md). Fragment reservado do
+# WS-A: só os serviços deste workstream, conectados à rede externa `dse_net`
+# (declarada em docker-compose.yml, fundação). `make up` faz o merge de
+# todos os fragments `docker-compose.ws*.yml` presentes.
+#
+# Build a partir da RAIZ do monorepo (contexto = `.`) porque cada Dockerfile
+# precisa copiar `packages/*` além do próprio serviço.
+
+services:
+  adapter-slack:
+    build:
+      context: .
+      dockerfile: services/adapter-slack/Dockerfile
+    container_name: dse_adapter_slack
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+      DSE_TENANT_ID: ${DSE_TENANT_ID:-tenant_dev}
+    ports:
+      - "8801:8801"
+    networks: [dse_net]
+    restart: unless-stopped
+
+  adapter-github:
+    build:
+      context: .
+      dockerfile: services/adapter-github/Dockerfile
+    container_name: dse_adapter_github
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+      DSE_TENANT_ID: ${DSE_TENANT_ID:-tenant_dev}
+    ports:
+      - "8802:8802"
+    networks: [dse_net]
+    restart: unless-stopped
+
+  ingest-gateway:
+    build:
+      context: .
+      dockerfile: services/ingest-gateway/Dockerfile
+    container_name: dse_ingest_gateway
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+    ports:
+      - "8803:8803"
+    networks: [dse_net]
+    restart: unless-stopped
+
+  ingest-dispatcher:
+    build:
+      context: .
+      dockerfile: services/ingest-gateway/Dockerfile
+    container_name: dse_ingest_dispatcher
+    command: ["python", "-m", "ingest_gateway.dispatcher_main"]
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      TEMPORAL_ADDRESS: temporal:7233
+    networks: [dse_net]
+    restart: unless-stopped
+    depends_on:
+      - temporal

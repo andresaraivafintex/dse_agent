@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dse-adapter-github"
+version = "0.1.0"
+description = "WS-A: adapter GitHub (inbound issues/PR webhooks + outbound status comment via MutableCommentWriter, sob identidade GitHub App)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+    "requests>=2.31",
+    "PyJWT>=2.8",
+    "cryptography>=42",
+    "dse-contracts",
+    "dse-audit",
+    "dse-identity",
+    "dse-ingest-gateway",
+]
+
+[tool.setuptools.packages.find]
+include = ["adapter_github*"]
