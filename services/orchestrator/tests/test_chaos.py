@@ -47,12 +47,15 @@ from pathlib import Path
 import pytest
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.worker import Worker
 
 from dse_contracts.work_item import WorkItemStatus
+from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
 from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item
+from fakes import FakeControlPlane, build_fake_activities
 
 _TEMPORAL_ADDRESS = os.environ.get("DSE_TEMPORAL_ADDRESS", "localhost:7233")
 _SCRIPT = Path(__file__).resolve().parent / "chaos_worker_process.py"
@@ -169,3 +172,134 @@ def test_chaos_worker_process_script_exists():
     import py_compile
 
     py_compile.compile(str(_SCRIPT), doraise=True)
+
+
+# ===========================================================================
+# WSB-E5-T3b — Chaos do CAMINHO DE MODELO + proxy fail-closed (Fase 2).
+#
+# Estende a suite de chaos alem da queda de worker (acima): agora o modo de
+# falha e o gateway de modelo (WS-D) / egress-proxy (WS-C) oscilando ou caindo
+# no meio da tarefa. Duas classes de comportamento, ambas exigidas:
+#   (a) recusa de POLITICA fail-closed (egress-proxy indisponivel -> zero
+#       egress; virtual key expirada; kill switch) -> a tarefa FALHA LIMPO na
+#       fronteira, sem output truncado (P6), auditada (P8) — nunca "adivinha".
+#   (b) oscilacao TRANSIENTE do gateway (LiteLLM cai e volta) -> a durabilidade
+#       do Temporal (retry de Activity) absorve a oscilacao e a tarefa
+#       COMPLETA sem perder progresso.
+#
+# NOTA DE FRONTEIRA (gap honesto — P8): as Activities de modelo reais (WS-C/
+# WS-D) e o egress-proxy real nao estao neste processo de teste; simulamos a
+# recusa fail-closed / oscilacao no ponto exato da fronteira de Activity com as
+# fakes (`fail_closed_on` / `transient_fail_on`), com o MESMO tipo de erro
+# (ApplicationError non_retryable=True vs False) que WS-D marca em producao. O
+# que provamos aqui e o comportamento do ORQUESTRADOR diante desses erros —
+# que e o que WSB-E5-T3b pede. A integracao real ponta-a-ponta (LiteLLM/virtual
+# key/egress-proxy de verdade) e validada na suite de integracao do WS-D/WS-C.
+# ===========================================================================
+
+
+async def _wait_for_status_local(handle, expected, attempts: int = 400) -> str:
+    status = None
+    for _ in range(attempts):
+        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
+        if status in expected:
+            return status
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
+
+
+@pytest.mark.asyncio
+async def test_egress_proxy_unavailable_fails_closed_no_egress(time_skipping_env):
+    """egress-proxy indisponivel -> zero egress (fail-closed): o Coder nao
+    consegue falar com o modelo; a Activity recusa non-retryable; o workflow
+    FALHA LIMPO na fronteira, sem PR/output truncado (P6)."""
+    work_item_id = new_work_item_id("egress")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        fail_closed_on={"run_coder_turn": {"times": 999, "marker": "egress_proxy_unreachable_fail_closed"}},
+    )
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        wf_input = WorkItemLifecycleInput(
+            work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
+            repo="acme/repo", base_branch="main", acceptance_criteria="crit",
+        )
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.failed.value
+    assert "fail_closed" in (result.detail or "")
+    assert state.finalize_calls == 0          # nenhum PR (zero output truncado, P6)
+    actions = read_audit_actions(work_item_id)
+    assert "model_path_fail_closed_detected" in actions
+    assert "model_path_fail_closed" in actions
+    assert "coder_turn_completed" not in actions  # o turno que falhou nao "completou"
+
+
+@pytest.mark.asyncio
+async def test_virtual_key_expired_mid_task_fails_closed(time_skipping_env):
+    """Virtual key expira mid-task (WS-D): a Activity de modelo recusa
+    non-retryable -> falha limpa auditada, sem truncar."""
+    work_item_id = new_work_item_id("keyexp")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    # o Planner ja falha: a expiracao pega na PRIMEIRA chamada de modelo
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        fail_closed_on={"run_planner_turn": {"times": 999, "marker": "virtual_key_expired"}},
+    )
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        wf_input = WorkItemLifecycleInput(
+            work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
+            repo="acme/repo", base_branch="main", acceptance_criteria="crit",
+        )
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.failed.value
+    assert "fail_closed" in (result.detail or "")
+    assert state.provision_calls == 0  # nunca chegou nem a provisionar sandbox
+    actions = read_audit_actions(work_item_id)
+    assert "model_path_fail_closed" in actions
+
+
+@pytest.mark.asyncio
+async def test_gateway_oscillation_transient_recovers_and_completes(time_skipping_env):
+    """LiteLLM oscilando mid-task (cai e volta): erro RETRYABLE -> o Temporal
+    retenta a Activity e a tarefa COMPLETA sem perder progresso nem truncar."""
+    work_item_id = new_work_item_id("oscill")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        transient_fail_on={"run_coder_turn": {"times": 3}},  # 3 quedas, depois volta
+    )
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        wf_input = WorkItemLifecycleInput(
+            work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
+            repo="acme/repo", base_branch="main", acceptance_criteria="crit",
+        )
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
+        await _wait_for_status_local(handle, {"pr_ready"})  # recuperou apesar da oscilacao
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {})
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.done.value
+    # o Coder foi RE-executado pelo retry do Temporal (>=4 chamadas: 3 quedas + 1 ok),
+    # mas so ha 1 PR finalizado — a durabilidade absorveu a oscilacao sem duplicar.
+    assert state.coder_turn_calls >= 4
+    assert state.finalize_calls == 1

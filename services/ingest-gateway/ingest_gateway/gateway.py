@@ -35,15 +35,30 @@ class AdmissionBlocked(Exception):
         self.reason = reason
 
 
-def _payload_json(event: ConversationEvent, sanitized_content: str | None) -> str:
+def _payload_json(
+    event: ConversationEvent,
+    sanitized_content: str | None,
+    extra_payload: dict[str, Any] | None = None,
+) -> str:
     """`ingest_events.payload`: o `ConversationEvent` completo (com o
     `content_snapshot` ORIGINAL intacto, congelado pela defesa TOCTOU —
     WSA-E2-T2) mais, se fornecido, `sanitized_content` — a versão que passou
     pela sanitização (WSA-E2-T3) e é a que deve seguir para qualquer estágio
-    que envolva um modelo. Nunca sobrescreve `content_snapshot`."""
+    que envolva um modelo. Nunca sobrescreve `content_snapshot`.
+
+    `extra_payload` (Fase 2): chaves de roteamento determinístico que o
+    dispatcher lê para escolher o signal certo — ex.: `{"merged_by_human":
+    True, "merged_by": <principal>, "pr_number": N}` para o webhook de merge
+    (WSA-E4-T3), ou `{"approval_verdict": "rejected", "approval_route":
+    "re_plan"}` para uma transição/botão de aprovação de plano (WSA-E6-T3).
+    São marcadores postos pelo ADAPTER (código determinístico, P1), nunca por
+    um modelo. Nunca sobrescreve chaves do próprio ConversationEvent."""
     data = event.model_dump(mode="json")
     if sanitized_content is not None:
         data["sanitized_content"] = sanitized_content
+    if extra_payload:
+        for k, v in extra_payload.items():
+            data.setdefault(k, v)
     return json.dumps(data)
 
 
@@ -148,6 +163,7 @@ def record_signal_event(
     channel: str,
     work_item_id: str,
     sanitized_content: str | None = None,
+    extra_payload: dict[str, Any] | None = None,
     conn=None,
 ) -> bool:
     """Grava o ConversationEvent de um sinal (Path B — correlacionado a um
@@ -187,7 +203,7 @@ def record_signal_event(
                 ON CONFLICT (event_id) DO NOTHING
                 RETURNING id
                 """,
-                (work_item_id, event.event_id, event.kind.value, _payload_json(event, sanitized_content)),
+                (work_item_id, event.event_id, event.kind.value, _payload_json(event, sanitized_content, extra_payload)),
             )
             is_new = cur.fetchone() is not None
 

@@ -83,6 +83,127 @@ para o contrato entre workstreams.
   (força push cru → rejeitado pelo hook; push pra outro branch → rejeitado;
   `ScopedGitSession.push()` propaga a recusa como `GitScopeViolation`).
 
+## Fase 2 ("Judgment & queue") — o que a Fase 2 adicionou (WSC-E3-T3/T4/T5, E4, E5)
+
+Extensão natural da fundação da Fase 1 (`AgentSubstrate` + `ScopedGitSession` +
+Activities Temporal). Migração própria: `migrations/0010_wsc2.sql`
+(`skill_registry`, `retrieval_documents`). Novos módulos:
+`skill_registry.py`, `retrieval.py`, `toolsets.py`, `sessions.py`, e 3 novas
+Activities em `activities.py` (na lista `ACTIVITIES` que o worker do WS-B
+importa).
+
+### WSC-E4-T1 — Skill registry bootstrap (`skill_registry.py`)
+
+Tabela `skill_registry` tenant-scoped, semeada com skills curadas por humano
+(`created_by` = principal humano, nunca `system:*`). `read_approved_skills(tenant_id,
+task_class=…)` é a API lida pelo Planner: só devolve `status='approved'` do
+tenant pedido — rascunhos (`draft`) e skills de outro tenant NUNCA vazam
+(isolamento hardcoded na query; provado por `tests/test_skill_registry.py`,
+inclusive com dois tenants dinâmicos de mesma `skill_key`). SEM pipeline de
+promoção (isso é Fase 4) — só o registry + a leitura, como o escopo manda.
+
+### WSC-E5 — Retrieval/index service (`retrieval.py`, ADR-24)
+
+`RetrievalService` sobre `retrieval_documents` (tenant-scoped) com três
+capacidades sobre o mesmo índice: **repo map** (arquivos + símbolos top-level
+extraídos por regex leve multi-linguagem), **busca lexical** (BM25) e
+**embeddings self-hosted** (TF-IDF esparso + cosseno — sem GPU nesta sessão;
+ver "O que falta para produção"). `index_repo` é idempotente (upsert por
+`content_sha`). **ISOLAMENTO POR TENANT RIGOROSO**: `_require_tenant` recusa
+tenant vazio; toda query filtra `tenant_id = %s`; não há caminho de leitura
+cross-tenant nem "list all" (provado por
+`tests/test_retrieval.py::test_tenant_isolation_strict` — índice de um tenant é
+invisível a outro; coordenado com a suíte de isolamento do WS-F).
+**Conteúdo indexado é input NÃO CONFIÁVEL do Planner**: `RetrievalHit.trusted`
+é sempre `False` e `render_untrusted_context` embrulha os trechos num bloco
+claramente demarcado com instrução de tratar como DADO, nunca como comando
+(defesa contra prompt-injection vinda de código/ticket indexado; o Planner é
+read-only, então nem um payload malicioso consegue disparar escrita).
+
+### WSC-E3-T3 — Sessão Planner read-only (`run_planner_turn`, `sessions.py`, `toolsets.py`)
+
+Activity `run_planner_turn` (nome `ACTIVITY_RUN_PLANNER_TURN`): toolset SÓ
+leitura (`PlannerToolset`). Hidrata AGENTS.md + CODEOWNERS (do workspace),
+skill registry aprovado do tenant (E4), tickets relacionados e o
+retrieval/index (E5), e emite um `PlanArtifact` estruturado (steps,
+expected_files, diff_budget_lines, test_plan, risk_class). **P1**: o
+`risk_class` — que dirige o gate do WS-B — é DERIVADO por
+`classify_risk_class` (código determinístico sobre o blast radius declarado:
+forbidden_paths, globs de alto risco como `**/*auth*`/`**/migrations/*`,
+tamanho do diff), NÃO pela palavra do LLM; o proposer (LLM) só sugere
+steps/expected_files/test_plan. **Conformidade** (provada por
+`tests/test_planner_session.py`): qualquer tool de ESCRITA no Planner FALHA
+com `ToolPermissionError` (a sessão passa toda tool-call por
+`Toolset.check` antes de despachar — o teste roda um `exploration_script` com
+um `write_file` e prova que levanta e que o arquivo nunca é criado).
+
+### WSC-E3-T4 — Sessão Tester (`run_tester_turn`)
+
+Activity `run_tester_turn` (nome `ACTIVITY_RUN_TESTER_TURN`): `TesterToolset`
+permite leitura + `run_tests` + `write_file` SÓ em caminhos de teste (`tests/`,
+`test_*.py`, `*_test.py`, `conftest.py`, `*.test.ts`, `_test.go`); escrever em
+código de produção FALHA (`ToolPermissionError`). Os testes escritos EXECUTAM
+de verdade — `run_tests` roda `pytest` real dentro do workspace e reporta
+pass/fail (um teste que falha é reportado como falha, provando que a execução é
+real, não simulada). O commit/push dos test files é determinístico
+(`ScopedGitSession`, identidade `dse-tester`), nunca pelo LLM (P1). Provado por
+`tests/test_tester_session.py`. Retorno: `TesterTurnResult` (não está em
+`packages/contracts` porque WS-C não edita a fundação — ver "Gaps" abaixo).
+
+### WSC-E3-T5 — Sessão Reviewer fresh-context (`run_l2_review`)
+
+Activity `run_l2_review` (nome `ACTIVITY_RUN_L2_REVIEW`, retorna `L2Verdict` de
+`dse_contracts`): sessão NOVA (`FreshReviewerSession`) que recebe SÓ o
+`ReviewerContext(plan, diff)` — **NADA do histórico do Coder (P3)**. A prova é
+POR CONSTRUÇÃO (`tests/test_reviewer_fresh_context.py`): os campos do
+`ReviewerContext` e da entrada `RunL2ReviewInput` são exatamente `{plan, diff}`
+(+ ids/classes) — não existe campo/parâmetro que carregue transcrição, turnos,
+thoughts ou tool-calls do produtor; a sessão fresca só expõe
+`read_plan`/`read_diff` (sem `repo_map`/`search_code`/history). Retorna
+`L2Verdict` (passed + objeções específicas arquivo/linha). O veredito L2 é uma
+RECOMENDAÇÃO que gateia a progressão (o WS-E orquestra o loop de fix-retries em
+torno dela) — o merge continua humano (P1), e por ser sessão fresca nunca é o
+produtor aprovando o próprio trabalho (P3).
+
+### Testes da Fase 2 (reais, contra Postgres/Docker/Temporal SDK)
+
+`test_skill_registry.py` (5), `test_retrieval.py` (7),
+`test_planner_session.py` (5), `test_tester_session.py` (4),
+`test_reviewer_fresh_context.py` (6) — **27 testes novos**, todos com infra
+real (Postgres para registry/índice; Docker para o workspace do sandbox das
+sessões Planner/Tester; `temporalio.testing.ActivityEnvironment` para provar
+que as 3 novas Activities são Activities Temporal de verdade com os nomes do
+contrato). **Resultado real desta sessão: `42 passed` em sandbox-runtime**
+(15 da Fase 1 + 27 da Fase 2) + `13 passed` em egress-proxy = **55 passed, 0
+failed, 0 skipped**.
+
+### Gaps da Fase 2 (documentados, não escondidos)
+
+- **Substrato real das sessões Planner/Tester**: como na Fase 1 (Coder), o
+  substrato roteirizado (`ScriptedAgentSession`) é o usado nos testes — não
+  chama LLM. Em produção o adapter OpenHands registra só as ferramentas cujo
+  nome está no allowlist do toolset e roteia cada tool-call pelo mesmo
+  `Toolset.check`, e o proposer do Planner / o `verdict_fn` do Reviewer viram
+  saídas de uma `Conversation` OpenHands fresca. Wireável por
+  `_run_planner_turn_impl(..., proposer=…)`, `_run_tester_turn_impl(...,
+  authoring_script=…)`, `_run_l2_review_impl(..., verdict_fn=…)` — mesmos
+  pontos de injeção do `_run_coder_turn_impl` da Fase 1.
+- **Embeddings**: TF-IDF esparso (self-hosted, sem GPU) é o "modelo local
+  pequeno" permitido pelo enunciado. Troca por um encoder denso (ex.:
+  `sentence-transformers/all-MiniLM-L6-v2` em CPU) é ADITIVA — mesma interface
+  `EmbeddingModel`, mesma coluna `embedding` (JSONB). Documentado no topo de
+  `retrieval.py`.
+- **`TesterTurnResult` fora do contrato**: WS-C não pode editar
+  `packages/contracts`. `run_tester_turn` retorna um `pydantic.BaseModel` local
+  (`activities.TesterTurnResult`); WS-B consome via dict/`model_validate`.
+  Proposta de promoção ao contrato (aditiva) fica para a próxima janela do
+  arquiteto (regra do CONTRACTS-CHANGELOG). `PlanArtifact` e `L2Verdict` já
+  estavam no contrato.
+- **`egress-proxy` (WS-C)**: sem mudanças na Fase 2 — o escopo WS-C da Fase 2
+  (E3-T3/T4/T5, E4, E5) é todo em `sandbox-runtime`. O proxy default-deny +
+  injeção de credencial efêmera da Fase 1 continua válido e é a rota de rede
+  das novas sessões (LLM sempre via model-gateway).
+
 ## O que está com fixture/mock local (documentado, não escondido)
 
 - **`FakeSubstrate`** é o substrato usado em TODOS os testes desta suíte —

@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 from dse_contracts.gateway_contract import GatewayCallHeaders, GatewayErrorResponse
 
-from . import settings, telemetry
+from . import enforcement, ledger, settings, telemetry
 from .errors import GatewayCallError
 
 # Header que o LiteLLM usa para reportar o custo real da chamada (calculado
@@ -45,7 +45,19 @@ def chat_completion(
 ) -> ChatCompletionResult:
     """Chama `POST {gateway_base_url}/v1/chat/completions`. Nunca chama
     nenhum outro host — `settings.gateway_base_url()` é a única base URL
-    usada por este módulo (ver teste de conformidade)."""
+    usada por este módulo (ver teste de conformidade).
+
+    ANTES de qualquer HTTP, aplica o enforcement no call time (WSD-E2/E4-T2):
+    reassign de modelo, kill switch, política e budget. Uma recusa levanta
+    `GatewayCallError` com corpo `GatewayErrorResponse` (P6 decline-never-
+    truncate) e já emitiu a linha de audit (P8) — o workflow do WS-B converte
+    isso em Failed. DEPOIS de uma resposta 2xx, grava o custo real no ledger
+    durável (WSD-E3-T4).
+    """
+    # Fronteira de enforcement (pode levantar GatewayCallError + emitir audit).
+    enf = enforcement.enforce_call(headers, model)
+    model = enf.effective_model  # honra reassign de modelo em voo
+
     url = f"{settings.gateway_base_url()}/v1/chat/completions"
     http_headers = {
         **headers.to_http_headers(),
@@ -97,6 +109,20 @@ def chat_completion(
         choices = payload.get("choices") or []
         if choices:
             content = choices[0].get("message", {}).get("content", "")
+
+        # WSD-E3-T4: grava o custo REAL no ledger durável (sobrevive a restart;
+        # é a fonte do cost_export e do accounting de budget). Só chamadas
+        # bem-sucedidas entram no ledger.
+        ledger.record_call(
+            tenant_id=headers.tenant_id,
+            work_item_id=headers.work_item_id,
+            stage=headers.stage.value,
+            task_class=headers.task_class,
+            model=returned_model,
+            cost_usd=cost_usd,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
 
         return ChatCompletionResult(
             content=content,

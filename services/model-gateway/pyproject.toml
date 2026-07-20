@@ -15,9 +15,13 @@ dependencies = [
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-http>=1.24",
     "fastapi>=0.110",
+    "pyyaml>=6.0",
     "dse-contracts",
     "dse-audit",
 ]
 
 [tool.setuptools.packages.find]
 include = ["model_gateway_client*"]
+
+[tool.setuptools.package-data]
+"model_gateway_client.eval_suite" = ["*.yaml"]

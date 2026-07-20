@@ -22,6 +22,7 @@ from ingest_gateway import (
     correlate,
     get_connection,
     record_signal_event,
+    resolve_tenant,
     sanitize_content,
     verify_github_signature,
 )
@@ -33,6 +34,7 @@ from .config import get_bot_mention_login, get_task_label, get_tenant_id, get_we
 from .events import (
     build_event_from_issue_assigned_or_labeled,
     build_event_from_issue_comment,
+    build_event_from_pr_merged,
     build_event_from_pr_review_comment,
 )
 
@@ -56,14 +58,33 @@ def _reject(reason: str) -> None:
     raise HTTPException(status_code=401, detail=f"signature_verification_failed:{reason}")
 
 
-def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
+def _resolve_tenant_for(payload: dict) -> str:
+    """WSA-E1-T5 — resolve o tenant a partir da installation da GitHub App
+    (`payload["installation"]["id"]`) via `tenant_platform_bindings`. Binding
+    ausente cai para `DSE_TENANT_ID` com audit row de aviso (fallback
+    single-tenant documentado)."""
+    installation_id = (payload.get("installation") or {}).get("id")
+    conn = get_connection()
+    try:
+        rt = resolve_tenant(
+            conn,
+            platform="github",
+            binding_key=str(installation_id) if installation_id is not None else None,
+        )
+        conn.commit()
+        return rt.tenant_id
+    finally:
+        conn.close()
+
+
+def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str) -> dict:
     """Path usado por eventos que PODEM legitimamente abrir um WorkItem
     novo (issues assigned/labeled, comentário com menção numa issue comum).
     """
     sanitized = sanitize_content(conv_event.content_snapshot)
     conn = get_connection()
     try:
-        result = correlate(conn, tenant_id=get_tenant_id(), event=conv_event, requester_principal=principal)
+        result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
 
         if result.kind == "unauthorized":
             conn.commit()
@@ -72,7 +93,7 @@ def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
         if result.kind == "signal":
             record_signal_event(
                 conv_event,
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 channel=conv_event.source_ref["repo"],
                 work_item_id=result.work_item_id,
                 sanitized_content=sanitized,
@@ -88,7 +109,7 @@ def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
             audit_emit(
                 actor=principal,
                 action="comment_ignored_no_mention_no_active_work_item",
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 details={"repo": conv_event.source_ref["repo"], "number": conv_event.source_ref["number"]},
             )
             return {"ok": True, "path": "ignored_no_mention"}
@@ -96,7 +117,7 @@ def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
         try:
             work_item_id = admit_work_item(
                 conv_event,
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 source="github",
                 channel=conv_event.source_ref["repo"],
                 requester_principal=principal,
@@ -111,7 +132,7 @@ def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
             audit_emit(
                 actor=principal,
                 action="work_item_provenance_link",
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 work_item_id=work_item_id,
                 details={"previous_work_item_id": result.provenance_work_item_id},
             )
@@ -121,13 +142,13 @@ def _handle_task_creating_event(conv_event, *, principal: str) -> dict:
         conn.close()
 
 
-def _handle_pr_comment_event(conv_event, *, principal: str) -> dict:
+def _handle_pr_comment_event(conv_event, *, principal: str, tenant_id: str) -> dict:
     """Path usado por comentários em PR (issue_comment numa PR ou
     pull_request_review_comment) — NUNCA cria WorkItem novo (WSA-E4-T1)."""
     sanitized = sanitize_content(conv_event.content_snapshot)
     conn = get_connection()
     try:
-        result = correlate(conn, tenant_id=get_tenant_id(), event=conv_event, requester_principal=principal)
+        result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
 
         if result.kind == "unauthorized":
             conn.commit()
@@ -136,7 +157,7 @@ def _handle_pr_comment_event(conv_event, *, principal: str) -> dict:
         if result.kind == "signal":
             record_signal_event(
                 conv_event,
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 channel=conv_event.source_ref["repo"],
                 work_item_id=result.work_item_id,
                 sanitized_content=sanitized,
@@ -150,8 +171,41 @@ def _handle_pr_comment_event(conv_event, *, principal: str) -> dict:
         audit_emit(
             actor=principal,
             action="review_comment_ignored_no_active_work_item",
-            tenant_id=get_tenant_id(),
+            tenant_id=tenant_id,
             details={"repo": conv_event.source_ref["repo"], "number": conv_event.source_ref["number"]},
+        )
+        return {"ok": True, "path": "ignored_no_active_work_item"}
+    finally:
+        conn.close()
+
+
+def _handle_merge_event(conv_event, *, principal: str, tenant_id: str, pr_number: int) -> dict:
+    """WSA-E4-T3 — pull_request merged: correlaciona por número de PR ao
+    WorkItem ATIVO e dispara `merged_by_human` (via marcador determinístico no
+    payload, lido pelo dispatcher). NUNCA cria WorkItem novo; sem WorkItem
+    ativo correspondente, é ignorado com audit (rota documentada)."""
+    conn = get_connection()
+    try:
+        result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
+
+        if result.kind == "signal":
+            record_signal_event(
+                conv_event,
+                tenant_id=tenant_id,
+                channel=conv_event.source_ref["repo"],
+                work_item_id=result.work_item_id,
+                extra_payload={"merged_by_human": True, "merged_by": principal, "pr_number": pr_number},
+                conn=conn,
+            )
+            return {"ok": True, "path": "signal_merged_by_human", "work_item_id": result.work_item_id}
+
+        # new_task (sem match) OU match terminal -> merge não dispara nada.
+        conn.rollback()
+        audit_emit(
+            actor=principal,
+            action="merge_ignored_no_active_work_item",
+            tenant_id=tenant_id,
+            details={"repo": conv_event.source_ref["repo"], "number": pr_number},
         )
         return {"ok": True, "path": "ignored_no_active_work_item"}
     finally:
@@ -171,6 +225,7 @@ async def github_webhook(request: Request) -> dict:
 
     payload = json.loads(body)
     action = payload.get("action")
+    tenant_id = _resolve_tenant_for(payload)
 
     if event_type == "issues" and action in ("assigned", "labeled"):
         if action == "labeled":
@@ -182,7 +237,7 @@ async def github_webhook(request: Request) -> dict:
         conv_event = build_event_from_issue_assigned_or_labeled(
             payload, delivery_id=delivery_id, resolved_principal=principal
         )
-        return _handle_task_creating_event(conv_event, principal=principal)
+        return _handle_task_creating_event(conv_event, principal=principal, tenant_id=tenant_id)
 
     if event_type == "issue_comment" and action == "created":
         sender = payload["comment"]["user"]["login"]
@@ -190,18 +245,39 @@ async def github_webhook(request: Request) -> dict:
         conv_event, is_pr_comment = build_event_from_issue_comment(payload, resolved_principal=principal)
 
         if is_pr_comment:
-            return _handle_pr_comment_event(conv_event, principal=principal)
+            return _handle_pr_comment_event(conv_event, principal=principal, tenant_id=tenant_id)
 
         mention = f"@{get_bot_mention_login()}".lower()
         if mention in conv_event.content_snapshot.lower():
             conv_event = conv_event.model_copy(update={"kind": EventKind.task_request})
-        return _handle_task_creating_event(conv_event, principal=principal)
+        return _handle_task_creating_event(conv_event, principal=principal, tenant_id=tenant_id)
 
     if event_type == "pull_request_review_comment" and action == "created":
         sender = payload["comment"]["user"]["login"]
         principal = resolve_principal("github", sender, sender)
         conv_event = build_event_from_pr_review_comment(payload, resolved_principal=principal)
-        return _handle_pr_comment_event(conv_event, principal=principal)
+        return _handle_pr_comment_event(conv_event, principal=principal, tenant_id=tenant_id)
+
+    if event_type == "pull_request" and action == "closed":
+        # WSA-E4-T3: só o merge dispara signal. PR fechado SEM merge NÃO
+        # dispara nada (rota documentada).
+        pr = payload["pull_request"]
+        pr_number = pr["number"]
+        repo = payload["repository"]["full_name"]
+        if not pr.get("merged"):
+            audit_emit(
+                actor="system:adapter-github",
+                action="pr_closed_without_merge_ignored",
+                tenant_id=tenant_id,
+                details={"repo": repo, "number": pr_number},
+            )
+            return {"ok": True, "path": "ignored_pr_closed_unmerged"}
+
+        merged_by_login = (pr.get("merged_by") or {}).get("login") or payload.get("sender", {}).get("login", "")
+        principal = resolve_principal("github", merged_by_login, merged_by_login)
+        merge_sha = pr.get("merge_commit_sha") or delivery_id
+        conv_event = build_event_from_pr_merged(payload, resolved_principal=principal, merge_sha=merge_sha)
+        return _handle_merge_event(conv_event, principal=principal, tenant_id=tenant_id, pr_number=pr_number)
 
     return {"ok": True, "path": "ignored_unhandled_event_type"}
 

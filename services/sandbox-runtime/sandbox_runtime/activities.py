@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from temporalio import activity
 
 from dse_audit import emit as audit_emit
@@ -33,18 +33,33 @@ from dse_contracts import (
     ACTIVITY_PROVISION_SANDBOX,
     ACTIVITY_REBUILD_SANDBOX,
     ACTIVITY_RUN_CODER_TURN,
+    ACTIVITY_RUN_L2_REVIEW,
+    ACTIVITY_RUN_PLANNER_TURN,
+    ACTIVITY_RUN_TESTER_TURN,
     ACTIVITY_TEARDOWN_SANDBOX,
     CheckpointRef,
     CoderTurnResult,
     GatewayCallHeaders,
+    L2Verdict,
+    PlanArtifact,
     SandboxHandle,
     Stage,
 )
 
 from . import docker_driver, git_checkpoint, leases_store, metrics
 from .model_gateway_client import mint_virtual_key
+from .retrieval import RetrievalService
 from .scoped_git import GitScopeViolation, ScopedGitSession
+from .sessions import (
+    FreshReviewerSession,
+    PlannerContext,
+    ReviewerContext,
+    ScriptedAgentSession,
+    classify_risk_class,
+    hydrate_planner_context,
+)
 from .substrate import AgentSubstrate, FakeSubstrate
+from .toolsets import PlannerToolset, TesterToolset
 
 _STATE_DIR = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
 
@@ -399,6 +414,403 @@ async def _run_coder_turn_impl(
     )
 
 
+# ===========================================================================
+# Fase 2 — sessões stage-scoped (WSC-E3-T3/T4/T5)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# run_planner_turn (WSC-E3-T3) — sessão read-only, emite PlanArtifact
+# ---------------------------------------------------------------------------
+class RunPlannerTurnInput(BaseModel):
+    # Reconciliação de contrato da integração da Fase 2: o worker do WS-B chama
+    # esta Activity enviando `instructions` (lista, de clarification_notes) e
+    # `base_branch`/`model_override` — não `instruction`/`branch`. Os fakes
+    # lenientes dos testes de ambos os lados (aceitam dict) esconderam o
+    # mismatch; o wire real quebrava com "missing instruction". Tornado
+    # tolerante: `instruction` opcional derivada de `instructions`; aceita os
+    # aliases do WS-B. Correção definitiva: promover este model + os de tester/
+    # L2 a dse_contracts para uma única fonte da verdade (registrado no README).
+    model_config = {"populate_by_name": True}
+
+    work_item_id: str
+    tenant_id: str
+    instruction: str = ""
+    instructions: list[str] = Field(default_factory=list)  # alias que o WS-B envia
+    repo: str = "app"
+    branch: str | None = None
+    base_branch: str | None = None  # alias que o WS-B envia
+    task_class: str = "default"
+    data_class: str = "internal"
+    diff_budget_lines: int = 400
+    related_tickets: list[str] = Field(default_factory=list)
+    model_override: str | None = None  # ignorado aqui; tolerado para não quebrar o decode
+
+    @model_validator(mode="after")
+    def _reconcile(self) -> "RunPlannerTurnInput":
+        if not self.instruction and self.instructions:
+            self.instruction = " ".join(s for s in self.instructions if s)
+        if self.branch is None and self.base_branch is not None:
+            self.branch = self.base_branch
+        return self
+
+
+def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> dict[str, Any]:
+    """Proposta MÍNIMA de plano quando nenhum substrato real está plugado —
+    fixture claramente marcado (mesmo espírito do `FakeSubstrate` do Coder). Em
+    produção, uma sessão OpenHands read-only (toolset planner) propõe
+    steps/expected_files/test_plan a partir de `ctx.render()`; o override real
+    é wireável por `_run_planner_turn_impl(..., proposer=...)`. Ver README."""
+    return {
+        "steps": [f"Analisar e implementar: {inp.instruction[:120]}"],
+        "expected_files": [],
+        "test_plan": "Adicionar/rodar testes cobrindo o comportamento novo (Tester turn).",
+    }
+
+
+@activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)
+async def run_planner_turn(inp: RunPlannerTurnInput) -> PlanArtifact:
+    """Wrapper fino registrado como Activity Temporal (mesmo padrão de
+    `run_coder_turn`). A lógica e os pontos de injeção para teste vivem em
+    `_run_planner_turn_impl`."""
+    return await _run_planner_turn_impl(inp)
+
+
+async def _run_planner_turn_impl(
+    inp: RunPlannerTurnInput,
+    *,
+    retrieval: RetrievalService | None = None,
+    proposer=None,
+    exploration_script: list[dict[str, Any]] | None = None,
+    skills_conn=None,
+) -> PlanArtifact:
+    """Sessão Planner READ-ONLY (WSC-E3-T3).
+
+    Toolset SÓ leitura: hidrata AGENTS.md + skill registry aprovado do tenant
+    (E4) + CODEOWNERS + tickets relacionados + retrieval/index (E5), e emite um
+    PlanArtifact estruturado. Qualquer tool de ESCRITA falha
+    (`ToolPermissionError`) — a sessão usa `PlannerToolset`. P1: o `risk_class`
+    é DERIVADO por `classify_risk_class` (determinístico), não pela palavra do
+    LLM — é ele que dirige o gate do WS-B.
+    """
+    branch = inp.branch or _default_branch(inp.work_item_id)
+    workspace_dir, _bare = _paths_for(inp.work_item_id)
+
+    # Chamada de modelo (se houver) sai SÓ via gateway, stage=planner.
+    headers = GatewayCallHeaders(
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        stage=Stage.planner,
+        task_class=inp.task_class,
+        data_class=inp.data_class,
+    )
+    vk = mint_virtual_key(headers)
+
+    retrieval = retrieval if retrieval is not None else RetrievalService()
+    ctx = hydrate_planner_context(
+        work_item_id=inp.work_item_id,
+        tenant_id=inp.tenant_id,
+        workspace_dir=workspace_dir,
+        repo=inp.repo,
+        instruction=inp.instruction,
+        task_class=inp.task_class,
+        related_tickets=inp.related_tickets,
+        retrieval=retrieval,
+        skills_conn=skills_conn,
+    )
+
+    # Sessão read-only: qualquer step de escrita no exploration_script FALHA
+    # aqui (toolset planner), o que é o teste de conformidade.
+    session = ScriptedAgentSession(
+        toolset=PlannerToolset(),
+        workspace_dir=workspace_dir,
+        retrieval=retrieval,
+        tenant_id=inp.tenant_id,
+        repo=inp.repo,
+        context_reads={
+            "read_agents_md": ctx.agents_md,
+            "read_codeowners": ctx.codeowners,
+            "list_skills": "\n".join(s.skill_key for s in ctx.skills),
+        },
+    )
+    if exploration_script:
+        session.run_script(exploration_script)
+
+    proposal = (proposer or (lambda c: _default_plan_proposer(c, inp)))(ctx)
+    expected_files = list(proposal.get("expected_files", []))
+    forbidden = PlanArtifact.model_fields["forbidden_paths"].default_factory()
+    risk_class = classify_risk_class(expected_files, inp.diff_budget_lines, forbidden)
+
+    plan = PlanArtifact(
+        work_item_id=inp.work_item_id,
+        steps=list(proposal.get("steps", [])),
+        expected_files=expected_files,
+        diff_budget_lines=inp.diff_budget_lines,
+        test_plan=proposal.get("test_plan", ""),
+        risk_class=risk_class,
+        forbidden_paths=forbidden,
+    )
+
+    audit_emit(
+        actor="system:sandbox-runtime",
+        action="planner_turn_completed",
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        details={
+            "stage": "planner",
+            "steps": plan.steps,
+            "expected_files": plan.expected_files,
+            "risk_class": plan.risk_class,
+            "diff_budget_lines": plan.diff_budget_lines,
+            "skills_hydrated": [s.skill_key for s in ctx.skills],
+            "retrieval_hits": [f"{h.repo}/{h.path}" for h in ctx.retrieval_hits],
+            "virtual_key_fixture": vk.fixture,
+        },
+    )
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# run_tester_turn (WSC-E3-T4) — test runners + autoria de testes (só test paths)
+# ---------------------------------------------------------------------------
+class RunTesterTurnInput(BaseModel):
+    # Reconciliação de contrato Fase 2 (ver nota em RunPlannerTurnInput): o
+    # WS-B envia `plan`(dict)+`sandbox_id`+`model_override`+`runtime_override`,
+    # não `instruction`. Tornado tolerante: instruction opcional derivada do
+    # test_plan do plano; aliases do WS-B aceitos.
+    model_config = {"populate_by_name": True}
+
+    work_item_id: str
+    tenant_id: str
+    instruction: str = ""
+    plan: dict | None = None  # alias que o WS-B envia (plan_json)
+    sandbox_id: str | None = None
+    repo: str = "app"
+    branch: str | None = None
+    task_class: str = "default"
+    data_class: str = "internal"
+    run_paths: list[str] = Field(default_factory=list)
+    model_override: str | None = None
+    runtime_override: str | None = None
+
+    @model_validator(mode="after")
+    def _reconcile(self) -> "RunTesterTurnInput":
+        if not self.instruction and self.plan:
+            self.instruction = str(self.plan.get("test_plan") or "write/adjust tests for the change")
+        return self
+
+
+class TesterTurnResult(BaseModel):
+    """Retorno da Activity run_tester_turn. NÃO está em `packages/contracts`
+    (WS-C não edita a fundação) — WS-B consome via dict/model_validate; ver
+    README (proposta de promoção ao contrato na próxima janela do arquiteto)."""
+
+    sandbox_id: str
+    test_files: list[str]
+    tests_ran: bool
+    tests_passed: bool
+    returncode: int
+    cost_usd: float = 0.0
+    # Reconciliação Fase 2: o WS-B decodifica o retorno desta Activity em
+    # `CoderTurnResult` (fundação), que exige `diff_summary` + `files_changed`.
+    # Expostos aqui como superset compatível (files_changed espelha test_files)
+    # para o decode do WS-B não falhar — até a promoção ao contrato compartilhado.
+    diff_summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _mirror_test_files(self) -> "TesterTurnResult":
+        if not self.files_changed:
+            self.files_changed = list(self.test_files)
+        if not self.diff_summary:
+            self.diff_summary = f"tester: {len(self.test_files)} test file(s)"
+        return self
+
+
+@activity.defn(name=ACTIVITY_RUN_TESTER_TURN)
+async def run_tester_turn(inp: RunTesterTurnInput) -> TesterTurnResult:
+    return await _run_tester_turn_impl(inp)
+
+
+async def _run_tester_turn_impl(
+    inp: RunTesterTurnInput,
+    *,
+    retrieval: RetrievalService | None = None,
+    authoring_script: list[dict[str, Any]] | None = None,
+    push: bool = True,
+) -> TesterTurnResult:
+    """Sessão Tester (WSC-E3-T4): autoria de testes + runners. Edits permitidos
+    SÓ em test paths (`TesterToolset` recusa write fora deles). Os testes
+    escritos EXECUTAM de verdade (`run_tests` → pytest real no workspace), não
+    são só gerados. O commit/push dos test files é determinístico
+    (`ScopedGitSession`), nunca pelo LLM (P1)."""
+    branch = inp.branch or _default_branch(inp.work_item_id)
+    workspace_dir, _bare = _paths_for(inp.work_item_id)
+
+    headers = GatewayCallHeaders(
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        stage=Stage.tester,
+        task_class=inp.task_class,
+        data_class=inp.data_class,
+    )
+    vk = mint_virtual_key(headers)
+
+    session = ScriptedAgentSession(
+        toolset=TesterToolset(),
+        workspace_dir=workspace_dir,
+        retrieval=retrieval,
+        tenant_id=inp.tenant_id,
+        repo=inp.repo,
+    )
+
+    test_files: list[str] = []
+    tests_ran = False
+    tests_passed = False
+    returncode = -1
+    for step in authoring_script or []:
+        res = session.invoke(step["tool"], **{k: v for k, v in step.items() if k != "tool"})
+        if step["tool"] == "write_file":
+            test_files.append(step["path"])
+        if step["tool"] == "run_tests":
+            tests_ran = True
+            tests_passed = bool(res.detail.get("passed"))
+            returncode = int(res.detail.get("returncode", -1))
+
+    # Commit/push determinístico dos test files (só test paths foram escritos —
+    # o toolset garantiu). Escapes de git ficam no código, nunca no LLM.
+    git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
+    git_session.ensure_identity(name="dse-tester", email="tester@dse.local")
+    if git_session.has_changes():
+        git_session.commit(f"tester({inp.work_item_id}): {inp.instruction[:60]}")
+        if push:
+            try:
+                git_session.push()
+            except GitScopeViolation:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="tester_push_rejected",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"branch": branch},
+                )
+                raise
+
+    audit_emit(
+        actor="system:sandbox-runtime",
+        action="tester_turn_completed",
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        details={
+            "stage": "tester",
+            "test_files": test_files,
+            "tests_ran": tests_ran,
+            "tests_passed": tests_passed,
+            "returncode": returncode,
+            "virtual_key_fixture": vk.fixture,
+        },
+    )
+    return TesterTurnResult(
+        sandbox_id=inp.work_item_id,
+        test_files=test_files,
+        tests_ran=tests_ran,
+        tests_passed=tests_passed,
+        returncode=returncode,
+        cost_usd=0.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_l2_review (WSC-E3-T5) — sessão Reviewer fresh-context, retorna L2Verdict
+# ---------------------------------------------------------------------------
+class RunL2ReviewInput(BaseModel):
+    """Entrada da Activity L2. Carrega SÓ plan + diff — deliberadamente NÃO
+    existe campo para histórico/transcrição do Coder (P3 por construção; o WS-B
+    não tem como injetar contexto do produtor nesta Activity nem se quisesse)."""
+
+    # P3 (NÃO-NEGOCIÁVEL, joia da coroa): os campos são EXATAMENTE
+    # {work_item_id, tenant_id, plan, diff, task_class, data_class} — nenhum
+    # canal para histórico/instrução do Coder. Este model é deliberadamente
+    # ESTRITO e NÃO foi alargado na reconciliação da Fase 2 (ao contrário de
+    # planner/tester): quem se adapta é o CHAMADOR (WS-B envia `diff`, não
+    # `diff_summary` — corrigido no call site do workflow, não aqui).
+    work_item_id: str
+    tenant_id: str
+    plan: PlanArtifact
+    diff: str
+    task_class: str = "default"
+    data_class: str = "internal"
+
+
+def _changed_files_from_diff(diff: str) -> list[str]:
+    files: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            files.append(line[6:].strip())
+        elif line.startswith("diff --git a/"):
+            # "diff --git a/x b/x"
+            parts = line.split(" b/", 1)
+            if len(parts) == 2:
+                files.append(parts[1].strip())
+    # dedup preservando ordem
+    seen: set[str] = set()
+    out = []
+    for f in files:
+        if f and f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _default_reviewer_verdict(ctx: ReviewerContext):
+    """Reviewer determinístico de STAND-IN (fixture claramente marcado, mesmo
+    espírito do FakeSubstrate). Julga aderência do diff ao plano por regras
+    objetivas: (a) nenhum arquivo alterado fora do blast radius declarado
+    (`expected_files`, se não vazio); (b) nenhum arquivo em `forbidden_paths`.
+    Em produção, uma sessão OpenHands FRESCA (só plan+diff) substitui isto e
+    devolve objeções de convenção/lógica com arquivo/linha — override via
+    `_run_l2_review_impl(..., verdict_fn=...)`. Ver README."""
+    changed = _changed_files_from_diff(ctx.diff)
+    objections: list[str] = []
+    expected = set(ctx.plan.expected_files)
+    for f in changed:
+        if expected and f not in expected:
+            objections.append(f"{f}: alterado fora do blast radius declarado no plano (expected_files)")
+        for fb in ctx.plan.forbidden_paths:
+            if f.startswith(fb.rstrip("*")):
+                objections.append(f"{f}: toca forbidden_path '{fb}' — requer caminho humano")
+    return (len(objections) == 0, objections, 0.0)
+
+
+@activity.defn(name=ACTIVITY_RUN_L2_REVIEW)
+async def run_l2_review(inp: RunL2ReviewInput) -> L2Verdict:
+    return await _run_l2_review_impl(inp)
+
+
+async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Verdict:
+    """Constrói a sessão Reviewer de contexto FRESCO (WSC-E3-T5) e devolve o
+    `L2Verdict`. A sessão recebe SÓ `ReviewerContext(plan, diff)` — nunca o
+    histórico do Coder (P3). O veredito é RECOMENDAÇÃO (gateia progressão); o
+    merge continua humano (P1)."""
+    context = ReviewerContext(work_item_id=inp.work_item_id, plan=inp.plan, diff=inp.diff)
+    session = FreshReviewerSession(context)
+    verdict = session.review(verdict_fn or _default_reviewer_verdict)
+
+    audit_emit(
+        actor="system:sandbox-runtime",
+        action="l2_review_completed",
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        details={
+            "stage": "reviewer",
+            "passed": verdict.passed,
+            "objections": verdict.objections,
+            "fresh_context": True,
+            "context_fields": sorted(type(context).__dataclass_fields__.keys()),
+        },
+    )
+    return verdict
+
+
 # Consumido pelo loader defensivo do worker unico (services/orchestrator/
 # src/dse_orchestrator/worker.py:_load_cross_workstream_activities) — nome
 # `ACTIVITIES` e o contrato que o integrador espera (ver docstring de lá).
@@ -408,4 +820,7 @@ ACTIVITIES = [
     rebuild_sandbox,
     teardown_sandbox,
     run_coder_turn,
+    run_planner_turn,
+    run_tester_turn,
+    run_l2_review,
 ]

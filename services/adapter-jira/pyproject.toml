@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dse-adapter-jira"
+version = "0.1.0"
+description = "WS-A Fase 2: adapter Jira (webhook + poller fallback inbound; transições serializadas + status comment via MutableCommentWriter, sob service account escopada)"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "python-multipart>=0.0.9",
+    "requests>=2.31",
+    "dse-contracts",
+    "dse-audit",
+    "dse-identity",
+    "dse-ingest-gateway",
+]
+
+[tool.setuptools.packages.find]
+include = ["adapter_jira*"]

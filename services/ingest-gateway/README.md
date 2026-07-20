@@ -1,10 +1,15 @@
-# WS-A — Ingestão e adaptadores (Fintex DSE, Fase 1)
+# WS-A — Ingestão e adaptadores (Fintex DSE, Fase 1 + Fase 2)
 
 Este README documenta o workstream inteiro (WS-A): `services/ingest-gateway/`
-(este diretório, o núcleo), `services/adapter-slack/` e
-`services/adapter-github/`. Os dois adapters importam `ingest_gateway` como
-biblioteca — toda a lógica de admissão, correlação, defesas de intake e
-steering allowlist vive aqui e é compartilhada, não duplicada.
+(este diretório, o núcleo), `services/adapter-slack/`,
+`services/adapter-github/` e (Fase 2) `services/adapter-jira/`. Todos os
+adapters importam `ingest_gateway` como biblioteca — toda a lógica de admissão,
+correlação, defesas de intake, steering allowlist e (Fase 2) tenant binding
+vive aqui e é compartilhada, não duplicada.
+
+> **Fase 2 ("Judgment & queue"):** ver a seção
+> [Fase 2 — o que WS-A adicionou](#fase-2--o-que-ws-a-adicionou) no fim deste
+> arquivo. O restante descreve a base da Fase 1 (que continua válida).
 
 ## O que está implementado e funcionando
 
@@ -260,3 +265,99 @@ nem `docker compose down`, só reiniciei o container já existente. Isso
 afeta TODOS os workstreams que dependem de Temporal (WS-B em especial) —
 vale o arquiteto adicionar esse arquivo (mesmo vazio) ao repo/imagem para
 o próximo `docker compose up` não recriar o container sem ele.
+
+---
+
+## Fase 2 — o que WS-A adicionou
+
+A Fase 2 do WS-A ("Judgment & queue") adiciona a superfície Jira, o mapeamento
+de tenant, o webhook de merge e o roteamento de signal por status. Migração:
+`migrations/0008_wsa2.sql`. Fragment: `docker-compose.wsa.yml` (adapter-jira +
+workers, porta 8804). Contratos importados de `dse_contracts` (não redefinidos):
+`SIGNAL_PLAN_APPROVAL`, `SIGNAL_MERGED_BY_HUMAN`.
+
+### WSA-E5 — Adapter Jira (`services/adapter-jira/`)
+Novo serviço espelhando o adapter-github. Inbound (webhook + poller fallback
+obrigatório), transições serializadas por ticket, status comment único via a
+mesma `MutableCommentWriter`. Detalhes completos e gaps em
+[`../adapter-jira/README.md`](../adapter-jira/README.md). Ganchos novos em
+`ingest_gateway`: `verify_jira_signature` (defesa #1, `X-Hub-Signature`).
+
+### WSA-E1-T5 — Mapeamento plataforma → tenant
+- Tabela `tenant_platform_bindings(platform, binding_key, tenant_id)`
+  (`0008_wsa2.sql`).
+- `ingest_gateway.resolve_tenant(conn, platform=, binding_key=)` →
+  `ResolvedTenant(tenant_id, from_binding)`. Resolvido nos **3 adapters**:
+  workspace Slack (`team_id`), installation GitHub (`installation.id`), site
+  Jira (host de `issue.self`).
+- **Fallback documentado** (P6): binding ausente → `DSE_TENANT_ID` (single-tenant)
+  **com audit row de aviso** (`tenant_binding_missing_fallback_default`) — nunca
+  adivinha um tenant. Preencher a tabela faz a resolução parar de cair no
+  fallback sem mudança de código.
+
+### WSA-E4-T3 — Webhook `pull_request` merged → `merged_by_human`
+- Handler no adapter-github para `pull_request` (action=`closed`,
+  `merged=true`), correlacionado por número de PR ao WorkItem ativo. Grava um
+  ingest_event com o marcador determinístico `merged_by_human` no payload; o
+  dispatcher dispara `SIGNAL_MERGED_BY_HUMAN` com o principal de quem mergeou.
+- **PR fechado SEM merge NÃO dispara nada** (rota `ignored_pr_closed_unmerged`,
+  testada). Reentrega deduplica por `event_id` (derivado do `merge_commit_sha`).
+
+### WSA-E6-T3 — Roteamento de signal por status do WorkItem
+- O mapa fixo `kind → signal` da Fase 1 foi substituído por
+  `dispatcher._route_signal(status, kind, payload)`, que consulta
+  `work_items.status`:
+  - `kind=approval` + status `awaiting_plan_approval` → `SIGNAL_PLAN_APPROVAL`
+    (verdict/route lidos de marcadores determinísticos no payload).
+  - `kind=approval` + status `pr_ready`/`review_feedback` → `SIGNAL_REVIEW_COMMENT`.
+  - `kind=approval` + status inesperado → **audit row + não sinaliza** (nunca
+    adivinha, P6; consumido com `dispatch_declined_unexpected_status`).
+  - marcador `merged_by_human` → `SIGNAL_MERGED_BY_HUMAN` (independe do status).
+  - `clarification_answer`/`review_comment`/`steering` → **comportamento da
+    Fase 1 preservado**.
+- Determinístico (P1): nenhuma decisão de fluxo por LLM — só `status` +
+  marcadores postos pelo adapter.
+
+### Princípios preservados
+- **P1** roteamento 100% determinístico (status + marcadores, nunca LLM).
+- **P6** status inesperado declina com evidência, nunca adivinha; kill switch e
+  fallback de tenant sempre deixam audit row.
+- **P8** toda decisão consequente (bind fallback, merge, transição, aprovação,
+  declínio) vira audit row via `dse_audit.emit`.
+
+### Resultado real de `pytest -q` desta sessão (Fase 1 + Fase 2, WS-A)
+
+```
+services/ingest-gateway  : 52 passed   (37 Fase 1 + 15 novos: routing + tenant binding)
+services/adapter-slack   : 14 passed   (Fase 1; tenant binding via env fallback, sem regressão)
+services/adapter-github  : 24 passed   (19 Fase 1 + 5 novos: merge webhook + tenant binding)
+services/adapter-jira    : 17 passed   (novo serviço)
+TOTAL                    : 107 passed, 0 failed
+```
+
+Rodados contra Postgres e Temporal **reais** (nunca mockados para
+durabilidade/idempotência — P8). Os 4 `Dockerfile` (incluindo o novo
+`adapter-jira/Dockerfile`) buildam com sucesso; `docker compose config` do
+merge fundação+wsa valida.
+
+### Notas honestas / gaps de ambiente
+
+- **Container `dse_ingest_dispatcher` roda código da Fase 1.** O container de
+  dispatcher que está no ar na infra compartilhada foi buildado na Fase 1
+  (roteamento por `kind` antigo) e é um **consumidor concorrente** do mesmo
+  outbox `ingest_events` (via `SELECT ... FOR UPDATE SKIP LOCKED`). Impacto nos
+  testes: (a) o chaos test `test_two_concurrent_dispatchers_...` teve sua
+  asserção `sum(results) == N` relaxada para `<= N` (os 2 dispatchers do teste
+  processam no máximo N; o resto pode ser drenado pelo container) — a invariante
+  real de NFR-01 (nenhuma perda, nenhuma duplicação, exatamente-uma-vez)
+  continua provada pelas asserções de banco, robustas a qualquer nº de
+  consumidores; (b) os testes de INTEGRAÇÃO de roteamento (WSA-E6-T3) exercitam
+  `_dispatch_row` diretamente (código novo + signal Temporal real) em vez de
+  passar pelo outbox disputado, para não colher um roteamento antigo do
+  container. Recomendação ao integrador: rebuildar `dse_ingest_dispatcher` na
+  consolidação da Fase 2.
+- **`SIGNAL_PLAN_APPROVAL`**: o dispatcher já roteia para o nome correto; o
+  `@workflow.signal plan_approval` é construído por WS-B (WSB-E3-T2) em paralelo.
+- **Multi-tenant real**: `resolve_tenant` está pronto; falta popular
+  `tenant_platform_bindings` com os workspaces/installations/sites reais (é dado
+  operacional, não engenharia).

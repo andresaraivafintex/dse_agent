@@ -26,6 +26,13 @@ def _float_env(name: str, default: float) -> float:
     return float(raw)
 
 
+def _csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class OrchestratorConfig:
     """Caps e timers configuraveis (Fase 1: sem fairness/budget — isso e WSB-E4/Fase 2)."""
@@ -41,6 +48,14 @@ class OrchestratorConfig:
     # WSB-E5-T1 — checkpoint/rebuild
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
+
+    # Fase 2 — WSB-E3-T2/T3 (gate de aprovacao de plano) + WSB-E2 (L2).
+    # POLITICA de quais classes de risco exigem aprovacao humana (P1: vive
+    # fora do modelo, aqui na config do operador). CSV em
+    # DSE_REQUIRE_APPROVAL_RISK_CLASSES (default "high").
+    require_approval_risk_classes: tuple[str, ...] = ("high",)
+    plan_round_cap: int = 3   # re_plan capado (rejection path)
+    l2_retry_cap: int = 2     # objecoes do L2 -> Coder, capadas
 
     # timeouts de activity (segundos) — generosos porque Coder/L1 podem ser lentos;
     # heartbeat permite deteccao de worker morto sem esperar o timeout inteiro.
@@ -60,6 +75,9 @@ class OrchestratorConfig:
             activity_start_to_close_seconds=_float_env("DSE_ACTIVITY_START_TO_CLOSE_SECONDS", 3600.0),
             activity_heartbeat_seconds=_float_env("DSE_ACTIVITY_HEARTBEAT_SECONDS", 30.0),
             activity_schedule_to_close_seconds=_float_env("DSE_ACTIVITY_SCHEDULE_TO_CLOSE_SECONDS", 7200.0),
+            require_approval_risk_classes=_csv_env("DSE_REQUIRE_APPROVAL_RISK_CLASSES", ("high",)),
+            plan_round_cap=_int_env("DSE_PLAN_ROUND_CAP", 3),
+            l2_retry_cap=_int_env("DSE_L2_RETRY_CAP", 2),
         )
 
 
@@ -82,4 +100,7 @@ def apply_to_input(input, cfg: "OrchestratorConfig | None" = None):
     input.activity_start_to_close_seconds = cfg.activity_start_to_close_seconds
     input.activity_heartbeat_seconds = cfg.activity_heartbeat_seconds
     input.activity_schedule_to_close_seconds = cfg.activity_schedule_to_close_seconds
+    input.require_approval_risk_classes = cfg.require_approval_risk_classes
+    input.plan_round_cap = cfg.plan_round_cap
+    input.l2_retry_cap = cfg.l2_retry_cap
     return input

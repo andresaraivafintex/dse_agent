@@ -29,11 +29,17 @@ from temporalio import activity
 from dse_contracts.activities import ACTIVITY_EMIT_AUDIT
 import dse_audit
 
+from dse_orchestrator import policy
+
 logger = logging.getLogger("dse_orchestrator.local_activities")
 
 LOCAL_ACTIVITY_UPDATE_STATUS = "update_work_item_status"
 LOCAL_ACTIVITY_CHECK_CLARIFICATION = "check_clarification_completeness"
 LOCAL_ACTIVITY_LOAD_WORK_ITEM = "load_work_item"
+# Fase 2 (WSB-E3-T2) — resolucao de aprovador (I/O: DB + CODEOWNERS) e
+# projecao duravel do gate (WSB migracao 0009).
+LOCAL_ACTIVITY_RESOLVE_APPROVER = "resolve_plan_approver"
+LOCAL_ACTIVITY_RECORD_GATE = "record_plan_approval"
 
 _DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
@@ -94,14 +100,15 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT tenant_id, repo, base_branch, requester, data_class, pr_number "
+                "SELECT tenant_id, repo, base_branch, requester, data_class, pr_number, "
+                "       risk_class, budget "
                 "FROM work_items WHERE id = %s",
                 (work_item_id,),
             )
             row = cur.fetchone()
         if row is None:
             raise ValueError(f"work_item_id={work_item_id!r} nao encontrado em work_items")
-        tenant_id, repo, base_branch, requester, data_class, pr_number = row
+        tenant_id, repo, base_branch, requester, data_class, pr_number, risk_class, budget = row
         return {
             "work_item_id": work_item_id,
             "tenant_id": tenant_id,
@@ -110,7 +117,139 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
             "requester": requester,
             "data_class": data_class or "internal",
             "pr_number": pr_number,
+            "risk_class": risk_class,
+            # WSB-E4-T1: budget lido na admissao. `budget` e o JSONB de
+            # work_items (default '{}'). A chave "max_usd" e o teto agregado.
+            "budget": budget or {},
         }
+    finally:
+        conn.close()
+
+
+@activity.defn(name=LOCAL_ACTIVITY_RESOLVE_APPROVER)
+async def resolve_plan_approver(payload: dict[str, Any]) -> dict[str, Any]:
+    """WSB-E3-T2 — cascata de resolucao de aprovador: CODEOWNERS -> designated
+    approvers do access bundle (WS-F, `dse_access_bundle`). Retorna a PRIMEIRA
+    fonte nao-vazia. Cascata VAZIA retorna `[]` — o workflow trata isso como
+    Blocked + escalacao, JAMAIS auto-aprova por ausencia (P1/P3).
+
+    I/O aqui (DB + CODEOWNERS) e por isso ser uma Activity e nao codigo de
+    workflow. Aprovadores offboardados (dse_console_identity.active=false) sao
+    filtrados quando a tabela de identidade do console existir (WS-F)."""
+    tenant_id = payload["tenant_id"]
+    repo = payload.get("repo")
+    channel = payload.get("channel")
+
+    # --- fonte 1: CODEOWNERS (reader trocavel; producao = adapter GitHub) ---
+    codeowners: list[str] = []
+    reader = policy._codeowners_reader
+    if reader is not None:
+        try:
+            text = reader(tenant_id, repo)
+            codeowners = policy.parse_codeowners_owners(text)
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("codeowners_reader falhou (%s); seguindo p/ access bundle", exc)
+    if codeowners:
+        return {"approvers": codeowners, "source": "codeowners"}
+
+    # --- fonte 2: access bundle (WS-F) — designated_approvers ---
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover - sem Postgres
+        logger.warning("resolve_plan_approver: sem Postgres (%s)", exc)
+        return {"approvers": [], "source": "none"}
+    try:
+        approvers: list[str] = []
+        try:
+            with conn.cursor() as cur:
+                # resolucao: canal-especifico primeiro, senao default do tenant (channel NULL)
+                cur.execute(
+                    """
+                    SELECT designated_approvers
+                    FROM dse_access_bundle
+                    WHERE tenant_id = %s AND enabled = true
+                      AND (channel = %s OR channel IS NULL)
+                    ORDER BY (channel IS NOT NULL) DESC
+                    LIMIT 1
+                    """,
+                    (tenant_id, channel),
+                )
+                row = cur.fetchone()
+            if row and row[0]:
+                approvers = [str(a) for a in row[0]]
+        except Exception as exc:
+            # WS-F ainda pode nao ter criado a tabela (build paralelo) — trata
+            # como fonte vazia, nunca como erro fatal do gate.
+            conn.rollback()
+            logger.warning("dse_access_bundle indisponivel (%s); fonte tratada como vazia", exc)
+            approvers = []
+
+        # filtra offboardados via dse_console_identity.active, se a tabela existir
+        if approvers:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT principal_id FROM dse_console_identity "
+                        "WHERE principal_id = ANY(%s) AND active = false",
+                        (approvers,),
+                    )
+                    inactive = {r[0] for r in cur.fetchall()}
+                if inactive:
+                    approvers = [a for a in approvers if a not in inactive]
+            except Exception:
+                conn.rollback()  # tabela ausente -> sem filtro (nao bloqueia)
+        return {"approvers": approvers, "source": "access_bundle" if approvers else "none"}
+    finally:
+        conn.close()
+
+
+@activity.defn(name=LOCAL_ACTIVITY_RECORD_GATE)
+async def record_plan_approval(payload: dict[str, Any]) -> dict[str, Any]:
+    """WSB-E3-T2/T3 — projecao duravel do gate (migracao 0009). Upsert
+    idempotente por work_item_id. NAO substitui o audit ledger (o workflow
+    tambem chama emit_audit_event) — e a projecao mutavel consultavel pelo
+    queue board/operadores."""
+    work_item_id = payload["work_item_id"]
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("record_plan_approval: sem Postgres (%s); pulando projecao", exc)
+        return {"persisted": False}
+    try:
+        import json
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO plan_approval_gate
+                    (work_item_id, tenant_id, risk_class, status, auto_approved,
+                     resolved_approvers, decided_by, rejection_route, justification, plan_round)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
+                ON CONFLICT (work_item_id) DO UPDATE SET
+                    risk_class = EXCLUDED.risk_class,
+                    status = EXCLUDED.status,
+                    auto_approved = EXCLUDED.auto_approved,
+                    resolved_approvers = EXCLUDED.resolved_approvers,
+                    decided_by = EXCLUDED.decided_by,
+                    rejection_route = EXCLUDED.rejection_route,
+                    justification = EXCLUDED.justification,
+                    plan_round = EXCLUDED.plan_round
+                """,
+                (
+                    work_item_id,
+                    payload["tenant_id"],
+                    payload["risk_class"],
+                    payload["status"],
+                    bool(payload.get("auto_approved", False)),
+                    json.dumps(payload.get("resolved_approvers", [])),
+                    payload.get("decided_by"),
+                    payload.get("rejection_route"),
+                    payload.get("justification"),
+                    int(payload.get("plan_round", 0)),
+                ),
+            )
+        conn.commit()
+        return {"persisted": True}
     finally:
         conn.close()
 
@@ -148,4 +287,6 @@ LOCAL_ACTIVITIES = [
     check_clarification_completeness,
     emit_audit_event,
     load_work_item,
+    resolve_plan_approver,
+    record_plan_approval,
 ]

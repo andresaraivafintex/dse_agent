@@ -19,21 +19,32 @@ para cada evento:
 da exceção de duplicado) — nunca antes, para não perder eventos em caso de
 crash entre o dequeue e a confirmação Temporal.
 
-Nota (contrato provisório): `SIGNAL_NAME` não está em
-`dse_contracts.constants` ainda (só `TASK_QUEUE`/`WORKFLOW_TYPE` existem)
-— documentado no README como pedido ao arquiteto para promover a constante
-ao pacote compartilhado quando o workflow do WS-B registrar o handler real.
+Fase 2 (WSA-E6-T3): o mapa fixo `kind -> signal` da Fase 1 foi substituído por
+`_route_signal(status, kind, payload)`, que consulta `work_items.status` para
+escolher o gate certo — um `kind=approval` com status `awaiting_plan_approval`
+dispara `SIGNAL_PLAN_APPROVAL` (gate de plano, WSB-E3-T2), com status
+`pr_ready`/`review_feedback` dispara `SIGNAL_REVIEW_COMMENT`, e com qualquer
+outro status é declinado com audit row (nunca adivinha — P6). O webhook de
+merge (WSA-E4-T3) chega com o marcador `merged_by_human` no payload e dispara
+`SIGNAL_MERGED_BY_HUMAN`. `clarification_answer`/`review_comment` preservam o
+comportamento da Fase 1. Todos os nomes de signal vêm de
+`dse_contracts.constants` (fonte única).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, NamedTuple
 
 from dse_audit import emit as audit_emit
 from dse_contracts import TASK_QUEUE, WORKFLOW_TYPE
-from dse_contracts.constants import SIGNAL_CLARIFICATION_ANSWER, SIGNAL_REVIEW_COMMENT
+from dse_contracts.constants import (
+    SIGNAL_CLARIFICATION_ANSWER,
+    SIGNAL_MERGED_BY_HUMAN,
+    SIGNAL_PLAN_APPROVAL,
+    SIGNAL_REVIEW_COMMENT,
+)
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -43,17 +54,13 @@ logger = logging.getLogger("ingest_gateway.dispatcher")
 
 _TASK_REQUEST_KIND = "task_request"
 
-# Achado da integração da Fase 1: mapear por `kind` (em vez de um único
-# SIGNAL_NAME genérico) para acertar o handler real do WorkItemLifecycleWorkflow
-# — ver a nota de limitação conhecida em dse_contracts.constants (o roteamento
-# ideal depende do status do WorkItem, não só do kind; heurística aceitável
-# para a Fase 1, onde só existem os pause points de clarificação e review).
-_KIND_TO_SIGNAL = {
-    "clarification_answer": SIGNAL_CLARIFICATION_ANSWER,
-    "review_comment": SIGNAL_REVIEW_COMMENT,
-    "approval": SIGNAL_REVIEW_COMMENT,
-    "steering": SIGNAL_REVIEW_COMMENT,
-}
+# WSA-E6-T3 — status do WorkItem em que um `kind=approval` roteia para o gate
+# de aprovação de PLANO (Fase 2, WSB-E3-T2) em vez do gate de review.
+_STATUS_AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+_STATUS_PR_READY = "pr_ready"
+# Estados em que um approval sobre o PR ainda é um sinal de review legítimo
+# (o revisor pode aprovar depois de já ter pedido mudanças).
+_APPROVAL_REVIEW_STATES = {_STATUS_PR_READY, "review_feedback"}
 
 
 class DispatchOutcome:
@@ -62,61 +69,109 @@ class DispatchOutcome:
     SIGNALED = "signaled"
     SIGNAL_FAILED = "signal_failed"
     IGNORED_NOT_A_DECISION = "ignored_not_a_decision"
+    # WSA-E6-T3: kind=approval chegou com um status de WorkItem em que o
+    # dispatcher não sabe (deterministicamente) para qual gate rotear — NUNCA
+    # adivinha (P6). Consumido (processed=true) com audit row, não re-tentado.
+    DECLINED_UNEXPECTED_STATUS = "declined_unexpected_status"
 
 
 _CHANGES_REQUESTED_STATES = {"changes_requested", "request_changes", "changes-requested"}
 
 
-def _build_signal_payload(kind: str, raw_payload: dict[str, Any]) -> dict[str, Any] | None:
-    """Traduz o `ConversationEvent` serializado (formato armazenado em
-    `ingest_events.payload` — ver `gateway._payload_json`) para o formato
-    FLAT que cada `@workflow.signal` do WorkItemLifecycleWorkflow realmente
-    lê. Achado da integração da Fase 1: antes desta função o payload bruto
-    (aninhado, com chaves `content_snapshot`/`source_ref`/...) era repassado
-    verbatim ao signal — o workflow esperava `payload["text"]` (clarificação)
-    ou `payload["verdict"]`/`payload["comment"]` (review) e nunca via nenhum
-    dos dois, então toda resposta de clarificação/review vinda pelo caminho
-    automático (não por chamada manual de teste) silenciosamente não surtia
-    efeito nenhum no workflow, mesmo com o nome do signal já corrigido.
+class SignalRoute(NamedTuple):
+    signal_name: str | None  # None => não sinaliza
+    payload: dict[str, Any] | None
+    reason: str  # rótulo para audit/observabilidade
 
-    Retorna `None` quando o evento não carrega uma decisão de review válida
-    (mesma regra de `dse_validation.review_signal.interpret_review_decision`,
-    duplicada aqui de propósito para não criar uma dependência de pacote
-    WS-A -> WS-E só por isto — consolidar as duas nesta função quando o
-    arquiteto revisar; ver README)."""
-    content = raw_payload.get("sanitized_content") or raw_payload.get("content_snapshot", "")
 
-    if kind == SIGNAL_CLARIFICATION_ANSWER:
-        # Achado da integração da Fase 1: `check_clarification_completeness`
-        # (services/orchestrator/src/dse_orchestrator/local_activities.py)
-        # cheeca especificamente `payload["acceptance_criteria"]` — so enviar
-        # `text` deixava o campo eternamente vazio e o gate reciclava a
-        # mesma pergunta a cada round ate estourar o cap. Fase 1 nao tem
-        # nenhuma etapa de extracao estruturada (NLP) da resposta livre do
-        # humano — heuristica deliberada e documentada: qualquer resposta
-        # de clarificacao nao-vazia e' tratada como satisfazendo o item
-        # `acceptance_criteria` do checklist (unico item hoje fora de
-        # repo/base_branch, que normalmente ja vem preenchido do intake).
-        # Rotear por campo especifico exigiria um checklist estruturado por
-        # task-class que ainda nao existe — ver README para o que falta.
-        return {"text": content, "acceptance_criteria": content}
+def _content_of(raw_payload: dict[str, Any]) -> str:
+    return raw_payload.get("sanitized_content") or raw_payload.get("content_snapshot", "")
 
-    if kind == "approval":
+
+def _actor_principal(raw_payload: dict[str, Any]) -> str | None:
+    actor = raw_payload.get("actor") or {}
+    return actor.get("resolved_principal")
+
+
+def _review_signal_payload(raw_payload: dict[str, Any], content: str) -> dict[str, Any] | None:
+    """Formato FLAT que `WorkItemLifecycleWorkflow.review_comment` lê.
+    Retorna None quando o comentário de review não carrega veredito formal
+    (não é uma decisão) — mesma regra da Fase 1."""
+    review_state = str(raw_payload.get("source_ref", {}).get("review_state", "")).lower()
+    if review_state in _CHANGES_REQUESTED_STATES:
+        return {"verdict": "changes_requested", "comment": content}
+    if review_state == "approved":
         return {"verdict": "approved", "comment": content}
-
-    if kind == "review_comment":
-        review_state = str(raw_payload.get("source_ref", {}).get("review_state", "")).lower()
-        if review_state in _CHANGES_REQUESTED_STATES:
-            return {"verdict": "changes_requested", "comment": content}
-        if review_state == "approved":
-            return {"verdict": "approved", "comment": content}
-        return None  # comentário de review sem veredito formal — nao e' uma decisao
-
-    # "steering" e outros kinds sem payload dedicado: melhor esforco, so o texto.
-    return {"text": content, "comment": content}
+    return None
 
 
-async def _dispatch_row(client: Client, *, work_item_id: str, event_id: str, kind: str, payload: dict[str, Any]) -> str:
+def _plan_approval_payload(raw_payload: dict[str, Any], content: str) -> dict[str, Any]:
+    """Payload do gate de aprovação de plano (SIGNAL_PLAN_APPROVAL), formato
+    documentado em `dse_contracts.constants`: {verdict, route (obrigatório
+    quando rejected), comment, actor}. `verdict`/`route` vêm de marcadores
+    DETERMINÍSTICOS postos pelo adapter (`extra_payload` — ex.: valor do botão
+    Slack "approve"/"reject" ou a coluna Jira de destino), default `approved`
+    quando o adapter não os informou (WSA-E6-T3)."""
+    verdict = str(raw_payload.get("approval_verdict", "approved")).lower()
+    if verdict not in ("approved", "rejected"):
+        verdict = "approved"
+    p: dict[str, Any] = {"verdict": verdict, "comment": content, "actor": _actor_principal(raw_payload)}
+    if verdict == "rejected":
+        # WSB-E3-T3: route é obrigatório quando rejected.
+        p["route"] = raw_payload.get("approval_route") or "re_plan"
+    return p
+
+
+def _route_signal(status: str | None, kind: str, raw_payload: dict[str, Any]) -> SignalRoute:
+    """WSA-E6-T3 — roteamento de signal por STATUS do WorkItem (não mais só
+    pelo `kind`, como na heurística da Fase 1). Determinístico (P1): nenhuma
+    decisão de fluxo por LLM — só consulta `work_items.status` + marcadores
+    postos pelo adapter.
+
+    Preserva o comportamento da Fase 1 para `clarification_answer` e
+    `review_comment`. O que muda é o `kind=approval`: passa a depender do
+    status (gate de plano vs. review), e um webhook de merge (marcador
+    `merged_by_human`) dispara `SIGNAL_MERGED_BY_HUMAN` (WSA-E4-T3)."""
+    content = _content_of(raw_payload)
+
+    # WSA-E4-T3: webhook pull_request merged -> merged_by_human. Marcador
+    # determinístico posto pelo adapter-github; independe do status (o merge é
+    # o terceiro pause point, o workflow só o consome quando está esperando).
+    if raw_payload.get("merged_by_human"):
+        return SignalRoute(
+            SIGNAL_MERGED_BY_HUMAN,
+            {"merged_by": raw_payload.get("merged_by"), "pr_number": raw_payload.get("pr_number")},
+            "merged_by_human",
+        )
+
+    if kind == "clarification_answer":  # PRESERVA Fase 1
+        return SignalRoute(SIGNAL_CLARIFICATION_ANSWER, {"text": content, "acceptance_criteria": content}, "clarification")
+
+    if kind == "review_comment":  # PRESERVA Fase 1
+        payload = _review_signal_payload(raw_payload, content)
+        if payload is None:
+            return SignalRoute(None, None, "review_comment_no_verdict")
+        return SignalRoute(SIGNAL_REVIEW_COMMENT, payload, "review_comment")
+
+    if kind == "steering":  # PRESERVA Fase 1 (best-effort, tratado como review)
+        return SignalRoute(SIGNAL_REVIEW_COMMENT, {"text": content, "comment": content}, "steering")
+
+    if kind == "approval":  # WSA-E6-T3: roteia por status
+        if status == _STATUS_AWAITING_PLAN_APPROVAL:
+            return SignalRoute(SIGNAL_PLAN_APPROVAL, _plan_approval_payload(raw_payload, content), "plan_approval")
+        if status in _APPROVAL_REVIEW_STATES:
+            return SignalRoute(SIGNAL_REVIEW_COMMENT, {"verdict": "approved", "comment": content}, "approval_as_review")
+        # status inesperado -> NÃO adivinha (P6). Consumido com audit row.
+        return SignalRoute(None, None, "unexpected_status")
+
+    return SignalRoute(None, None, "unhandled_kind")
+
+
+async def _dispatch_row(
+    client: Client, *, work_item_id: str, event_id: str, kind: str, status: str | None, payload: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Retorna `(outcome, extra_details)`. `extra_details` alimenta a audit
+    row emitida por `drain_once` (inclui o signal roteado e o motivo)."""
     if kind == _TASK_REQUEST_KIND:
         try:
             await client.start_workflow(
@@ -125,28 +180,31 @@ async def _dispatch_row(client: Client, *, work_item_id: str, event_id: str, kin
                 id=work_item_id,
                 task_queue=TASK_QUEUE,
             )
-            return DispatchOutcome.STARTED
+            return DispatchOutcome.STARTED, {}
         except WorkflowAlreadyStartedError:
             # Idempotente por design (WSA-E1-T3): reentrega do mesmo
             # ingest_event (ou corrida entre 2 dispatchers) nunca e'
             # re-lancada como erro.
-            return DispatchOutcome.DEDUPED_ALREADY_STARTED
+            return DispatchOutcome.DEDUPED_ALREADY_STARTED, {}
 
-    signal_payload = _build_signal_payload(kind, payload)
-    if signal_payload is None:
-        return DispatchOutcome.IGNORED_NOT_A_DECISION
+    route = _route_signal(status, kind, payload)
+
+    if route.signal_name is None:
+        if route.reason == "unexpected_status":
+            # P6 decline-never-truncate: fronteira limpa, deixa evidência.
+            return DispatchOutcome.DECLINED_UNEXPECTED_STATUS, {"status": status, "reason": route.reason}
+        return DispatchOutcome.IGNORED_NOT_A_DECISION, {"reason": route.reason}
 
     handle = client.get_workflow_handle(work_item_id)
-    signal_name = _KIND_TO_SIGNAL.get(kind, SIGNAL_REVIEW_COMMENT)
     try:
-        await handle.signal(signal_name, signal_payload)
-        return DispatchOutcome.SIGNALED
+        await handle.signal(route.signal_name, route.payload)
+        return DispatchOutcome.SIGNALED, {"signal": route.signal_name, "reason": route.reason, "status": status}
     except Exception:
         logger.exception(
             "signal_workflow falhou para work_item_id=%s event_id=%s (será retentado)",
             work_item_id, event_id,
         )
-        return DispatchOutcome.SIGNAL_FAILED
+        return DispatchOutcome.SIGNAL_FAILED, {"signal": route.signal_name}
 
 
 class Dispatcher:
@@ -166,7 +224,7 @@ class Dispatcher:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT ie.id, ie.work_item_id, ie.event_id, ie.kind, ie.payload, wi.tenant_id
+                    SELECT ie.id, ie.work_item_id, ie.event_id, ie.kind, ie.payload, wi.tenant_id, wi.status
                     FROM ingest_events ie
                     JOIN work_items wi ON wi.id = ie.work_item_id
                     WHERE NOT ie.processed
@@ -183,12 +241,13 @@ class Dispatcher:
                 return 0
 
             processed = 0
-            for ingest_event_id, work_item_id, event_id, kind, payload, tenant_id in rows:
-                outcome = await _dispatch_row(
+            for ingest_event_id, work_item_id, event_id, kind, payload, tenant_id, status in rows:
+                outcome, extra_details = await _dispatch_row(
                     self._client,
                     work_item_id=work_item_id,
                     event_id=event_id,
                     kind=kind,
+                    status=status,
                     payload=payload,
                 )
 
@@ -208,7 +267,7 @@ class Dispatcher:
                     action=f"dispatch_{outcome}",
                     tenant_id=tenant_id,
                     work_item_id=work_item_id,
-                    details={"event_id": event_id, "kind": kind, "ingest_event_id": ingest_event_id},
+                    details={"event_id": event_id, "kind": kind, "ingest_event_id": ingest_event_id, **extra_details},
                     conn=conn,
                 )
                 processed += 1

@@ -54,6 +54,37 @@ class WorkItemLifecycleInput:
     terminal_detail: str | None = None
 
     # ------------------------------------------------------------------
+    # Fase 2 — split de sessoes + gate de aprovacao de plano (WSB-E2-T3
+    # estendida / WSB-E3-T2/T3). Sobrevivem a `continue_as_new` como o resto
+    # do estado deterministico do workflow.
+    # ------------------------------------------------------------------
+    # PlanArtifact serializado (produzido pelo Planner read-only ANTES do
+    # gate). Passado para o Reviewer L2 junto do diff final — e SO isto +
+    # diff, nunca o historico do Coder (P3).
+    plan_json: dict = field(default_factory=dict)
+    # classe de risco EFETIVA (planner + classificacao deterministica de
+    # defesa-em-profundidade — ver policy.classify_risk). Dirige o gate.
+    risk_class: str = "low"
+    # aprovadores resolvidos pela cascata CODEOWNERS -> access bundle (WS-F),
+    # preenchido quando o gate estaciona em awaiting_plan_approval.
+    approvers: list[str] = field(default_factory=list)
+    plan_rounds: int = 0  # quantas vezes o Planner rodou (re_plan incrementa)
+
+    # Reviewer L2 (contexto fresco) — objecoes voltam ao Coder, capadas.
+    l2_objections: list[str] = field(default_factory=list)
+    l2_retry_count: int = 0
+
+    # ------------------------------------------------------------------
+    # Fase 2 — budgets (WSB-E4-T1). `budget_max_usd` vem do JSONB
+    # `work_items.budget` (chave "max_usd") lido na admissao; `spent_usd`
+    # acumula o custo reportado pelo gateway (WS-D) em cada Activity de
+    # modelo. Checado na admissao e em CADA fronteira de fase — nunca corta
+    # no meio de uma Activity (P6).
+    # ------------------------------------------------------------------
+    budget_max_usd: float | None = None
+    spent_usd: float = 0.0
+
+    # ------------------------------------------------------------------
     # Caps/timers configuraveis (WSB-E3-T1 / E2-T3 / E5-T1). Fazem parte do
     # INPUT do workflow (nao de env-var lida dentro do sandbox) para que:
     #  (a) sejam deterministicas e sobrevivam a `continue_as_new`/replay;
@@ -72,6 +103,13 @@ class WorkItemLifecycleInput:
     activity_start_to_close_seconds: float = 3600.0
     activity_heartbeat_seconds: float = 30.0
     activity_schedule_to_close_seconds: float = 7200.0
+
+    # Fase 2 (WSB-E3-T2/E3-T3/E4) — caps/politica novos. `require_approval_risk_classes`
+    # e a POLITICA de quais classes de risco exigem aprovacao humana; vive no
+    # INPUT (fora do modelo — P1), preenchida por config.from_env pelo caller.
+    require_approval_risk_classes: tuple[str, ...] = ("high",)
+    plan_round_cap: int = 3  # re_plan capado (rejection path — WSB-E3-T3)
+    l2_retry_cap: int = 2  # objecoes do L2 -> Coder, capadas
 
 
 @dataclass

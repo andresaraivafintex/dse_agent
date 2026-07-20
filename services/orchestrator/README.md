@@ -8,6 +8,127 @@ blocked/failed/escalated como estados terminais e nenhuma decisão de fluxo
 tomada por LLM (P1) ou por uma sessão de agente sobre o próprio trabalho
 (P3).
 
+## Fase 2 ("Judgment & queue") — o que foi adicionado
+
+A Fase 2 estende (não reescreve) a máquina de estados da Fase 1. Tudo abaixo é
+coberto por teste automatizado real contra o Postgres/Temporal da fundação
+(20 testes novos; suíte total **37 passed**). Migração nova:
+`migrations/0009_wsb2.sql` (tabela `plan_approval_gate`).
+
+### Nova sequência de sessões (WSB-E2-T3 estendida)
+
+O workflow agora orquestra, dentro da fase de implementação:
+
+```
+[budget na admissão] -> Planner (read-only) -> [GATE de aprovação de plano]
+  -> provision -> ( Coder -> Tester -> L1 )*  -> L2 (contexto fresco) -> PR
+```
+
+- Nomes de Activity por `dse_contracts`: `ACTIVITY_RUN_PLANNER_TURN`,
+  `ACTIVITY_RUN_TESTER_TURN`, `ACTIVITY_RUN_L2_REVIEW` (import defensivo — as
+  reais vêm de WS-C/WS-E; testes usam fakes com a mesma assinatura em
+  `tests/fakes.py`).
+- **P3 (não-negociável) no L2**: `_run_l2_review` monta o payload com
+  **exatamente** `plan` + `diff_summary` + `files_changed` — nunca
+  `instructions`/`clarification_notes`/`objections`/histórico do Coder.
+  Provado em `test_phase2_sequence.py::test_l2_review_receives_only_plan_and_diff_not_coder_history`.
+- Objeções do L2 voltam ao Coder (capadas por `l2_retry_cap`); esgotado ->
+  escala. PR nunca é finalizado com objeção aberta (P6).
+
+### Gate de aprovação de plano por risk class (WSB-E3-T2)
+
+- Novo `@workflow.signal` **`plan_approval`** (nome = `SIGNAL_PLAN_APPROVAL`).
+  Payload: `{verdict: approved|rejected, route: re_plan|re_clarify|cancel,
+  comment/justification, actor}`.
+- **Política vive fora do modelo (P1)**: `dse_orchestrator/policy.py`.
+  `classify_risk()` faz classificação **determinística de defesa em
+  profundidade** — um plano que toca `migrations/`, `.github/workflows/`,
+  `auth/`, `billing/`… é `high` **mesmo que o Planner declare `low`** (um
+  modelo sub-classificando não rebaixa o gate). `requires_plan_approval()`
+  consulta o conjunto `require_approval_risk_classes` (config do operador,
+  default `{high}`), nunca o modelo.
+- `low` -> **auto-aprova por política** (nunca por ausência de aprovador).
+  `high` -> estaciona no estado durável **`awaiting_plan_approval`**, resolve o
+  aprovador pela **cascata CODEOWNERS -> designated approvers do access bundle
+  (WS-F `dse_access_bundle`)**, renderiza o pedido via adapters
+  (`post_tracking_comment`), e espera durável o `plan_approval`.
+- **Cascata VAZIA = Blocked + escalação, JAMAIS auto-aprova por ausência**
+  (`_finish_blocked` + audit `plan_gate_no_approver_blocked`). Aprovadores
+  offboardados (`dse_console_identity.active=false`) são filtrados.
+- Projeção durável consultável pelo queue board (WS-F): tabela
+  `plan_approval_gate` (upsert idempotente por work_item; **não** substitui o
+  audit ledger — P8: o `audit_log` continua a fonte imutável).
+
+### Rejection path (WSB-E3-T3)
+
+3 rotas determinísticas, sempre auditadas com **identidade + justificativa**,
+e nenhuma dispara implementação sem passar de novo pelo gate correspondente:
+- `re_plan` -> re-roda o Planner + gate (capado por `plan_round_cap`);
+- `re_clarify` -> `continue_as_new` ao **gate de clarificação** (reabre a
+  rodada limpando `acceptance_criteria`);
+- `cancel` -> terminal Failed.
+
+### Budgets na admissão e em fronteiras (WSB-E4-T1)
+
+- `budget_max_usd` lido do JSONB `work_items.budget` (chave `max_usd`) na
+  admissão; `spent_usd` **agrega o `cost_usd` reportado pelo gateway (WS-D)**
+  em cada resultado de Activity de modelo (coder/tester/l2).
+- Checado na admissão e em **cada fronteira de fase** (`_budget_boundary`) —
+  **nunca corta no meio de uma Activity (P6)**. Exaurido -> Failed com mensagem
+  clara. Operador pode elevar via `@workflow.signal raise_budget` (aplicado na
+  próxima fronteira, retoma sem recomeçar). Todo evento de budget -> audit.
+
+### Fairness por tenant, worker-side (WSB-E1-T3)
+
+- `dse_orchestrator/fairness.py`: **interface trocável** `FairnessController`.
+  `WorkerSideFairnessController` impõe um **cap de concorrência de Activity por
+  tenant** (semáforo por tenant) lido de `tenant_config`
+  (`fairness->>'max_concurrent_activities'` > `max_concurrent_work_items`), via
+  um `FairnessInterceptor` de Activity inbound. Quando o server suportar P&F
+  nativo (1.31+, indisponível — estamos em 1.29), troca-se por
+  `NativeFairnessController` (no-op no worker; delega ao server via
+  `fairness_key`) **sem tocar no workflow** — só na montagem do Worker
+  (`--fairness-mode`).
+- Teste de **burst** (`test_fairness.py`): um tenant saturando seu cap não
+  empurra o dispatch do outro além do SLO (concorrência real, relógio de
+  parede). Interceptor validado num Worker Temporal real (pico ≤ cap).
+
+### Chaos do caminho de modelo + proxy fail-closed (WSB-E5-T3b)
+
+`tests/test_chaos.py` estendido (além da queda de worker da Fase 1):
+- egress-proxy indisponível / virtual key expirada / kill switch -> a Activity
+  de modelo recusa **non-retryable**; o orquestrador **falha limpo na
+  fronteira, sem output truncado (P6)**, auditado — via `_run_model_activity`,
+  que converte a recusa de política fail-closed em `_FailClosed`;
+- LiteLLM **oscilando** (transiente/retryable) -> a durabilidade do Temporal
+  reexecuta a Activity e a tarefa **completa sem perder progresso** (1 PR).
+
+### Estado `awaiting_plan_approval` — gap de enum documentado
+
+O valor de status `awaiting_plan_approval` é gravado na coluna TEXT
+`work_items.status` (sem CHECK; a própria `dse_contracts.constants` já referencia
+essa string como o gatilho de roteamento do `SIGNAL_PLAN_APPROVAL` no WS-A).
+Porém o **enum `dse_contracts.work_item.WorkItemStatus` (fundação, não editável
+por este workstream) ainda não tem esse membro** nem o mapa público
+`to_public_status` o projeta (deveria -> `"blocked"`). O orquestrador contorna
+com `STATUS_AWAITING_PLAN_APPROVAL` + `_set_raw_status` (ver `workflows.py`).
+**Ação de fundação recomendada**: adicionar `awaiting_plan_approval` ao enum e
+ao `_PUBLIC_STATUS_MAP`.
+
+### Gaps de fronteira honestos (a reconciliar na integração)
+
+- **CODEOWNERS reader** (`policy.set_codeowners_reader`) é um ponto de injeção:
+  produção = adapter GitHub (WS-A) lendo o arquivo via GitHub App; default local
+  retorna `None` (sem GitHub). Testes injetam um fake. A cascata cai para o
+  access bundle (WS-F) quando CODEOWNERS está vazio.
+- **Custo do Planner** não entra no `spent_usd` (o `PlanArtifact` não carrega
+  `cost_usd`); coder/tester/l2 entram. Reconciliar se WS-C passar a reportar
+  custo do planner.
+- **Chaos de modelo real** (LiteLLM/virtual key/egress-proxy de verdade) é
+  simulado na fronteira de Activity com o **mesmo tipo de erro**
+  (`ApplicationError non_retryable` vs retryable) que WS-D marca — a integração
+  ponta-a-ponta real é da suíte de WS-D/WS-C.
+
 ## Status — o que está implementado e funcionando
 
 Todas as tarefas P0 do enunciado (WSB-E1, E2, E3-T1/T4, E5) estão
@@ -310,10 +431,11 @@ escalate), 1 chaos test crítico + 1 sanity check do script auxiliar.
    o operador pode reenviar o sinal (idempotente do ponto de vista de
    negócio); todas as OUTRAS fronteiras (dentro de implementação e review,
    que agora é a maior parte da vida útil do workflow) não têm esse risco.
-4. **Sem fairness/budget enforcement** (WSB-E1-T3 e WSB-E4) — Fase 2, fora
-   de escopo conforme o enunciado.
-5. **Sem split Planner/Tester/Reviewer nem gate de aprovação de plano por
-   risk class** — Fase 2, fora de escopo conforme o enunciado.
+4. ~~Sem fairness/budget enforcement~~ — **implementado na Fase 2** (WSB-E1-T3
+   fairness worker-side + WSB-E4 budgets). Ver a seção "Fase 2" no topo.
+5. ~~Sem split Planner/Tester/Reviewer nem gate de aprovação de plano~~ —
+   **implementado na Fase 2** (WSB-E2-T3 estendida + WSB-E3-T2/T3). Ver a
+   seção "Fase 2" no topo.
 6. **`worker.py` roda sem TLS/mTLS para o Temporal** (`Client.connect`
    simples) — adequado para o Temporal dev local; produção precisaria de
    `tls=...`/namespace real, fora do escopo desta sessão local.

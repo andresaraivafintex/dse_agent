@@ -27,6 +27,7 @@ from ingest_gateway import (
     correlate,
     get_connection,
     record_signal_event,
+    resolve_tenant,
     sanitize_content,
     verify_slack_signature,
 )
@@ -61,13 +62,26 @@ def _reject(reason: str, *, surface: str) -> None:
     raise HTTPException(status_code=401, detail=f"signature_verification_failed:{reason}")
 
 
-def _handle_conversation_event(conv_event, *, principal: str) -> dict:
+def _resolve_tenant_for(team_id: str | None) -> str:
+    """WSA-E1-T5 — resolve o tenant a partir do workspace Slack (`team_id`)
+    via `tenant_platform_bindings`. Binding ausente cai para `DSE_TENANT_ID`
+    com audit row de aviso (fallback single-tenant documentado)."""
+    conn = get_connection()
+    try:
+        rt = resolve_tenant(conn, platform="slack", binding_key=team_id)
+        conn.commit()
+        return rt.tenant_id
+    finally:
+        conn.close()
+
+
+def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str) -> dict:
     channel = conv_event.source_ref["channel"]
     sanitized = sanitize_content(conv_event.content_snapshot)
 
     conn = get_connection()
     try:
-        result = correlate(conn, tenant_id=get_tenant_id(), event=conv_event, requester_principal=principal)
+        result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
 
         if result.kind == "unauthorized":
             conn.commit()
@@ -76,7 +90,7 @@ def _handle_conversation_event(conv_event, *, principal: str) -> dict:
         if result.kind == "signal":
             record_signal_event(
                 conv_event,
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 channel=channel,
                 work_item_id=result.work_item_id,
                 sanitized_content=sanitized,
@@ -88,7 +102,7 @@ def _handle_conversation_event(conv_event, *, principal: str) -> dict:
         try:
             work_item_id = admit_work_item(
                 conv_event,
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 source="slack",
                 channel=channel,
                 requester_principal=principal,
@@ -102,7 +116,7 @@ def _handle_conversation_event(conv_event, *, principal: str) -> dict:
             audit_emit(
                 actor=principal,
                 action="work_item_provenance_link",
-                tenant_id=get_tenant_id(),
+                tenant_id=tenant_id,
                 work_item_id=work_item_id,
                 details={"previous_work_item_id": result.provenance_work_item_id},
             )
@@ -142,6 +156,7 @@ async def slack_events(request: Request) -> dict:
         return {"ok": True}  # eventos sem user (ex.: bot_message) ignorados na Fase 1
 
     principal = resolve_principal("slack", user_id)
+    tenant_id = _resolve_tenant_for(payload.get("team_id"))
 
     if event_type == "app_mention":
         conv_event = build_event_from_app_mention(event, resolved_principal=principal)
@@ -150,7 +165,7 @@ async def slack_events(request: Request) -> dict:
     else:
         return {"ok": True}  # tipo de evento não coberto na Fase 1
 
-    return _handle_conversation_event(conv_event, principal=principal)
+    return _handle_conversation_event(conv_event, principal=principal, tenant_id=tenant_id)
 
 
 @app.post("/slack/interactions")
@@ -176,9 +191,11 @@ async def slack_interactions(request: Request) -> dict:
 
     user_id = payload["user"]["id"]
     principal = resolve_principal("slack", user_id)
+    team_id = (payload.get("team") or {}).get("id") or payload.get("user", {}).get("team_id")
+    tenant_id = _resolve_tenant_for(team_id)
     conv_event = build_event_from_block_action(payload, resolved_principal=principal)
 
-    return _handle_conversation_event(conv_event, principal=principal)
+    return _handle_conversation_event(conv_event, principal=principal, tenant_id=tenant_id)
 
 
 class StatusCommentRequest(BaseModel):

@@ -49,33 +49,65 @@ def get_tracked_pr(work_item_id: str) -> dict[str, Any] | None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT work_item_id, tenant_id, repo, branch, pr_number, pr_url "
+                "SELECT work_item_id, tenant_id, repo, branch, pr_number, pr_url, compare_url "
                 "FROM wse_pr_tracking WHERE work_item_id = %s",
                 (work_item_id,),
             )
             row = cur.fetchone()
         if row is None:
             return None
-        keys = ["work_item_id", "tenant_id", "repo", "branch", "pr_number", "pr_url"]
+        keys = ["work_item_id", "tenant_id", "repo", "branch", "pr_number", "pr_url", "compare_url"]
         return dict(zip(keys, row))
     finally:
         conn.close()
 
 
 def save_tracked_pr(
-    work_item_id: str, tenant_id: str, repo: str, branch: str, pr_number: int, pr_url: str
+    work_item_id: str,
+    tenant_id: str,
+    repo: str,
+    branch: str,
+    pr_number: int | None,
+    pr_url: str,
+    compare_url: str | None = None,
 ) -> None:
+    # Fase 2 (WSE-E3-T8): pr_number pode ser NULL no modo estrito (só compare
+    # link postado, PR ainda não aberto por humano). `pr_url` guarda a melhor
+    # URL conhecida (compare link enquanto pr_number IS NULL, depois a do PR).
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO wse_pr_tracking (work_item_id, tenant_id, repo, branch, pr_number, pr_url)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO wse_pr_tracking
+                    (work_item_id, tenant_id, repo, branch, pr_number, pr_url, compare_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (work_item_id) DO UPDATE SET
-                    pr_number = EXCLUDED.pr_number, pr_url = EXCLUDED.pr_url
+                    pr_number = EXCLUDED.pr_number, pr_url = EXCLUDED.pr_url,
+                    compare_url = EXCLUDED.compare_url
                 """,
-                (work_item_id, tenant_id, repo, branch, pr_number, pr_url),
+                (work_item_id, tenant_id, repo, branch, pr_number, pr_url, compare_url),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def adopt_tracked_pr(work_item_id: str, pr_number: int, pr_url: str) -> None:
+    """WSE-E3-T8 — modo estrito: um humano abriu o PR a partir do compare link;
+    preenche pr_number/pr_url na linha existente SEM criar outra. Idempotente:
+    só grava se ainda não havia um pr_number (o primeiro humano que abre vence;
+    reexecuções não sobrescrevem)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE wse_pr_tracking
+                   SET pr_number = %s, pr_url = %s
+                 WHERE work_item_id = %s AND pr_number IS NULL
+                """,
+                (pr_number, pr_url, work_item_id),
             )
         conn.commit()
     finally:
@@ -163,5 +195,104 @@ def get_ci_status(work_item_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         return {"work_item_id": row[0], "pr_number": row[1], "status": row[2], "detail": row[3]}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# wse_l2_reviews (WSE-E2-T4) — evidência de cada execução da sessão Reviewer L2.
+# ---------------------------------------------------------------------------
+def record_l2_review(
+    work_item_id: str,
+    tenant_id: str,
+    iteration: int,
+    passed: bool,
+    objections: list[str],
+    cost_usd: float,
+) -> int:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wse_l2_reviews
+                    (work_item_id, tenant_id, iteration, passed, objections, cost_usd)
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s)
+                RETURNING id
+                """,
+                (work_item_id, tenant_id, iteration, passed, json.dumps(objections), cost_usd),
+            )
+            review_id = cur.fetchone()[0]
+        conn.commit()
+        return review_id
+    finally:
+        conn.close()
+
+
+def get_l2_reviews(work_item_id: str) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT iteration, passed, objections, cost_usd, run_at "
+                "FROM wse_l2_reviews WHERE work_item_id = %s ORDER BY run_at ASC, id ASC",
+                (work_item_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {"iteration": r[0], "passed": r[1], "objections": r[2], "cost_usd": float(r[3]), "run_at": r[4]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# wse_fix_loops (WSE-E2-T5) — contador durável do loop bounded L2->Coder.
+# ---------------------------------------------------------------------------
+def get_fix_loop(work_item_id: str) -> dict[str, Any] | None:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT work_item_id, tenant_id, iterations, spent_usd, exhausted "
+                "FROM wse_fix_loops WHERE work_item_id = %s",
+                (work_item_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "work_item_id": row[0],
+            "tenant_id": row[1],
+            "iterations": row[2],
+            "spent_usd": float(row[3]),
+            "exhausted": row[4],
+        }
+    finally:
+        conn.close()
+
+
+def upsert_fix_loop(
+    work_item_id: str,
+    tenant_id: str,
+    iterations: int,
+    spent_usd: float,
+    exhausted: bool,
+) -> None:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wse_fix_loops (work_item_id, tenant_id, iterations, spent_usd, exhausted)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (work_item_id) DO UPDATE SET
+                    iterations = EXCLUDED.iterations, spent_usd = EXCLUDED.spent_usd,
+                    exhausted = EXCLUDED.exhausted, updated_at = now()
+                """,
+                (work_item_id, tenant_id, iterations, spent_usd, exhausted),
+            )
+        conn.commit()
     finally:
         conn.close()

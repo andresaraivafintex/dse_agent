@@ -28,6 +28,12 @@ from temporalio.worker import Worker
 
 from dse_contracts.constants import TASK_QUEUE
 
+from dse_orchestrator.fairness import (
+    FairnessInterceptor,
+    NativeFairnessController,
+    WorkerSideFairnessController,
+    postgres_cap_provider,
+)
 from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.otel_interceptor import setup_tracing
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
@@ -126,7 +132,27 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("DSE_WORKER_USE_VERSIONING", "false").lower() == "true",
         help="Ativa Worker Versioning classico (build_id compat set). Ver RUNBOOK.md.",
     )
+    parser.add_argument(
+        "--fairness-mode",
+        default=os.environ.get("DSE_FAIRNESS_MODE", "worker-side"),
+        choices=["worker-side", "native", "off"],
+        help="WSB-E1-T3: 'worker-side' (caps de concorrencia por tenant lidos de "
+             "tenant_config, default nesta versao do Temporal), 'native' (delega ao "
+             "server P&F — so 1.31+), 'off' (sem gating).",
+    )
     return parser.parse_args(argv)
+
+
+def _build_fairness_interceptor(mode: str):
+    """WSB-E1-T3 — monta o interceptor de fairness conforme o modo. Interface
+    trocavel: quando o server suportar P&F nativo (1.31+), use `native` (no-op
+    no worker) e adicione `fairness_key=tenant_id` nas ActivityOptions."""
+    if mode == "off":
+        return None
+    if mode == "native":
+        return FairnessInterceptor(NativeFairnessController())
+    controller = WorkerSideFairnessController(postgres_cap_provider())
+    return FairnessInterceptor(controller)
 
 
 async def run_worker(argv: list[str] | None = None) -> None:
@@ -143,12 +169,18 @@ async def run_worker(argv: list[str] | None = None) -> None:
 
     activities = list(LOCAL_ACTIVITIES) + _load_cross_workstream_activities()
 
+    interceptors: list[Any] = [tracing_interceptor]
+    fairness_interceptor = _build_fairness_interceptor(args.fairness_mode)
+    if fairness_interceptor is not None:
+        interceptors.append(fairness_interceptor)
+        logger.info("Fairness worker-side ativa (modo=%s)", args.fairness_mode)
+
     worker_kwargs: dict[str, Any] = dict(
         client=client,
         task_queue=TASK_QUEUE,
         workflows=[WorkItemLifecycleWorkflow],
         activities=activities,
-        interceptors=[tracing_interceptor],
+        interceptors=interceptors,
         build_id=args.build_id,
     )
     if args.use_worker_versioning:

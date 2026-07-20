@@ -3,6 +3,12 @@
 Implementação Fase 1 dos P0 do WS-F. Lê `../../CONVENTIONS.md` primeiro se
 ainda não leu — este README assume o vocabulário/contratos de lá.
 
+> **A Fase 2 ("Judgment & queue") está na seção no final deste README**
+> ("## Fase 2 — o que foi adicionado"). A Fase 1 abaixo permanece válida e
+> intacta. Resultado atual da suíte completa do WS-F (Fase 1 + Fase 2):
+> `90 passed, 2 skipped` (os 2 skips são testes adversariais do egress-proxy
+> que exigem sandbox real do WS-C — herança da Fase 1).
+
 ## O que está implementado e funcionando (contra infra real)
 
 | Item | Onde | Prova |
@@ -250,4 +256,157 @@ docker-compose.wsf.yml   (otel-collector)
 
 .github/workflows/ci.yml
 CONTRACTS-CHANGELOG.md
+```
+
+---
+
+## Fase 2 — o que foi adicionado
+
+A Fase 2 do WS-F ("access bundles, ADR-22/SSO, isolamento multi-tenant, queue
+board") é **aditiva** sobre a Fase 1. Nada da Fase 1 foi removido/renomeado.
+Migração reservada: `migrations/0013_wsf2.sql`. Porta nova: **8890** (queue board).
+
+### Mapa de entrega (Fase 2)
+
+| Tarefa | Onde | Prova |
+|---|---|---|
+| **WSF-E3-T2 — Access bundles por tenant/canal** | `dse_platform/access_bundles.py` + `migrations/0013_wsf2.sql` (`dse_access_bundle`) | `tests/test_access_bundles.py` — CRUD, resolução canal-sobre-default, deny-by-default (sem bundle nega repo/mode), `blocked_actions` (ex. `direct_merge_to_protected_branch`), **cascata de approvers vazia BLOQUEIA** (`NoApproverError`, P3), offboardado removido da cascata |
+| **WSF-E3-T3 — ADR-22 + SSO/OIDC do console** | `infra/ADR-22-identity.md` (design), `dse_platform/sso.py` (`OIDCVerifier`/`login`/`offboard`/`provision_console_user`), `dse_platform/dev_idp.py` (IdP OIDC de dev), `dse_platform/steering_resolution.py`, login em `queue_board/app.py` | `tests/test_sso.py` — verificação RSA real (assinatura/iss/aud/exp), account matching por `sub` estável, login JIT, **offboarding nega login E remove de approver/steering**, contractor expira |
+| **WSF-E4-T3 — Suíte de isolamento multi-tenant (NFR-03)** | `dse_platform/tenant_isolation.py` | `tests/test_tenant_isolation.py` — camada a camada (filas/fairness keys, artifacts/prefixos, skills, retrieval, audit, tokens) com **tentativas ATIVAS cross-tenant** que falham (`CrossTenantViolation`) e são auditadas (`cross_tenant_access_denied`) |
+| **WSF-E6-T1 — API do queue board** | `dse_platform/queue_board/api.py` | `tests/test_queue_board.py` — projeção §9.3 (todos os estados), `to_public_status` reusado, budgets + custo agregado, `active_work_items`, quarentena, trilha de audit |
+| **WSF-E6-T2 — Controles de operador → signals Temporal** | `dse_platform/queue_board/operator.py` + `signals.py` + `dse_platform/kill_switches.py` | `tests/test_queue_board.py` + `tests/test_kill_switches.py` — pause/resume/cancel/retry/reassign model+runtime/force_clarification/escalate/quarantine + **kill switches nos 4 escopos** (global/tenant/canal/task); cada ação auditada com identidade do operador; intenção auditada mesmo se o signal falhar |
+| **WSF-E6-T3 — UI mínima (server-rendered, 8890)** | `dse_platform/queue_board/app.py` + `asgi.py` + `services/platform/Dockerfile` + fragment `docker-compose.wsf.yml` | `tests/test_queue_board_app.py` — SSO gate (401 sem sessão), página por tenant com todos os estados §9.3, controle end-to-end (form POST → OperatorConsole → signal + audit), offboarding derruba a sessão no próximo request (403) |
+| **Popula `tenant_config` p/ fairness (WS-B)** | `dse_platform/tenant_isolation.fairness_key` + `tenant_config` (Fase 1) | fairness key namespaced por tenant (`tenant::<id>`), lida pelo WS-B; a suíte prova que não colide entre tenants |
+
+### Princípios não-negociáveis nesta fase
+
+- **P1 (deterministic-or-human):** toda decisão de enforcement (repo/mode/ação/
+  admissão/cross-tenant) é comparação de conjuntos/strings em código — nenhum
+  LLM. O gate de plano **nunca auto-aprova**: cascata de approver vazia levanta
+  `NoApproverError` (`require_plan_approver`).
+- **P3 (no producer approves own work):** a cascata de approvers do WS-B tem
+  fallback nos `designated_approvers` do bundle; vazia = bloqueia.
+- **P6 (decline-never-truncate):** enforcement falha limpo em fronteira
+  (`AccessDenied`/`CrossTenantViolation`/`LoginDenied`), nunca meio-caminho.
+- **P8 (evidence over assertion):** toda decisão consequente (upsert de bundle,
+  negação de acesso, mudança de kill switch, offboarding, ação de operador,
+  violação cross-tenant) grava audit via `dse_audit.emit`.
+
+### Contratos de consumo (cross-workstream) da Fase 2
+
+```python
+# WS-A (ingest-gateway) e WS-D (model-gateway): checar admissão nos 4 escopos
+from dse_platform import is_admission_blocked
+block = is_admission_blocked(tenant_id, channel)      # None = admissível
+if block: refuse(block.scope, block.reason)            # 'global'|'tenant'|'channel'
+
+# WS-A/WS-C: repos permitidos; WS-B: modes e ações bloqueadas
+from dse_platform import require_repo_allowed, check_mode_allowed, require_action_allowed
+require_repo_allowed(tenant_id, "org/repo", channel=ch, work_item_id=wid)
+require_action_allowed(tenant_id, "direct_merge_to_protected_branch", channel=ch)
+
+# WS-B (gate de plano, WSB-E3-T2): cascata CODEOWNERS -> designated approvers
+from dse_platform import require_plan_approver          # levanta NoApproverError se vazia
+approvers = require_plan_approver(tenant_id, channel=ch, codeowners=owners, work_item_id=wid)
+
+# WS-B (fairness worker-side): chave de namespacing por tenant
+from dse_platform import fairness_key                   # "tenant::<id>", nunca colide
+
+# WS-C: enforcement tenant-scoped de skills/retrieval (nega + audita cross-tenant)
+from dse_platform import fetch_skill_scoped, query_retrieval_scoped
+```
+
+### SSO — como plugar um IdP real
+
+O console valida `id_token` OIDC (RS256) contra o JWKS do IdP. Config por env
+(ver `queue_board/asgi.py`):
+
+```
+DSE_OIDC_ISSUER=https://login.cliente.com
+DSE_OIDC_AUDIENCE=dse-admin-console          # client_id
+DSE_OIDC_JWKS_FILE=/etc/dse/idp-jwks.json    # ou DSE_OIDC_JWKS='{"keys":[...]}'
+DSE_CONSOLE_SESSION_SECRET=<>=32 bytes>
+```
+
+Sem essas vars o login fica desabilitado (503) — apropriado para um deployment
+sem IdP ainda. Em dev/teste, `dse_platform.dev_idp.DevIdP` mina id_tokens + JWKS
+para exercitar o mesmo verifier (ver `tests/test_sso.py`).
+
+### Gaps honestos (fixture/mock ou dependência externa — Fase 2)
+
+- **IdP real (Keycloak/Okta/Entra/Ping) não provisionado nesta sessão.** O
+  contrato OIDC (assinatura RSA + `iss/aud/exp`) é exercitado de verdade contra
+  o `DevIdP` (keypair RSA real, `PyJWT` + `cryptography`). Para produção: apontar
+  `OIDCVerifier` para o `jwks_uri` do IdP e trocar o handler `/login` por um
+  redirect OIDC (authorization code flow) — verify/sessão/offboarding não mudam.
+  **SAML** entra via broker OIDC (Keycloak/Dex/oauth2-proxy) na frente — o
+  console não parseia SAML (ver ADR-22 §1). **SCIM** real (provisioning
+  automático de papéis) é integração por cliente; o schema
+  (`dse_console_identity.roles`) já suporta, o endpoint SCIM não está incluído.
+- **Account matching SSO × chat/VCS não unificado** — o CHECK
+  `platform IN ('slack','github','jira')` do `identity_links` da fundação
+  (0001, não editável nesta fase) impede gravar `platform='sso'`. Principais de
+  SSO são criados direto em `principals` via `sso.ensure_sso_principal`, com o
+  matching em `dse_console_identity.sso_subject`. Documentado como dívida no
+  ADR-22 §2 — resolvível quando a fundação adicionar `'sso'` ao CHECK.
+- **Envio real de signals do queue board (`TemporalSignalSender`)** exige
+  `temporalio` (extra `[temporal]`) e um workflow vivo. Os testes usam
+  `FakeSignalSender` (marcado) — o caminho de validação + audit + estado durável
+  (quarentena/kill switch) é 100% real; só o transporte do signal é fake, para
+  não exigir um workflow por teste. Rodar contra o Temporal real na consolidação.
+- **Custo corrente do budget** (`get_tenant_budget.spent_usd`) é agregado das
+  linhas de audit com `details->>'cost_usd'` (ex. `coder_turn_completed`) — a
+  mesma fonte que o OTel collector consome. É uma aproximação honesta enquanto
+  nenhum provider real grava custo (mesma limitação da Fase 1; sem conta
+  AWS/Bedrock — WS-D usa o tier `eco/echo-model` local, custo zero).
+- **UI sem design system, por decisão (WSF-E6-T3):** HTML cru montado em Python,
+  tabelas, forms POST. É ferramenta de operação, não produto. `python-multipart`
+  é a única dependência nova só-para-forms.
+- **Kill switch de canal escreve na tabela `channel_kill_switches` do WS-A**
+  (data-plane, mesmo banco) — não editamos o arquivo/migração do WS-A. O composto
+  `is_admission_blocked` lê global (nosso) → tenant (nosso) → canal (WS-A).
+
+### Novas dependências (Fase 2)
+
+`PyJWT>=2.8`, `cryptography>=42` (verificação OIDC RS256), `python-multipart`
+(forms do queue board), extra opcional `temporalio>=1.7` (`[temporal]`, envio
+real de signals). Reinstalar: `pip install -e "services/platform[temporal]"`.
+
+### Rodar o queue board localmente
+
+```bash
+# via docker (fragment WS-F já declara o serviço queue-board na 8890)
+#   NÃO rode make up (derrubaria a infra dos outros agentes) — build só este:
+docker compose -f docker-compose.yml -f docker-compose.wsf.yml build queue-board
+docker compose -f docker-compose.yml -f docker-compose.wsf.yml up -d queue-board
+# ou direto com uvicorn (venv do WS-F):
+uvicorn dse_platform.queue_board.asgi:app --port 8890
+```
+
+### Estrutura adicionada (Fase 2)
+
+```
+services/platform/
+  dse_platform/
+    access_bundles.py        (WSF-E3-T2)
+    sso.py                    (WSF-E3-T3 — OIDC verify, login, offboard)
+    dev_idp.py                (WSF-E3-T3 — IdP OIDC de dev, fixture)
+    steering_resolution.py    (WSF-E3-T3 — offboarding × steering)
+    kill_switches.py          (WSF-E6-T2 — 4 escopos + quarentena)
+    tenant_isolation.py       (WSF-E4-T3 — enforcement camada a camada)
+    queue_board/
+      api.py                  (WSF-E6-T1 — projeção §9.3, budgets, trilha)
+      signals.py              (WSF-E6-T2 — SignalSender real/fake)
+      operator.py             (WSF-E6-T2 — controles + audit por operador)
+      app.py                  (WSF-E6-T3 — FastAPI + HTML mínimo, SSO gate)
+      asgi.py                 (entrypoint uvicorn na 8890)
+  Dockerfile                  (imagem do queue board)
+  tests/
+    test_access_bundles.py  test_sso.py  test_kill_switches.py
+    test_tenant_isolation.py  test_queue_board.py  test_queue_board_app.py
+
+migrations/0013_wsf2.sql      (dse_access_bundle, dse_console_identity,
+                               dse_kill_switch_global, dse_work_item_quarantine)
+infra/ADR-22-identity.md      (design doc SSO/SCIM/offboarding)
+docker-compose.wsf.yml        (+ serviço queue-board na 8890)
 ```

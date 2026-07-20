@@ -80,6 +80,31 @@ def build_event_from_issue_comment(
     return event, is_pr_comment
 
 
+def build_event_from_pr_merged(
+    payload: dict[str, Any], *, resolved_principal: str, merge_sha: str
+) -> ConversationEvent:
+    """WSA-E4-T3 — webhook `pull_request` (action=closed, merged=true) ->
+    `ConversationEvent` de aprovação humana de merge. `merge_sha` (o
+    `merge_commit_sha` do PR) entra no `message_id` para o `event_id`
+    determinístico deduplicar reentregas do mesmo webhook de merge.
+
+    Só é construído quando `pull_request.merged == true` (o handler em app.py
+    já filtrou o caso de PR fechado SEM merge — que NÃO dispara nada, rota
+    documentada)."""
+    repo = payload["repository"]["full_name"]
+    number = payload["pull_request"]["number"]
+    return ConversationEvent.build(
+        platform=Platform.github,
+        thread_key=f"{repo}:{number}",
+        message_id=f"merged:{merge_sha}",
+        kind=EventKind.approval,
+        source_ref={"repo": repo, "number": number},
+        actor=_actor(resolved_principal, resolved_principal),
+        content_snapshot=f"pull_request #{number} merged",
+        signature_verified=True,
+    )
+
+
 def build_event_from_pr_review_comment(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
     repo = payload["repository"]["full_name"]
     number = payload["pull_request"]["number"]

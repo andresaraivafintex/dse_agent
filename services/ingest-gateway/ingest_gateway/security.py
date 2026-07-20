@@ -82,3 +82,35 @@ def verify_github_signature(
         return SignatureCheck(False, "signature_mismatch")
 
     return SignatureCheck(True, "ok")
+
+
+def verify_jira_signature(
+    *,
+    webhook_secret: str,
+    body: bytes,
+    signature_header: str | None,
+) -> SignatureCheck:
+    """WSA-E5-T1 — HMAC-SHA256 do webhook secret sobre o corpo bruto do
+    webhook Jira Cloud (`X-Hub-Signature`, formato `sha256=<hex>`, o mesmo
+    esquema do GitHub). Jira Cloud assina o payload com o segredo registrado
+    ao criar o webhook via a REST API de webhooks dinâmicos.
+
+    Sem um site Jira real registrado nesta sessão, o segredo é lido de
+    `JIRA_WEBHOOK_SECRET` (env) como fallback do Vault (ver
+    `adapter_jira.config`). A lógica é idêntica à de produção — só faltam as
+    credenciais reais.
+    """
+    if not webhook_secret:
+        return SignatureCheck(False, "missing_webhook_secret")
+    if not signature_header:
+        return SignatureCheck(False, "missing_signature_header")
+    if not signature_header.startswith("sha256="):
+        return SignatureCheck(False, "malformed_signature_header")
+
+    digest = hmac.new(webhook_secret.encode(), body, hashlib.sha256).hexdigest()
+    computed = f"sha256={digest}"
+
+    if not hmac.compare_digest(computed, signature_header):
+        return SignatureCheck(False, "signature_mismatch")
+
+    return SignatureCheck(True, "ok")

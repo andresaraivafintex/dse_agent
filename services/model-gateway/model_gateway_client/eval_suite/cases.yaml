@@ -1,0 +1,61 @@
+# Suite de avaliação Tier-2 do model-gateway (WSD-E5-T1). Dono: WS-D.
+#
+# Cada caso tem:
+#   id          — identificador estável
+#   model       — alias LiteLLM (model_name do litellm_config.yaml)
+#   messages    — payload OpenAI-compatible enviado ao gateway
+#   assertions  — lista de checagens sobre a resposta. Tipos suportados
+#                 (ver runner.py):
+#     - equals            {value: "..."}        content == value (exato)
+#     - contains          {value: "..."}        value in content
+#     - deterministic     {}                     rodar 2x -> mesma content
+#     - tokens_positive   {}                     tokens_in>0 e tokens_out>0
+#     - max_cost_usd      {value: 0.01}          cost_usd <= value
+#
+# Nota: os casos do `eco/echo-model` usam a transformação determinística
+# conhecida do echo provider (ECHO[<último user reverso>]) — por isso a
+# asserção `equals` é possível e estável. Casos para `bedrock/*` ficam com
+# asserções mais frouxas (contains/tokens) porque um LLM real não é
+# byte-determinístico; e são SKIPPED automaticamente se a infra AWS não estiver
+# disponível (ver runner.py).
+
+cases:
+  - id: echo-determinism
+    model: eco/echo-model
+    messages:
+      - role: user
+        content: "reference prompt one"
+    assertions:
+      - type: deterministic
+      - type: tokens_positive
+
+  - id: echo-known-transform
+    model: eco/echo-model
+    messages:
+      - role: user
+        content: "abc"
+    assertions:
+      - type: equals
+        value: "ECHO[cba]"
+
+  - id: echo-nonempty
+    model: eco/echo-model
+    messages:
+      - role: system
+        content: "you are a code assistant"
+      - role: user
+        content: "summarize the diff"
+    assertions:
+      - type: contains
+        value: "ECHO["
+      - type: max_cost_usd
+        value: 1.0
+
+  # Caso de referência para o tier de produção (Bedrock). SKIPPED sem AWS.
+  - id: bedrock-sonnet-smoke
+    model: bedrock/anthropic.claude-3-5-sonnet
+    messages:
+      - role: user
+        content: "Reply with the single word: ok"
+    assertions:
+      - type: tokens_positive

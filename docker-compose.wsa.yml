@@ -68,3 +68,67 @@ services:
     restart: unless-stopped
     depends_on:
       - temporal
+
+  # --- Fase 2 (WSA-E5): adapter Jira + workers de transição/poll ---
+  adapter-jira:
+    build:
+      context: .
+      dockerfile: services/adapter-jira/Dockerfile
+    container_name: dse_adapter_jira
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      JIRA_WEBHOOK_SECRET: ${JIRA_WEBHOOK_SECRET:-}
+      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
+      JIRA_ACCOUNT_EMAIL: ${JIRA_ACCOUNT_EMAIL:-}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
+      JIRA_TRIGGER_LABEL: ${JIRA_TRIGGER_LABEL:-dse}
+      JIRA_PLAN_APPROVED_STATUS: ${JIRA_PLAN_APPROVED_STATUS:-Plano aprovado}
+      JIRA_PLAN_REJECTED_STATUS: ${JIRA_PLAN_REJECTED_STATUS:-Plano rejeitado}
+      JIRA_POLL_PROJECTS: ${JIRA_POLL_PROJECTS:-}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+      DSE_TENANT_ID: ${DSE_TENANT_ID:-tenant_dev}
+    ports:
+      - "8804:8804"
+    networks: [dse_net]
+    restart: unless-stopped
+
+  # Worker de transições serializadas por ticket (WSA-E5-T3).
+  adapter-jira-transitions:
+    build:
+      context: .
+      dockerfile: services/adapter-jira/Dockerfile
+    container_name: dse_adapter_jira_transitions
+    command: ["python", "-m", "adapter_jira.transition_main"]
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
+      JIRA_ACCOUNT_EMAIL: ${JIRA_ACCOUNT_EMAIL:-}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+    networks: [dse_net]
+    restart: unless-stopped
+
+  # Poller de fallback do webhook Jira (best-effort) — WSA-E5-T2.
+  adapter-jira-poller:
+    build:
+      context: .
+      dockerfile: services/adapter-jira/Dockerfile
+    container_name: dse_adapter_jira_poller
+    command: ["python", "-m", "adapter_jira.poller_main"]
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      JIRA_BASE_URL: ${JIRA_BASE_URL:-}
+      JIRA_ACCOUNT_EMAIL: ${JIRA_ACCOUNT_EMAIL:-}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN:-}
+      JIRA_TRIGGER_LABEL: ${JIRA_TRIGGER_LABEL:-dse}
+      JIRA_PLAN_APPROVED_STATUS: ${JIRA_PLAN_APPROVED_STATUS:-Plano aprovado}
+      JIRA_PLAN_REJECTED_STATUS: ${JIRA_PLAN_REJECTED_STATUS:-Plano rejeitado}
+      JIRA_POLL_PROJECTS: ${JIRA_POLL_PROJECTS:-}
+      JIRA_POLL_INTERVAL_SECONDS: ${JIRA_POLL_INTERVAL_SECONDS:-60}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+      DSE_TENANT_ID: ${DSE_TENANT_ID:-tenant_dev}
+    networks: [dse_net]
+    restart: unless-stopped

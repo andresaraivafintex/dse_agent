@@ -24,3 +24,23 @@ services:
       - "4317:4317" # OTLP gRPC
       - "4318:4318" # OTLP HTTP
     networks: [dse_net]
+
+  # WSF-E6-T3 — Admin queue board (server-rendered, SEM design system) na 8890.
+  # Lê o Postgres (system of record) e envia signals ao Temporal. Login via SSO
+  # (WSF-E3-T3) — configure DSE_OIDC_* para plugar o IdP; sem isso o login fica
+  # desabilitado (503), apropriado para um deployment ainda sem IdP.
+  queue-board:
+    build:
+      context: .
+      dockerfile: services/platform/Dockerfile
+    container_name: dse_queue_board
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_PLATFORM_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_TEMPORAL_TARGET: temporal:7233
+      DSE_CONSOLE_SESSION_SECRET: ${DSE_CONSOLE_SESSION_SECRET:-dev-console-secret-not-for-prod-change-me-32b}
+      # Plugar o IdP: DSE_OIDC_ISSUER / DSE_OIDC_AUDIENCE / DSE_OIDC_JWKS(_FILE)
+    ports:
+      - "8890:8890"
+    networks: [dse_net]

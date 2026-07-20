@@ -12,8 +12,14 @@ from .kill_switch import is_channel_killed
 from .gateway import admit_work_item, record_signal_event, AdmissionBlocked
 from .correlate import correlate, CorrelationResult
 from .steering import is_authorized_to_steer
-from .security import verify_slack_signature, verify_github_signature, SignatureCheck
+from .security import (
+    verify_slack_signature,
+    verify_github_signature,
+    verify_jira_signature,
+    SignatureCheck,
+)
 from .sanitize import sanitize_content
+from .tenant_binding import resolve_tenant, default_tenant, ResolvedTenant
 
 __all__ = [
     "get_connection",
@@ -26,6 +32,10 @@ __all__ = [
     "is_authorized_to_steer",
     "verify_slack_signature",
     "verify_github_signature",
+    "verify_jira_signature",
     "SignatureCheck",
     "sanitize_content",
+    "resolve_tenant",
+    "default_tenant",
+    "ResolvedTenant",
 ]

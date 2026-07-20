@@ -1,20 +1,21 @@
-"""Agregação de custo por tenant/task-class/stage (WSD-E3-T2).
+"""Agregação de custo por tenant/task-class/stage (WSD-E3-T2 / WSD-E3-T4).
 
-Fonte de dados nesta Fase 1: os spans em memória gravados por
-`telemetry.get_recorded_spans()` (o mesmo `InMemorySpanExporter` que os
-testes usam) — suficiente para provar a lógica de agregação localmente sem
-nenhuma infra extra.
+Fonte DURÁVEL (default a partir da Fase 2 — WSD-E3-T4): a tabela
+`model_call_ledger` (`ledger.py`), gravada a cada chamada bem-sucedida com o
+custo/tokens REAIS do LiteLLM. Sobrevive a restart do processo e agrega entre
+processos — a pendência #4 do adendo ("hoje em memória por processo") está
+resolvida. `aggregate_cost(..., source="ledger")` (default) lê daí.
 
-Integração real esperada em produção (documentada, não implementada aqui —
-depende do OTel collector do WS-F, que ainda não existe neste momento):
-um collector recebe os spans via OTLP (ver
-`settings.otlp_exporter_endpoint()` / `DSE_OTEL_EXPORTER_OTLP_ENDPOINT`),
-grava em um backend com suporte a agregação (Tempo+metrics-generator,
-ClickHouse, ou simplesmente um exporter de métricas derivadas via
-span-metrics connector). Este módulo deveria então virar uma query contra
-esse backend em vez de ler o buffer em memória do processo atual — a forma
-da função de agregação (`aggregate_cost`) já é a interface estável para essa
-troca: troque só `_iter_spans()`.
+Fonte em memória (legado da Fase 1, ainda disponível via `source="memory"`):
+os spans do `InMemorySpanExporter` do processo atual
+(`telemetry.get_recorded_spans()`). Útil para testes de unidade puros que não
+querem tocar o Postgres.
+
+Os spans OTel continuam sendo exportados em paralelo para o collector do WS-F
+quando `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` está setado (dashboards/alerting do
+WSF-E7). O collector local só faz `debug`/stdout (sem backend consultável neste
+ambiente), então a agregação consultável mora no ledger Postgres, não no
+collector — ver README §"WSD-E3-T4".
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ from dse_contracts.constants import (
     OTEL_ATTR_TOKENS_OUT,
 )
 
-from . import telemetry
+from . import ledger, telemetry
 from .telemetry import OTEL_ATTR_TASK_CLASS
 
 
@@ -59,15 +60,24 @@ class CostBucket:
 
 
 def _iter_spans():
-    """Ponto de troca para produção: em vez do buffer em memória, faria uma
-    query no backend do collector do WS-F. Ver docstring do módulo."""
+    """Buffer em memória do processo atual (source="memory"). Fonte legado da
+    Fase 1 — ver docstring do módulo."""
     return telemetry.get_recorded_spans()
 
 
-def aggregate_cost(*, tenant_id: str | None = None) -> list[dict]:
+def aggregate_cost(*, tenant_id: str | None = None, source: str = "ledger") -> list[dict]:
     """Agrega custo/tokens por (tenant_id, task_class, stage). Se
     `tenant_id` for passado, filtra só aquele tenant (isolamento — nunca
-    devolve dados de outro tenant misturados por engano)."""
+    devolve dados de outro tenant misturados por engano).
+
+    `source`:
+      - "ledger" (default, WSD-E3-T4): tabela durável `model_call_ledger`;
+      - "memory": spans do processo atual (legado Fase 1)."""
+    if source == "ledger":
+        return ledger.aggregate(tenant_id=tenant_id)
+    if source != "memory":
+        raise ValueError(f"source inválido: {source!r} (use 'ledger' ou 'memory')")
+
     buckets: dict[tuple[str, str, str], CostBucket] = {}
 
     for span in _iter_spans():

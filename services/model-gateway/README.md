@@ -69,6 +69,90 @@ Contrato de consumo já publicado pela fundação:
   modelo eco) e compara byte-a-byte contra ela — o procedimento de upgrade
   documentado no topo do próprio script.
 
+## Fase 2 ("Judgment & queue") — o que foi adicionado (WSD-E2/E3-T4/E4/E5)
+
+Tudo abaixo é ADITIVO sobre a Fase 1 (as 20 chamadas/superfícies da Fase 1
+continuam idênticas). O enforcement é **permissivo por default**: sem política,
+sem cap, sem kill switch e sem reassign configurados, `chat_completion` se
+comporta exatamente como na Fase 1. Migração: `migrations/0011_wsd2.sql`
+(`model_policies`, `model_call_ledger`, `work_item_budgets`,
+`gateway_kill_switches`, `model_reassignments`).
+
+### WSD-E2-T1 — Motor de política per-stage/per-tenant (`policy.py`)
+- Config **declarativa** (fora do código do agente) na tabela `model_policies`,
+  mapeando `(tenant, stage, data_class, risk_class) -> {allowed_models,
+  preferred_model}`. Coringa `'*'` em qualquer dimensão; a linha mais
+  **específica** (menos coringas), desempatada por `priority`, vence. Sem linha
+  aplicável -> allow-all (Fase 1 preservada).
+- **Hot-reload sem redeploy**: o motor lê a tabela no call time com um cache TTL
+  curto (`DSE_POLICY_CACHE_TTL_SECONDS`, default 5s). Um operador dá
+  `INSERT/UPDATE` e o efeito aparece em <=TTL segundos. `load_policies_from_file`
+  carrega um YAML/JSON declarativo ("config as code") para a tabela.
+- **Deny tipado**: chamada a modelo não permitido -> `GatewayCallError` (HTTP
+  403) com corpo `GatewayErrorResponse{error="policy_denied"}` + linha de audit
+  `gateway.call_denied_policy` (P8). O workflow do WS-B converte em Failed (P6).
+- **Integração com o access bundle do WS-F** (`dse_access_bundle`): se o bundle
+  default do tenant existe e está `enabled=false`, o tenant está desligado
+  (deny-all). Leitura defensiva — se a tabela do WS-F ainda não existir, degrada
+  para "sem restrição adicional".
+- Nota: `risk_class` é dimensão da tabela mas hoje é sempre `'*'` na resolução
+  porque `GatewayCallHeaders` (contrato da fundação) ainda não carrega um header
+  de risco — quando carregar, o motor já casa a dimensão sem mudança de schema.
+
+### WSD-E2-T2 — Enforcement de budget no call time (`budget.py`)
+- Dois caps checados a **cada** chamada: budget de runtime do WorkItem
+  (`work_item_budgets` ou `per_task_usd` do access bundle) e budget **agregado**
+  do tenant no mês (`tenant_config.monthly_budget_usd` do WS-F ou `monthly_usd`
+  do access bundle). "spent-so-far" vem do **ledger durável** (não de contador
+  em memória).
+- Exaustão -> recusa limpa na fronteira (P6): `GatewayCallError` (HTTP 402)
+  `GatewayErrorResponse{error="budget_exhausted"}` + audit
+  `gateway.call_denied_budget`.
+
+### WSD-E4-T2 — Kill switch por escopo + reassign de modelo em voo (`controls.py`, `control_api.py`)
+- Kill switch de **4 escopos** (global | tenant | work_item | channel). O
+  gateway enforça no call time os escopos visíveis nos headers
+  (global/tenant/work_item); `channel` fica na tabela para operabilidade mas é
+  honrado na admissão pelo WS-A/WS-B (o gateway não vê o canal).
+- **Conecta aos controles do WS-B/WS-F**: o check lê TAMBÉM
+  `dse_kill_switch_global` (WS-F) e `tenant_config.kill_switch_enabled` (WS-F),
+  então acionar por qualquer caminho zera as chamadas do escopo. Efeito **<60s**:
+  cache TTL curto (default 5s), muito abaixo de 60s (não interrompe uma geração
+  em curso — não há stream aqui — zera a emissão de novas chamadas do escopo).
+- **Reassign de modelo em voo**: um operador troca o modelo efetivo de um
+  WorkItem; a próxima chamada usa `to_model` no lugar do requisitado. Reassign
+  **não burla a política** (o modelo efetivo ainda passa pelo policy engine).
+- `control_api.py` é o FastAPI de operador (`uvicorn
+  model_gateway_client.control_api:app --port 4010`): `POST /internal/kill-switch`,
+  `POST /internal/reassign-model`, `DELETE /internal/reassign-model/{wi}`,
+  `GET /internal/budget-status`, `GET /internal/policy`. Toda mutação já emite
+  audit via `controls.py`.
+
+### WSD-E3-T4 — Agregação de custo em fonte DURÁVEL (`ledger.py`)
+- Cada chamada bem-sucedida grava uma linha em `model_call_ledger` com o custo/
+  tokens **reais** do LiteLLM. `cost_export.aggregate_cost(source="ledger")` (o
+  novo **default**) lê dessa tabela — **sobrevive a restart** e agrega entre
+  processos (resolve a pendência #4 do adendo). `source="memory"` mantém o
+  caminho legado (spans em memória) para testes de unidade puros.
+- O **OTel collector do WS-F já está no ar** (`dse_otel_collector`, OTLP em
+  `localhost:4317/4318`) — provado nesta sessão: com
+  `DSE_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces` os spans
+  `dse.model_gateway.chat_completion` chegam ao collector (visíveis no
+  `docker logs dse_otel_collector`). O collector local só faz `debug`/stdout
+  (sem backend consultável), por isso a agregação **consultável** mora no ledger
+  Postgres; os spans no collector são para dashboards/alerting do WSF-E7.
+- `OTEL_ATTR_TASK_CLASS` agora vem de `dse_contracts.constants` (promovido na
+  fundação da Fase 2); `telemetry.py` re-exporta para compatibilidade.
+
+### WSD-E5-T1 — Suite de avaliação Tier-2 (`eval_suite/`) — **dono: WS-D**
+- Harness real e rodável (`python -m model_gateway_client.eval_suite`) que
+  dispara prompts de referência (`eval_suite/cases.yaml`) contra os modelos
+  configurados e reporta pass/fail + custo + latência por caso. Modelos
+  indisponíveis na infra atual (ex.: `bedrock/*` sem AWS) viram **SKIP**, não
+  falha. Exit code 0 se nada falhou (gate de CI/promoção de modelo). **Não é** o
+  Tier-2 air-gapped serving completo (Fase 4) — é a estrutura mínima de eval
+  (gap 6) com dono nomeado.
+
 ## API pública estável (`model_gateway_client`)
 
 ```python
@@ -162,9 +246,17 @@ def revoke_virtual_key(key: str) -> None: ...
    task-class pedida em WSD-E3-T2 fazer sentido fora deste processo, esse
    atributo deveria subir para o contrato compartilhado da próxima vez que
    alguém tocar em `dse_contracts.constants`.
-6. **Policy/budget enforcement no call time** (WSD-E2, Fase 2) —
-   explicitamente fora de escopo desta Fase 1, não implementado aqui de
-   propósito.
+6. **Enforcement non-bypassable no servidor** (Fase 2 entregue com uma
+   ressalva honesta): o policy/budget/kill-switch/reassign de `enforcement.py`
+   roda no caminho do **cliente** do gateway (`chat_completion`). O backstop
+   server-side já existe e NÃO é burlável pelo sandbox — as virtual keys são
+   escopadas por modelo no LiteLLM (403 nativo, testado) e podem levar
+   `max_budget`/`duration`. Para um deployment 100% non-bypassable, o mesmo
+   `enforce_call` deve ser espelhado como um **pre-call hook do LiteLLM proxy**
+   (custom callback carregado em `litellm_config.yaml` + rebuild da imagem
+   pinada) — não feito nesta sessão para não tocar a imagem pinada por digest
+   sem rodar o smoke de upgrade. A lógica é a mesma função; só muda o ponto de
+   montagem.
 7. **Rotação/expiração automática de virtual keys** — hoje só é revogada
    explicitamente via `revoke_virtual_key`. `ttl_seconds`/`max_budget_usd`
    já são aceitos por `mint_virtual_key` e repassados ao LiteLLM
@@ -212,17 +304,38 @@ acima estiver no ar.
 
 ### Resultado real (rodado nesta sessão)
 
+Fase 1 (20 testes) + Fase 2 (19 testes) contra a MESMA infra real:
+
 ```
-20 passed in 2.05s
+39 passed in 6.79s
 ```
 
-Cobertura: `echo_provider` isolado (determinismo, shape OpenAI, 404),
+Cobertura Fase 1: `echo_provider` isolado (determinismo, shape OpenAI, 404),
 round-trip completo mint→call→revoke→denied contra o LiteLLM real,
 model-scoping de virtual key (403), tabela `virtual_keys` (insert/revoke
 real no Postgres), audit ledger (linhas reais gravadas/consultadas),
 telemetria OTel (atributos do contrato + status ERROR em falha), agregação
 de custo (multi-tenant, multi-task-class), e conformidade
 gateway-only (estática + dinâmica).
+
+Cobertura Fase 2:
+- `test_policy_enforcement.py` — resolução por especificidade/coringa, default
+  permissivo, deny tipado + audit numa chamada real negada, hot-reload muda a
+  decisão sem redeploy, carga de política de YAML.
+- `test_budget_enforcement.py` — custo real acumulado no ledger durável, deny de
+  budget de WorkItem e de tenant (`tenant_config`) na fronteira + audit,
+  `budget-status`.
+- `test_kill_switch_reassign.py` — kill switch de work_item (liga/desliga),
+  gateway honrando o kill switch de tenant do WS-F (`tenant_config`), reassign
+  trocando o modelo efetivo (echo no lugar de haiku) + audit, reassign não
+  burlando a política.
+- `test_ledger_durable.py` — agregação durável sobrevive ao "clear" do buffer em
+  memória (proxy de restart), isolamento por tenant.
+- `test_eval_suite.py` — casos do echo passam, modelo indisponível vira SKIP.
+
+Também verificado à mão nesta sessão (não em pytest): o export OTLP real chega
+ao `dse_otel_collector` do WS-F (1 span `dse.model_gateway.chat_completion`
+recebido) e o `python -m model_gateway_client.eval_suite` roda (3 pass, 1 skip).
 
 ## Version pinning e upgrade simulado (WSD-E1-T1)
 
@@ -236,36 +349,56 @@ promover.
 ## Arquivos
 
 ```
-migrations/0005_wsd.sql                        # tabela virtual_keys (raiz do repo)
+migrations/0005_wsd.sql                        # tabela virtual_keys (Fase 1, raiz do repo)
+migrations/0011_wsd2.sql                        # Fase 2: model_policies, model_call_ledger,
+                                               #   work_item_budgets, gateway_kill_switches,
+                                               #   model_reassignments (raiz do repo)
 docker-compose.wsd.yml                          # serviços model-gateway + model-gateway-echo (raiz do repo)
 services/model-gateway/
   litellm_config.yaml                           # config do LiteLLM (bedrock placeholders + eco real)
-  pyproject.toml                                # pacote instalável model-gateway-client
+  pyproject.toml                                # pacote instalável model-gateway-client (+pyyaml)
   README.md
   echo_provider/
     server.py                                   # "modelo eco" — stdlib puro, determinístico
     Dockerfile
   model_gateway_client/
-    __init__.py                                 # superfície pública estável
+    __init__.py                                 # superfície pública estável (Fase 1 + Fase 2)
     settings.py                                  # env vars + leitura real do Vault dev
-    db.py                                        # conexão Postgres (virtual_keys)
+    db.py                                        # conexão Postgres (control-plane dse)
     virtual_keys.py                              # mint_virtual_key / revoke_virtual_key
-    gateway_call.py                              # chat_completion (único caminho de chamada de modelo)
+    gateway_call.py                              # chat_completion (enforcement no call time + ledger)
     telemetry.py                                 # spans OTel (contrato dse_contracts.constants)
-    cost_export.py                               # agregação de custo por tenant/task_class/stage
+    cost_export.py                               # agregação de custo (default: ledger durável)
     export_api.py                                # FastAPI fino sobre cost_export
     errors.py
+    # --- Fase 2 ---
+    policy.py                                    # WSD-E2-T1 motor de política per-stage/per-tenant
+    budget.py                                    # WSD-E2-T2 enforcement de budget no call time
+    controls.py                                  # WSD-E4-T2 kill switch (4 escopos) + reassign
+    enforcement.py                               # ponto único de enforcement (policy+budget+kill+reassign)
+    ledger.py                                    # WSD-E3-T4 ledger de custo DURÁVEL (Postgres)
+    control_api.py                               # FastAPI de operador (kill switch/reassign/budget/policy)
+    eval_suite/
+      __init__.py                                # WSD-E5-T1 suite de eval Tier-2 (dono: WS-D)
+      cases.yaml                                 # prompts de referência + asserções
+      runner.py                                  # harness (run_suite / run_case)
+      __main__.py                                # CLI (gate de promoção de modelo)
   scripts/
     smoke_test.py                                # upgrade simulado
     smoke_baseline.json                           # baseline gravada nesta sessão
     cost_export_cli.py
   tests/
     conftest.py
-    test_echo_provider.py
-    test_gateway_e2e.py
-    test_virtual_keys_table.py
-    test_audit_emission.py
-    test_telemetry.py
-    test_cost_export.py
-    test_conformance_gateway_only.py
+    test_echo_provider.py                         # Fase 1
+    test_gateway_e2e.py                           # Fase 1
+    test_virtual_keys_table.py                    # Fase 1
+    test_audit_emission.py                        # Fase 1
+    test_telemetry.py                             # Fase 1
+    test_cost_export.py                           # Fase 1
+    test_conformance_gateway_only.py              # Fase 1
+    test_policy_enforcement.py                    # Fase 2 WSD-E2-T1
+    test_budget_enforcement.py                    # Fase 2 WSD-E2-T2
+    test_kill_switch_reassign.py                  # Fase 2 WSD-E4-T2
+    test_ledger_durable.py                        # Fase 2 WSD-E3-T4
+    test_eval_suite.py                            # Fase 2 WSD-E5-T1
 ```

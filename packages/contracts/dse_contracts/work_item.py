@@ -11,12 +11,18 @@ from pydantic import BaseModel, Field
 
 
 class WorkItemStatus(str, Enum):
-    """Máquina de estados §9.3. Fase 1: sem AwaitingPlanApproval (Fase 2)."""
+    """Máquina de estados §9.3."""
 
     new = "new"
     needs_clarification = "needs_clarification"
     ready = "ready"
     queued = "queued"
+    # Fase 2 (WSB-E3-T2): gate de aprovação de plano por risk class. Estado
+    # durável em que o WorkItem estaciona esperando um humano aprovar o plano
+    # de alto risco (o WS-A já roteava `SIGNAL_PLAN_APPROVAL` com base nele —
+    # a constante em constants.py referenciava este estado antes dele existir
+    # no enum; gap de fundação corrigido na integração da Fase 2).
+    awaiting_plan_approval = "awaiting_plan_approval"
     implementing = "implementing"
     validating = "validating"
     pr_ready = "pr_ready"
@@ -37,6 +43,9 @@ _PUBLIC_STATUS_MAP: dict[WorkItemStatus, PublicStatus] = {
     WorkItemStatus.needs_clarification: "blocked",
     WorkItemStatus.ready: "running",
     WorkItemStatus.queued: "running",
+    # awaiting_plan_approval -> "blocked" (§10.3: "AwaitingPlanApproval /
+    # Escalated -> blocked com razão no detalhe do WorkItem").
+    WorkItemStatus.awaiting_plan_approval: "blocked",
     WorkItemStatus.implementing: "running",
     WorkItemStatus.validating: "running",
     WorkItemStatus.pr_ready: "running",

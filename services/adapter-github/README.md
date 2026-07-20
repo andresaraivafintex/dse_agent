@@ -18,9 +18,15 @@ GITHUB_WEBHOOK_SECRET=dev_only_fixture GITHUB_BOT_LOGIN=dse-bot GITHUB_TASK_LABE
 
 Endpoints:
 - `POST /github/webhook` — webhooks da GitHub App (`issues`,
-  `issue_comment`, `pull_request_review_comment`).
+  `issue_comment`, `pull_request_review_comment`, e **Fase 2**
+  `pull_request` closed/merged → signal `merged_by_human`, WSA-E4-T3).
 - `POST /internal/status-comment` — outbound, sob identidade GitHub App.
 - `GET /health`.
+
+**Fase 2 (WSA-E4-T3 + WSA-E1-T5):** o webhook de `pull_request` merged dispara
+`merged_by_human`; PR fechado sem merge não dispara nada. A resolução de tenant
+usa `installation.id` via `tenant_platform_bindings` (fallback documentado para
+`DSE_TENANT_ID`). Ver [`../ingest-gateway/README.md`](../ingest-gateway/README.md#fase-2--o-que-ws-a-adicionou).
 
 ## Testes
 
@@ -29,7 +35,8 @@ cd /Users/saraiva/Documents/DSE/fase1/services/adapter-github
 pytest -q
 ```
 
-Resultado desta sessão: **19 passed**. Requer Postgres real
+Resultado desta sessão: **24 passed** (19 Fase 1 + 5 Fase 2: merge webhook +
+tenant binding, `tests/test_merge_and_tenant.py`). Requer Postgres real
 (`localhost:5432`, migração `0002_wsa.sql` aplicada) — sem mocks de DB.
 GitHub em si é 100% fixture (`FakeGithubClient`) nos testes de outbound; a
 autenticação GitHub App real (`adapter_github/auth.py`) não é exercitada

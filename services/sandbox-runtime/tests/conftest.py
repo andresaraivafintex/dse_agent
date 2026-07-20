@@ -8,6 +8,29 @@ import pytest
 
 from sandbox_runtime import docker_driver
 
+# DSN de teste: prioriza a role de app (dse_app) mas cai para a superuser `dse`
+# usada localmente pela fundação; ambas veem as tabelas do WS-C (grants em
+# 0004/0010). O migrate roda como `dse`; os testes só precisam de SELECT/INSERT.
+_TEST_DSN = os.environ.get(
+    "DSE_DATABASE_URL", "postgresql://dse:dse_dev_only@localhost:5432/dse"
+)
+
+
+@pytest.fixture(scope="session")
+def pg_dsn():
+    return _TEST_DSN
+
+
+@pytest.fixture()
+def pg_conn(pg_dsn):
+    import psycopg2
+
+    conn = psycopg2.connect(pg_dsn)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 # Evita o exporter de console do OTel (que roda num thread periódico em
 # background e loga barulho/erros de "I/O on closed file" quando o processo
 # de teste termina antes do próximo ciclo de export) — os testes que querem

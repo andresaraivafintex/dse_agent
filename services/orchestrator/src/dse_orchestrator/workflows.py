@@ -36,19 +36,27 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_REBUILD_SANDBOX,
         ACTIVITY_RUN_CODER_TURN,
         ACTIVITY_RUN_L1_PIPELINE,
+        ACTIVITY_RUN_L2_REVIEW,
+        ACTIVITY_RUN_PLANNER_TURN,
+        ACTIVITY_RUN_TESTER_TURN,
         ACTIVITY_TEARDOWN_SANDBOX,
         CiStatusResult,
         CoderTurnResult,
         L1Result,
+        L2Verdict,
         PrRef,
         SandboxHandle,
     )
     from dse_contracts.constants import WORKFLOW_TYPE
+    from dse_contracts.plan_artifact import PlanArtifact
     from dse_contracts.work_item import WorkItemStatus
 
+    from dse_orchestrator import policy
     from dse_orchestrator.local_activities import (
         LOCAL_ACTIVITY_CHECK_CLARIFICATION,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
+        LOCAL_ACTIVITY_RECORD_GATE,
+        LOCAL_ACTIVITY_RESOLVE_APPROVER,
         LOCAL_ACTIVITY_UPDATE_STATUS,
     )
     from dse_orchestrator.models import (
@@ -65,6 +73,30 @@ logger = logging.getLogger("dse_orchestrator.workflow")
 _SYSTEM_ACTOR = "system:orchestrator"
 _MAX_OPERATOR_EVENTS = 25
 
+# Fase 2 — status interno novo do gate de aprovacao de plano (WSB-E3-T2). NAO
+# esta no enum `dse_contracts.work_item.WorkItemStatus` (fundacao — nao editavel
+# por este workstream), mas a coluna `work_items.status` e TEXT sem CHECK, e a
+# propria `constants.py` da fundacao ja referencia esta string como o valor de
+# status que o dispatcher do WS-A consulta para rotear SIGNAL_PLAN_APPROVAL.
+# Gap documentado no README ("Estado awaiting_plan_approval"): o enum da
+# fundacao deveria ganhar este membro (+ mapa publico -> "blocked").
+STATUS_AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+
+# Erros retornados pelas Activities de modelo (WS-D/WS-C) que representam uma
+# recusa de POLITICA fail-closed — nunca sao "adivinhados" nem truncados (P6):
+# viram uma falha limpa e auditada na fronteira. Bater por substring no tipo/
+# mensagem do erro da Activity (WS-D marca non_retryable=True nesses casos).
+_FAIL_CLOSED_MARKERS = (
+    "egress",            # egress-proxy indisponivel -> zero egress (fail-closed)
+    "fail_closed",
+    "fail-closed",
+    "policy_denied",
+    "budget_denied",
+    "virtual_key_expired",
+    "key_expired",
+    "kill_switch",
+)
+
 
 class _CancelledByOperator(Exception):
     pass
@@ -76,6 +108,38 @@ class _ForceClarification(Exception):
 
 
 class _EscalateNow(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+class _FailClosed(Exception):
+    """Recusa de politica do caminho de modelo/egress (WSB-E5-T3b) — falha
+    limpa e auditada, sem output truncado (P6)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+class _BudgetExhausted(Exception):
+    """WSB-E4-T1 — teto de budget atingido numa FRONTEIRA (nunca mid-Activity)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+class _PlanRejected(Exception):
+    """WSB-E3-T3 — plano recusado; `route` in {re_plan, re_clarify, cancel}."""
+
+    def __init__(self, route: str, actor: str, justification: str):
+        self.route = route
+        self.actor = actor
+        self.justification = justification
+
+
+class _BlockNow(Exception):
+    """WSB-E3-T2 — cascata de aprovadores VAZIA: Blocked + escalacao, jamais
+    auto-aprova por ausencia (P1/P3)."""
+
     def __init__(self, reason: str):
         self.reason = reason
 
@@ -105,6 +169,13 @@ class WorkItemLifecycleWorkflow:
         self._review_payload: dict[str, Any] | None = None
         self._merged = False
 
+        # --- Fase 2: gate de aprovacao de plano (WSB-E3-T2/T3) ---
+        self._plan_approval_received = False
+        self._plan_approval_payload: dict[str, Any] | None = None
+        # --- Fase 2: retry de budget por operador (WSB-E4-T1) ---
+        self._budget_raise_requested = False
+        self._budget_new_max: float | None = None
+
     # ------------------------------------------------------------------
     # Signals — WSB-E2-T4, WSB-E3-T1, WSB-E3-T4, WSB-E5-T2
     # ------------------------------------------------------------------
@@ -121,6 +192,29 @@ class WorkItemLifecycleWorkflow:
     @workflow.signal
     def merged_by_human(self, payload: dict[str, Any] | None = None) -> None:
         self._merged = True
+
+    @workflow.signal(name="plan_approval")
+    def plan_approval(self, payload: dict[str, Any]) -> None:
+        """WSB-E3-T2/T3 — veredito do gate de aprovacao de plano. Nome bate com
+        `dse_contracts.SIGNAL_PLAN_APPROVAL`. Payload: {"verdict":
+        "approved"|"rejected", "route": "re_plan"|"re_clarify"|"cancel"
+        (obrigatorio quando rejected), "comment"/"justification": str,
+        "actor": principal resolvido}. O dispatcher do WS-A so roteia
+        `kind=approval` para ca quando work_items.status ==
+        'awaiting_plan_approval'. Nao resetamos a flag no handler (mesma
+        disciplina anti-clobber dos outros sinais)."""
+        self._plan_approval_payload = payload
+        self._plan_approval_received = True
+
+    @workflow.signal
+    def raise_budget(self, new_max_usd: float) -> None:
+        """WSB-E4-T1 — operador eleva o teto de budget. Aplicado na PROXIMA
+        fronteira de checagem (nunca interrompe uma Activity em andamento, P6).
+        Permite retomar um WorkItem que bateu (ou esta prestes a bater) o teto
+        sem recomeçar do zero."""
+        self._budget_raise_requested = True
+        self._budget_new_max = float(new_max_usd)
+        self._log_operator("raise_budget", str(new_max_usd))
 
     @workflow.signal
     def pause(self, reason: str | None = None) -> None:
@@ -216,6 +310,18 @@ class WorkItemLifecycleWorkflow:
             return await self._finish_cancelled()
         except _EscalateNow as exc:
             return await self._finish_escalated(exc.reason)
+        except _FailClosed as exc:
+            # WSB-E5-T3b — recusa de politica do caminho de modelo/egress:
+            # falha limpa e auditada, sem output truncado (P6).
+            return await self._finish_failed(f"fail_closed:{exc.reason}",
+                                             audit_action="model_path_fail_closed")
+        except _BudgetExhausted as exc:
+            return await self._finish_failed(f"budget_exhausted:{exc.reason}",
+                                             audit_action="budget_exhausted")
+        except _PlanRejected as exc:
+            return await self._handle_plan_rejection(exc)
+        except _BlockNow as exc:
+            return await self._finish_blocked(exc.reason, audit_action="plan_gate_blocked_no_approver")
         except _ForceClarification as exc:
             input.phase = PHASE_INTAKE
             input.status = WorkItemStatus.needs_clarification.value
@@ -248,6 +354,8 @@ class WorkItemLifecycleWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=5),
             )
+            budget = row.get("budget") or {}
+            max_usd = budget.get("max_usd") if isinstance(budget, dict) else None
             return WorkItemLifecycleInput(
                 work_item_id=row["work_item_id"],
                 tenant_id=row["tenant_id"],
@@ -256,6 +364,8 @@ class WorkItemLifecycleWorkflow:
                 base_branch=row.get("base_branch"),
                 data_class=row.get("data_class") or "internal",
                 pr_number=row.get("pr_number"),
+                risk_class=row.get("risk_class") or "low",
+                budget_max_usd=float(max_usd) if max_usd is not None else None,
             )
         raise ApplicationError(
             f"WorkItemLifecycleWorkflow.run recebeu um tipo de input nao suportado: {type(raw_input)!r}"
@@ -304,6 +414,17 @@ class WorkItemLifecycleWorkflow:
     async def _set_status(self, status: WorkItemStatus, *, audit_action: str | None = None,
                            details: dict[str, Any] | None = None) -> None:
         self._input.status = status.value
+        await self._persist_status()
+        if audit_action:
+            await self._audit(audit_action, details)
+
+    async def _set_raw_status(self, status: str, *, audit_action: str | None = None,
+                              details: dict[str, Any] | None = None) -> None:
+        """Como `_set_status`, mas para um valor de status que nao esta no enum
+        `WorkItemStatus` da fundacao (ex.: `awaiting_plan_approval` — ver
+        STATUS_AWAITING_PLAN_APPROVAL e o README). A coluna e TEXT, aceita a
+        string; o gap do enum esta documentado no README."""
+        self._input.status = status
         await self._persist_status()
         if audit_action:
             await self._audit(audit_action, details)
@@ -358,6 +479,114 @@ class WorkItemLifecycleWorkflow:
             detail=detail,
             pr_number=self._input.pr_number,
         )
+
+    async def _finish_failed(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
+        """Falha terminal LIMPA (P6): status Failed + audit, sem output
+        truncado. Faz teardown do sandbox se existir (best-effort)."""
+        if self._input.sandbox_id:
+            try:
+                await workflow.execute_activity(
+                    ACTIVITY_TEARDOWN_SANDBOX,
+                    {"sandbox_id": self._input.sandbox_id,
+                     "work_item_id": self._input.work_item_id, "reason": audit_action},
+                    start_to_close_timeout=timedelta(seconds=120),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError:
+                logger.warning("teardown falhou durante falha terminal; seguindo mesmo assim")
+        detail = reason
+        self._input.terminal_detail = detail
+        await self._set_status(
+            WorkItemStatus.failed, audit_action=audit_action, details={"reason": reason}
+        )
+        return WorkItemLifecycleResult(
+            work_item_id=self._input.work_item_id,
+            status=WorkItemStatus.failed.value,
+            detail=detail,
+            pr_number=self._input.pr_number,
+        )
+
+    async def _finish_blocked(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
+        """Estado terminal Blocked (WSB-E3-T2: cascata de aprovadores vazia).
+        Distinto de Failed — o WorkItem esta esperando intervencao humana
+        (nomear um aprovador), nao morto. Escala junto (audit)."""
+        detail = reason
+        self._input.terminal_detail = detail
+        await self._set_status(
+            WorkItemStatus.blocked, audit_action=audit_action, details={"reason": reason}
+        )
+        await self._audit("escalated", {"reason": reason})
+        return WorkItemLifecycleResult(
+            work_item_id=self._input.work_item_id,
+            status=WorkItemStatus.blocked.value,
+            detail=detail,
+            pr_number=self._input.pr_number,
+        )
+
+    # ------------------------------------------------------------------
+    # Budgets (WSB-E4-T1) — deterministico, puro (aritmetica/comparacao),
+    # seguro no corpo do workflow. Checado na admissao e em CADA fronteira.
+    # ------------------------------------------------------------------
+    def _apply_pending_budget_raise(self) -> None:
+        if self._budget_raise_requested and self._budget_new_max is not None:
+            self._input.budget_max_usd = self._budget_new_max
+            self._budget_raise_requested = False
+            self._budget_new_max = None
+
+    async def _budget_boundary(self, boundary: str) -> None:
+        """Checa o teto de budget numa FRONTEIRA. Se ja aplicou um raise
+        pendente, usa o novo teto. Estourou -> `_BudgetExhausted` (nunca corta
+        no meio de uma Activity — so aqui, entre elas). Toda checagem audita."""
+        self._apply_pending_budget_raise()
+        cap = self._input.budget_max_usd
+        if cap is None:
+            return  # sem teto configurado: nada a impor
+        if self._input.spent_usd >= cap:
+            await self._audit(
+                "budget_boundary_denied",
+                {"boundary": boundary, "spent_usd": round(self._input.spent_usd, 6),
+                 "max_usd": cap},
+            )
+            raise _BudgetExhausted(
+                f"boundary={boundary} spent={round(self._input.spent_usd, 6)}>=max={cap}"
+            )
+        await self._audit(
+            "budget_boundary_ok",
+            {"boundary": boundary, "spent_usd": round(self._input.spent_usd, 6), "max_usd": cap},
+        )
+
+    async def _consume_cost(self, cost_usd: float, *, source: str) -> None:
+        """Agrega o custo reportado pelo gateway (WS-D) via o resultado da
+        Activity. Todo consumo audita (P8)."""
+        if not cost_usd:
+            return
+        self._input.spent_usd += float(cost_usd)
+        await self._audit(
+            "budget_consumed",
+            {"source": source, "delta_usd": float(cost_usd),
+             "spent_usd": round(self._input.spent_usd, 6)},
+        )
+
+    async def _run_model_activity(self, name: str, payload: dict[str, Any], result_type):
+        """Wrapper das Activities do caminho de MODELO/SANDBOX (planner/coder/
+        tester/l2/provision/l1). Converte uma recusa de politica fail-closed
+        (egress-proxy down, virtual key expirada, kill switch) em `_FailClosed`
+        — falha limpa e auditada, sem output truncado (P6). Erros
+        retryable/transientes continuam sendo retentados pelo proprio Temporal
+        (nao caem aqui: so ActivityError final chega)."""
+        try:
+            return await workflow.execute_activity(
+                name, payload, result_type=result_type, **self._activity_timeouts()
+            )
+        except ActivityError as exc:
+            blob = f"{type(exc.cause).__name__}:{exc.cause}".lower() if exc.cause else str(exc).lower()
+            if any(marker in blob for marker in _FAIL_CLOSED_MARKERS):
+                await self._audit(
+                    "model_path_fail_closed_detected",
+                    {"activity": name, "error": blob[:300]},
+                )
+                raise _FailClosed(f"{name}:{blob[:200]}")
+            raise
 
     async def _checkpoint_or_rebuild(self, phase_name: str) -> None:
         """WSB-E5-T1: checkpoint ao fim de cada fase, com retries limitados;
@@ -526,14 +755,29 @@ class WorkItemLifecycleWorkflow:
             return False
 
     # ------------------------------------------------------------------
-    # Fase 2 — implementacao (WSB-E2-T3, WSB-E5-T1)
+    # Fase 2 — implementacao (WSB-E2-T3 estendida, WSB-E3-T2/T3, WSB-E4, WSB-E5-T1)
+    # Sequencia: [budget admission] -> Planner (read-only) -> [gate de
+    # aprovacao de plano] -> provision -> (Coder -> Tester -> L1)* -> L2 -> PR.
     # ------------------------------------------------------------------
     async def _run_implementation_phase(self) -> WorkItemLifecycleResult:
         input = self._input
 
+        # WSB-E4-T1 — budget na admissao (nunca corta mid-Activity, so aqui).
+        await self._audit(
+            "budget_admitted",
+            {"max_usd": input.budget_max_usd, "spent_usd": round(input.spent_usd, 6)},
+        )
+        await self._budget_boundary("admission")
+
+        # WSB-E2-T3 estendida + WSB-E3-T2 — Planner read-only ANTES do gate, e o
+        # gate de aprovacao. So roda enquanto nao ha sandbox (uma vez por
+        # implementacao; re_plan reentra com sandbox_id None e plan_json vazio).
+        if not input.sandbox_id:
+            await self._run_planner_and_gate()
+
         if not input.sandbox_id:
             await self._boundary_gate()
-            handle: SandboxHandle = await workflow.execute_activity(
+            handle: SandboxHandle = await self._run_model_activity(
                 ACTIVITY_PROVISION_SANDBOX,
                 {
                     "work_item_id": input.work_item_id,
@@ -541,8 +785,7 @@ class WorkItemLifecycleWorkflow:
                     "repo": input.repo,
                     "base_branch": input.base_branch,
                 },
-                result_type=SandboxHandle,
-                **self._activity_timeouts(),
+                SandboxHandle,
             )
             input.sandbox_id = handle.sandbox_id
             input.branch = handle.branch
@@ -551,74 +794,119 @@ class WorkItemLifecycleWorkflow:
 
         while True:
             await self._boundary_gate()
+            await self._budget_boundary("coder_turn")
             await self._maybe_retry_from_checkpoint()
 
-            coder_result: CoderTurnResult = await workflow.execute_activity(
+            coder_result: CoderTurnResult = await self._run_model_activity(
                 ACTIVITY_RUN_CODER_TURN,
                 {
                     "sandbox_id": input.sandbox_id,
                     "work_item_id": input.work_item_id,
                     "tenant_id": input.tenant_id,
                     "instructions": list(input.clarification_notes),
+                    "objections": list(input.l2_objections),  # objecoes do L2 anterior, se houver
                     "model_override": self._model_override,
                     "runtime_override": self._runtime_override,
                 },
-                result_type=CoderTurnResult,
-                **self._activity_timeouts(),
+                CoderTurnResult,
             )
+            await self._consume_cost(coder_result.cost_usd, source="coder")
             await self._audit(
                 "coder_turn_completed",
                 {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
             )
+
+            # WSB-E2-T3 — Tester session (escreve/ajusta testes ANTES do L1).
+            await self._boundary_gate()
+            await self._budget_boundary("tester_turn")
+            tester_result: CoderTurnResult = await self._run_model_activity(
+                ACTIVITY_RUN_TESTER_TURN,
+                {
+                    "sandbox_id": input.sandbox_id,
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "plan": input.plan_json,
+                    "model_override": self._model_override,
+                    "runtime_override": self._runtime_override,
+                },
+                CoderTurnResult,
+            )
+            await self._consume_cost(tester_result.cost_usd, source="tester")
+            await self._audit("tester_turn_completed",
+                              {"files_changed": tester_result.files_changed})
 
             await self._boundary_gate()
             await self._checkpoint_or_rebuild("implementing")
 
             await self._set_status(WorkItemStatus.validating, audit_action="l1_started")
             await self._boundary_gate()
-            l1_result: L1Result = await workflow.execute_activity(
+            await self._budget_boundary("l1")
+            l1_result: L1Result = await self._run_model_activity(
                 ACTIVITY_RUN_L1_PIPELINE,
                 {"work_item_id": input.work_item_id, "sandbox_id": input.sandbox_id},
-                result_type=L1Result,
-                **self._activity_timeouts(),
+                L1Result,
             )
             await self._audit(
                 "l1_completed",
                 {"passed": l1_result.passed, "findings": [f.check for f in l1_result.findings]},
             )
 
-            if l1_result.passed:
-                break
-
-            input.coder_retry_count += 1
-            if input.coder_retry_count > self._input.coder_retry_cap:
-                self._input.terminal_detail = (
-                    f"l1_failed_after_{input.coder_retry_count - 1}_retries: "
-                    + "; ".join(f"{f.check}:{f.detail}" for f in l1_result.findings if not f.passed)
-                )
-                await self._set_status(WorkItemStatus.failed, audit_action="coder_retry_cap_exhausted")
-                try:
-                    await workflow.execute_activity(
-                        ACTIVITY_TEARDOWN_SANDBOX,
-                        {"sandbox_id": input.sandbox_id, "work_item_id": input.work_item_id,
-                         "reason": "l1_retry_cap_exhausted"},
-                        start_to_close_timeout=timedelta(seconds=120),
-                        retry_policy=RetryPolicy(maximum_attempts=3),
+            if not l1_result.passed:
+                input.coder_retry_count += 1
+                if input.coder_retry_count > self._input.coder_retry_cap:
+                    self._input.terminal_detail = (
+                        f"l1_failed_after_{input.coder_retry_count - 1}_retries: "
+                        + "; ".join(f"{f.check}:{f.detail}" for f in l1_result.findings if not f.passed)
                     )
-                except ActivityError:
-                    logger.warning("teardown falhou apos exaustao de retries; seguindo mesmo assim")
-                return WorkItemLifecycleResult(
-                    work_item_id=input.work_item_id,
-                    status=WorkItemStatus.failed.value,
-                    detail=self._input.terminal_detail,
-                    pr_number=input.pr_number,
-                )
+                    await self._set_status(WorkItemStatus.failed, audit_action="coder_retry_cap_exhausted")
+                    try:
+                        await workflow.execute_activity(
+                            ACTIVITY_TEARDOWN_SANDBOX,
+                            {"sandbox_id": input.sandbox_id, "work_item_id": input.work_item_id,
+                             "reason": "l1_retry_cap_exhausted"},
+                            start_to_close_timeout=timedelta(seconds=120),
+                            retry_policy=RetryPolicy(maximum_attempts=3),
+                        )
+                    except ActivityError:
+                        logger.warning("teardown falhou apos exaustao de retries; seguindo mesmo assim")
+                    return WorkItemLifecycleResult(
+                        work_item_id=input.work_item_id,
+                        status=WorkItemStatus.failed.value,
+                        detail=self._input.terminal_detail,
+                        pr_number=input.pr_number,
+                    )
+                await self._set_status(WorkItemStatus.implementing, audit_action="l1_failed_retrying",
+                                        details={"attempt": input.coder_retry_count})
+                continue  # novo turno do Coder no mesmo sandbox/branch
 
-            await self._set_status(WorkItemStatus.implementing, audit_action="l1_failed_retrying",
-                                    details={"attempt": input.coder_retry_count})
-            # volta ao topo do loop: novo turno do Coder no mesmo sandbox/branch
+            # L1 passou -> Reviewer L2 de contexto fresco (WSC-E3-T5/WSE-E2).
+            # P3: a sessao L2 recebe SO plan artifact + diff final — NUNCA o
+            # historico/instrucoes do Coder (construido em `_run_l2_review`).
+            await self._boundary_gate()
+            await self._budget_boundary("l2")
+            l2: L2Verdict = await self._run_l2_review(coder_result)
+            await self._consume_cost(l2.cost_usd, source="l2")
+
+            if not l2.passed:
+                input.l2_retry_count += 1
+                input.l2_objections = list(l2.objections)
+                await self._audit(
+                    "l2_objections_raised",
+                    {"attempt": input.l2_retry_count, "objections": l2.objections},
+                )
+                if input.l2_retry_count > self._input.l2_retry_cap:
+                    raise _EscalateNow(
+                        f"l2_objections_after_retry_cap (objections={l2.objections})"
+                    )
+                await self._set_status(WorkItemStatus.implementing,
+                                        audit_action="l2_changes_requested")
+                continue  # volta ao Coder com as objecoes do L2
+
+            input.l2_objections = []  # limpo — L2 aprovou
+            break
 
         await self._boundary_gate()
+        await self._budget_boundary("finalize_pr")
         pr_ref: PrRef = await workflow.execute_activity(
             ACTIVITY_FINALIZE_PR,
             {
@@ -662,6 +950,238 @@ class WorkItemLifecycleWorkflow:
         # corrida por construcao: nao ha run "fechando" para perder o sinal.
         input.phase = PHASE_REVIEW
         return await self._run_review_phase()
+
+    # ------------------------------------------------------------------
+    # WSB-E3-T2 — Planner read-only + gate de aprovacao de plano por risk class
+    # ------------------------------------------------------------------
+    async def _run_planner_and_gate(self) -> None:
+        """Roda o Planner (read-only) e aplica o gate. Ao retornar, o plano
+        esta aprovado (auto por politica OU por humano nomeado) e o workflow
+        pode provisionar/implementar. Levanta `_PlanRejected`/`_BlockNow`/
+        `_EscalateNow`/`_CancelledByOperator` nos caminhos que nao seguem."""
+        input = self._input
+
+        await self._boundary_gate()
+        await self._budget_boundary("planner")
+        plan: PlanArtifact = await self._run_model_activity(
+            ACTIVITY_RUN_PLANNER_TURN,
+            {
+                "work_item_id": input.work_item_id,
+                "tenant_id": input.tenant_id,
+                "repo": input.repo,
+                "base_branch": input.base_branch,
+                "instructions": list(input.clarification_notes),
+                "model_override": self._model_override,
+            },
+            PlanArtifact,
+        )
+        input.plan_json = plan.model_dump()
+        input.plan_rounds += 1
+        await self._audit(
+            "planner_completed",
+            {"risk_class_declared": plan.risk_class, "expected_files": plan.expected_files,
+             "round": input.plan_rounds},
+        )
+
+        # P1: classificacao de risco EFETIVA por POLITICA deterministica (fora
+        # do modelo) — um Planner que sub-classifica NAO rebaixa o gate.
+        effective_risk = policy.classify_risk(plan.expected_files, plan.risk_class)
+        input.risk_class = effective_risk
+
+        if not policy.requires_plan_approval(effective_risk, input.require_approval_risk_classes):
+            # Risco baixo -> auto-aprova POR POLITICA (nunca por ausencia de
+            # aprovador). Projeta e audita.
+            await self._record_gate(status="approved", auto_approved=True,
+                                    approvers=[], decided_by=None)
+            await self._audit("plan_auto_approved", {"risk_class": effective_risk})
+            return
+
+        # Risco alto -> resolve aprovador pela cascata CODEOWNERS -> access bundle.
+        resolved = await workflow.execute_activity(
+            LOCAL_ACTIVITY_RESOLVE_APPROVER,
+            {"tenant_id": input.tenant_id, "repo": input.repo,
+             "work_item_id": input.work_item_id, "channel": None},
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )
+        approvers = list(resolved.get("approvers") or [])
+        input.approvers = approvers
+
+        if not approvers:
+            # CASCATA VAZIA -> Blocked + escalacao, JAMAIS auto-aprova (P1/P3).
+            await self._record_gate(status="blocked", auto_approved=False,
+                                    approvers=[], decided_by=None)
+            await self._audit("plan_gate_no_approver_blocked", {"risk_class": effective_risk})
+            raise _BlockNow(
+                f"plan_approval_cascade_empty:no CODEOWNERS/designated approver for tenant={input.tenant_id}"
+            )
+
+        # Estaciona em espera DURAVEL (novo estado awaiting_plan_approval).
+        await self._set_raw_status(
+            STATUS_AWAITING_PLAN_APPROVAL,
+            audit_action="awaiting_plan_approval",
+            details={"risk_class": effective_risk, "approvers": approvers,
+                     "source": resolved.get("source")},
+        )
+        await self._record_gate(status="pending", auto_approved=False,
+                                approvers=approvers, decided_by=None)
+        # Renderiza o pedido de aprovacao via adapters (WS-A edita a mensagem
+        # de status unica in-place; aqui so pedimos que ela reflita o gate).
+        try:
+            await workflow.execute_activity(
+                ACTIVITY_POST_TRACKING_COMMENT,
+                {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                 "pr_number": None, "status": "awaiting_plan_approval"},
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
+        except ActivityError:
+            logger.warning("post_tracking_comment do gate falhou; gate segue durável mesmo assim")
+
+        # Espera durável pelo SIGNAL_PLAN_APPROVAL (roteado pelo WS-A quando
+        # status==awaiting_plan_approval). Anti-clobber: nao resetamos a flag
+        # antes de ler o payload.
+        await workflow.wait_condition(
+            lambda: self._plan_approval_received or self._cancelled
+            or self._operator_escalate_requested
+        )
+        if self._cancelled:
+            raise _CancelledByOperator()
+        if self._operator_escalate_requested:
+            raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
+
+        payload = self._plan_approval_payload or {}
+        self._plan_approval_received = False  # consumido
+        verdict = payload.get("verdict")
+        actor = payload.get("actor") or payload.get("decided_by") or "unknown"
+
+        if verdict == "approved":
+            await self._record_gate(status="approved", auto_approved=False,
+                                    approvers=approvers, decided_by=actor)
+            await self._audit("plan_approved", {"decided_by": actor, "risk_class": effective_risk})
+            input.status = WorkItemStatus.queued.value
+            await self._persist_status()
+            return
+
+        if verdict == "rejected":
+            route = payload.get("route")
+            justification = payload.get("justification") or payload.get("comment") or ""
+            # Rejeicao SEMPRE auditada com identidade + justificativa (WSB-E3-T3).
+            await self._record_gate(status="rejected", auto_approved=False, approvers=approvers,
+                                    decided_by=actor, route=route, justification=justification)
+            await self._audit(
+                "plan_rejected",
+                {"decided_by": actor, "route": route, "justification": justification,
+                 "risk_class": effective_risk},
+            )
+            if route not in ("re_plan", "re_clarify", "cancel"):
+                raise _EscalateNow(f"plan_rejected_unknown_route:{route!r}")
+            raise _PlanRejected(route=route, actor=actor, justification=justification)
+
+        raise _EscalateNow(f"unknown_plan_verdict:{verdict!r}")
+
+    async def _record_gate(self, *, status: str, auto_approved: bool, approvers: list[str],
+                           decided_by: str | None, route: str | None = None,
+                           justification: str | None = None) -> None:
+        """Projecao duravel do gate (migracao 0009) — consultavel pelo queue
+        board/operadores. NAO substitui o audit ledger (o proprio metodo caller
+        tambem chama `_audit`)."""
+        await workflow.execute_activity(
+            LOCAL_ACTIVITY_RECORD_GATE,
+            {
+                "work_item_id": self._input.work_item_id,
+                "tenant_id": self._input.tenant_id,
+                "risk_class": self._input.risk_class,
+                "status": status,
+                "auto_approved": auto_approved,
+                "resolved_approvers": approvers,
+                "decided_by": decided_by,
+                "rejection_route": route,
+                "justification": justification,
+                "plan_round": self._input.plan_rounds,
+            },
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )
+
+    async def _run_l2_review(self, coder_result: CoderTurnResult) -> "L2Verdict":
+        """WSC-E3-T5/WSE-E2 — sessao Reviewer L2 de contexto fresco. P3
+        (NAO-NEGOCIAVEL): o payload contem SO o plan artifact + o diff final;
+        NADA do historico/instrucoes do Coder (nenhum `instructions`,
+        `clarification_notes`, `objections` — deliberadamente ausentes)."""
+        input = self._input
+        l2: L2Verdict = await self._run_model_activity(
+            ACTIVITY_RUN_L2_REVIEW,
+            {
+                "work_item_id": input.work_item_id,
+                "tenant_id": input.tenant_id,
+                # P3: EXATAMENTE plan + diff, nada mais. O input da Activity L2
+                # (RunL2ReviewInput, WS-C) é deliberadamente estrito e não aceita
+                # `sandbox_id`/`files_changed` — enviamos só o que ele declara
+                # (reconciliação da integração da Fase 2; o diff resumido do
+                # Coder é o `diff`).
+                "plan": input.plan_json,
+                "diff": coder_result.diff_summary,
+            },
+            L2Verdict,
+        )
+        await self._audit("l2_review_completed",
+                          {"passed": l2.passed, "objections": l2.objections})
+        return l2
+
+    # ------------------------------------------------------------------
+    # WSB-E3-T3 — rejection path: 3 rotas deterministicas. Nenhuma dispara
+    # implementacao sem passar de novo pelo gate correspondente.
+    # ------------------------------------------------------------------
+    async def _handle_plan_rejection(self, exc: "_PlanRejected") -> WorkItemLifecycleResult:
+        input = self._input
+        if exc.route == "cancel":
+            detail = f"plan_rejected_cancel: {exc.justification}"
+            input.terminal_detail = detail
+            await self._set_status(
+                WorkItemStatus.failed, audit_action="plan_rejected_cancelled",
+                details={"decided_by": exc.actor, "justification": exc.justification},
+            )
+            return WorkItemLifecycleResult(
+                work_item_id=input.work_item_id, status=WorkItemStatus.failed.value,
+                detail=detail, pr_number=input.pr_number,
+            )
+
+        if exc.route == "re_clarify":
+            # Volta ao gate de CLARIFICACAO (nao a implementacao): reentra o
+            # intake do zero — implementacao so recomeca apos clarificacao +
+            # planner + gate de novo. Reabrir a clarificacao significa exigir
+            # que o requester re-forneca os criterios de aceite (o aprovador
+            # rejeitou justamente por ambiguidade do escopo): limpamos
+            # `acceptance_criteria` para o checklist deterministico reabrir a
+            # rodada (nunca "adivinha" — P1/P6).
+            input.phase = PHASE_INTAKE
+            input.status = WorkItemStatus.needs_clarification.value
+            input.clarification_rounds = 0
+            input.acceptance_criteria = None
+            input.plan_json = {}
+            input.risk_class = "low"
+            input.approvers = []
+            await self._audit("plan_rejected_route_re_clarify", {"decided_by": exc.actor})
+            await self._persist_status()
+            return workflow.continue_as_new(input)
+
+        if exc.route == "re_plan":
+            # Re-planeja: limpa o plano e reentra a fase de implementacao, que
+            # comeca pelo Planner + gate de novo (nunca pula o gate). Capado.
+            if input.plan_rounds >= input.plan_round_cap:
+                return await self._finish_escalated(
+                    f"plan_round_cap_exhausted:{input.plan_rounds}"
+                )
+            input.plan_json = {}
+            input.approvers = []
+            input.status = WorkItemStatus.queued.value
+            await self._audit("plan_rejected_route_re_plan",
+                              {"decided_by": exc.actor, "round": input.plan_rounds})
+            await self._persist_status()
+            return await self._run_implementation_phase()
+
+        return await self._finish_escalated(f"plan_rejected_unknown_route:{exc.route}")
 
     # ------------------------------------------------------------------
     # Fase 3 — review humano (WSB-E3-T4). NENHUM path chama merge da API do
@@ -756,9 +1276,10 @@ class WorkItemLifecycleWorkflow:
         branch/PR, re-valida L1, re-finaliza o MESMO PR (idempotente)."""
         input = self._input
         await self._boundary_gate()
+        await self._budget_boundary("review_fix_coder")
         await self._maybe_retry_from_checkpoint()
 
-        coder_result: CoderTurnResult = await workflow.execute_activity(
+        coder_result: CoderTurnResult = await self._run_model_activity(
             ACTIVITY_RUN_CODER_TURN,
             {
                 "sandbox_id": input.sandbox_id,
@@ -768,20 +1289,20 @@ class WorkItemLifecycleWorkflow:
                 "model_override": self._model_override,
                 "runtime_override": self._runtime_override,
             },
-            result_type=CoderTurnResult,
-            **self._activity_timeouts(),
+            CoderTurnResult,
         )
+        await self._consume_cost(coder_result.cost_usd, source="coder_fix")
         await self._audit("coder_fix_applied", {"files_changed": coder_result.files_changed})
 
         await self._boundary_gate()
         await self._checkpoint_or_rebuild("review_feedback")
 
         await self._set_status(WorkItemStatus.validating, audit_action="l1_revalidation_started")
-        l1_result: L1Result = await workflow.execute_activity(
+        await self._budget_boundary("review_fix_l1")
+        l1_result: L1Result = await self._run_model_activity(
             ACTIVITY_RUN_L1_PIPELINE,
             {"work_item_id": input.work_item_id, "sandbox_id": input.sandbox_id},
-            result_type=L1Result,
-            **self._activity_timeouts(),
+            L1Result,
         )
         if not l1_result.passed:
             input.coder_retry_count += 1

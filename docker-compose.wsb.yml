@@ -12,6 +12,11 @@ services:
       DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-dev}
       DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
       DSE_OTEL_EXPORTER: ${DSE_OTEL_EXPORTER:-console}
+      # Fase 2 (WSB-E1-T3) — fairness worker-side (caps de concorrencia por
+      # tenant lidos de tenant_config). "native" so quando o server for 1.31+.
+      DSE_FAIRNESS_MODE: ${DSE_FAIRNESS_MODE:-worker-side}
+      # Fase 2 (WSB-E3-T2) — POLITICA do gate de aprovacao (P1: fora do modelo).
+      DSE_REQUIRE_APPROVAL_RISK_CLASSES: ${DSE_REQUIRE_APPROVAL_RISK_CLASSES:-high}
       # Consumidos pelas Activities cross-workstream registradas neste worker
       # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
       DSE_MODEL_GATEWAY_URL: http://model-gateway:4000

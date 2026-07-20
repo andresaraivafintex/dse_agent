@@ -14,10 +14,16 @@ dependencies = [
     "uvicorn>=0.29",
     "pyyaml>=6.0",
     "psycopg2-binary>=2.9",
+    "PyJWT>=2.8",
+    "cryptography>=42.0",
+    "python-multipart>=0.0.9",
     "dse-audit",
 ]
 
 [project.optional-dependencies]
+# temporalio: envio real de signals do queue board (WSF-E6-T2). Opcional porque
+# os testes usam FakeSignalSender; instale para o TemporalSignalSender real.
+temporal = ["temporalio>=1.7"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 
 [tool.setuptools.packages.find]

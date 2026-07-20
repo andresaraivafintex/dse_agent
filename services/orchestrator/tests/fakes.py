@@ -16,6 +16,41 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
+
+
+def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
+    """WSB-E5-T3b — simula uma recusa de politica fail-closed do caminho de
+    modelo/egress (egress-proxy down, virtual key expirada, kill switch). Levanta
+    um ApplicationError NAO-retryable com um marcador que o
+    `_run_model_activity` do workflow reconhece — falha limpa, sem output
+    truncado (P6). Marcado como FAKE de fronteira (WS-D/WS-C reais fazem isso
+    de verdade)."""
+    spec = state.fail_closed_on.get(name)
+    if not spec:
+        return
+    times = spec.get("times", 0)
+    if times <= 0:
+        return
+    spec["times"] = times - 1
+    marker = spec.get("marker", "egress_proxy_unreachable_fail_closed")
+    raise ApplicationError(marker, type="EgressFailClosed", non_retryable=True)
+
+
+def _maybe_transient_fail(state: "FakeControlPlane", name: str) -> None:
+    """WSB-E5-T3b — simula uma oscilacao TRANSIENTE do gateway (LiteLLM cai e
+    volta mid-task). Erro RETRYABLE: o proprio Temporal retenta a Activity ate
+    passar — a durabilidade absorve a oscilacao sem perder progresso nem
+    truncar output (P6/P8)."""
+    spec = state.transient_fail_on.get(name)
+    if not spec:
+        return
+    times = spec.get("times", 0)
+    if times <= 0:
+        return
+    spec["times"] = times - 1
+    raise ApplicationError("gateway_oscillation_transient", type="GatewayUnavailable",
+                           non_retryable=False)
 
 from dse_contracts.activities import (
     ACTIVITY_CHECKPOINT_SANDBOX,
@@ -26,15 +61,20 @@ from dse_contracts.activities import (
     ACTIVITY_REBUILD_SANDBOX,
     ACTIVITY_RUN_CODER_TURN,
     ACTIVITY_RUN_L1_PIPELINE,
+    ACTIVITY_RUN_L2_REVIEW,
+    ACTIVITY_RUN_PLANNER_TURN,
+    ACTIVITY_RUN_TESTER_TURN,
     ACTIVITY_TEARDOWN_SANDBOX,
     CheckpointRef,
     CiStatusResult,
     CoderTurnResult,
     L1Finding,
     L1Result,
+    L2Verdict,
     PrRef,
     SandboxHandle,
 )
+from dse_contracts.plan_artifact import PlanArtifact
 
 
 @dataclass
@@ -59,11 +99,74 @@ class FakeControlPlane:
     # para simular uma Activity longa em andamento quando o worker morre)
     coder_turn_hang_event: Any = None
 
+    # --- Fase 2: Planner / Tester / Reviewer L2 (WS-C/WS-E fronteiras) ---
+    planner_calls: int = 0
+    tester_calls: int = 0
+    l2_calls: int = 0
+    # risco declarado pelo Planner (default low -> auto-aprova o gate)
+    plan_risk_class: str = "low"
+    plan_expected_files: list[str] = field(default_factory=lambda: ["app.py"])
+    planner_cost_usd: float = 0.0
+    tester_cost_usd: float = 0.0
+    l2_cost_usd: float = 0.0
+    coder_cost_usd: float = 0.01
+    # L2: falha N vezes (objecoes) antes de aprovar
+    l2_fail_times: int = 0
+    l2_objections: list[str] = field(default_factory=lambda: ["app.py:12 sem teste"])
+    # captura do ULTIMO payload que a fake L2 recebeu (prova de isolamento P3)
+    last_l2_payload: dict | None = None
+    # simula recusa fail-closed do caminho de modelo (WSB-E5-T3b): nome da
+    # activity -> {"times": N, "marker": str}. Erro NAO-retryable -> falha limpa.
+    fail_closed_on: dict = field(default_factory=dict)
+    # simula oscilacao TRANSIENTE do gateway (LiteLLM instavel mid-task): nome
+    # da activity -> {"times": N}. Erro RETRYABLE -> Temporal retenta ate passar.
+    transient_fail_on: dict = field(default_factory=dict)
+
 
 def build_fake_activities(state: FakeControlPlane) -> list[Any]:
+    async def run_planner_turn(payload: dict) -> PlanArtifact:
+        state.planner_calls += 1
+        state.calls_log.append("run_planner_turn")
+        _maybe_fail_closed(state, ACTIVITY_RUN_PLANNER_TURN)
+        return PlanArtifact(
+            work_item_id=payload["work_item_id"],
+            steps=["passo 1", "passo 2"],
+            expected_files=list(state.plan_expected_files),
+            test_plan="cobre o caminho feliz",
+            risk_class=state.plan_risk_class,
+        )
+
+    async def run_tester_turn(payload: dict) -> CoderTurnResult:
+        state.tester_calls += 1
+        state.calls_log.append("run_tester_turn")
+        _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
+        return CoderTurnResult(
+            sandbox_id=payload["sandbox_id"],
+            diff_summary="fake tests",
+            files_changed=["test_app.py"],
+            cost_usd=state.tester_cost_usd,
+        )
+
+    async def run_l2_review(payload: dict) -> L2Verdict:
+        state.l2_calls += 1
+        state.calls_log.append("run_l2_review")
+        state.last_l2_payload = dict(payload)
+        _maybe_fail_closed(state, ACTIVITY_RUN_L2_REVIEW)
+        if state.l2_fail_times > 0:
+            state.l2_fail_times -= 1
+            return L2Verdict(
+                work_item_id=payload["work_item_id"], passed=False,
+                objections=list(state.l2_objections), cost_usd=state.l2_cost_usd,
+            )
+        return L2Verdict(
+            work_item_id=payload["work_item_id"], passed=True, objections=[],
+            cost_usd=state.l2_cost_usd,
+        )
+
     async def provision_sandbox(payload: dict) -> SandboxHandle:
         state.provision_calls += 1
         state.calls_log.append("provision_sandbox")
+        _maybe_fail_closed(state, ACTIVITY_PROVISION_SANDBOX)
         return SandboxHandle(
             sandbox_id=f"sbx-{payload['work_item_id']}",
             work_item_id=payload["work_item_id"],
@@ -74,13 +177,15 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def run_coder_turn(payload: dict) -> CoderTurnResult:
         state.coder_turn_calls += 1
         state.calls_log.append("run_coder_turn")
+        _maybe_transient_fail(state, ACTIVITY_RUN_CODER_TURN)
+        _maybe_fail_closed(state, ACTIVITY_RUN_CODER_TURN)
         if state.coder_turn_hang_event is not None:
             await state.coder_turn_hang_event.wait()
         return CoderTurnResult(
             sandbox_id=payload["sandbox_id"],
             diff_summary="fake diff",
             files_changed=["app.py"],
-            cost_usd=0.01,
+            cost_usd=state.coder_cost_usd,
             tokens_in=10,
             tokens_out=10,
         )
@@ -149,6 +254,9 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         )
 
     return [
+        activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)(run_planner_turn),
+        activity.defn(name=ACTIVITY_RUN_TESTER_TURN)(run_tester_turn),
+        activity.defn(name=ACTIVITY_RUN_L2_REVIEW)(run_l2_review),
         activity.defn(name=ACTIVITY_PROVISION_SANDBOX)(provision_sandbox),
         activity.defn(name=ACTIVITY_RUN_CODER_TURN)(run_coder_turn),
         activity.defn(name=ACTIVITY_CHECKPOINT_SANDBOX)(checkpoint_sandbox),
