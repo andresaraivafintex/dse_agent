@@ -158,6 +158,45 @@ precisar de uma tabela própria, escreva-a em `migrations/000X_wsY.sql`
 `DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse python3 scripts/migrate.py`
 (idempotente, só aplica o que for novo).
 
+## Fase 2 ("Judgment & queue") — escopo e reservas
+
+A Fase 1 está completa e integrada (ver `docs/PHASE1-STATUS.md` e o adendo
+`../plano-desenvolvimento/01-ADENDO-FASE2-POS-FASE1.md`). A Fase 2 adiciona:
+split Planner/Tester/Reviewer (WS-C), gate de aprovação de plano por risk
+class + rejection path + budgets (WS-B), adapter Jira + mapeamento de tenant +
+webhook de merge + roteamento de signal por status (WS-A), policy/budget no
+call time + kill switch de gateway (WS-D), L2 fresh-context (WS-E), access
+bundles + ADR-22/SSO design + suíte de isolamento multi-tenant + queue board
+(WS-F). **Continua fora de escopo até a Fase 3/4:** previews Argo CD,
+evidência Playwright/vídeo, artifact store, promoção de skills (só bootstrap
+do registry na Fase 2).
+
+Contratos novos já publicados na fundação (importe, não redefina):
+`SIGNAL_PLAN_APPROVAL` (payload documentado em `constants.py`),
+`ACTIVITY_RUN_PLANNER_TURN` / `ACTIVITY_RUN_TESTER_TURN` /
+`ACTIVITY_RUN_L2_REVIEW`, `L2Verdict`, `PrRef.compare_url` (opcional,
+`pr_number` agora opcional — exatamente um dos dois presente),
+`OTEL_ATTR_TASK_CLASS`.
+
+Migrações reservadas da Fase 2 (mesma regra da Fase 1 — um arquivo por WS):
+
+| Arquivo | Workstream |
+|---|---|
+| `migrations/0008_wsa2.sql` | WS-A (ex.: tenant_platform_bindings) |
+| `migrations/0009_wsb2.sql` | WS-B |
+| `migrations/0010_wsc2.sql` | WS-C (ex.: skill_registry, retrieval index) |
+| `migrations/0011_wsd2.sql` | WS-D (ex.: model_policies) |
+| `migrations/0012_wse2.sql` | WS-E |
+| `migrations/0013_wsf2.sql` | WS-F (ex.: dse_access_bundles) |
+
+Portas novas reservadas: **8890** = queue board do admin console (WS-F).
+
+Nota de infra: o cluster Temporal da fundação foi atualizado de
+`auto-setup:1.24` para a maior versão disponível no registro (drill de
+upgrade WSB-E1-T5). Priority & Fairness nativo (1.31+) NÃO está disponível —
+fairness na Fase 2 é worker-side (caps de concorrência por tenant lidos de
+`tenant_config`), atrás de interface trocável quando o servidor suportar.
+
 ## Como rodar localmente
 
 ```

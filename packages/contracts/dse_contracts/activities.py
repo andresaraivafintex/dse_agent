@@ -31,6 +31,14 @@ ACTIVITY_POST_TRACKING_COMMENT = "post_tracking_comment"
 ACTIVITY_CONSUME_CI_STATUS = "consume_ci_status"
 ACTIVITY_EMIT_AUDIT = "emit_audit_event"
 
+# --- Fase 2 (split de sessões stage-scoped + L2, ADR-13/FR-08/FR-13) ---
+# Donos: WS-C implementa as sessões (planner/tester/reviewer L2 — a sessão L2
+# é construída no WS-C por decisão de de-duplicação do plano mestre §7; o
+# WS-E orquestra o loop de fix-retries em torno dela); WS-B chama por nome.
+ACTIVITY_RUN_PLANNER_TURN = "run_planner_turn"
+ACTIVITY_RUN_TESTER_TURN = "run_tester_turn"
+ACTIVITY_RUN_L2_REVIEW = "run_l2_review"
+
 
 # ---------------------------------------------------------------------------
 # Dono: WS-C (services/sandbox-runtime)
@@ -74,9 +82,26 @@ class L1Result(BaseModel):
 
 
 class PrRef(BaseModel):
+    # Fase 2 (adendo 01 §4, aprovado pelo arquiteto): `pr_number` opcional +
+    # `compare_url` para o modo estrito (WSE-E3-T8) em que o sistema só faz
+    # push do branch e posta um compare link — o PR é aberto por um humano.
+    # Mudança aditiva: todo caller da Fase 1 continua construindo com
+    # pr_number preenchido; exatamente um dos dois deve estar presente.
     work_item_id: str
-    pr_number: int
+    pr_number: int | None = None
     url: str
+    compare_url: str | None = None
+
+
+class L2Verdict(BaseModel):
+    """Veredito estruturado da sessão Reviewer de contexto fresco (Fase 2,
+    WSC-E3-T5 constrói a sessão / WSE-E2 orquestra o loop). P3: a sessão L2
+    recebe APENAS plan artifact + diff final — nunca o histórico do Coder."""
+
+    work_item_id: str
+    passed: bool
+    objections: list[str] = []  # vazia quando passed; específicas (arquivo/linha) quando não
+    cost_usd: float = 0.0
 
 
 class CiStatusResult(BaseModel):

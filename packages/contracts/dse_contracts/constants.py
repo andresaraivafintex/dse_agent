@@ -19,6 +19,14 @@ SIGNAL_CLARIFICATION_ANSWER = "clarification_answer"
 SIGNAL_REVIEW_COMMENT = "review_comment"
 SIGNAL_MERGED_BY_HUMAN = "merged_by_human"
 
+# Fase 2 (adendo 01 §2.2): signal do gate de aprovação de plano (WSB-E3-T2).
+# Payload: {"verdict": "approved"|"rejected", "route": "re_plan"|"re_clarify"|
+# "cancel" (obrigatório quando rejected — WSB-E3-T3), "comment": str,
+# "actor": principal resolvido}. O dispatcher do WS-A roteia `kind=approval`
+# para este signal quando work_items.status == 'awaiting_plan_approval'
+# (WSA-E6-T3) — nunca mais só pelo `kind`.
+SIGNAL_PLAN_APPROVAL = "plan_approval"
+
 # Limitação conhecida (documentar, não esconder — P8): o roteamento correto
 # de um ConversationEvent correlacionado (Path B) deveria depender do ESTADO
 # atual do WorkItem (esperando clarificação? esperando review?), não só do
@@ -37,3 +45,6 @@ OTEL_ATTR_MODEL = "dse.model"
 OTEL_ATTR_COST_USD = "dse.cost_usd"
 OTEL_ATTR_TOKENS_IN = "dse.tokens_in"
 OTEL_ATTR_TOKENS_OUT = "dse.tokens_out"
+# Promovido do WS-D na Fase 2 (adendo 01 §4) — já era emitido como atributo
+# ad-hoc "dse.task_class" na Fase 1.
+OTEL_ATTR_TASK_CLASS = "dse.task_class"

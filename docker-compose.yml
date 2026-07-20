@@ -26,7 +26,7 @@ services:
     networks: [dse_net]
 
   temporal:
-    image: temporalio/auto-setup:1.24
+    image: temporalio/auto-setup:1.29
     container_name: dse_temporal
     depends_on:
       postgres:
@@ -38,11 +38,16 @@ services:
       POSTGRES_PWD: dse_dev_only
       POSTGRES_SEEDS: postgres
       # Achado da integração da Fase 1: "development-sql.yaml" não existe na
-      # imagem temporalio/auto-setup:1.24 (o container ficava Exited(1) até
-      # alguém copiar um arquivo vazio manualmente pra dentro dele — um fix
-      # que só "colava" enquanto ninguém recriasse o container). O próprio
-      # image já ships um "docker.yaml" vazio-mas-válido para este exato
-      # propósito — usar esse em vez de inventar um path.
+      # imagem auto-setup (o container ficava Exited(1) até alguém copiar um
+      # arquivo vazio manualmente — fix que só "colava" enquanto ninguém
+      # recriasse o container). A imagem já ships um "docker.yaml"
+      # vazio-mas-válido para este exato propósito — usar esse.
+      #
+      # Fase 2 (WSB-E1-T5, adendo 01): imagem atualizada de auto-setup:1.24
+      # para 1.29 (maior versão disponível no registro; 1.31+, que traz
+      # Priority & Fairness nativo, ainda não publicada). O estado do Temporal
+      # vive em bancos Postgres próprios (temporal, temporal_visibility), então
+      # o upgrade é seguro — a schema é migrada pelo auto-setup no boot.
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
     ports:
       - "7233:7233"

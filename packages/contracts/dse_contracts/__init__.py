@@ -10,7 +10,15 @@ from .work_item import (
 from .plan_artifact import PlanArtifact
 from .gateway_contract import GatewayCallHeaders, GatewayErrorResponse, Stage
 from .mutable_comment import CommentBackend, MutableCommentWriter
-from .constants import TASK_QUEUE, WORKFLOW_TYPE
+from .constants import (
+    OTEL_ATTR_TASK_CLASS,
+    SIGNAL_CLARIFICATION_ANSWER,
+    SIGNAL_MERGED_BY_HUMAN,
+    SIGNAL_PLAN_APPROVAL,
+    SIGNAL_REVIEW_COMMENT,
+    TASK_QUEUE,
+    WORKFLOW_TYPE,
+)
 from .activities import (
     ACTIVITY_CHECKPOINT_SANDBOX,
     ACTIVITY_CONSUME_CI_STATUS,
@@ -21,12 +29,16 @@ from .activities import (
     ACTIVITY_REBUILD_SANDBOX,
     ACTIVITY_RUN_CODER_TURN,
     ACTIVITY_RUN_L1_PIPELINE,
+    ACTIVITY_RUN_L2_REVIEW,
+    ACTIVITY_RUN_PLANNER_TURN,
+    ACTIVITY_RUN_TESTER_TURN,
     ACTIVITY_TEARDOWN_SANDBOX,
     CheckpointRef,
     CiStatusResult,
     CoderTurnResult,
     L1Finding,
     L1Result,
+    L2Verdict,
     PrRef,
     SandboxHandle,
 )
@@ -34,6 +46,11 @@ from .activities import (
 __all__ = [
     "TASK_QUEUE",
     "WORKFLOW_TYPE",
+    "SIGNAL_CLARIFICATION_ANSWER",
+    "SIGNAL_REVIEW_COMMENT",
+    "SIGNAL_MERGED_BY_HUMAN",
+    "SIGNAL_PLAN_APPROVAL",
+    "OTEL_ATTR_TASK_CLASS",
     "SandboxHandle",
     "CheckpointRef",
     "CoderTurnResult",
@@ -47,6 +64,10 @@ __all__ = [
     "ACTIVITY_REBUILD_SANDBOX",
     "ACTIVITY_TEARDOWN_SANDBOX",
     "ACTIVITY_RUN_L1_PIPELINE",
+    "ACTIVITY_RUN_L2_REVIEW",
+    "ACTIVITY_RUN_PLANNER_TURN",
+    "ACTIVITY_RUN_TESTER_TURN",
+    "L2Verdict",
     "ACTIVITY_FINALIZE_PR",
     "ACTIVITY_POST_TRACKING_COMMENT",
     "ACTIVITY_CONSUME_CI_STATUS",
