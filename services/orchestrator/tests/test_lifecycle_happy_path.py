@@ -52,11 +52,14 @@ async def test_happy_path_reaches_done(time_skipping_env):
 
         # workflow deve chegar em pr_ready e ficar esperando review humano —
         # fazemos polling curto via query ate ver o status esperado.
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        await _wait_for_status(handle, {"pr_ready"})  # approved_awaiting_merge ainda e pr_ready
-        await handle.signal("merged_by_human", {})
+        # estados finos (spec §2): apos aprovar, o workflow estaciona em
+        # merge_pending esperando o merge humano; `pr_ready` cobre o fallback
+        # coarse de runs sem o patch de estados finos.
+        await _wait_for_status(handle, {"merge_pending", "pr_ready"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
 
         result = await handle.result()
 
@@ -110,9 +113,9 @@ async def test_l1_failure_triggers_fix_loop_then_passes(time_skipping_env):
             id=work_item_id,
             task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
