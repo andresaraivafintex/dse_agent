@@ -155,11 +155,19 @@ class AdoptPrInput(BaseModel):
 
 
 class ConsumeCiStatusInput(BaseModel):
+    """Lição de robustez (auditoria pós-S7, observada AO VIVO): payloads de
+    activity ficam GRAVADOS na história do Temporal — um call site antigo que
+    agendou esta activity com {work_item_id, pr_number} retenta com esse
+    payload PARA SEMPRE; corrigir o call site não cura workflows em voo. Por
+    isso tenant_id/repo/ref têm default vazio e são RESOLVIDOS do banco pela
+    activity quando ausentes (work_items + wse_pr_tracking) — payload antigo
+    decodifica e o workflow se auto-cura no próximo retry."""
+
     work_item_id: str
-    tenant_id: str
-    repo: str
+    tenant_id: str = ""
+    repo: str = ""
     pr_number: int
-    ref: str = Field(description="commit sha (ou nome de branch) para consultar check-runs")
+    ref: str = Field(default="", description="commit sha (ou nome de branch) para consultar check-runs")
     # Fase 3 (WSE-E4-T9b) — aditivo: quando `surface_ref` vem preenchido, o
     # consumo L3 reflete o status no tracking comment único do PR e habilita
     # targeted re-runs/episódios de repair. Payloads da Fase 1/2 (sem o campo)
@@ -330,7 +338,37 @@ def _adopt_pr(inp: AdoptPrInput) -> PrRef | None:
     )
 
 
+def _resolve_ci_input_gaps(inp: ConsumeCiStatusInput) -> ConsumeCiStatusInput:
+    """Preenche tenant_id/repo/ref ausentes (payload antigo na história do
+    Temporal — ver docstring do modelo) a partir de work_items +
+    wse_pr_tracking. Deterministico; no-op quando o payload já veio completo."""
+    if inp.tenant_id and inp.repo and inp.ref:
+        return inp
+    from dse_validation.db import get_connection
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT wi.tenant_id, t.repo, t.branch
+            FROM work_items wi
+            LEFT JOIN wse_pr_tracking t ON t.work_item_id = wi.id
+            WHERE wi.id = %s
+            ORDER BY t.created_at DESC NULLS LAST LIMIT 1
+            """,
+            (inp.work_item_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return inp
+    tenant_id, repo, branch = row
+    return inp.model_copy(update={
+        "tenant_id": inp.tenant_id or (tenant_id or ""),
+        "repo": inp.repo or (repo or ""),
+        "ref": inp.ref or (branch or ""),
+    })
+
+
 def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
+    inp = _resolve_ci_input_gaps(inp)
     github_client = build_github_client(GitHubConfig())
     if inp.surface_ref is None:
         # comportamento Fase 1/2 inalterado (poll + agregação + persistência)

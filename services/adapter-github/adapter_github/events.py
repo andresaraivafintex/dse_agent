@@ -105,6 +105,31 @@ def build_event_from_pr_merged(
     )
 
 
+def build_event_from_pr_review(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
+    """Webhook `pull_request_review` (action=submitted) — o ÚNICO evento do
+    GitHub que carrega o veredito formal do review (`review.state`:
+    approved / changes_requested / commented). Auditoria pós-S7: sem este
+    builder, `source_ref.review_state` nunca era populado e
+    `_review_signal_payload` (dispatcher) devolvia None para TODO review do
+    GitHub — o loop de changes_requested era inalcançável a partir da UI.
+    O `review_state` entra no source_ref e vira o verdict do signal."""
+    repo = payload["repository"]["full_name"]
+    number = payload["pull_request"]["number"]
+    review = payload["review"]
+    sender = review["user"]["login"]
+
+    return ConversationEvent.build(
+        platform=Platform.github,
+        thread_key=f"{repo}:{number}",
+        message_id=f"review:{review['id']}",
+        kind=EventKind.review_comment,
+        source_ref={"repo": repo, "number": number, "review_state": str(review.get("state", "")).lower()},
+        actor=_actor(sender, resolved_principal),
+        content_snapshot=review.get("body") or "",
+        signature_verified=True,
+    )
+
+
 def build_event_from_pr_review_comment(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
     repo = payload["repository"]["full_name"]
     number = payload["pull_request"]["number"]

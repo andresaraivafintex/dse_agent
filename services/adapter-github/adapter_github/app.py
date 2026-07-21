@@ -35,6 +35,7 @@ from .events import (
     build_event_from_issue_assigned_or_labeled,
     build_event_from_issue_comment,
     build_event_from_pr_merged,
+    build_event_from_pr_review,
     build_event_from_pr_review_comment,
 )
 
@@ -143,13 +144,42 @@ def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str, b
         conn.close()
 
 
+def _resolve_pr_correlation_ref(conn, *, tenant_id: str, repo: str, pr_number: int) -> dict | None:
+    """Auditoria pós-S7: o source_ref do WorkItem guarda o número da ISSUE de
+    origem, não o do PR (issue #5 -> PR #6) — correlacionar pelo número do PR
+    nunca casava. A ponte determinística é `wse_pr_tracking` (populada pelo
+    finalizer, 1 PR por WorkItem): resolve PR -> work_item e devolve o
+    source_ref EXATO desse WorkItem como correlation_ref (containment por
+    igualdade). None quando o PR não é rastreado (ex.: PR aberto por humano)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT wi.source_ref FROM wse_pr_tracking t
+            JOIN work_items wi ON wi.id = t.work_item_id
+            WHERE t.tenant_id = %s AND t.repo = %s AND t.pr_number = %s
+            ORDER BY t.created_at DESC LIMIT 1
+            """,
+            (tenant_id, repo, int(pr_number)),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _handle_pr_comment_event(conv_event, *, principal: str, tenant_id: str) -> dict:
     """Path usado por comentários em PR (issue_comment numa PR ou
     pull_request_review_comment) — NUNCA cria WorkItem novo (WSA-E4-T1)."""
     sanitized = sanitize_content(conv_event.content_snapshot)
     conn = get_connection()
     try:
-        result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
+        # 1º: PR rastreado -> source_ref do WorkItem dono. Fallback: o próprio
+        # source_ref do evento SEM campos extras (ex.: review_state), que
+        # quebrariam o containment `@>` do correlate.
+        ref = _resolve_pr_correlation_ref(
+            conn, tenant_id=tenant_id,
+            repo=conv_event.source_ref["repo"], pr_number=conv_event.source_ref["number"],
+        ) or {"repo": conv_event.source_ref["repo"], "number": conv_event.source_ref["number"]}
+        result = correlate(conn, tenant_id=tenant_id, event=conv_event,
+                           requester_principal=principal, correlation_ref=ref)
 
         if result.kind == "unauthorized":
             conn.commit()
@@ -264,6 +294,17 @@ async def github_webhook(request: Request) -> dict:
         sender = payload["comment"]["user"]["login"]
         principal = resolve_principal("github", sender, sender)
         conv_event = build_event_from_pr_review_comment(payload, resolved_principal=principal)
+        return _handle_pr_comment_event(conv_event, principal=principal, tenant_id=tenant_id)
+
+    if event_type == "pull_request_review" and action == "submitted":
+        # Auditoria pós-S7: review formal (Request changes / Approve na UI) —
+        # o único evento com `review.state`. Mesmo path de signal dos
+        # comentários de PR (NUNCA cria WorkItem — WSA-E4-T1); o dispatcher
+        # converte review_state em verdict (changes_requested/approved) e um
+        # state=commented segue sem verdict (rota no-op documentada).
+        sender = payload["review"]["user"]["login"]
+        principal = resolve_principal("github", sender, sender)
+        conv_event = build_event_from_pr_review(payload, resolved_principal=principal)
         return _handle_pr_comment_event(conv_event, principal=principal, tenant_id=tenant_id)
 
     if event_type == "pull_request" and action == "closed":

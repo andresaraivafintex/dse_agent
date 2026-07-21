@@ -346,3 +346,54 @@ def test_secret_pattern_in_comment_is_redacted_in_sanitized_content():
 
     assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" in payload["content_snapshot"]
     assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in payload["sanitized_content"]
+
+
+def test_pull_request_review_submitted_carries_review_state_for_verdict():
+    """Auditoria pós-S7: o webhook `pull_request_review` (Request changes /
+    Approve na UI) é o ÚNICO com `review.state`; sem tratá-lo, o dispatcher
+    nunca via um verdict e o loop de changes_requested era inalcançável.
+    Valida: correlaciona como signal + `review_state` no source_ref do evento
+    (é dele que `_review_signal_payload` deriva o verdict)."""
+    created = _post(
+        {
+            "action": "labeled",
+            "issue": {"number": 700, "title": "t", "body": "b"},
+            "label": {"name": "dse"},
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "alice"},
+        },
+        "issues",
+        "delivery-700",
+    )
+    work_item_id = created["work_item_id"]
+    _allow_steering("erin")
+
+    review = _post(
+        {
+            "action": "submitted",
+            "pull_request": {"number": 700},
+            "review": {
+                "id": 7007,
+                "state": "changes_requested",
+                "body": "Remova o arquivo .dse-task-branch do PR",
+                "user": {"login": "erin"},
+            },
+            "repository": {"full_name": "acme/widgets"},
+        },
+        "pull_request_review",
+        "delivery-701",
+    )
+    assert review["path"] == "signal"
+    assert review["work_item_id"] == work_item_id
+
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload FROM ingest_events WHERE work_item_id = %s AND event_id IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (work_item_id,),
+        )
+        payload = cur.fetchone()[0]
+    conn.close()
+    assert payload["source_ref"]["review_state"] == "changes_requested"
+    assert ".dse-task-branch" in payload["content_snapshot"]
