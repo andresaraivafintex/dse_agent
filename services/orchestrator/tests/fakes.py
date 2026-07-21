@@ -283,8 +283,10 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             url=f"https://github.com/x/y/pull/{pr_number}",
         )
 
-    async def post_tracking_comment(payload: dict) -> None:
-        state.calls_log.append("post_tracking_comment")
+    # S3 (Fase 5): post_tracking_comment agora é uma Activity LOCAL REAL
+    # (em LOCAL_ACTIVITIES) — não é mais fake aqui, senão colide (dois
+    # @activity.defn com o mesmo nome no worker de teste). A real é
+    # best-effort: sem adapter no ar nos testes, retorna ok=False sem crashar.
 
     async def consume_ci_status(payload: dict) -> CiStatusResult:
         state.calls_log.append("consume_ci_status")
@@ -390,7 +392,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         activity.defn(name=ACTIVITY_TEARDOWN_SANDBOX)(teardown_sandbox),
         activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)(run_l1_pipeline),
         activity.defn(name=ACTIVITY_FINALIZE_PR)(finalize_pr),
-        activity.defn(name=ACTIVITY_POST_TRACKING_COMMENT)(post_tracking_comment),
+        # post_tracking_comment: real, vem de LOCAL_ACTIVITIES (S3) — não registrar aqui.
         activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)(consume_ci_status),
         activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)(trigger_preview),
         activity.defn(name=ACTIVITY_RUN_DEMO_EVIDENCE)(run_demo_evidence),

@@ -77,7 +77,7 @@ def _resolve_tenant_for(payload: dict) -> str:
         conn.close()
 
 
-def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str) -> dict:
+def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str, base_branch: str | None = None) -> dict:
     """Path usado por eventos que PODEM legitimamente abrir um WorkItem
     novo (issues assigned/labeled, comentário com menção numa issue comum).
     """
@@ -122,6 +122,7 @@ def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str) -
                 channel=conv_event.source_ref["repo"],
                 requester_principal=principal,
                 repo=conv_event.source_ref["repo"],
+                base_branch=base_branch,
                 sanitized_content=sanitized,
                 conn=conn,
             )
@@ -237,7 +238,14 @@ async def github_webhook(request: Request) -> dict:
         conv_event = build_event_from_issue_assigned_or_labeled(
             payload, delivery_id=delivery_id, resolved_principal=principal
         )
-        return _handle_task_creating_event(conv_event, principal=principal, tenant_id=tenant_id)
+        # S6 (Fase 5): issues do GitHub nao tem base_branch; o default do repo
+        # vem no proprio payload do webhook (repository.default_branch) — sem
+        # chamada extra a API. Preenche o WorkItem para o gate de completude
+        # (S2) nao pedir clarificacao a toa e o clone (S4) saber a branch base.
+        default_branch = (payload.get("repository") or {}).get("default_branch")
+        return _handle_task_creating_event(
+            conv_event, principal=principal, tenant_id=tenant_id, base_branch=default_branch
+        )
 
     if event_type == "issue_comment" and action == "created":
         sender = payload["comment"]["user"]["login"]

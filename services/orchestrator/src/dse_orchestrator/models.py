@@ -33,6 +33,10 @@ class WorkItemLifecycleInput:
     base_branch: str | None = None
     data_class: str = "internal"
     acceptance_criteria: str | None = None
+    # S1 (Fase 5): titulo+corpo da issue (ja sanitizado) — o QUE construir.
+    # Carregado de ingest_events.payload por load_work_item; passado como
+    # instruction do Planner/Coder. Sem isto os agentes nao sabiam a tarefa.
+    task_content: str = ""
 
     phase: str = PHASE_INTAKE
     status: str = "new"

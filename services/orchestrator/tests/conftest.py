@@ -13,6 +13,12 @@ DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
 )
 
+# S3 (Fase 5): a Activity real `post_tracking_comment` tenta POSTar no
+# adapter-github. Nos testes não há adapter no ar e o hostname de rede Docker
+# não resolve no host — apontamos para uma porta local morta (connection
+# refused = falha instantânea) para o best-effort não somar timeouts.
+os.environ.setdefault("DSE_ADAPTER_GITHUB_URL", "http://127.0.0.1:1")
+
 
 def new_work_item_id(prefix: str = "wi") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"

@@ -407,11 +407,34 @@ class WorkItemLifecycleWorkflow:
                 data_class=row.get("data_class") or "internal",
                 pr_number=row.get("pr_number"),
                 risk_class=row.get("risk_class") or "low",
+                task_content=row.get("task_content") or "",
                 budget_max_usd=float(max_usd) if max_usd is not None else None,
             )
         raise ApplicationError(
             f"WorkItemLifecycleWorkflow.run recebeu um tipo de input nao suportado: {type(raw_input)!r}"
         )
+
+    def _agent_instruction(self, *, include_objections: bool = False) -> str:
+        """S1 (Fase 5): monta a instrucao REAL que o Planner/Coder recebem —
+        a descricao da tarefa (titulo+corpo da issue), mais criterio de aceite
+        e respostas de clarificacao, mais (para o Coder no fix loop) as
+        objecoes do L2. Determinístico (P1): so concatena strings ja
+        capturadas, nenhum LLM decide o conteudo. Antes do S1 os agentes
+        recebiam so `clarification_notes` (vazio) e nao sabiam a tarefa."""
+        input = self._input
+        parts: list[str] = []
+        if (input.task_content or "").strip():
+            parts.append(input.task_content.strip())
+        if (input.acceptance_criteria or "").strip():
+            parts.append(f"Critério de aceite: {input.acceptance_criteria.strip()}")
+        for note in input.clarification_notes:
+            if note and note.strip():
+                parts.append(f"Esclarecimento: {note.strip()}")
+        if include_objections:
+            for obj in getattr(input, "l2_objections", []) or []:
+                if obj and str(obj).strip():
+                    parts.append(f"Objeção do review a corrigir: {str(obj).strip()}")
+        return "\n\n".join(parts) or "Implementar a tarefa solicitada."
 
     async def _boundary_gate(self) -> None:
         """Checado antes de CADA Activity de negocio (nao antes de bookkeeping
@@ -742,6 +765,10 @@ class WorkItemLifecycleWorkflow:
                     "repo": input.repo,
                     "base_branch": input.base_branch,
                     "acceptance_criteria": input.acceptance_criteria,
+                    # S2 (Fase 5): o conteudo da tarefa entra no checklist —
+                    # uma issue bem descrita satisfaz o "o que fazer" sem exigir
+                    # um campo acceptance_criteria separado.
+                    "task_content": input.task_content,
                 },
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=5),
@@ -773,6 +800,26 @@ class WorkItemLifecycleWorkflow:
                 audit_action="clarification_requested",
                 details={"missing": completeness["missing"], "round": input.clarification_rounds},
             )
+
+            # S3 (Fase 5): posta a PERGUNTA de volta na superfície de origem
+            # (issue do GitHub), enumerando os campos faltantes — antes disto o
+            # humano nunca via o que era pedido. Best-effort (nunca derruba o
+            # workflow); a Activity auto-resolve repo/issue_number pelo work_item.
+            _field_pt = {"acceptance_criteria": "critério de aceite / comportamento esperado",
+                         "repo": "repositório", "base_branch": "branch base"}
+            question = "Faltam estas informações para eu começar: " + ", ".join(
+                _field_pt.get(m, m) for m in completeness["missing"]
+            ) + ". Responda nesta thread que eu retomo automaticamente."
+            try:
+                await workflow.execute_activity(
+                    ACTIVITY_POST_TRACKING_COMMENT,
+                    {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                     "status": "needs_clarification", "detail": question},
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+            except ActivityError:
+                logger.warning("post_tracking_comment (clarificacao) falhou; workflow segue esperando resposta")
 
             # IMPORTANTE: nao reset `_clarification_received` aqui — um
             # `clarification_answer` pode ja ter chegado durante os awaits
@@ -929,8 +976,12 @@ class WorkItemLifecycleWorkflow:
                     "sandbox_id": input.sandbox_id,
                     "work_item_id": input.work_item_id,
                     "tenant_id": input.tenant_id,
-                    "instructions": list(input.clarification_notes),
-                    "objections": list(input.l2_objections),  # objecoes do L2 anterior, se houver
+                    # S1: RunCoderTurnInput exige `instruction` (singular). Antes
+                    # o workflow mandava `instructions`/`objections` (campos que
+                    # o model nao tem — descartados no decode); agora a tarefa
+                    # real + objecoes do L2 vao dobradas na instrucao.
+                    "instruction": self._agent_instruction(include_objections=True),
+                    "branch": input.branch,
                     "model_override": self._model_override,
                     "runtime_override": self._runtime_override,
                 },
@@ -1110,7 +1161,8 @@ class WorkItemLifecycleWorkflow:
                 "tenant_id": input.tenant_id,
                 "repo": input.repo,
                 "base_branch": input.base_branch,
-                "instructions": list(input.clarification_notes),
+                # S1: instrucao real (conteudo da issue + aceite + esclarecimentos).
+                "instruction": self._agent_instruction(),
                 "model_override": self._model_override,
             },
             PlanArtifact,

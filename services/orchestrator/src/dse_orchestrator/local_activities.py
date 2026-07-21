@@ -26,7 +26,7 @@ from typing import Any
 
 from temporalio import activity
 
-from dse_contracts.activities import ACTIVITY_EMIT_AUDIT
+from dse_contracts.activities import ACTIVITY_EMIT_AUDIT, ACTIVITY_POST_TRACKING_COMMENT
 import dse_audit
 
 from dse_orchestrator import policy
@@ -110,14 +110,37 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT tenant_id, repo, base_branch, requester, data_class, pr_number, "
-                "       risk_class, budget "
+                "       risk_class, budget, source_ref "
                 "FROM work_items WHERE id = %s",
                 (work_item_id,),
             )
             row = cur.fetchone()
-        if row is None:
-            raise ValueError(f"work_item_id={work_item_id!r} nao encontrado em work_items")
-        tenant_id, repo, base_branch, requester, data_class, pr_number, risk_class, budget = row
+            if row is None:
+                raise ValueError(f"work_item_id={work_item_id!r} nao encontrado em work_items")
+            # S1 (Fase 5): o conteudo da tarefa (titulo+corpo da issue) vive no
+            # `ingest_events.payload` do evento de admissao (task_request), NAO
+            # em work_items. Lemos aqui para o Planner/Coder receberem a
+            # descricao real da tarefa — antes disto os agentes so recebiam
+            # clarification_notes (vazio), sem saber o que construir.
+            cur.execute(
+                "SELECT payload FROM ingest_events "
+                "WHERE work_item_id = %s AND kind = 'task_request' "
+                "ORDER BY id ASC LIMIT 1",
+                (work_item_id,),
+            )
+            ev = cur.fetchone()
+        task_content = ""
+        if ev and ev[0]:
+            p = ev[0]  # JSONB -> dict (ConversationEvent serializado + sanitized_content)
+            # a versao sanitizada e' a que segue ao modelo (WSA-E2-T3); cai
+            # para o content_snapshot original se nao houver.
+            task_content = (p.get("sanitized_content") or p.get("content_snapshot") or "").strip()
+        tenant_id, repo, base_branch, requester, data_class, pr_number, risk_class, budget, source_ref = row
+        # S3 (Fase 5): o numero da issue vive em source_ref (JSONB {repo, number})
+        # — necessario para o outbound postar o comentario de status na issue certa.
+        issue_number = None
+        if isinstance(source_ref, dict):
+            issue_number = source_ref.get("number") or source_ref.get("issue_number")
         return {
             "work_item_id": work_item_id,
             "tenant_id": tenant_id,
@@ -127,6 +150,8 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
             "data_class": data_class or "internal",
             "pr_number": pr_number,
             "risk_class": risk_class,
+            "task_content": task_content,
+            "issue_number": issue_number,
             # WSB-E4-T1: budget lido na admissao. `budget` e o JSONB de
             # work_items (default '{}'). A chave "max_usd" e o teto agregado.
             "budget": budget or {},
@@ -413,7 +438,14 @@ async def check_clarification_completeness(payload: dict[str, Any]) -> dict[str,
         missing.append("repo")
     if not payload.get("base_branch"):
         missing.append("base_branch")
-    if not (payload.get("acceptance_criteria") or "").strip():
+    # S2 (Fase 5): "o que fazer" e satisfeito por um criterio de aceite
+    # explicito OU por um corpo de tarefa substancial (issue bem descrita).
+    # Heuristica determinística (P1): >= 40 chars de conteudo real conta como
+    # descricao suficiente; abaixo disso (ex.: "arruma o bug") pede clarificacao.
+    # Nunca um LLM decide isto.
+    acceptance = (payload.get("acceptance_criteria") or "").strip()
+    task_content = (payload.get("task_content") or "").strip()
+    if not acceptance and len(task_content) < 40:
         missing.append("acceptance_criteria")
     return {"complete": not missing, "missing": missing}
 
@@ -432,6 +464,78 @@ async def emit_audit_event(payload: dict[str, Any]) -> None:
     )
 
 
+_STATUS_BODIES = {
+    "needs_clarification": "🔎 O DSE precisa de esclarecimento antes de começar:\n\n{detail}",
+    "awaiting_plan_approval": "📋 Plano pronto — aguardando aprovação humana (risco: {detail}).",
+    "implementing": "⚙️ O DSE está implementando a mudança em um sandbox isolado.",
+    "pr_ready": "✅ PR aberto com a mudança e evidência — pronto para revisão humana.",
+    "done": "🎉 Merge feito por humano. Tarefa concluída.",
+    "failed": "❌ A tarefa falhou: {detail}",
+    "escalated": "⚠️ Escalado a um operador humano: {detail}",
+}
+
+
+@activity.defn(name=ACTIVITY_POST_TRACKING_COMMENT)
+async def post_tracking_comment(payload: dict[str, Any]) -> dict[str, Any]:
+    """S3 (Fase 5): posta/edita O comentário de status único na superfície de
+    origem (issue do GitHub), via o `/internal/status-comment` do adapter-github
+    (que usa a MutableCommentWriter + token do Vault). Auto-resolve repo +
+    issue_number a partir de `work_items.source_ref` — os call sites só precisam
+    passar work_item_id + status (+ detail opcional). Determinístico (P1).
+
+    Só age em WorkItems de origem `github` nesta fase; outras superfícies são
+    no-op auditado (o outbound de Slack/Jira tem seu próprio caminho)."""
+    work_item_id = payload["work_item_id"]
+    tenant_id = payload.get("tenant_id", "")
+    status = payload.get("status", "")
+    detail = str(payload.get("detail") or "")
+    body = payload.get("body")
+
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT source, repo, source_ref FROM work_items WHERE id = %s", (work_item_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"ok": False, "reason": "work_item_not_found"}
+    source, repo, source_ref = row
+    if source != "github":
+        return {"ok": True, "skipped": f"source={source}_not_github"}
+    issue_number = None
+    if isinstance(source_ref, dict):
+        issue_number = source_ref.get("number") or source_ref.get("issue_number")
+    if not repo or not issue_number:
+        return {"ok": False, "reason": "missing_repo_or_issue_number"}
+
+    if not body:
+        template = _STATUS_BODIES.get(status, "Status do DSE: {status}")
+        body = template.format(detail=detail or "—", status=status)
+
+    # URL lida por-chamada (não no import) para testes poderem sobrepor via env.
+    adapter_url = os.environ.get("DSE_ADAPTER_GITHUB_URL", "http://adapter-github:8802")
+    import httpx
+    try:
+        with httpx.Client(timeout=httpx.Timeout(8.0, connect=2.0)) as client:
+            resp = client.post(
+                f"{adapter_url}/internal/status-comment",
+                json={"work_item_id": work_item_id, "repo": repo,
+                      "issue_number": int(issue_number), "body": body,
+                      "actor": "system:orchestrator"},
+            )
+            resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — outbound é best-effort; nunca derruba o workflow
+        logging.getLogger("dse_orchestrator").warning(
+            "post_tracking_comment falhou para %s: %s", work_item_id, exc
+        )
+        return {"ok": False, "reason": "adapter_unavailable", "error": str(exc)[:200]}
+    dse_audit.emit(actor="system:orchestrator", action="tracking_comment_posted",
+                   tenant_id=tenant_id, work_item_id=work_item_id,
+                   details={"repo": repo, "issue_number": issue_number, "status": status})
+    return {"ok": True}
+
+
 LOCAL_ACTIVITIES = [
     update_work_item_status,
     check_clarification_completeness,
@@ -443,4 +547,5 @@ LOCAL_ACTIVITIES = [
     emit_history_metric,
     record_skill_episode,
     emit_pr_quality_metric,
+    post_tracking_comment,
 ]
