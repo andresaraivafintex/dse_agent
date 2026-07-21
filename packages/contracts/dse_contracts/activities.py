@@ -54,6 +54,14 @@ ACTIVITY_PUBLISH_ARTIFACT = "publish_artifact"
 ACTIVITY_TRIGGER_PREVIEW = "trigger_preview"
 ACTIVITY_RUN_VISUAL_DIFF = "run_visual_diff"
 
+# --- Fase 4 (loop hardening & learning) ---
+# Definidos ANTES da implementação (gate de entrada §4 do adendo 03, mesma
+# disciplina da Fase 3). Donos: merge-base = WS-E; promoção de skill = WS-C
+# (a esteira eval->approval->canary->rollback); WS-B chama por nome.
+ACTIVITY_UPDATE_BASE_BRANCH = "update_base_branch"   # merge-base, nunca rebase (WSE-E6-T16)
+ACTIVITY_EVAL_SKILL_CANDIDATE = "eval_skill_candidate"  # replay contra eval set (WSC-E4-T3)
+ACTIVITY_PROMOTE_SKILL = "promote_skill"             # transição de estado governada (WSC-E4-T3)
+
 
 # ---------------------------------------------------------------------------
 # Dono: WS-C (services/sandbox-runtime)
@@ -316,3 +324,78 @@ class VisualDiffResult(BaseModel):
     # `base_screenshot_key` nos runs seguintes — antes disso a chave voltava
     # sobrecarregada em `diff_artifact_key` quando baseline_created=True.
     baseline_artifact_key: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 — merge-base / base-drift (dono WS-E, WSE-E6-T16) e promoção de skill
+# (dono WS-C, WSC-E4-T3). Contratos definidos no gate de entrada, antes do
+# build. NOTA DE VALIDAÇÃO (adendo 03): merge-base é construção NOVA — a Fase 1
+# nunca implementou o tratamento de drift, apesar do texto do plano.
+# ---------------------------------------------------------------------------
+class UpdateBaseBranchInput(BaseModel):
+    """Atualiza o branch da tarefa com o drift da base SEM reescrever história.
+    P1: a estratégia é determinística (código, não modelo). `first_human_review`
+    distingue o único momento em que rebase é permitido (antes do 1º review):
+    depois dele, SÓ merge-base-into-branch — rebase+force-push órfã as threads
+    de review ancoradas em commits reescritos (comportamento verificado do
+    GitHub, failure mode 11)."""
+
+    work_item_id: str
+    tenant_id: str
+    repo: str
+    branch: str
+    base_branch: str
+    first_human_review_done: bool = True  # default seguro: assume que já houve review → nunca rebase
+
+
+class UpdateBaseBranchResult(BaseModel):
+    work_item_id: str
+    strategy: str          # "merge_base" | "rebase_prefirst_review" | "noop_no_drift"
+    conflict: bool = False  # conflito não-resolvível → workflow escala a humano (nunca resolve à força)
+    orphaned_threads: int = 0  # asserção de exit da Fase 4: DEVE ser 0
+    detail: str = ""
+
+
+class EvalSkillCandidateInput(BaseModel):
+    """Replay de um skill candidate contra o eval set histórico (positivos e
+    negativos) — WSC-E4-T3. Determinístico; produz um score, não uma decisão
+    (a aprovação é humana)."""
+
+    tenant_id: str
+    skill_key: str
+    candidate_version: int
+
+
+class EvalSkillCandidateResult(BaseModel):
+    skill_key: str
+    candidate_version: int
+    passed: bool
+    score: float = 0.0
+    positive_hits: int = 0
+    negative_regressions: int = 0  # >0 bloqueia promoção por construção
+    detail: str = ""
+
+
+class PromoteSkillInput(BaseModel):
+    """Transição de estado GOVERNADA da esteira de promoção (WSC-E4-T3):
+    candidate → (eval) → approved → canary → active, e o rollback active/canary
+    → rolled_back. P1/P3: nenhuma transição para `approved`/`active` sem
+    `approver` humano resolvido — promoção sem aprovação é impossível por
+    construção (a Activity recusa `to_status in {approved,active}` com
+    approver vazio)."""
+
+    tenant_id: str
+    skill_key: str
+    version: int
+    to_status: str      # 'approved' | 'canary' | 'active' | 'rolled_back'
+    approver: str | None = None  # principal resolvido; obrigatório p/ approved/active
+    reason: str = ""
+
+
+class PromoteSkillResult(BaseModel):
+    skill_key: str
+    version: int
+    from_status: str
+    to_status: str
+    ok: bool
+    detail: str = ""

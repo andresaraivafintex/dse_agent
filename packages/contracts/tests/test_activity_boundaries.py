@@ -169,3 +169,55 @@ def test_visual_diff_accepts_exact_wsb_payload():
     assert inp.base_screenshot_key is None
     assert inp.candidate_screenshot_path == "demos/wi_x/screenshot.png"
     assert inp.threshold_pct == 0.1  # default do contrato — WS-B nao sobrepoe
+
+
+# ---------------------------------------------------------------------------
+# Fase 4 — payloads EXATOS dos call sites de merge-base e promoção de skill.
+# ---------------------------------------------------------------------------
+from dse_contracts import (  # noqa: E402
+    EvalSkillCandidateInput,
+    PromoteSkillInput,
+    UpdateBaseBranchInput,
+)
+
+WSB_UPDATE_BASE_PAYLOAD = {
+    "work_item_id": "wi_x",
+    "tenant_id": "tenant_dev",
+    "repo": "acme/repo",
+    "branch": "dse/wi_x",
+    "base_branch": "main",
+    "first_human_review_done": True,
+}
+
+
+def test_update_base_branch_accepts_exact_wsb_payload():
+    inp = UpdateBaseBranchInput(**WSB_UPDATE_BASE_PAYLOAD)
+    # default seguro: depois do 1o review, NUNCA rebase (só merge-base)
+    assert inp.first_human_review_done is True
+
+
+def test_update_base_branch_default_is_review_done_never_rebase():
+    """Invariante de segurança: se o chamador OMITIR first_human_review_done,
+    o default é True — ou seja, o caminho conservador (nunca rebase). Um
+    esquecimento no call site NÃO pode abrir a porta para force-push."""
+    inp = UpdateBaseBranchInput(
+        work_item_id="w", tenant_id="t", repo="r", branch="b", base_branch="main"
+    )
+    assert inp.first_human_review_done is True
+
+
+def test_promote_skill_requires_approver_for_approved_active():
+    """P1/P3 no contrato: o model aceita a intenção, mas a Activity (WS-C) DEVE
+    recusar to_status approved/active sem approver. Aqui garantimos que o campo
+    approver existe e é opcional no wire (a obrigatoriedade é enforcement da
+    Activity, testado no WS-C) — o contrato não pode ESCONDER o approver."""
+    inp = PromoteSkillInput(tenant_id="t", skill_key="s", version=1, to_status="canary")
+    assert inp.approver is None  # canary pode não ter approver; approved/active não (WS-C valida)
+    inp2 = PromoteSkillInput(tenant_id="t", skill_key="s", version=1,
+                             to_status="active", approver="usr_alice")
+    assert inp2.approver == "usr_alice"
+
+
+def test_eval_skill_candidate_shape():
+    inp = EvalSkillCandidateInput(tenant_id="t", skill_key="s", candidate_version=3)
+    assert inp.candidate_version == 3

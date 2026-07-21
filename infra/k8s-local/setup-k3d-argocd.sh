@@ -28,6 +28,14 @@ else
 fi
 
 echo "==> 2/4 kubecontext"
+# Reconcilia o kubeconfig SEMPRE (não só na criação): um restart do Docker
+# Desktop destrói os containers do k3d e/ou reatribui a porta do API server
+# do loadbalancer, deixando o context antigo apontando para uma porta morta
+# (ex.: https://0.0.0.0:50640 -> connection refused). Rodar este script de
+# novo re-mescla o kubeconfig com a porta atual. Achado da validação profunda
+# pré-Fase 4: o cluster é infra EFÊMERA de dev — recriável por este script,
+# nunca uma dependência persistente. (Produção usa o cluster real do cliente.)
+k3d kubeconfig merge "${CLUSTER_NAME}" --kubeconfig-merge-default --kubeconfig-switch-context >/dev/null
 kubectl config use-context "k3d-${CLUSTER_NAME}" >/dev/null
 kubectl wait --for=condition=Ready node --all --timeout=120s
 
