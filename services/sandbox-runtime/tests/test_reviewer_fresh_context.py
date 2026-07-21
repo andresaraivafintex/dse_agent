@@ -58,9 +58,17 @@ def test_reviewer_context_by_construction_has_only_plan_and_diff():
     for banned in ("coder_history", "transcript", "turns", "thoughts", "tool_calls", "coder_log", "session_history"):
         assert banned not in ctx_fields
 
+    # Remediação (spec §4): a evidência do L2 é amarrada ao SHA — o input ganhou
+    # base_sha/head_sha (metadados imutáveis, NÃO histórico do Coder). O guard de
+    # P3 é o allowlist de conteúdo {plan, diff} + a lista de campos BANIDOS abaixo;
+    # SHAs de commit não abrem canal para transcrição/thoughts/tool-calls.
     input_fields = set(RunL2ReviewInput.model_fields.keys())
-    assert input_fields == {"work_item_id", "tenant_id", "plan", "diff", "task_class", "data_class"}
-    for banned in ("coder_history", "transcript", "turns", "coder_log"):
+    assert input_fields == {
+        "work_item_id", "tenant_id", "plan", "diff", "task_class", "data_class",
+        "base_sha", "head_sha",
+    }
+    for banned in ("coder_history", "transcript", "turns", "coder_log",
+                   "thoughts", "tool_calls", "session_history"):
         assert banned not in input_fields
 
     # A sessão fresca só expõe read_plan/read_diff — nada de repo/history.
