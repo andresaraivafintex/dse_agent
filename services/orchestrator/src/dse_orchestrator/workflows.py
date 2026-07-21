@@ -44,20 +44,23 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_TEARDOWN_SANDBOX,
         ACTIVITY_TRIGGER_PREVIEW,
         ACTIVITY_UPDATE_BASE_BRANCH,
+        CheckpointRef,
         CiStatusResult,
         CoderTurnResult,
         DemoEvidenceResult,
         L1Result,
         L2Verdict,
+        GateStatus,
         PreviewRef,
         PrRef,
         SandboxHandle,
+        TesterTurnResult,
         UpdateBaseBranchResult,
         VisualDiffResult,
     )
     from dse_contracts.constants import WORKFLOW_TYPE
     from dse_contracts.plan_artifact import PlanArtifact
-    from dse_contracts.work_item import WorkItemStatus
+    from dse_contracts.work_item import MergedByHumanSignal, WorkItemStatus
 
     from dse_orchestrator import policy
     from dse_orchestrator.local_activities import (
@@ -156,6 +159,14 @@ class _BlockNow(Exception):
         self.reason = reason
 
 
+class _ActivityRetriesExhausted(Exception):
+    """Activity de negocio esgotou o cap; o workflow projeta falha terminal."""
+
+    def __init__(self, activity_name: str, reason: str):
+        self.activity_name = activity_name
+        self.reason = reason
+
+
 @workflow.defn(name=WORKFLOW_TYPE)
 class WorkItemLifecycleWorkflow:
     def __init__(self) -> None:
@@ -185,6 +196,7 @@ class WorkItemLifecycleWorkflow:
         # refresh de evidencia, nunca N.
         self._review_comments: list[dict[str, Any]] = []
         self._merged = False
+        self._merge_payload: dict[str, Any] | None = None
         # Fase 3 (ADR-26): pedido humano EXPLICITO de refresh de evidencia —
         # o unico gatilho de refresh alem de um fix cycle (commit novo).
         self._refresh_evidence_requested = False
@@ -233,6 +245,7 @@ class WorkItemLifecycleWorkflow:
 
     @workflow.signal
     def merged_by_human(self, payload: dict[str, Any] | None = None) -> None:
+        self._merge_payload = payload or {}
         self._merged = True
 
     @workflow.signal(name="plan_approval")
@@ -364,6 +377,11 @@ class WorkItemLifecycleWorkflow:
             return await self._handle_plan_rejection(exc)
         except _BlockNow as exc:
             return await self._finish_blocked(exc.reason, audit_action="plan_gate_blocked_no_approver")
+        except _ActivityRetriesExhausted as exc:
+            return await self._finish_failed(
+                f"activity_retries_exhausted:{exc.activity_name}:{exc.reason}",
+                audit_action="activity_retries_exhausted",
+            )
         except _ForceClarification as exc:
             input.phase = PHASE_INTAKE
             input.status = WorkItemStatus.needs_clarification.value
@@ -407,6 +425,13 @@ class WorkItemLifecycleWorkflow:
                 data_class=row.get("data_class") or "internal",
                 pr_number=row.get("pr_number"),
                 risk_class=row.get("risk_class") or "low",
+                plan_json=row.get("plan") or {},
+                plan_hash=row.get("plan_hash"),
+                base_sha=row.get("base_sha"),
+                head_sha=row.get("head_sha"),
+                pr_url=row.get("pr_url"),
+                ci_status=row.get("ci_status"),
+                state_version=int(row.get("state_version") or 0),
                 task_content=row.get("task_content") or "",
                 issue_number=(int(row["issue_number"]) if row.get("issue_number") else None),
                 budget_max_usd=float(max_usd) if max_usd is not None else None,
@@ -489,23 +514,53 @@ class WorkItemLifecycleWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=5),
         )
 
-    async def _persist_status(self) -> None:
-        payload = {
-            "work_item_id": self._input.work_item_id,
-            "status": self._input.status,
-            "pr_number": self._input.pr_number,
-        }
-        await workflow.execute_activity(
+    async def _persist_status(self, *, clear_ci_status: bool = False) -> None:
+        # Patch marker preserva replay de histories cujo payload antigo tinha
+        # somente work_item_id/status/pr_number. Novas execucoes projetam toda
+        # a verdade operacional; o servidor deriva plan_hash/expected_files.
+        if workflow.patched("operational-state-payload-v1"):
+            payload = {
+                "work_item_id": self._input.work_item_id,
+                "status": self._input.status,
+                "pr_number": self._input.pr_number,
+                "pr_url": self._input.pr_url,
+                "plan": self._input.plan_json or None,
+                "risk_class": self._input.risk_class,
+                "base_sha": self._input.base_sha,
+                "head_sha": self._input.head_sha,
+                "ci_status": self._input.ci_status,
+                "clear_ci_status": clear_ci_status,
+                "last_error": self._input.terminal_detail,
+                "validation_attempts": {
+                    "coder": self._input.coder_retry_count,
+                    "l2": self._input.l2_retry_count,
+                    "review": self._input.review_round,
+                    "ci_pending": self._input.ci_pending_polls,
+                },
+            }
+        else:  # replay de payload historico
+            payload = {
+                "work_item_id": self._input.work_item_id,
+                "status": self._input.status,
+                "pr_number": self._input.pr_number,
+            }
+        persisted = await workflow.execute_activity(
             LOCAL_ACTIVITY_UPDATE_STATUS,
             payload,
             start_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=5),
         )
+        if isinstance(persisted, dict):
+            self._input.state_version = int(
+                persisted.get("state_version") or self._input.state_version
+            )
+            self._input.plan_hash = persisted.get("plan_hash") or self._input.plan_hash
 
     async def _set_status(self, status: WorkItemStatus, *, audit_action: str | None = None,
-                           details: dict[str, Any] | None = None) -> None:
+                           details: dict[str, Any] | None = None,
+                           clear_ci_status: bool = False) -> None:
         self._input.status = status.value
-        await self._persist_status()
+        await self._persist_status(clear_ci_status=clear_ci_status)
         if audit_action:
             await self._audit(audit_action, details)
 
@@ -675,8 +730,24 @@ class WorkItemLifecycleWorkflow:
         retryable/transientes continuam sendo retentados pelo proprio Temporal
         (nao caem aqui: so ActivityError final chega)."""
         try:
+            options = self._activity_timeouts()
+            if workflow.patched("model-activity-infra-retry-v2"):
+                # spec §6: DISTINGUIR falha de infra retryable de permanente.
+                # Falhas permanentes (fail-closed do egress/gateway, virtual key
+                # expirada, kill switch, decode de contrato) sao lancadas
+                # `non_retryable` na origem e NAO retentam — falham rapido.
+                # As retryable (oscilacao transiente do gateway) retentam sob o
+                # teto de WALL-CLOCK (schedule_to_close, ~2h) + o budget por fase
+                # (custo) — nunca sob um cap de CONTAGEM que confunde um blip de
+                # infra com uma falha permanente e mata a durabilidade (P6/P8:
+                # 3 quedas transientes nao podem falhar uma tarefa cara).
+                options["retry_policy"] = RetryPolicy(maximum_attempts=0)
+            elif workflow.patched("bounded-business-activity-retries-v1"):
+                options["retry_policy"] = RetryPolicy(
+                    maximum_attempts=max(1, int(self._input.activity_retry_cap))
+                )
             return await workflow.execute_activity(
-                name, payload, result_type=result_type, **self._activity_timeouts()
+                name, payload, result_type=result_type, **options
             )
         except ActivityError as exc:
             blob = f"{type(exc.cause).__name__}:{exc.cause}".lower() if exc.cause else str(exc).lower()
@@ -686,7 +757,44 @@ class WorkItemLifecycleWorkflow:
                     {"activity": name, "error": blob[:300]},
                 )
                 raise _FailClosed(f"{name}:{blob[:200]}")
-            raise
+            raise _ActivityRetriesExhausted(name, blob[:300])
+
+    async def _capture_base_sha(self) -> None:
+        """Captura o tip imutavel anterior ao primeiro turno do Coder.
+
+        Reusa o checkpoint deterministico existente: logo apos o provision o
+        task branch ainda aponta exatamente para a base. O SHA retornado vira
+        base_sha e head_sha inicial, persistidos antes de qualquer escrita.
+        """
+        input = self._input
+        try:
+            ref: CheckpointRef = await workflow.execute_activity(
+                ACTIVITY_CHECKPOINT_SANDBOX,
+                {
+                    "sandbox_id": input.sandbox_id,
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "branch": input.branch,
+                    "phase": "base",
+                },
+                result_type=CheckpointRef,
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=max(1, int(input.activity_retry_cap))
+                ),
+            )
+        except ActivityError as exc:
+            raise _ActivityRetriesExhausted(
+                ACTIVITY_CHECKPOINT_SANDBOX, str(exc.cause or exc)[:300]
+            )
+        input.base_sha = ref.git_ref
+        input.head_sha = ref.git_ref
+        input.last_checkpoint_ref = ref.model_dump()
+        if input.sandbox_handle:
+            input.sandbox_handle["base_sha"] = input.base_sha
+            input.sandbox_handle["head_sha"] = input.head_sha
+        await self._persist_status()
+        await self._audit("base_sha_captured", {"base_sha": input.base_sha})
 
     async def _checkpoint_or_rebuild(self, phase_name: str) -> None:
         """WSB-E5-T1: checkpoint ao fim de cada fase, com retries limitados;
@@ -700,7 +808,7 @@ class WorkItemLifecycleWorkflow:
                 # site antigo nao o enviava — boundary bug latente escondido
                 # pelos fakes; mesma classe dos outros). Capturamos o
                 # CheckpointRef retornado para o rebuild poder reconstruir dele.
-                ref = await workflow.execute_activity(
+                ref: CheckpointRef = await workflow.execute_activity(
                     ACTIVITY_CHECKPOINT_SANDBOX,
                     {
                         "sandbox_id": self._input.sandbox_id,
@@ -708,10 +816,14 @@ class WorkItemLifecycleWorkflow:
                         "tenant_id": self._input.tenant_id,
                         "phase": phase_name,
                     },
+                    result_type=CheckpointRef,
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
-                self._input.last_checkpoint_ref = ref  # dict do CheckpointRef (sobrevive a CAN)
+                self._input.last_checkpoint_ref = ref.model_dump()
+                self._input.head_sha = ref.git_ref
+                if self._input.sandbox_handle:
+                    self._input.sandbox_handle["head_sha"] = ref.git_ref
                 return
             except ActivityError:
                 continue
@@ -730,6 +842,11 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
                 self._input.sandbox_id = handle.sandbox_id
+                self._input.sandbox_handle = handle.model_dump()
+                if self._input.base_sha:
+                    self._input.sandbox_handle["base_sha"] = self._input.base_sha
+                if self._input.head_sha:
+                    self._input.sandbox_handle["head_sha"] = self._input.head_sha
                 await self._audit("rebuild_succeeded", {"phase": phase_name})
                 return
             except ActivityError:
@@ -1009,15 +1126,14 @@ class WorkItemLifecycleWorkflow:
             input.sandbox_id = handle.sandbox_id
             input.branch = handle.branch
             # S7: retem o handle COMPLETO (L1/finalize precisam dele, nao so do id).
-            input.sandbox_handle = {
-                "sandbox_id": handle.sandbox_id,
-                "work_item_id": handle.work_item_id,
-                "tenant_id": handle.tenant_id,
-                "branch": handle.branch,
-                "container_id": handle.container_id,
-            }
+            input.sandbox_handle = handle.model_dump()
             await self._set_status(WorkItemStatus.implementing, audit_action="sandbox_provisioned",
                                     details={"sandbox_id": handle.sandbox_id})
+            # Nova Activity protegida por patch marker: histories antigos
+            # replayam sem o comando; execucoes novas persistem a base antes
+            # do primeiro turno do Coder.
+            if workflow.patched("capture-base-sha-before-coder-v1"):
+                await self._capture_base_sha()
 
         while True:
             await self._boundary_gate()
@@ -1050,7 +1166,7 @@ class WorkItemLifecycleWorkflow:
             # WSB-E2-T3 — Tester session (escreve/ajusta testes ANTES do L1).
             await self._boundary_gate()
             await self._budget_boundary("tester_turn")
-            tester_result: CoderTurnResult = await self._run_model_activity(
+            tester_result: TesterTurnResult = await self._run_model_activity(
                 ACTIVITY_RUN_TESTER_TURN,
                 {
                     "sandbox_id": input.sandbox_id,
@@ -1060,11 +1176,38 @@ class WorkItemLifecycleWorkflow:
                     "model_override": self._model_override,
                     "runtime_override": self._runtime_override,
                 },
-                CoderTurnResult,
+                TesterTurnResult,
             )
             await self._consume_cost(tester_result.cost_usd, source="tester")
-            await self._audit("tester_turn_completed",
-                              {"files_changed": tester_result.files_changed})
+            await self._audit(
+                "tester_turn_completed",
+                {
+                    "files_changed": tester_result.files_changed,
+                    "tests_ran": tester_result.tests_ran,
+                    "tests_passed": tester_result.tests_passed,
+                    "status": tester_result.status.value,
+                },
+            )
+
+            if workflow.patched("enforce-tester-result-v1"):
+                if not tester_result.tests_ran:
+                    return await self._finish_failed(
+                        "tester_contract_failed:tests_ran=false",
+                        audit_action="tester_tests_not_run",
+                    )
+                if tester_result.status != GateStatus.PASS:
+                    input.coder_retry_count += 1
+                    if input.coder_retry_count > input.coder_retry_cap:
+                        return await self._finish_failed(
+                            "tester_failed_after_retry_cap",
+                            audit_action="tester_retry_cap_exhausted",
+                        )
+                    await self._set_status(
+                        WorkItemStatus.implementing,
+                        audit_action="tester_failed_retrying",
+                        details={"attempt": input.coder_retry_count},
+                    )
+                    continue
 
             await self._boundary_gate()
             await self._checkpoint_or_rebuild("implementing")
@@ -1072,17 +1215,21 @@ class WorkItemLifecycleWorkflow:
             await self._set_status(WorkItemStatus.validating, audit_action="l1_started")
             await self._boundary_gate()
             await self._budget_boundary("l1")
+            l1_payload = {
+                "sandbox": self._input.sandbox_handle,
+                "plan": input.plan_json,
+                "tenant_id": input.tenant_id,
+                "base_branch": input.base_branch or "main",
+            }
+            if workflow.patched("sha-bound-validation-inputs-v1"):
+                l1_payload.update({
+                    "work_item_id": input.work_item_id,
+                    "base_sha": input.base_sha or "",
+                    "head_sha": input.head_sha or "",
+                })
             l1_result: L1Result = await self._run_model_activity(
                 ACTIVITY_RUN_L1_PIPELINE,
-                {
-                    # S7: RunL1PipelineInput exige o handle COMPLETO + plan +
-                    # tenant + base_branch (o call site antigo so mandava
-                    # work_item_id/sandbox_id -> Failed decoding arguments).
-                    "sandbox": self._input.sandbox_handle,
-                    "plan": input.plan_json,
-                    "tenant_id": input.tenant_id,
-                    "base_branch": input.base_branch or "main",
-                },
+                l1_payload,
                 L1Result,
             )
             await self._audit(
@@ -1090,7 +1237,12 @@ class WorkItemLifecycleWorkflow:
                 {"passed": l1_result.passed, "findings": [f.check for f in l1_result.findings]},
             )
 
-            if not l1_result.passed:
+            l1_passed = (
+                l1_result.status == GateStatus.PASS
+                if workflow.patched("structured-gate-status-v1")
+                else l1_result.passed
+            )
+            if not l1_passed:
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     self._input.terminal_detail = (
@@ -1126,7 +1278,12 @@ class WorkItemLifecycleWorkflow:
             l2: L2Verdict = await self._run_l2_review(coder_result)
             await self._consume_cost(l2.cost_usd, source="l2")
 
-            if not l2.passed:
+            l2_passed = (
+                l2.status == GateStatus.PASS
+                if workflow.patched("structured-l2-gate-status-v1")
+                else l2.passed
+            )
+            if not l2_passed:
                 input.l2_retry_count += 1
                 input.l2_objections = list(l2.objections)
                 await self._audit(
@@ -1146,30 +1303,39 @@ class WorkItemLifecycleWorkflow:
 
         await self._boundary_gate()
         await self._budget_boundary("finalize_pr")
-        pr_ref: PrRef = await workflow.execute_activity(
+        finalize_payload = {
+            "work_item_id": input.work_item_id,
+            "tenant_id": input.tenant_id,
+            "sandbox": self._input.sandbox_handle,
+            "repo": input.repo,
+            "base_branch": input.base_branch or "main",
+            "branch": input.branch,
+            "summary": self._pr_summary(),
+            "issue_ref": ({"issue_number": input.issue_number}
+                          if input.issue_number else None),
+            "evidence_url": self._l1_evidence(l1_result),
+        }
+        if workflow.patched("sha-bound-finalize-input-v1"):
+            finalize_payload.update({
+                "base_sha": input.base_sha or "",
+                "head_sha": input.head_sha or "",
+                "risk_class": input.risk_class,
+            })
+        try:
+            pr_ref: PrRef = await workflow.execute_activity(
             ACTIVITY_FINALIZE_PR,
-            {
-                # S7: FinalizePrInput exige `summary` e resolve o executor pelo
-                # `sandbox` (handle completo — no modo in-process do PoC o git
-                # push sai do workspace LOCAL). O call site antigo mandava
-                # `sandbox_id` (extra ignorado) e omitia `summary` -> decode fail.
-                "work_item_id": input.work_item_id,
-                "tenant_id": input.tenant_id,
-                "sandbox": self._input.sandbox_handle,
-                "repo": input.repo,
-                "base_branch": input.base_branch or "main",
-                "branch": input.branch,
-                "summary": self._pr_summary(),
-                # back-link da issue de origem ("Closes #N") + evidência L1.
-                "issue_ref": ({"issue_number": input.issue_number}
-                              if input.issue_number else None),
-                "evidence_url": self._l1_evidence(l1_result),
-            },
+            finalize_payload,
             result_type=PrRef,
+            retry_policy=RetryPolicy(maximum_attempts=max(1, input.activity_retry_cap)),
             **self._activity_timeouts(),
-        )
+            )
+        except ActivityError as exc:
+            raise _ActivityRetriesExhausted(
+                ACTIVITY_FINALIZE_PR, str(exc.cause or exc)[:300]
+            )
         input.pr_number = pr_ref.pr_number
         input.pr_url = pr_ref.url
+        input.head_sha = pr_ref.head_sha or input.head_sha
         # Fase 4 — marca o instante de PR finalizado (leitura deterministica/
         # replay-safe de workflow.now()) para o "tempo ate merge" do pilot gate.
         if input.pr_finalized_at_epoch is None:
@@ -1182,14 +1348,19 @@ class WorkItemLifecycleWorkflow:
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
                 "pr_number": pr_ref.pr_number,
-                "status": "pr_ready",
+                "status": ("pr_open" if workflow.patched("fine-pr-ci-states-v1") else "pr_ready"),
             },
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=5),
         )
 
-        await self._checkpoint_or_rebuild("pr_ready")
-        await self._set_status(WorkItemStatus.pr_ready, audit_action="pr_finalized",
+        await self._checkpoint_or_rebuild("pr_open")
+        pr_open_status = (
+            WorkItemStatus.pr_open
+            if workflow.patched("fine-pr-open-state-v1")
+            else WorkItemStatus.pr_ready
+        )
+        await self._set_status(pr_open_status, audit_action="pr_finalized",
                                 details={"pr_number": pr_ref.pr_number, "url": pr_ref.url})
 
         # Fase 3 — pipeline de evidencia INICIAL (depois de finalize_pr):
@@ -1250,6 +1421,19 @@ class WorkItemLifecycleWorkflow:
         # do modelo) — um Planner que sub-classifica NAO rebaixa o gate.
         effective_risk = policy.classify_risk(plan.expected_files, plan.risk_class)
         input.risk_class = effective_risk
+
+        if workflow.patched("reject-empty-expected-files-v1"):
+            if not plan.expected_files and not plan.no_code_change:
+                await self._audit(
+                    "planner_contract_rejected",
+                    {"reason": "expected_files_empty", "round": input.plan_rounds},
+                )
+                raise _EscalateNow("planner_expected_files_empty_without_no_code_change")
+
+        # Postgres recebe plano/risco antes do Coder. O hash e a lista de
+        # expected_files sao derivados pela Activity server-side.
+        if workflow.patched("persist-plan-before-coder-v1"):
+            await self._persist_status()
 
         if not policy.requires_plan_approval(effective_risk, input.require_approval_risk_classes):
             # Risco baixo -> auto-aprova POR POLITICA (nunca por ausencia de
@@ -1381,23 +1565,23 @@ class WorkItemLifecycleWorkflow:
         NADA do historico/instrucoes do Coder (nenhum `instructions`,
         `clarification_notes`, `objections` — deliberadamente ausentes)."""
         input = self._input
+        payload = {
+            "work_item_id": input.work_item_id,
+            "tenant_id": input.tenant_id,
+            "plan": input.plan_json,
+            "diff": coder_result.diff_summary,
+        }
+        if workflow.patched("sha-bound-l2-input-v1"):
+            payload.update({"base_sha": input.base_sha, "head_sha": input.head_sha})
         l2: L2Verdict = await self._run_model_activity(
             ACTIVITY_RUN_L2_REVIEW,
-            {
-                "work_item_id": input.work_item_id,
-                "tenant_id": input.tenant_id,
-                # P3: EXATAMENTE plan + diff, nada mais. O input da Activity L2
-                # (RunL2ReviewInput, WS-C) é deliberadamente estrito e não aceita
-                # `sandbox_id`/`files_changed` — enviamos só o que ele declara
-                # (reconciliação da integração da Fase 2; o diff resumido do
-                # Coder é o `diff`).
-                "plan": input.plan_json,
-                "diff": coder_result.diff_summary,
-            },
+            payload,
             L2Verdict,
         )
         await self._audit("l2_review_completed",
-                          {"passed": l2.passed, "objections": l2.objections})
+                          {"passed": l2.passed, "status": l2.status.value,
+                           "objections": l2.objections,
+                           "base_sha": input.base_sha, "head_sha": input.head_sha})
         return l2
 
     # ------------------------------------------------------------------
@@ -1559,6 +1743,25 @@ class WorkItemLifecycleWorkflow:
         except ActivityError:
             logger.warning("emit_pr_quality_metric falhou; metrica e best-effort, fluxo segue")
 
+    def _validate_merge_signal(self) -> tuple[bool, str, MergedByHumanSignal | None]:
+        """Valida o envelope ja autenticado/correlacionado pelo adapter.
+
+        A verificacao remota do estado do PR continua pertencendo ao adapter/
+        finalizador; aqui impedimos que um signal vazio, de outro PR/repo/SHA
+        ou sem identidade humana conclua o workflow.
+        """
+        try:
+            merge = MergedByHumanSignal(**(self._merge_payload or {}))
+        except Exception as exc:  # payload de signal e dado nao confiavel
+            return False, f"invalid_payload:{type(exc).__name__}", None
+        if self._input.pr_number is None or merge.pr_number != self._input.pr_number:
+            return False, "pr_number_mismatch", merge
+        if merge.repo and self._input.repo and merge.repo != self._input.repo:
+            return False, "repo_mismatch", merge
+        if merge.head_sha and self._input.head_sha and merge.head_sha != self._input.head_sha:
+            return False, "head_sha_mismatch", merge
+        return True, "ok", merge
+
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
         """Loop `while True` (NAO `continue_as_new` por iteracao — ver
         comentario em `_run_implementation_phase` sobre a corrida de sinais):
@@ -1576,18 +1779,50 @@ class WorkItemLifecycleWorkflow:
             # cresce sem Continue-As-New (limitacao documentada) — emite a
             # metrica a cada volta para o collector/WS-F.
             await self._emit_history_metric("review_loop")
-            ci: CiStatusResult = await workflow.execute_activity(
-                ACTIVITY_CONSUME_CI_STATUS,
-                # Boundary fix (auditoria pós-S7): ConsumeCiStatusInput exige
-                # tenant_id/repo/ref — o payload antigo quebrava TODO ciclo de
-                # review com CI. `ref` = branch da tarefa (o modelo aceita sha ou branch).
-                {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
-                 "repo": input.repo, "ref": input.branch or "",
-                 "pr_number": input.pr_number},
-                result_type=CiStatusResult,
-                **self._activity_timeouts(),
-            )
+            fine_states = workflow.patched("ci-pending-blocks-review-v1")
+            if fine_states:
+                input.ci_status = "pending"
+                await self._set_status(
+                    WorkItemStatus.ci_pending,
+                    audit_action="ci_pending",
+                    details={"head_sha": input.head_sha},
+                )
+            ci_payload = {
+                "work_item_id": input.work_item_id,
+                "tenant_id": input.tenant_id,
+                "repo": input.repo,
+                "ref": (input.head_sha or input.branch or "") if fine_states else (input.branch or ""),
+                "pr_number": input.pr_number,
+            }
+            if fine_states:
+                ci_payload.update({
+                    "base_sha": input.base_sha or "",
+                    "head_sha": input.head_sha or "",
+                })
+            try:
+                ci: CiStatusResult = await workflow.execute_activity(
+                    ACTIVITY_CONSUME_CI_STATUS,
+                    ci_payload,
+                    result_type=CiStatusResult,
+                    retry_policy=RetryPolicy(maximum_attempts=max(1, input.activity_retry_cap)),
+                    **self._activity_timeouts(),
+                )
+            except ActivityError as exc:
+                raise _ActivityRetriesExhausted(
+                    ACTIVITY_CONSUME_CI_STATUS, str(exc.cause or exc)[:300]
+                )
+            input.ci_status = ci.status
             await self._audit("ci_status_observed", {"status": ci.status})
+
+            if fine_states and ci.status == "pending":
+                input.ci_pending_polls += 1
+                await self._persist_status()
+                if input.ci_pending_polls >= input.ci_pending_poll_cap:
+                    raise _EscalateNow(
+                        f"ci_pending_poll_cap_exhausted:{input.ci_pending_polls}"
+                    )
+                await workflow.sleep(timedelta(seconds=max(0.01, input.ci_poll_interval_seconds)))
+                continue
 
             if ci.status == "red":
                 # CI vermelho antes de acordar um humano: volta ao Coder no
@@ -1598,11 +1833,15 @@ class WorkItemLifecycleWorkflow:
                 self._bump_review_round()
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="ci_red_retrying")
                 fix_result = await self._apply_coder_fix_cycle(["ci red: corrigir o pipeline"])
+                input.ci_pending_polls = 0
                 # ADR-26: fix cycle = commit novo que muda comportamento -> 1 refresh
                 input.last_files_changed = list(fix_result.files_changed)
                 await self._run_evidence_pipeline(fix_result.files_changed,
                                                   reason="fix_cycle_ci_red")
                 continue
+
+            if fine_states and ci.status != "green":
+                raise _EscalateNow(f"unknown_ci_status:{ci.status!r}")
 
             # IMPORTANTE: nao resetamos `_review_received` aqui antes de
             # esperar — um `review_comment` pode ja ter chegado (via signal
@@ -1611,7 +1850,9 @@ class WorkItemLifecycleWorkflow:
             # Resetar aqui apagaria essa resposta legitima e o workflow
             # ficaria esperando para sempre por um sinal que ja veio. So
             # consumimos e resetamos DEPOIS de drenar o lote, abaixo.
-            await self._set_status(WorkItemStatus.pr_ready, audit_action="awaiting_human_review")
+            ready_status = WorkItemStatus.review_ready if fine_states else WorkItemStatus.pr_ready
+            await self._set_status(ready_status, audit_action="awaiting_human_review",
+                                   details={"ci_status": ci.status, "head_sha": input.head_sha})
             await workflow.wait_condition(
                 lambda: self._review_received or self._refresh_evidence_requested
                 or self._cancelled or self._operator_escalate_requested
@@ -1684,12 +1925,35 @@ class WorkItemLifecycleWorkflow:
                 continue
 
             if "approved" in verdicts:
-                await self._set_status(WorkItemStatus.pr_ready, audit_action="approved_awaiting_merge")
+                merge_status = (
+                    WorkItemStatus.merge_pending if fine_states else WorkItemStatus.pr_ready
+                )
+                await self._set_status(merge_status, audit_action="approved_awaiting_merge")
                 # (sem reset de `_merged` aqui pela mesma razao acima — comeca
                 # False no __init__ e so este ramo o consome, uma vez por run)
-                await workflow.wait_condition(lambda: self._merged or self._cancelled)
-                if self._cancelled:
-                    raise _CancelledByOperator()
+                require_verified_signal = workflow.patched("validate-merge-signal-v1")
+                while True:
+                    await workflow.wait_condition(lambda: self._merged or self._cancelled)
+                    if self._cancelled:
+                        raise _CancelledByOperator()
+                    if not require_verified_signal:
+                        break
+                    valid, reason, merge = self._validate_merge_signal()
+                    if valid:
+                        await self._audit(
+                            "merge_signal_verified",
+                            {"merged_by": merge.merged_by,
+                             "pr_number": merge.pr_number,
+                             "merge_sha": merge.merge_sha,
+                             "head_sha": input.head_sha},
+                        )
+                        break
+                    await self._audit(
+                        "merge_signal_rejected",
+                        {"reason": reason, "payload": dict(self._merge_payload or {})},
+                    )
+                    self._merged = False
+                    self._merge_payload = None
                 await self._checkpoint_or_rebuild("done")
                 if input.sandbox_id:
                     try:
@@ -1702,7 +1966,12 @@ class WorkItemLifecycleWorkflow:
                         )
                     except ActivityError:
                         logger.warning("teardown falhou apos merge; seguindo mesmo assim (nao bloqueia Done)")
-                await self._set_status(WorkItemStatus.done, audit_action="merged_by_human")
+                await self._set_status(
+                    WorkItemStatus.done,
+                    audit_action="merged_by_human",
+                    details={"merged_by": (self._merge_payload or {}).get("merged_by"),
+                             "pr_number": input.pr_number},
+                )
                 # Fase 4 — metrica de qualidade de PR na fronteira de merge
                 # (pilot gate). Best-effort, apos o Done ja estar persistido.
                 await self._emit_pr_quality_metric("merged")
@@ -1751,17 +2020,27 @@ class WorkItemLifecycleWorkflow:
 
         await self._set_status(WorkItemStatus.validating, audit_action="l1_revalidation_started")
         await self._budget_boundary("review_fix_l1")
+        l1_payload = {
+            "sandbox": self._input.sandbox_handle,
+            "plan": input.plan_json,
+            "tenant_id": input.tenant_id,
+            "base_branch": input.base_branch or "main",
+        }
+        if workflow.patched("sha-bound-review-l1-input-v1"):
+            l1_payload.update({
+                "work_item_id": input.work_item_id,
+                "base_sha": input.base_sha or "",
+                "head_sha": input.head_sha or "",
+            })
         l1_result: L1Result = await self._run_model_activity(
-            ACTIVITY_RUN_L1_PIPELINE,
-            {
-                "sandbox": self._input.sandbox_handle,
-                "plan": input.plan_json,
-                "tenant_id": input.tenant_id,
-                "base_branch": input.base_branch or "main",
-            },
-            L1Result,
+            ACTIVITY_RUN_L1_PIPELINE, l1_payload, L1Result,
         )
-        if not l1_result.passed:
+        l1_passed = (
+            l1_result.status == GateStatus.PASS
+            if workflow.patched("structured-review-l1-status-v1")
+            else l1_result.passed
+        )
+        if not l1_passed:
             input.coder_retry_count += 1
             if input.coder_retry_count > self._input.coder_retry_cap:
                 raise _EscalateNow("l1_revalidation_failed_after_retry_cap")
@@ -1769,29 +2048,39 @@ class WorkItemLifecycleWorkflow:
             return await self._apply_coder_fix_cycle(comments)
 
         await self._boundary_gate()
-        pr_ref: PrRef = await workflow.execute_activity(
-            ACTIVITY_FINALIZE_PR,
-            {
-                # S7: mesmo shape do finalize primario (summary + sandbox handle).
-                # `existing_pr_number` nao e campo do modelo — o PR ja rastreado
-                # e resolvido por work_item_id dentro do finalize; mantido no
-                # branch/PR original (idempotente).
-                "work_item_id": input.work_item_id,
-                "tenant_id": input.tenant_id,
-                "sandbox": self._input.sandbox_handle,
-                "repo": input.repo,
-                "base_branch": input.base_branch or "main",
-                "branch": input.branch,
-                "summary": self._pr_summary(),
-                "issue_ref": ({"issue_number": input.issue_number}
-                              if input.issue_number else None),
-                "evidence_url": self._l1_evidence(l1_result),
-            },
-            result_type=PrRef,
-            **self._activity_timeouts(),
-        )
+        finalize_payload = {
+            "work_item_id": input.work_item_id,
+            "tenant_id": input.tenant_id,
+            "sandbox": self._input.sandbox_handle,
+            "repo": input.repo,
+            "base_branch": input.base_branch or "main",
+            "branch": input.branch,
+            "summary": self._pr_summary(),
+            "issue_ref": ({"issue_number": input.issue_number}
+                          if input.issue_number else None),
+            "evidence_url": self._l1_evidence(l1_result),
+        }
+        if workflow.patched("sha-bound-refinalize-input-v1"):
+            finalize_payload.update({
+                "base_sha": input.base_sha or "",
+                "head_sha": input.head_sha or "",
+                "risk_class": input.risk_class,
+            })
+        try:
+            pr_ref: PrRef = await workflow.execute_activity(
+                ACTIVITY_FINALIZE_PR,
+                finalize_payload,
+                result_type=PrRef,
+                retry_policy=RetryPolicy(maximum_attempts=max(1, input.activity_retry_cap)),
+                **self._activity_timeouts(),
+            )
+        except ActivityError as exc:
+            raise _ActivityRetriesExhausted(
+                ACTIVITY_FINALIZE_PR, str(exc.cause or exc)[:300]
+            )
         input.pr_number = pr_ref.pr_number
         input.pr_url = pr_ref.url
+        input.head_sha = pr_ref.head_sha or input.head_sha
         await workflow.execute_activity(
             ACTIVITY_POST_TRACKING_COMMENT,
             {
@@ -1803,8 +2092,18 @@ class WorkItemLifecycleWorkflow:
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=5),
         )
-        await self._set_status(WorkItemStatus.pr_ready, audit_action="pr_refinalized",
-                                details={"pr_number": pr_ref.pr_number})
+        input.ci_status = None
+        refinalized_status = (
+            WorkItemStatus.pr_open
+            if workflow.patched("refinalize-resets-ci-v1")
+            else WorkItemStatus.pr_ready
+        )
+        await self._set_status(
+            refinalized_status,
+            audit_action="pr_refinalized",
+            details={"pr_number": pr_ref.pr_number, "head_sha": input.head_sha},
+            clear_ci_status=True,
+        )
         return coder_result
 
     # ------------------------------------------------------------------
