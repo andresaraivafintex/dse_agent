@@ -86,6 +86,7 @@ class ProvisionSandboxInput(BaseModel):
     tenant_id: str
     branch: str | None = None
     base_branch: str = "main"
+    repo: str | None = None  # S4: repo alvo (ex. "andre2654/fintex-wallet") a clonar
     budget: dict[str, Any] = Field(default_factory=dict)
     image: str | None = None
 
@@ -99,7 +100,23 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
     if is_new_checkpoint_repo:
         git_checkpoint.provision_checkpoint_repo(bare_repo_path, branch)
     if not Path(workspace_dir).exists():
-        git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
+        # S4 (Fase 5): se a tarefa tem um repo alvo (ex.: github.com/andre2654/
+        # fintex-wallet), CLONA o código real (com token minto no control plane
+        # e scrubbado do config) — o Coder trabalha no repo de verdade. Sem
+        # repo/token (testes), cai para o workspace vazio da mecânica original.
+        cloned = False
+        if inp.repo:
+            from . import repo_clone
+            token = repo_clone.mint_installation_token()
+            cloned = repo_clone.clone_repo_into(
+                workspace_dir=workspace_dir, repo=inp.repo,
+                base_branch=inp.base_branch, task_branch=branch,
+                bare_repo_path=bare_repo_path, token=token,
+            )
+            if cloned and not repo_clone.token_absent_from_config(workspace_dir):
+                raise RuntimeError("SEGURANCA: token vazou no git config do workspace")
+        if not cloned:
+            git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
 
     provisioned = docker_driver.provision_container(
         work_item_id=inp.work_item_id,

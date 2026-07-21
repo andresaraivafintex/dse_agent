@@ -956,7 +956,7 @@ class WorkItemLifecycleWorkflow:
                     "work_item_id": input.work_item_id,
                     "tenant_id": input.tenant_id,
                     "repo": input.repo,
-                    "base_branch": input.base_branch,
+                    "base_branch": input.base_branch or "main",
                 },
                 SandboxHandle,
             )

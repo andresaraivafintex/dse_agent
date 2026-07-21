@@ -2,6 +2,11 @@
 # CONVENTIONS.md (independente da versao do host usada em dev/test).
 FROM python:3.11-slim
 
+# S4 (Fase 5): o worker (control plane) clona o repo alvo via subprocess `git`
+# antes de montar o workspace no sandbox — precisa do git no PATH.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Copia so o que este servico precisa para instalar (contratos compartilhados
