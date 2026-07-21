@@ -2,9 +2,12 @@
 # CONVENTIONS.md (independente da versao do host usada em dev/test).
 FROM python:3.11-slim
 
-# S4 (Fase 5): o worker (control plane) clona o repo alvo via subprocess `git`
-# antes de montar o workspace no sandbox — precisa do git no PATH.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# S4 (Fase 5): git para clonar o repo alvo no control plane.
+# S5 (Fase 5): Node.js para o CLI do Claude Code que o claude-agent-sdk dispara
+# (o Coder real). curl/ca-certificates para o NodeSource. Node 20 LTS.
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,6 +33,11 @@ RUN pip install --no-cache-dir \
         -e /app/services/sandbox-runtime \
         -e /app/services/validation \
         -e /app/services/orchestrator
+
+# S5 (Fase 5): só o Claude Agent SDK (o substrato do Coder real). NÃO uso o
+# extra [substrates] porque ele arrasta openhands-sdk, que exige Python 3.12
+# (esta imagem é 3.11). claude-agent-sdk roda em 3.11 e embute o CLI (Node).
+RUN pip install --no-cache-dir "claude-agent-sdk>=0.2.124"
 
 ENV DSE_ORCHESTRATOR_HEALTH_PORT=8900
 EXPOSE 8900
