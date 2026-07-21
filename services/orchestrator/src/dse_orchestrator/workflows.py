@@ -607,12 +607,31 @@ class WorkItemLifecycleWorkflow:
             audit_action="cancelled_by_operator",
             details={"reason": self._cancel_reason},
         )
+        await self._post_status_comment("failed", detail=detail)
         return WorkItemLifecycleResult(
             work_item_id=self._input.work_item_id,
             status=WorkItemStatus.failed.value,
             detail=detail,
             pr_number=self._input.pr_number,
         )
+
+    async def _post_status_comment(self, status: str, *, detail: str = "") -> None:
+        """Oversight barato (nunca deixar uma superfície sem o estado atual): toda
+        transição consequencial reflete o status no comentário único da superfície
+        de origem. BEST-EFFORT — jamais bloqueia a transição (o audit ledger e a
+        fonte de verdade; o comentario e conveniencia). A Activity resolve
+        repo/issue e e no-op auditado para origens nao-github (Slack/Jira terao
+        seu proprio caminho de saida com o MESMO vocabulario de status)."""
+        try:
+            await workflow.execute_activity(
+                ACTIVITY_POST_TRACKING_COMMENT,
+                {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
+                 "status": status, "detail": detail},
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
+        except ActivityError:
+            logger.warning("post_status_comment best-effort falhou (status=%s)", status)
 
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
         detail = f"escalated: {reason}"
@@ -622,6 +641,7 @@ class WorkItemLifecycleWorkflow:
             audit_action="escalated",
             details={"reason": reason},
         )
+        await self._post_status_comment("escalated", detail=reason)
         # Fase 4 — se ja havia um PR finalizado, esta escalacao e uma fronteira
         # terminal do PR: emite a metrica de qualidade (pilot gate) para nao
         # perder dados de PRs que nao mergeiam. Escalacoes pre-PR (ex.:
@@ -654,6 +674,7 @@ class WorkItemLifecycleWorkflow:
         await self._set_status(
             WorkItemStatus.failed, audit_action=audit_action, details={"reason": reason}
         )
+        await self._post_status_comment("failed", detail=reason)
         return WorkItemLifecycleResult(
             work_item_id=self._input.work_item_id,
             status=WorkItemStatus.failed.value,
@@ -671,6 +692,7 @@ class WorkItemLifecycleWorkflow:
             WorkItemStatus.blocked, audit_action=audit_action, details={"reason": reason}
         )
         await self._audit("escalated", {"reason": reason})
+        await self._post_status_comment("blocked", detail=reason)
         return WorkItemLifecycleResult(
             work_item_id=self._input.work_item_id,
             status=WorkItemStatus.blocked.value,
@@ -1129,6 +1151,11 @@ class WorkItemLifecycleWorkflow:
             input.sandbox_handle = handle.model_dump()
             await self._set_status(WorkItemStatus.implementing, audit_action="sandbox_provisioned",
                                     details={"sandbox_id": handle.sandbox_id})
+            # Estado visível durante a fase MAIS LONGA (coding): sem isto, uma
+            # tarefa low-risk auto-aprovada some da superfície entre a admissão
+            # e o pr_ready. O comentário único é editado in-place (sem spam).
+            if workflow.patched("status-comment-on-implementing-v1"):
+                await self._post_status_comment("implementing")
             # Nova Activity protegida por patch marker: histories antigos
             # replayam sem o comando; execucoes novas persistem a base antes
             # do primeiro turno do Coder.

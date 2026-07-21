@@ -20,13 +20,19 @@ no corpo do `@workflow.run`):
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 from typing import Any
 
 from temporalio import activity
 
-from dse_contracts.activities import ACTIVITY_EMIT_AUDIT, ACTIVITY_POST_TRACKING_COMMENT
+from dse_contracts.activities import (
+    ACTIVITY_EMIT_AUDIT,
+    ACTIVITY_POST_TRACKING_COMMENT,
+    PersistWorkItemStateInput,
+)
 import dse_audit
 
 from dse_orchestrator import policy
@@ -63,17 +69,25 @@ def _get_connection():
 
 @activity.defn(name=LOCAL_ACTIVITY_UPDATE_STATUS)
 async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
-    """UPDATE work_items SET status=..., pr_number=... WHERE id=....
+    """Projeta o estado do workflow em ``work_items`` de forma idempotente.
 
-    Idempotente: reescrever o mesmo status/pr_number duas vezes e um no-op
-    logico. Se a linha nao existir ainda (ex.: teste isolado sem WS-A tendo
-    rodado o intake), grava um aviso e segue — o workflow e a fonte de
-    verdade da maquina de estados mesmo quando a projecao em Postgres nao
-    esta disponivel (ex.: ambiente de teste unitario do WS-B sozinho).
+    O modelo aceita o payload historico minimo (work_item_id/status/pr_number)
+    e campos novos opcionais. Plano/hash/expected_files sao derivados aqui,
+    fora do sandbox deterministico do workflow. Reentregar a mesma Activity
+    nao incrementa ``state_version`` quando o estado nao mudou.
     """
-    work_item_id = payload["work_item_id"]
-    status = payload["status"]
-    pr_number = payload.get("pr_number")
+    inp = PersistWorkItemStateInput(**payload)
+    work_item_id = inp.work_item_id
+    plan_json = json.dumps(inp.plan) if inp.plan is not None else None
+    expected_files = None
+    plan_hash = None
+    if inp.plan is not None:
+        expected_files = json.dumps(list(inp.plan.get("expected_files") or []))
+        canonical_plan = json.dumps(inp.plan, sort_keys=True, separators=(",", ":"))
+        plan_hash = hashlib.sha256(canonical_plan.encode("utf-8")).hexdigest()
+    attempts_json = (
+        json.dumps(inp.validation_attempts) if inp.validation_attempts is not None else None
+    )
     try:
         conn = _get_connection()
     except Exception as exc:  # pragma: no cover - so ocorre sem Postgres no ar
@@ -82,17 +96,73 @@ async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE work_items SET status = %s, pr_number = COALESCE(%s, pr_number) WHERE id = %s",
-                (status, pr_number, work_item_id),
+                """
+                UPDATE work_items SET
+                    status = COALESCE(%s, status),
+                    pr_number = COALESCE(%s, pr_number),
+                    pr_url = COALESCE(%s, pr_url),
+                    plan = COALESCE(%s::jsonb, plan),
+                    plan_hash = COALESCE(%s, plan_hash),
+                    expected_files = COALESCE(%s::jsonb, expected_files),
+                    risk_class = COALESCE(%s, risk_class),
+                    base_sha = COALESCE(%s, base_sha),
+                    head_sha = COALESCE(%s, head_sha),
+                    ci_status = CASE
+                        WHEN %s THEN NULL
+                        ELSE COALESCE(%s, ci_status)
+                    END,
+                    last_error = COALESCE(%s, last_error),
+                    validation_attempts = COALESCE(%s::jsonb, validation_attempts),
+                    state_version = state_version + CASE
+                        WHEN %s IS NOT NULL AND status IS DISTINCT FROM %s THEN 1
+                        ELSE 0
+                    END,
+                    last_transition_at = CASE
+                        WHEN %s IS NOT NULL AND status IS DISTINCT FROM %s THEN now()
+                        ELSE last_transition_at
+                    END
+                WHERE id = %s
+                RETURNING status, state_version, plan_hash, base_sha, head_sha, ci_status
+                """,
+                (
+                    inp.status,
+                    inp.pr_number,
+                    inp.pr_url,
+                    plan_json,
+                    plan_hash,
+                    expected_files,
+                    inp.risk_class,
+                    inp.base_sha,
+                    inp.head_sha,
+                    inp.clear_ci_status,
+                    inp.ci_status,
+                    inp.last_error,
+                    attempts_json,
+                    inp.status,
+                    inp.status,
+                    inp.status,
+                    inp.status,
+                    work_item_id,
+                ),
             )
-            updated = cur.rowcount
+            row = cur.fetchone()
         conn.commit()
-        if updated == 0:
+        if row is None:
             logger.info(
                 "update_work_item_status: work_item_id=%s ainda nao existe em work_items (ok em teste isolado)",
                 work_item_id,
             )
-        return {"persisted": updated > 0}
+            return {"persisted": False}
+        status, state_version, persisted_plan_hash, base_sha, head_sha, ci_status = row
+        return {
+            "persisted": True,
+            "status": status,
+            "state_version": state_version,
+            "plan_hash": persisted_plan_hash,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "ci_status": ci_status,
+        }
     finally:
         conn.close()
 
@@ -110,7 +180,8 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT tenant_id, repo, base_branch, requester, data_class, pr_number, "
-                "       risk_class, budget, source_ref "
+                "       risk_class, budget, source_ref, plan, plan_hash, expected_files, "
+                "       base_sha, head_sha, pr_url, ci_status, state_version, last_error "
                 "FROM work_items WHERE id = %s",
                 (work_item_id,),
             )
@@ -135,7 +206,11 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
             # a versao sanitizada e' a que segue ao modelo (WSA-E2-T3); cai
             # para o content_snapshot original se nao houver.
             task_content = (p.get("sanitized_content") or p.get("content_snapshot") or "").strip()
-        tenant_id, repo, base_branch, requester, data_class, pr_number, risk_class, budget, source_ref = row
+        (
+            tenant_id, repo, base_branch, requester, data_class, pr_number,
+            risk_class, budget, source_ref, plan, plan_hash, expected_files,
+            base_sha, head_sha, pr_url, ci_status, state_version, last_error,
+        ) = row
         # S3 (Fase 5): o numero da issue vive em source_ref (JSONB {repo, number})
         # — necessario para o outbound postar o comentario de status na issue certa.
         issue_number = None
@@ -150,6 +225,15 @@ async def load_work_item(payload: dict[str, Any]) -> dict[str, Any]:
             "data_class": data_class or "internal",
             "pr_number": pr_number,
             "risk_class": risk_class,
+            "plan": plan or {},
+            "plan_hash": plan_hash,
+            "expected_files": expected_files or [],
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "pr_url": pr_url,
+            "ci_status": ci_status,
+            "state_version": int(state_version or 0),
+            "last_error": last_error,
             "task_content": task_content,
             "issue_number": issue_number,
             # WSB-E4-T1: budget lido na admissao. `budget` e o JSONB de
@@ -464,14 +548,30 @@ async def emit_audit_event(payload: dict[str, Any]) -> None:
     )
 
 
+# Toda transição consequencial descreve o ESTADO ATUAL na superfície de origem
+# (princípio de oversight barato — nunca deixar o humano no escuro em nenhuma
+# plataforma). O fallback genérico garante que um status sem template ainda
+# produza um comentário. Hoje GitHub; Slack/Jira reusam o mesmo vocabulário de
+# status via seus próprios adapters de saída.
 _STATUS_BODIES = {
     "needs_clarification": "🔎 O DSE precisa de esclarecimento antes de começar:\n\n{detail}",
     "awaiting_plan_approval": "📋 Plano pronto — aguardando aprovação humana (risco: {detail}).",
     "implementing": "⚙️ O DSE está implementando a mudança em um sandbox isolado.",
+    "validating": "🧪 Implementação pronta — rodando validação (L1/L2) no sandbox.",
     "pr_ready": "✅ PR aberto com a mudança e evidência — pronto para revisão humana.",
+    "pr_updated": "🔁 PR atualizado com o fix do review — pronto para nova revisão.",
     "done": "🎉 Merge feito por humano. Tarefa concluída.",
-    "failed": "❌ A tarefa falhou: {detail}",
-    "escalated": "⚠️ Escalado a um operador humano: {detail}",
+    "failed": "❌ A tarefa falhou e parou: {detail}",
+    "escalated": (
+        "⚠️ O DSE escalou esta tarefa para revisão humana e parou.\n\n"
+        "**Motivo:** {detail}\n\n"
+        "Revise a descrição / critérios de aceite e re-aplique a label `dse` "
+        "para tentar novamente."
+    ),
+    "blocked": (
+        "🚧 Bloqueado aguardando intervenção humana.\n\n**Motivo:** {detail}\n\n"
+        "(ex.: nenhum aprovador resolvível — ajuste CODEOWNERS / access bundle.)"
+    ),
 }
 
 
