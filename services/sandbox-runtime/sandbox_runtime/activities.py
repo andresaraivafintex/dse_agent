@@ -421,37 +421,12 @@ async def _run_coder_turn_impl(
 # ---------------------------------------------------------------------------
 # run_planner_turn (WSC-E3-T3) — sessão read-only, emite PlanArtifact
 # ---------------------------------------------------------------------------
-class RunPlannerTurnInput(BaseModel):
-    # Reconciliação de contrato da integração da Fase 2: o worker do WS-B chama
-    # esta Activity enviando `instructions` (lista, de clarification_notes) e
-    # `base_branch`/`model_override` — não `instruction`/`branch`. Os fakes
-    # lenientes dos testes de ambos os lados (aceitam dict) esconderam o
-    # mismatch; o wire real quebrava com "missing instruction". Tornado
-    # tolerante: `instruction` opcional derivada de `instructions`; aceita os
-    # aliases do WS-B. Correção definitiva: promover este model + os de tester/
-    # L2 a dse_contracts para uma única fonte da verdade (registrado no README).
-    model_config = {"populate_by_name": True}
-
-    work_item_id: str
-    tenant_id: str
-    instruction: str = ""
-    instructions: list[str] = Field(default_factory=list)  # alias que o WS-B envia
-    repo: str = "app"
-    branch: str | None = None
-    base_branch: str | None = None  # alias que o WS-B envia
-    task_class: str = "default"
-    data_class: str = "internal"
-    diff_budget_lines: int = 400
-    related_tickets: list[str] = Field(default_factory=list)
-    model_override: str | None = None  # ignorado aqui; tolerado para não quebrar o decode
-
-    @model_validator(mode="after")
-    def _reconcile(self) -> "RunPlannerTurnInput":
-        if not self.instruction and self.instructions:
-            self.instruction = " ".join(s for s in self.instructions if s)
-        if self.branch is None and self.base_branch is not None:
-            self.branch = self.base_branch
-        return self
+# PROMOVIDO ao contrato (adendo 02 §2.3, gate de entrada da Fase 3): a
+# definição canônica vive em `dse_contracts.activities` com testes de
+# regressão de boundary (packages/contracts/tests/test_activity_boundaries.py)
+# validando os payloads exatos do WS-B. Re-import para compatibilidade — todo
+# consumidor local (testes, sessions) continua funcionando sem mudança.
+from dse_contracts import RunPlannerTurnInput  # noqa: E402
 
 
 def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> dict[str, Any]:
@@ -572,58 +547,10 @@ async def _run_planner_turn_impl(
 # ---------------------------------------------------------------------------
 # run_tester_turn (WSC-E3-T4) — test runners + autoria de testes (só test paths)
 # ---------------------------------------------------------------------------
-class RunTesterTurnInput(BaseModel):
-    # Reconciliação de contrato Fase 2 (ver nota em RunPlannerTurnInput): o
-    # WS-B envia `plan`(dict)+`sandbox_id`+`model_override`+`runtime_override`,
-    # não `instruction`. Tornado tolerante: instruction opcional derivada do
-    # test_plan do plano; aliases do WS-B aceitos.
-    model_config = {"populate_by_name": True}
-
-    work_item_id: str
-    tenant_id: str
-    instruction: str = ""
-    plan: dict | None = None  # alias que o WS-B envia (plan_json)
-    sandbox_id: str | None = None
-    repo: str = "app"
-    branch: str | None = None
-    task_class: str = "default"
-    data_class: str = "internal"
-    run_paths: list[str] = Field(default_factory=list)
-    model_override: str | None = None
-    runtime_override: str | None = None
-
-    @model_validator(mode="after")
-    def _reconcile(self) -> "RunTesterTurnInput":
-        if not self.instruction and self.plan:
-            self.instruction = str(self.plan.get("test_plan") or "write/adjust tests for the change")
-        return self
-
-
-class TesterTurnResult(BaseModel):
-    """Retorno da Activity run_tester_turn. NÃO está em `packages/contracts`
-    (WS-C não edita a fundação) — WS-B consome via dict/model_validate; ver
-    README (proposta de promoção ao contrato na próxima janela do arquiteto)."""
-
-    sandbox_id: str
-    test_files: list[str]
-    tests_ran: bool
-    tests_passed: bool
-    returncode: int
-    cost_usd: float = 0.0
-    # Reconciliação Fase 2: o WS-B decodifica o retorno desta Activity em
-    # `CoderTurnResult` (fundação), que exige `diff_summary` + `files_changed`.
-    # Expostos aqui como superset compatível (files_changed espelha test_files)
-    # para o decode do WS-B não falhar — até a promoção ao contrato compartilhado.
-    diff_summary: str = ""
-    files_changed: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _mirror_test_files(self) -> "TesterTurnResult":
-        if not self.files_changed:
-            self.files_changed = list(self.test_files)
-        if not self.diff_summary:
-            self.diff_summary = f"tester: {len(self.test_files)} test file(s)"
-        return self
+# PROMOVIDOS ao contrato (adendo 02 §2.3) — definição canônica em
+# `dse_contracts.activities`, testes de boundary na fundação. Re-import para
+# compatibilidade dos consumidores locais.
+from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
 
 
 @activity.defn(name=ACTIVITY_RUN_TESTER_TURN)
@@ -722,23 +649,12 @@ async def _run_tester_turn_impl(
 # ---------------------------------------------------------------------------
 # run_l2_review (WSC-E3-T5) — sessão Reviewer fresh-context, retorna L2Verdict
 # ---------------------------------------------------------------------------
-class RunL2ReviewInput(BaseModel):
-    """Entrada da Activity L2. Carrega SÓ plan + diff — deliberadamente NÃO
-    existe campo para histórico/transcrição do Coder (P3 por construção; o WS-B
-    não tem como injetar contexto do produtor nesta Activity nem se quisesse)."""
-
-    # P3 (NÃO-NEGOCIÁVEL, joia da coroa): os campos são EXATAMENTE
-    # {work_item_id, tenant_id, plan, diff, task_class, data_class} — nenhum
-    # canal para histórico/instrução do Coder. Este model é deliberadamente
-    # ESTRITO e NÃO foi alargado na reconciliação da Fase 2 (ao contrário de
-    # planner/tester): quem se adapta é o CHAMADOR (WS-B envia `diff`, não
-    # `diff_summary` — corrigido no call site do workflow, não aqui).
-    work_item_id: str
-    tenant_id: str
-    plan: PlanArtifact
-    diff: str
-    task_class: str = "default"
-    data_class: str = "internal"
+# PROMOVIDO ao contrato (adendo 02 §2.3) e ENDURECIDO lá: a definição
+# canônica em `dse_contracts.activities` agora tem `extra="forbid"` — tentar
+# passar qualquer campo além de {work_item_id, tenant_id, plan, diff,
+# task_class, data_class} (ex.: histórico do Coder) falha no DECODE da
+# Activity, não apenas em teste. P3 estrutural na fundação.
+from dse_contracts import RunL2ReviewInput  # noqa: E402
 
 
 def _changed_files_from_diff(diff: str) -> list[str]:

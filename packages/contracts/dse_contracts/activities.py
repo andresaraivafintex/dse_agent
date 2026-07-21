@@ -13,7 +13,11 @@ esperado enquanto os workstreams constroem em paralelo.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
+
+from .plan_artifact import PlanArtifact
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +42,17 @@ ACTIVITY_EMIT_AUDIT = "emit_audit_event"
 ACTIVITY_RUN_PLANNER_TURN = "run_planner_turn"
 ACTIVITY_RUN_TESTER_TURN = "run_tester_turn"
 ACTIVITY_RUN_L2_REVIEW = "run_l2_review"
+
+# --- Fase 3 (pipeline de evidência, ADR-26/ADR-27/§10.12-13) ---
+# Donos: WS-E implementa (evidência/preview/artifacts); WS-B chama por nome
+# depois do PR finalizado. Definidos ANTES da implementação (gate de entrada
+# da Fase 3, adendo 02 §2.3) — os models de input/output correspondentes
+# vivem NESTE arquivo desde o dia zero, para a classe de bug de boundary das
+# Fases 1-2 (14 ocorrências) não ter onde nascer.
+ACTIVITY_RUN_DEMO_EVIDENCE = "run_demo_evidence"
+ACTIVITY_PUBLISH_ARTIFACT = "publish_artifact"
+ACTIVITY_TRIGGER_PREVIEW = "trigger_preview"
+ACTIVITY_RUN_VISUAL_DIFF = "run_visual_diff"
 
 
 # ---------------------------------------------------------------------------
@@ -108,3 +123,191 @@ class CiStatusResult(BaseModel):
     work_item_id: str
     pr_number: int
     status: str  # "pending" | "green" | "red"
+
+
+# ---------------------------------------------------------------------------
+# Models de sessão promovidos à fundação (adendo 02 §2.3 — Fase 3, gate de
+# entrada). Nas Fases 1-2 estes models viviam em `sandbox_runtime.activities`
+# e o payload do chamador (WS-B) derivou dos campos declarados sem que nenhum
+# teste pegasse (fakes lenientes dos dois lados) — 14 bugs de boundary no
+# total. A partir daqui: UMA fonte da verdade, com testes de regressão de
+# boundary em packages/contracts/tests/test_activity_boundaries.py que
+# validam os payloads EXATOS que o workflow envia. `sandbox_runtime` importa
+# daqui e re-exporta para compatibilidade.
+# ---------------------------------------------------------------------------
+class RunPlannerTurnInput(BaseModel):
+    """Input da sessão Planner (WSC-E3-T3). Tolerante por design aos aliases
+    que o workflow do WS-B envia (`instructions` lista / `base_branch`) —
+    reconciliação da integração da Fase 2, agora parte do contrato."""
+
+    model_config = {"populate_by_name": True}
+
+    work_item_id: str
+    tenant_id: str
+    instruction: str = ""
+    instructions: list[str] = Field(default_factory=list)
+    repo: str = "app"
+    branch: str | None = None
+    base_branch: str | None = None
+    task_class: str = "default"
+    data_class: str = "internal"
+    diff_budget_lines: int = 400
+    related_tickets: list[str] = Field(default_factory=list)
+    model_override: str | None = None  # tolerado; a política de modelo vive no gateway
+
+    @model_validator(mode="after")
+    def _reconcile(self) -> "RunPlannerTurnInput":
+        if not self.instruction and self.instructions:
+            self.instruction = " ".join(s for s in self.instructions if s)
+        if self.branch is None and self.base_branch is not None:
+            self.branch = self.base_branch
+        return self
+
+
+class RunTesterTurnInput(BaseModel):
+    """Input da sessão Tester (WSC-E3-T4). Tolerante aos aliases do WS-B
+    (`plan` dict + `sandbox_id`); deriva `instruction` do test_plan."""
+
+    model_config = {"populate_by_name": True}
+
+    work_item_id: str
+    tenant_id: str
+    instruction: str = ""
+    plan: dict[str, Any] | None = None
+    sandbox_id: str | None = None
+    repo: str = "app"
+    branch: str | None = None
+    task_class: str = "default"
+    data_class: str = "internal"
+    run_paths: list[str] = Field(default_factory=list)
+    model_override: str | None = None
+    runtime_override: str | None = None
+
+    @model_validator(mode="after")
+    def _reconcile(self) -> "RunTesterTurnInput":
+        if not self.instruction and self.plan:
+            self.instruction = str(self.plan.get("test_plan") or "write/adjust tests for the change")
+        return self
+
+
+class TesterTurnResult(BaseModel):
+    """Retorno da sessão Tester. Superset compatível com `CoderTurnResult`
+    (o workflow decodifica o retorno como CoderTurnResult — `files_changed`
+    espelha `test_files`)."""
+
+    sandbox_id: str
+    test_files: list[str]
+    tests_ran: bool
+    tests_passed: bool
+    returncode: int
+    cost_usd: float = 0.0
+    diff_summary: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _mirror_test_files(self) -> "TesterTurnResult":
+        if not self.files_changed:
+            self.files_changed = list(self.test_files)
+        if not self.diff_summary:
+            self.diff_summary = f"tester: {len(self.test_files)} test file(s)"
+        return self
+
+
+class RunL2ReviewInput(BaseModel):
+    """Input da sessão Reviewer L2 (WSC-E3-T5). P3 ESTRUTURAL, endurecido na
+    promoção ao contrato: `extra="forbid"` — qualquer tentativa de passar um
+    campo além dos declarados (ex.: histórico/instruções do Coder) falha no
+    DECODE da Activity, não apenas em teste. Os campos são exatamente
+    {work_item_id, tenant_id, plan, diff, task_class, data_class}; quem se
+    adapta é sempre o CHAMADOR (o WS-B envia `diff`, nunca `diff_summary`)."""
+
+    model_config = {"extra": "forbid"}
+
+    work_item_id: str
+    tenant_id: str
+    plan: PlanArtifact
+    diff: str
+    task_class: str = "default"
+    data_class: str = "internal"
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — pipeline de evidência (dono: WS-E; chamador: WS-B). Definidos no
+# contrato ANTES de qualquer implementação existir (gate de entrada).
+# ---------------------------------------------------------------------------
+class RunDemoEvidenceInput(BaseModel):
+    """Executa o(s) teste(s) `@demo` da tarefa (convenção `demos/<work_item_id>/`,
+    ADR-27) com gravação de vídeo. O teste é autorado pelo Tester (WSC-E3-T4b);
+    a EXECUÇÃO aqui é determinística — Playwright real, sem LLM."""
+
+    work_item_id: str
+    tenant_id: str
+    sandbox: SandboxHandle | None = None
+    demo_dir: str = ""  # default derivado: demos/<work_item_id>/
+    base_url: str | None = None  # URL do preview (TriggerPreview) quando houver; fixture local senão
+    timeout_s: int = 120
+
+
+class DemoEvidenceResult(BaseModel):
+    work_item_id: str
+    passed: bool
+    video_artifact_key: str | None = None  # chave no artifact store (publicado via PublishArtifact)
+    trace_artifact_key: str | None = None
+    duration_s: float = 0.0
+    detail: str = ""
+
+
+class PublishArtifactInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    kind: str  # "demo_video" | "playwright_trace" | "visual_diff" | "test_report"
+    local_path: str
+    content_type: str = "application/octet-stream"
+    ttl_seconds: int = 7 * 24 * 3600  # presigned URL de TTL curto por política
+
+
+class ArtifactRef(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    kind: str
+    store_key: str  # chave S3 no Garage, prefixada por tenant (NFR-03)
+    presigned_url: str
+    expires_at: str  # ISO-8601 — links de evidência EXPIRAM por política (exit da Fase 3)
+
+
+class TriggerPreviewInput(BaseModel):
+    """Dispara (ou pula) o preview environment por PR. A decisão UI-touching é
+    DETERMINÍSTICA por paths-filter (FR-20) — nunca por modelo; PR backend-only
+    resulta em `skipped_backend_only`, que conta como sucesso e NUNCA bloqueia."""
+
+    work_item_id: str
+    tenant_id: str
+    repo: str
+    pr_number: int
+    files_changed: list[str] = Field(default_factory=list)
+    ui_path_globs: list[str] = Field(default_factory=lambda: ["ui/**", "frontend/**", "**/*.css", "**/*.tsx", "**/*.jsx"])
+
+
+class PreviewRef(BaseModel):
+    work_item_id: str
+    pr_number: int
+    status: str  # "created" | "skipped_backend_only" | "degraded"
+    namespace: str | None = None
+    url: str | None = None
+    detail: str = ""
+
+
+class RunVisualDiffInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    base_screenshot_key: str | None = None  # artifact store; None = primeiro run (baseline)
+    candidate_screenshot_path: str = ""
+    threshold_pct: float = 0.1
+
+
+class VisualDiffResult(BaseModel):
+    work_item_id: str
+    passed: bool
+    changed_pct: float = 0.0
+    diff_artifact_key: str | None = None
+    baseline_created: bool = False

@@ -197,6 +197,41 @@ upgrade WSB-E1-T5). Priority & Fairness nativo (1.31+) NÃO está disponível �
 fairness na Fase 2 é worker-side (caps de concorrência por tenant lidos de
 `tenant_config`), atrás de interface trocável quando o servidor suportar.
 
+## Fase 3 ("Evidence") — escopo e reservas
+
+Fases 1+2 completas e integradas (399 testes — ver `docs/PHASE2-STATUS.md` e o adendo
+`../plano-desenvolvimento/02-ADENDO-FASE3-POS-FASE2.md`). A Fase 3 adiciona: L3 completo
+(reflection + targeted re-runs), preview environments por PR via Argo CD ApplicationSet,
+vídeo `@demo` Playwright, artifact store Garage (links expirantes + quarentena + log de
+acesso), visual diff, debounce de evidência (ADR-26), Playwright na imagem do sandbox +
+convenção `demos/<workitem-id>/` (WSC-E3-T4b), segundo substrato (Claude Agent SDK),
+failover intra-tier + bateria completa de chaos, ADR-28 completo (rotação agendada +
+secrets de preview via ESO), retenção por classificação. **Fora de escopo até a Fase 4:**
+promoção de skills, merge-base hardening, red-team.
+
+**Gate de entrada JÁ EXECUTADO pela fundação:**
+- Models de sessão (Planner/Tester/L2) PROMOVIDOS a `dse_contracts.activities`
+  (`sandbox_runtime.activities` re-importa) com testes de regressão de boundary em
+  `packages/contracts/tests/test_activity_boundaries.py` — **regra nova: ao mudar um call
+  site no workflow, atualize o payload correspondente nesses testes NO MESMO PR.**
+  `RunL2ReviewInput` agora tem `extra="forbid"` (P3 estrutural no decode).
+- Contratos de evidência da Fase 3 JÁ DEFINIDOS na fundação (importe, não redefina):
+  `ACTIVITY_RUN_DEMO_EVIDENCE`/`PUBLISH_ARTIFACT`/`TRIGGER_PREVIEW`/`RUN_VISUAL_DIFF` +
+  models `RunDemoEvidenceInput`/`DemoEvidenceResult`/`PublishArtifactInput`/`ArtifactRef`/
+  `TriggerPreviewInput`/`PreviewRef`/`RunVisualDiffInput`/`VisualDiffResult`.
+- **Cluster K8s local no ar**: k3d `dse-preview` (2 nós, rede `dse_net` — pods alcançam
+  Vault/model-gateway/Garage pelo nome de container) com **Argo CD v2.13.3** instalado e
+  Available no namespace `argocd` (ApplicationSet controller incluído). Setup idempotente:
+  `infra/k8s-local/setup-k3d-argocd.sh`. kubecontext: `k3d-dse-preview`. ESO é instalado
+  pelo WS-F via helm (comando no rodapé do script). NÃO delete o cluster.
+
+Migrações reservadas da Fase 3: `0014_wsb3.sql`, `0015_wsc3.sql`, `0016_wsd3.sql`,
+`0017_wse3.sql`, `0018_wsf3.sql` (WS-A não tem tarefas na Fase 3).
+
+Portas novas reservadas: **3900/3903** = Garage S3 API/admin (WS-E declara o serviço no
+`docker-compose.wse.yml` — fragment ainda não existe, criar); **8091** = port-forward do
+Argo CD UI (sob demanda, não fixo).
+
 ## Como rodar localmente
 
 ```
