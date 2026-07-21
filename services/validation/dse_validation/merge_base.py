@@ -145,6 +145,16 @@ class MergeBaseConfig:
         )
 
     def locations(self, work_item_id: str) -> tuple[str, str]:
+        # Costura com o WS-C (observada ao vivo no review loop): o workspace
+        # REAL da tarefa vive em $DSE_SANDBOX_STATE_DIR/<wi>/workspace (onde o
+        # clone/Coder/checkpoint operam). Se ele existe, é ele que o merge-base
+        # deve atualizar — o default legado (merge_base_repos/, fixtures dos
+        # testes) fica como fallback quando o sandbox real não está neste host.
+        state_dir = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
+        sandbox_ws = os.path.join(state_dir, work_item_id, "workspace")
+        if os.path.isdir(sandbox_ws):
+            bare = os.path.join(state_dir, work_item_id, "checkpoint.git")
+            return bare, sandbox_ws
         base = os.path.join(self.git_root, work_item_id)
         return os.path.join(base, "origin.git"), os.path.join(base, "workspace")
 

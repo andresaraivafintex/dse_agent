@@ -70,6 +70,14 @@ services:
       # regra do proprio sandbox nao ter socket (P2/ADR-11) — o sandbox em si
       # nunca recebe este mount, so o processo que o cria.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Robustez (observado ao vivo): os workspaces/checkpoints das tarefas
+      # (DSE_SANDBOX_STATE_DIR) viviam no /tmp DO CONTAINER — cada recreate do
+      # worker destruia o estado de TODA tarefa em voo. Montado do host:
+      # (a) sobrevive a restart/deploy do worker; (b) coere com o
+      # docker-outside-of-docker — o daemon monta este MESMO path do host no
+      # /workspace do sandbox, entao o container do sandbox passa a ver os
+      # arquivos reais (antes via um diretorio vazio).
+      - /tmp/dse-sandboxes:/tmp/dse-sandboxes
     depends_on:
       - postgres
       - temporal

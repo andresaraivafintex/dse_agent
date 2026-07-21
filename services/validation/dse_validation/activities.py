@@ -419,7 +419,11 @@ def _update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
 
     # threads de review ancoradas em commits — resolvidas pelo PR rastreado.
     anchored: list[str] = []
-    tracked = db.get_tracked_pr(inp.work_item_id)
+    # fix (observado ao vivo no review loop): `db` nunca foi importado neste
+    # módulo — NameError em todo update_base_branch real. Import local, no
+    # estilo dos demais deste arquivo.
+    from dse_validation import db as _db
+    tracked = _db.get_tracked_pr(inp.work_item_id)
     pr_number = tracked.get("pr_number") if tracked else None
     if pr_number is not None:
         github_client = build_github_client(GitHubConfig())
