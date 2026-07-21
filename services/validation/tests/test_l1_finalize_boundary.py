@@ -47,7 +47,24 @@ def test_finalize_input_accepts_exact_workflow_payload():
         "base_branch": "main",
         "branch": "dse/wi-1",
         "summary": "DSE: corrige exclusão de transação",
+        # back-link da issue ("Closes #N") + evidência L1 no corpo do PR.
+        "issue_ref": {"issue_number": 2},
+        "evidence_url": "L1 verde (test ✓, secret_scan ✓)",
     }
     inp = FinalizePrInput(**payload)
     assert inp.summary.startswith("DSE:")
     assert inp.sandbox.container_id == "abc123"
+    assert inp.issue_ref == {"issue_number": 2}
+    assert "L1 verde" in inp.evidence_url
+
+
+def test_finalize_input_tolerates_absent_issue_and_evidence():
+    # work item sem issue de origem (ex.: origem Slack/Jira sem numero) —
+    # o workflow manda issue_ref=None e evidence vazio; o finalizer usa os
+    # fallbacks "(sem ...)" no corpo.
+    inp = FinalizePrInput(
+        work_item_id="wi-1", tenant_id="tnt-1", sandbox=_handle_payload(),
+        repo="a/b", base_branch="main", branch="dse/wi-1", summary="s",
+        issue_ref=None, evidence_url="",
+    )
+    assert inp.issue_ref is None and inp.evidence_url == ""

@@ -37,6 +37,11 @@ class WorkItemLifecycleInput:
     # Carregado de ingest_events.payload por load_work_item; passado como
     # instruction do Planner/Coder. Sem isto os agentes nao sabiam a tarefa.
     task_content: str = ""
+    # Numero da issue de origem (de work_items.source_ref, via load_work_item).
+    # O finalize usa como issue_ref -> "Closes #N" no corpo do PR (back-link +
+    # auto-close no merge). Sem isto o PR saia com "(sem issue de origem
+    # vinculada)" mesmo vindo de uma issue.
+    issue_number: int | None = None
 
     phase: str = PHASE_INTAKE
     status: str = "new"

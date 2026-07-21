@@ -412,6 +412,7 @@ class WorkItemLifecycleWorkflow:
                 pr_number=row.get("pr_number"),
                 risk_class=row.get("risk_class") or "low",
                 task_content=row.get("task_content") or "",
+                issue_number=(int(row["issue_number"]) if row.get("issue_number") else None),
                 budget_max_usd=float(max_usd) if max_usd is not None else None,
             )
         raise ApplicationError(
@@ -452,6 +453,18 @@ class WorkItemLifecycleWorkflow:
         if (input.task_content or "").strip():
             title = input.task_content.strip().splitlines()[0].strip()
         return plan_summary or title or f"DSE: alteração automatizada ({input.work_item_id})"
+
+    @staticmethod
+    def _l1_evidence(l1_result) -> str:
+        """S7 follow-up: evidência de teste no corpo do PR (P8 — evidência
+        sobre asserção). Neste ponto a evidência real que EXISTE é o resultado
+        do L1 (o pipeline de vídeo/preview roda DEPOIS do PR); resume os checks
+        que passaram, deterministicamente. Sem isto o PR saía com
+        "(sem link de evidência)"."""
+        if l1_result is None or not getattr(l1_result, "findings", None):
+            return ""
+        checks = ", ".join(f"{f.check} ✓" for f in l1_result.findings if f.passed)
+        return f"L1 verde ({checks})" if checks else ""
 
     async def _boundary_gate(self) -> None:
         """Checado antes de CADA Activity de negocio (nao antes de bookkeeping
@@ -1141,6 +1154,10 @@ class WorkItemLifecycleWorkflow:
                 "base_branch": input.base_branch or "main",
                 "branch": input.branch,
                 "summary": self._pr_summary(),
+                # back-link da issue de origem ("Closes #N") + evidência L1.
+                "issue_ref": ({"issue_number": input.issue_number}
+                              if input.issue_number else None),
+                "evidence_url": self._l1_evidence(l1_result),
             },
             result_type=PrRef,
             **self._activity_timeouts(),
@@ -1755,6 +1772,9 @@ class WorkItemLifecycleWorkflow:
                 "base_branch": input.base_branch or "main",
                 "branch": input.branch,
                 "summary": self._pr_summary(),
+                "issue_ref": ({"issue_number": input.issue_number}
+                              if input.issue_number else None),
+                "evidence_url": self._l1_evidence(l1_result),
             },
             result_type=PrRef,
             **self._activity_timeouts(),
