@@ -98,6 +98,22 @@ def read_evidence_row(work_item_id: str):
         conn.close()
 
 
+def read_skill_episodes(work_item_id: str):
+    """Fase 4 — le os episodios de skill-learning gravados por um work item
+    (source=clarification, tabela skill_episode da migracao 0019/WS-C)."""
+    conn = psycopg2.connect(DSN)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT source, pattern_key, occurrence_n, provenance "
+                "FROM skill_episode WHERE work_item_id = %s ORDER BY id",
+                (work_item_id,),
+            )
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
 def set_tenant_config(tenant_id: str, *, max_concurrent_work_items: int = 5,
                       max_concurrent_activities: int | None = None) -> None:
     """Semeia/atualiza tenant_config (WS-F, migracao 0007) para o teste de

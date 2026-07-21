@@ -1,0 +1,60 @@
+{{- if .Values.modelServer.enabled }}
+# Model server self-hosted / air-gapped (Tier 2, WSD-E5-T2/T3). Só é
+# renderizado na topologia B (`modelServer.enabled: true`). O model-gateway
+# aponta para este Service em vez de um provider externo — nenhum dado de
+# inferência sai do VPC. Sem env de credencial de provider externo: por
+# construção, este workload não tem para onde exfiltrar.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-model-server
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "model-server" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: {{ .Values.modelServer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "model-server" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "model-server" "Release" .Release) | nindent 8 }}
+    spec:
+      containers:
+        - name: model-server
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.modelServer.image.repository "tag" .Values.modelServer.image.tag) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.modelServer.port }}
+              name: http
+          resources:
+            requests:
+              {{- toYaml .Values.modelServer.resources.requests | nindent 14 }}
+            limits:
+              {{- toYaml .Values.modelServer.resources.limits | nindent 14 }}
+              {{- if gt (int .Values.modelServer.gpu) 0 }}
+              nvidia.com/gpu: {{ .Values.modelServer.gpu }}
+              {{- end }}
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.modelServer.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-model-server
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "model-server" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.modelServer.port }}
+      targetPort: {{ .Values.modelServer.port }}
+      name: http
+{{- end }}

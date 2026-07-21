@@ -42,11 +42,26 @@ METRIC_HISTORY_SIZE_BYTES = "dse.workflow.history_size_bytes"
 METRIC_CONTINUE_AS_NEW = "dse.workflow.continue_as_new_count"
 ATTR_CHECKPOINT = "dse.checkpoint"
 
+# Fase 4 — metricas de QUALIDADE DE PR (pilot gate "PR quality thresholds",
+# adendo 03 Parte 3). O piloto interno mede a saude do loop de review por PR;
+# estas quatro alimentam esse gate. NUMEROS reais so saem operando contra
+# repos reais (bloqueio administrativo do adendo 03) — aqui garantimos que a
+# instrumentacao existe e emite deterministicamente do lado do workflow.
+METRIC_PR_REVIEW_ROUNDS = "dse.pr.review_rounds"          # rounds de review por PR
+METRIC_PR_CHANGES_REQUESTED = "dse.pr.changes_requested_total"  # taxa (contagem) de changes_requested
+METRIC_PR_TIME_TO_MERGE = "dse.pr.time_to_merge_seconds"  # tempo ate merge (finalize -> merged_by_human)
+METRIC_PR_EVIDENCE_REFRESHES = "dse.pr.evidence_refreshes"  # evidence-consumption (proxy; WS-E loga o acesso real)
+ATTR_PR_OUTCOME = "dse.pr.outcome"  # "merged" | "escalated" | ...
+
 _lock = threading.Lock()
 _meter = None
 _hist_length = None
 _hist_size = None
 _can_count = None
+_pr_review_rounds = None
+_pr_changes_requested = None
+_pr_time_to_merge = None
+_pr_evidence_refreshes = None
 
 
 def _build_metric_reader():
@@ -113,6 +128,24 @@ def _make_instruments() -> None:
         unit="{run}",
         description="Quantos Continue-As-New esta cadeia de execucoes ja fez",
     )
+    global _pr_review_rounds, _pr_changes_requested, _pr_time_to_merge, _pr_evidence_refreshes
+    _pr_review_rounds = _meter.create_histogram(
+        METRIC_PR_REVIEW_ROUNDS, unit="{round}",
+        description="Rounds de review humano/CI-red por PR (pilot gate: PR quality thresholds)",
+    )
+    _pr_changes_requested = _meter.create_histogram(
+        METRIC_PR_CHANGES_REQUESTED, unit="{batch}",
+        description="Quantos lotes de changes_requested um PR acumulou (pilot gate)",
+    )
+    _pr_time_to_merge = _meter.create_histogram(
+        METRIC_PR_TIME_TO_MERGE, unit="s",
+        description="Segundos de PR finalizado ate merged_by_human (pilot gate)",
+    )
+    _pr_evidence_refreshes = _meter.create_histogram(
+        METRIC_PR_EVIDENCE_REFRESHES, unit="{refresh}",
+        description="Refreshes de evidencia do PR (proxy de evidence-consumption; "
+        "o acesso real e logado pelo WS-E). Pilot gate.",
+    )
 
 
 def _ensure_configured() -> None:
@@ -164,3 +197,31 @@ def record_history_metric(
     if history_size_bytes:
         _hist_size.record(int(history_size_bytes), attrs)
     _can_count.record(int(continue_as_new_count), attrs)
+
+
+def record_pr_quality_metric(
+    *,
+    work_item_id: str,
+    tenant_id: str,
+    outcome: str,
+    review_rounds: int,
+    changes_requested_count: int,
+    evidence_refreshes: int,
+    time_to_merge_seconds: float | None = None,
+) -> None:
+    """Fase 4 — emite as quatro metricas de QUALIDADE DE PR que alimentam o
+    pilot gate "PR quality thresholds" (adendo 03). Emitida numa fronteira
+    TERMINAL do PR (merge ou escalacao) com as tallies finais do run, mais
+    incrementalmente por round (contadores) para nao perder dados de PRs que
+    nunca mergeiam. Best-effort — falha aqui nunca afeta o fluxo."""
+    _ensure_configured()
+    attrs = {
+        OTEL_ATTR_WORK_ITEM: work_item_id,
+        OTEL_ATTR_TENANT: tenant_id,
+        ATTR_PR_OUTCOME: outcome,
+    }
+    _pr_review_rounds.record(int(review_rounds), attrs)
+    _pr_changes_requested.record(int(changes_requested_count), attrs)
+    _pr_evidence_refreshes.record(int(evidence_refreshes), attrs)
+    if time_to_merge_seconds is not None:
+        _pr_time_to_merge.record(float(time_to_merge_seconds), attrs)

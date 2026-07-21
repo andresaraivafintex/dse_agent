@@ -1,0 +1,86 @@
+# Fintex DSE — overlay da TOPOLOGIA B (WSF-E5-T3, Fase 4).
+#
+# Uso:
+#   helm template dse-<tenant> infra/helm/dse \
+#       -f infra/helm/dse/values.yaml \
+#       -f infra/helm/dse/values-topology-b.yaml \
+#       -f values-<tenant>.yaml
+#
+# Topologia B = o TIER MAIS ESTRITO: TUDO roda dentro do VPC do cliente, sem
+# NENHUMA dependência externa gerenciada nem compartilhada — nem Temporal
+# Cloud, nem Postgres gerenciado (RDS/CloudSQL), nem Vault externo, nem
+# provider de modelo externo. Difere da topologia A (que PERMITE apontar para
+# serviços gerenciados/compartilhados em produção) por proibir todos eles.
+#
+# Consequência de custo: cada cliente recebe uma STACK STANDALONE COMPLETA —
+# o custo operacional NÃO amortiza entre clientes (NFR-08 × N). Ver
+# infra/helm/dse/TOPOLOGY-B.md para o detalhamento.
+#
+# Este arquivo contém APENAS os overrides que diferem do values.yaml base;
+# o que não aparece aqui herda o default (que já é self-hosted).
+
+# --- Postgres: self-managed in-cluster OBRIGATÓRIO (nada de RDS/CloudSQL). ---
+# Em topologia B o cliente assume PITR/backup deste StatefulSet dentro do VPC.
+postgres:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 50Gi            # maior: é o único Postgres, sem serviço gerenciado atrás
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits: { cpu: "2", memory: "4Gi" }
+
+# --- Temporal: self-hosted in-cluster (NÃO Temporal Cloud). ---
+temporal:
+  enabled: true
+  ui:
+    enabled: true         # console de orquestração TAMBÉM dentro do VPC
+  resources:
+    requests: { cpu: "500m", memory: "1Gi" }
+    limits: { cpu: "2", memory: "4Gi" }
+
+# --- Vault: in-cluster, NUNCA apontando para um Vault externo/compartilhado. ---
+# devMode continua PROIBIDO em produção — usar um Vault HA in-VPC (unseal
+# gerenciado pelo cliente). externallyManaged=false força o Vault do chart.
+vault:
+  externallyManaged: false
+  devMode: false
+
+secrets:
+  vaultAddr: "http://dse-vault:8200"
+  externalSecrets:
+    enabled: true         # ESO in-cluster; secretStore aponta para o Vault in-VPC
+    secretStoreRef: "dse-vault-backend"
+
+# --- Egress: allowlist SÓ interna. Nenhum host público (nem *.amazonaws.com). ---
+# O único destino de modelo é o model-server in-cluster (via model-gateway);
+# git/registry devem ser espelhos internos do cliente. Ajustar por cliente.
+egressProxy:
+  enabled: true
+  allowlist:
+    - host: "git.internal"
+      purpose: "git remote interno (GitHub Enterprise/GitLab on-prem espelhado no VPC)"
+    - host: "registry.internal"
+      purpose: "espelho interno de pacotes (nada de pypi.org/npmjs.org público)"
+  # NOTA: nenhuma entry de api.github.com/slack.com/*.amazonaws.com — em
+  # air-gapped esses hosts são inalcançáveis por construção. Se o cliente
+  # exigir Slack, é uma exceção explícita revisada pelo red-team (§4 do
+  # RED-TEAM-PROGRAM.md), não um default.
+
+# --- Model gateway: consome o model-server LOCAL, sem provider externo. ---
+modelGateway:
+  enabled: true
+
+# --- Model server air-gapped LIGADO (a diferença estrutural da topologia B). ---
+modelServer:
+  enabled: true
+  replicas: 1
+  gpu: 1                  # produção air-gapped: GPU dedicada in-VPC
+
+# --- NetworkPolicy default-deny de egress OBRIGATÓRIO (defesa em profundidade). ---
+networkPolicy:
+  enabled: true
+
+# --- Ingress interno apenas (sem exposição pública). ---
+ingress:
+  enabled: false

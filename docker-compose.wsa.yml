@@ -110,6 +110,29 @@ services:
     networks: [dse_net]
     restart: unless-stopped
 
+  # --- Fase 4 (WSA, PROVISÃO): adapter Teams — NÃO ativado (ver
+  # services/adapter-teams/README.md). Sobe o serviço (health/outbound
+  # funcionam); o inbound retorna 501 teams_not_activated até a fundação
+  # expor Platform.teams + activation.sql. Porta 8808. ---
+  adapter-teams:
+    build:
+      context: .
+      dockerfile: services/adapter-teams/Dockerfile
+    container_name: dse_adapter_teams
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      TEAMS_OUTGOING_SECRET: ${TEAMS_OUTGOING_SECRET:-}
+      TEAMS_APP_ID: ${TEAMS_APP_ID:-}
+      TEAMS_APP_PASSWORD: ${TEAMS_APP_PASSWORD:-}
+      TEAMS_SERVICE_URL: ${TEAMS_SERVICE_URL:-}
+      VAULT_ADDR: http://vault:8200
+      VAULT_DEV_ROOT_TOKEN: dse_dev_root
+      DSE_TENANT_ID: ${DSE_TENANT_ID:-tenant_dev}
+    ports:
+      - "8808:8808"
+    networks: [dse_net]
+    restart: unless-stopped
+
   # Poller de fallback do webhook Jira (best-effort) — WSA-E5-T2.
   adapter-jira-poller:
     build:

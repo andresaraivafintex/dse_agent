@@ -149,6 +149,18 @@ class WorkItemLifecycleInput:
     # o history length/size em cada fronteira via emit_history_metric.
     continue_as_new_count: int = 0
 
+    # ------------------------------------------------------------------
+    # Fase 4 — metricas de qualidade de PR (pilot gate "PR quality
+    # thresholds", adendo 03). Contadores deterministicos que sobrevivem a
+    # `continue_as_new` como o resto do estado; emitidos via OTel na fronteira
+    # terminal do PR (merge/escalacao) pela Activity local emit_pr_quality_metric.
+    # ------------------------------------------------------------------
+    changes_requested_count: int = 0
+    # epoch (segundos) de quando o PR foi finalizado (workflow.now() — leitura
+    # deterministica/replay-safe). Usado para o tempo-ate-merge; None ate o PR
+    # existir.
+    pr_finalized_at_epoch: float | None = None
+
 
 @dataclass
 class WorkItemLifecycleResult:

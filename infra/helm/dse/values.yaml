@@ -173,6 +173,27 @@ validation:
   port: 8807
 
 # ---------------------------------------------------------------------------
+# Model server SELF-HOSTED / air-gapped (Tier 2, WSD-E5-T2/T3) — DESLIGADO na
+# topologia A (o model-gateway fala Bedrock via PrivateLink). LIGADO só na
+# topologia B / tier mais estrito, onde NENHUM dado de inferência pode sair do
+# VPC: o modelo roda in-cluster (GPU) e o model-gateway o consome in-VPC.
+# Ver infra/helm/dse/values-topology-b.yaml e infra/helm/dse/TOPOLOGY-B.md.
+# ---------------------------------------------------------------------------
+modelServer:
+  enabled: false
+  image:
+    repository: dse/model-server-airgapped
+    tag: "0.1.0"
+  replicas: 1
+  port: 8000
+  # GPU: em produção air-gapped, requests/limits de nvidia.com/gpu. Deixado
+  # vazio no chart base para o `helm template` validar sem um device plugin.
+  gpu: 0
+  resources:
+    requests: { cpu: "1", memory: "2Gi" }
+    limits: { cpu: "4", memory: "8Gi" }
+
+# ---------------------------------------------------------------------------
 # Observabilidade (WSF-E7-T1)
 # ---------------------------------------------------------------------------
 otelCollector:

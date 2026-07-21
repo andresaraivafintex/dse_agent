@@ -52,6 +52,17 @@ def _cleanup_test_rows():
             cur.execute("DELETE FROM jira_transition_queue WHERE tenant_id LIKE 'test_tenant_%'")
             cur.execute("DELETE FROM jira_poll_state WHERE tenant_id LIKE 'test_tenant_%'")
             cur.execute("DELETE FROM audit_log WHERE tenant_id LIKE 'test_tenant_%'")
+            # WSA-E6-T2b: steering agora resolve papel via dse_console_identity /
+            # dse_access_bundle (WS-F). Os testes de steering criam principals de
+            # teste (prefixo `usr_test_`) + linhas nessas tabelas; limpe-as aqui
+            # (superuser) sem ampliar grants de produção. Ordem: console_identity
+            # antes de principals (FK), access_bundle por prefixo de tenant.
+            cur.execute("DELETE FROM dse_access_bundle WHERE tenant_id LIKE 'test_tenant_%'")
+            cur.execute(
+                "DELETE FROM dse_console_identity "
+                "WHERE tenant_id LIKE 'test_tenant_%' OR principal_id LIKE 'usr_test_%'"
+            )
+            cur.execute("DELETE FROM principals WHERE id LIKE 'usr_test_%'")
         conn.commit()
     finally:
         conn.close()

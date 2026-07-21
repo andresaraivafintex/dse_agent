@@ -752,3 +752,146 @@ def upsert_evidence_publication(
         conn.commit()
     finally:
         conn.close()
+
+
+# ===========================================================================
+# Fase 4 (0020_wse4.sql)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# wse_base_updates (WSE-E6-T16) — evidência de cada merge-base/rebase.
+# ---------------------------------------------------------------------------
+def record_base_update(
+    *,
+    work_item_id: str,
+    tenant_id: str,
+    repo: str,
+    branch: str,
+    base_branch: str,
+    strategy: str,
+    conflict: bool,
+    orphaned_threads: int,
+    anchored_threads: int,
+    first_human_review_done: bool,
+    old_tip_sha: str,
+    new_tip_sha: str,
+    detail: str,
+) -> int:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO wse_base_updates
+                    (work_item_id, tenant_id, repo, branch, base_branch, strategy,
+                     conflict, orphaned_threads, anchored_threads, first_human_review_done,
+                     old_tip_sha, new_tip_sha, detail)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (work_item_id, tenant_id, repo, branch, base_branch, strategy,
+                 conflict, orphaned_threads, anchored_threads, first_human_review_done,
+                 old_tip_sha, new_tip_sha, detail),
+            )
+            row_id = cur.fetchone()[0]
+        conn.commit()
+        return row_id
+    finally:
+        conn.close()
+
+
+def list_base_updates(work_item_id: str) -> list[dict[str, Any]]:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT strategy, conflict, orphaned_threads, anchored_threads, "
+                "first_human_review_done, old_tip_sha, new_tip_sha, detail, created_at "
+                "FROM wse_base_updates WHERE work_item_id = %s ORDER BY id",
+                (work_item_id,),
+            )
+            rows = cur.fetchall()
+        keys = ["strategy", "conflict", "orphaned_threads", "anchored_threads",
+                "first_human_review_done", "old_tip_sha", "new_tip_sha", "detail", "created_at"]
+        return [dict(zip(keys, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# skill_episode (source='review_feedback') — WSE-E6-T18. Tabela do WS-C
+# (migração 0019); WS-E só INSERT/SELECT (grant da 0019). NENHUMA skill criada
+# aqui — é só o episódio (a fronteira é testada).
+# ---------------------------------------------------------------------------
+def record_review_feedback_episode(
+    *,
+    tenant_id: str,
+    work_item_id: str,
+    pattern_key: str,
+    provenance: dict,
+) -> dict[str, Any]:
+    """Grava o episódio (source='review_feedback') com `occurrence_n` =
+    nº de ocorrências do MESMO (tenant, source, pattern_key) até aqui, inclusive.
+    Mesma disciplina de `record_ci_repair_episode` (Fase 3)."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM skill_episode "
+                "WHERE tenant_id = %s AND source = 'review_feedback' AND pattern_key = %s",
+                (tenant_id, pattern_key),
+            )
+            occurrence_n = cur.fetchone()[0] + 1
+            cur.execute(
+                """
+                INSERT INTO skill_episode
+                    (tenant_id, source, work_item_id, pattern_key, occurrence_n, provenance)
+                VALUES (%s, 'review_feedback', %s, %s, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (tenant_id, work_item_id, pattern_key, occurrence_n, json.dumps(provenance)),
+            )
+            episode_id = cur.fetchone()[0]
+        conn.commit()
+        return {"id": episode_id, "occurrence_n": occurrence_n}
+    finally:
+        conn.close()
+
+
+def list_skill_episodes(
+    tenant_id: str, source: str | None = None, pattern_key: str | None = None
+) -> list[dict[str, Any]]:
+    clauses = ["tenant_id = %s"]
+    params: list[Any] = [tenant_id]
+    if source is not None:
+        clauses.append("source = %s")
+        params.append(source)
+    if pattern_key is not None:
+        clauses.append("pattern_key = %s")
+        params.append(pattern_key)
+    where = " AND ".join(clauses)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT source, work_item_id, pattern_key, occurrence_n, provenance, created_at "
+                f"FROM skill_episode WHERE {where} ORDER BY id",
+                tuple(params),
+            )
+            rows = cur.fetchall()
+        keys = ["source", "work_item_id", "pattern_key", "occurrence_n", "provenance", "created_at"]
+        return [dict(zip(keys, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def count_skill_registry(tenant_id: str) -> int:
+    """Contagem de skills no registry para o tenant — usado pelos testes de
+    FRONTEIRA (WSE-E6-T18): gravar um episódio NÃO pode criar/ativar skill."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM skill_registry WHERE tenant_id = %s", (tenant_id,))
+            return cur.fetchone()[0]
+    finally:
+        conn.close()

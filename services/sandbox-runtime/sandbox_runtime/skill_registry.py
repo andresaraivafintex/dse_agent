@@ -56,14 +56,22 @@ def read_approved_skills(
     task_class: str | None = None,
     conn=None,
 ) -> list[Skill]:
-    """Skills APROVADAS do tenant. Se `task_class` for dado, filtra para as que
-    se aplicam a esse task_class (ou marcadas 'default'); senão devolve todas as
-    aprovadas do tenant.
+    """Skills SERVIDAS do tenant (o Planner de produção). Se `task_class` for
+    dado, filtra para as que se aplicam a esse task_class (ou marcadas
+    'default'); senão devolve todas as servidas do tenant.
 
     ISOLAMENTO (coordenado com a suíte do WS-F): a query tem `tenant_id = %s`
     hardcoded — não existe caminho que devolva skill de outro tenant, e não há
-    parâmetro para "todos os tenants". `status='approved'` também é hardcoded:
-    rascunhos (`draft`) e aposentadas (`retired`) nunca são lidos pelo Planner.
+    parâmetro para "todos os tenants".
+
+    ESTADOS SERVIDOS (Fase 4): `status IN ('approved','active')` — hardcoded.
+    `approved` = curada/aprovada por humano (inclui os seeds da Fase 2);
+    `active` = candidate que subiu a esteira completa (eval → aprovação →
+    canary → active, WSC-E4-T3). NUNCA são servidos: `draft`, `candidate`,
+    `canary` (= shadow nesta fase), `rolled_back`, `retired`. O índice único
+    parcial `uq_skill_registry_one_served` garante estruturalmente no máximo UMA
+    versão servida por (tenant, skill_key) — o Planner nunca vê duas versões da
+    mesma skill.
     """
     owns = conn is None
     if owns:
@@ -77,7 +85,7 @@ def read_approved_skills(
                 """
                 SELECT tenant_id, skill_key, title, body, category, applies_to
                 FROM skill_registry
-                WHERE tenant_id = %s AND status = 'approved'
+                WHERE tenant_id = %s AND status IN ('approved', 'active')
                 ORDER BY category, skill_key
                 """,
                 (tenant_id,),

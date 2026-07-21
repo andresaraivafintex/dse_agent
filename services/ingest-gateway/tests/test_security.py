@@ -2,14 +2,21 @@
 timestamp expirado, replay. 100% deve ser rejeitado."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import time
 
-from ingest_gateway.security import verify_github_signature, verify_slack_signature
+from ingest_gateway.security import (
+    verify_github_signature,
+    verify_slack_signature,
+    verify_teams_signature,
+)
 
 SLACK_SECRET = "slack_signing_secret_test"
 GITHUB_SECRET = "github_webhook_secret_test"
+# Teams entrega o secret já em Base64 (é como o outgoing webhook o devolve).
+TEAMS_SECRET_B64 = base64.b64encode(b"teams_outgoing_webhook_secret_test").decode()
 
 
 def _slack_sig(secret: str, timestamp: str, body: bytes) -> str:
@@ -136,3 +143,68 @@ def test_github_malformed_header_rejected():
     body = b'{"action":"opened"}'
     result = verify_github_signature(webhook_secret=GITHUB_SECRET, body=body, signature_header="not-sha256-prefixed")
     assert result.verified is False
+
+
+# ---------------------------------------------------------------------------
+# Teams (provisão, Fase 4) — outgoing webhook HMAC (secret + assinatura Base64)
+# ---------------------------------------------------------------------------
+def _teams_auth(secret_b64: str, body: bytes) -> str:
+    key = base64.b64decode(secret_b64)
+    digest = hmac.new(key, body, hashlib.sha256).digest()
+    return f"HMAC {base64.b64encode(digest).decode()}"
+
+
+def test_teams_valid_signature_accepted():
+    body = b'{"type":"message","text":"<at>DSE</at> ship it"}'
+    auth = _teams_auth(TEAMS_SECRET_B64, body)
+    result = verify_teams_signature(shared_secret=TEAMS_SECRET_B64, body=body, authorization_header=auth)
+    assert result.verified is True
+
+
+def test_teams_missing_header_rejected():
+    body = b'{"type":"message"}'
+    result = verify_teams_signature(shared_secret=TEAMS_SECRET_B64, body=body, authorization_header=None)
+    assert result.verified is False
+    assert result.reason == "missing_authorization_header"
+
+
+def test_teams_malformed_header_rejected():
+    body = b'{"type":"message"}'
+    result = verify_teams_signature(
+        shared_secret=TEAMS_SECRET_B64, body=body, authorization_header="Bearer abc"
+    )
+    assert result.verified is False
+    assert result.reason == "malformed_authorization_header"
+
+
+def test_teams_wrong_signature_rejected():
+    body = b'{"type":"message"}'
+    result = verify_teams_signature(
+        shared_secret=TEAMS_SECRET_B64, body=body, authorization_header="HMAC deadbeef"
+    )
+    assert result.verified is False
+    assert result.reason == "signature_mismatch"
+
+
+def test_teams_tampered_body_rejected():
+    original = b'{"type":"message","text":"approve low-risk change"}'
+    auth = _teams_auth(TEAMS_SECRET_B64, original)
+    tampered = b'{"type":"message","text":"approve high-risk change"}'
+    result = verify_teams_signature(shared_secret=TEAMS_SECRET_B64, body=tampered, authorization_header=auth)
+    assert result.verified is False
+
+
+def test_teams_wrong_secret_rejected():
+    body = b'{"type":"message"}'
+    other = base64.b64encode(b"a_different_secret").decode()
+    auth = _teams_auth(other, body)
+    result = verify_teams_signature(shared_secret=TEAMS_SECRET_B64, body=body, authorization_header=auth)
+    assert result.verified is False
+
+
+def test_teams_non_base64_secret_rejected():
+    body = b'{"type":"message"}'
+    auth = "HMAC " + base64.b64encode(b"whatever").decode()
+    result = verify_teams_signature(shared_secret="not*base64*secret", body=body, authorization_header=auth)
+    assert result.verified is False
+    assert result.reason == "invalid_shared_secret_encoding"

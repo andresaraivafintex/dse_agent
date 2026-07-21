@@ -303,6 +303,89 @@ internet — nenhuma entrada nova de allowlist).
 `13 passed` em egress-proxy + `14 passed` em packages/contracts (boundary —
 inalterados, nenhum call site de workflow mudou) = **0 failed, 0 skipped**.
 
+## Fase 4 ("Loop hardening & learning") — pipeline de promoção de skill (WSC-E4-T2/T3)
+
+Fecha o que a Fase 2 deixou de fora de propósito: a curadoria automática de
+skills a partir de execuções. Tudo DETERMINÍSTICO (P1) — nenhuma decisão de
+fluxo por LLM. Migrações: `0019_wsc4.sql` (gate de entrada, já aplicado —
+status ampliado, `version`, `skill_episode`, `skill_eval`) + `0020_wsc4.sql`
+(multi-versão + proveniência, ver abaixo).
+
+### WSC-E4-T2 — Captura de episódios + materialização de candidates (`skill_promotion.py`)
+
+`record_episode(tenant, source, pattern_key, ...)` grava as três *sources at
+launch* (§10.17) em `skill_episode`: `clarification` (WS-B), `ci_repair` e
+`review_feedback` (WS-E). Quando um `pattern_key` acumula
+`SUM(occurrence_n) >= threshold` (`DSE_SKILL_CANDIDATE_THRESHOLD`, default 3 —
+CONFIG, não LLM), `materialize_candidates(tenant)` cria uma skill
+`status='candidate'`, `version` incrementada, `pattern_key` + `provenance`
+completos (de quais episódios/work-items/fontes veio). Idempotente (não
+re-materializa uma skill que já tem versão viva). Um candidate NÃO é servido ao
+Planner e NÃO se auto-promove — precisa de eval + aprovação humana (P3).
+`created_by='system:skill-promotion'` de propósito: um candidate é PROPOSTA da
+máquina; só a aprovação humana o torna servível.
+
+### WSC-E4-T3 — Esteira de promoção governada (`eval_skill_candidate`, `promote_skill`)
+
+Duas Activities Temporal (nomes/tipos de `dse_contracts.activities`, gate de
+entrada da Fase 4), lógica em `skill_promotion.py`:
+
+- **`eval_skill_candidate`** → `EvalSkillCandidateResult`: replay do candidate
+  contra um eval set histórico (positivos = casos onde a skill ajudaria;
+  negativos = casos onde não deve disparar; derivado de `skill_episode` ou
+  injetado). `negative_regressions > 0` ⇒ `passed=False`. Grava a trilha em
+  `skill_eval` (P8).
+- **`promote_skill`** → `PromoteSkillResult`: máquina de estados explícita
+  `candidate → approved → canary → active` (+ rollback `active/canary →
+  rolled_back`). Invariantes **por construção** (levantam exceção ANTES de
+  qualquer escrita — não há code path que as viole):
+  - **P1/P3**: `to_status in {approved, active}` sem `approver` humano resolvido
+    (vazio ou `system:*`) ⇒ `ApproverRequired`. Promoção sem humano nomeado é
+    IMPOSSÍVEL — o teste adversarial prova (`promote_skill(to_status=active,
+    approver=None)` recusa).
+  - `candidate → approved` sem eval passante (`negative_regressions=0`) ⇒
+    `EvalGateNotPassed` — o candidate não se aprova sozinho.
+  - transição fora da máquina ⇒ `IllegalTransition`.
+  - Toda transição → `dse_audit.emit` com a identidade do aprovador.
+- **Rollback = mudança de PONTEIRO em uma transação** (failure mode 13): a
+  versão servida vira `rolled_back` e a versão que ela suplantou (registrada em
+  `provenance.supersedes`) volta a `active` — em segundos, sem reprocessar.
+
+### O que o Planner enxerga (`read_approved_skills`)
+
+O Planner de produção lê `status IN ('approved','active')`. `candidate`,
+`canary`, `draft`, `rolled_back`, `retired` NUNCA são servidos. **`canary` =
+shadow nesta fase** — não há seleção de subconjunto canário; um canary é
+avaliado fora da linha de produção e só passa a servir ao virar `active`. O
+índice único parcial `uq_skill_registry_one_served` (migração 0020) garante
+ESTRUTURALMENTE (não por convenção) no máximo UMA versão servida por
+`(tenant, skill_key)`: a transição que serve uma versão nova rebaixa a anterior
+na mesma transação, ou o índice rejeita — o Planner nunca vê duas versões da
+mesma skill.
+
+### Migração `0020_wsc4.sql`
+
+Aditiva. A 0010 tinha `UNIQUE (tenant_id, skill_key)` (UMA linha por skill); o
+rollback "por ponteiro sem perder a versão anterior" (comentário da 0019) exige
+que várias versões coexistam como linhas distintas. A 0020 troca a unicidade
+para `(tenant_id, skill_key, version)`, adiciona `pattern_key`/`provenance` e o
+índice único parcial de "uma versão servida".
+
+### Testes da Fase 4 (reais, contra Postgres)
+
+- `test_skill_promotion.py` (7): as 3 sources; limiar (noop abaixo, materializa
+  no limiar); candidate nasce não-servido com proveniência; idempotência; eval
+  passa sem regressão e reprova com regressão negativa (grava `skill_eval`).
+- `test_promotion_pipeline.py` (7) — **exit da Fase 4**: fluxo completo
+  candidate→eval→approved→canary→active→rollback com o ponteiro voltando à
+  versão anterior; rollback sem versão anterior some do Planner; adversariais
+  P1/P3 (approver `None`/`""`/`system:*` recusam); gate de eval; transição
+  ilegal.
+- `test_promotion_activities_wiring.py` (3): as duas Activities via
+  `temporalio.testing.ActivityEnvironment` (SDK real) + a recusa propagada.
+
+**17 testes novos**; suíte do pacote **82 passed, 0 failed** nesta sessão.
+
 ## O que está com fixture/mock local (documentado, não escondido)
 
 - **`FakeSubstrate`** é o substrato usado em TODOS os testes desta suíte —

@@ -13,6 +13,8 @@ adapter_github/config.py).
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import time
@@ -79,6 +81,59 @@ def verify_github_signature(
     computed = f"sha256={digest}"
 
     if not hmac.compare_digest(computed, signature_header):
+        return SignatureCheck(False, "signature_mismatch")
+
+    return SignatureCheck(True, "ok")
+
+
+def verify_teams_signature(
+    *,
+    shared_secret: str,
+    body: bytes,
+    authorization_header: str | None,
+) -> SignatureCheck:
+    """WSA (Fase 4, provisão adapter Teams) — HMAC do Microsoft Teams
+    *outgoing webhook*.
+
+    Esquema de assinatura do Teams (documentado pela Microsoft): ao registrar
+    um outgoing webhook, o Teams devolve um `securityToken` codificado em
+    Base64. A cada POST, o Teams envia o header
+    `Authorization: HMAC <base64(HMAC_SHA256(decoded_secret, raw_body))>`.
+    A verificação: decodifica o secret de Base64 -> bytes da chave, calcula o
+    HMAC-SHA256 sobre o corpo BRUTO (não reparseado — defesa TOCTOU), codifica
+    o digest em Base64 e compara em tempo constante com o valor do header.
+
+    Diferente de Slack/GitHub/Jira (hex no header), o Teams usa Base64 tanto no
+    secret quanto na assinatura — por isso um verificador próprio. Sem tenant
+    Teams real nesta sessão, o secret é lido de env/Vault (ver
+    `adapter_teams.config`); a LÓGICA é a de produção.
+
+    Nota: o canal Bot Framework "completo" (Azure Bot Service) autentica por
+    JWT Bearer validado contra o metadata OpenID da Microsoft — mais pesado e
+    dependente de rede. Para a provisão, o esquema HMAC do outgoing webhook é
+    o análogo direto de Slack/Jira e é o que este verificador cobre; o JWT
+    Bearer fica documentado como o passo de ativação do canal Bot Framework.
+    """
+    if not shared_secret:
+        return SignatureCheck(False, "missing_shared_secret")
+    if not authorization_header:
+        return SignatureCheck(False, "missing_authorization_header")
+    if not authorization_header.startswith("HMAC "):
+        return SignatureCheck(False, "malformed_authorization_header")
+
+    provided = authorization_header[len("HMAC "):].strip()
+
+    try:
+        key = base64.b64decode(shared_secret, validate=True)
+    except (binascii.Error, ValueError):
+        return SignatureCheck(False, "invalid_shared_secret_encoding")
+    if not key:
+        return SignatureCheck(False, "invalid_shared_secret_encoding")
+
+    digest = hmac.new(key, body, hashlib.sha256).digest()
+    computed = base64.b64encode(digest).decode()
+
+    if not hmac.compare_digest(computed, provided):
         return SignatureCheck(False, "signature_mismatch")
 
     return SignatureCheck(True, "ok")

@@ -43,6 +43,7 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_RUN_VISUAL_DIFF,
         ACTIVITY_TEARDOWN_SANDBOX,
         ACTIVITY_TRIGGER_PREVIEW,
+        ACTIVITY_UPDATE_BASE_BRANCH,
         CiStatusResult,
         CoderTurnResult,
         DemoEvidenceResult,
@@ -51,6 +52,7 @@ with workflow.unsafe.imports_passed_through():
         PreviewRef,
         PrRef,
         SandboxHandle,
+        UpdateBaseBranchResult,
         VisualDiffResult,
     )
     from dse_contracts.constants import WORKFLOW_TYPE
@@ -61,9 +63,11 @@ with workflow.unsafe.imports_passed_through():
     from dse_orchestrator.local_activities import (
         LOCAL_ACTIVITY_CHECK_CLARIFICATION,
         LOCAL_ACTIVITY_EMIT_HISTORY_METRIC,
+        LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
         LOCAL_ACTIVITY_RECORD_EVIDENCE,
         LOCAL_ACTIVITY_RECORD_GATE,
+        LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
         LOCAL_ACTIVITY_RESOLVE_APPROVER,
         LOCAL_ACTIVITY_UPDATE_STATUS,
     )
@@ -191,6 +195,16 @@ class WorkItemLifecycleWorkflow:
         # --- Fase 2: retry de budget por operador (WSB-E4-T1) ---
         self._budget_raise_requested = False
         self._budget_new_max: float | None = None
+
+        # --- Fase 4: deteccao de lacuna de clarificacao RECORRENTE (source do
+        # insumo de skill-learning, WSC-E4-T2). Uniao dos campos que ja
+        # faltaram em rounds anteriores DESTE run de intake — se um campo
+        # reaparece faltando depois de ja termos pedido clarificacao, e uma
+        # recorrencia e vira um skill_episode. Estado de instancia
+        # (replay-safe: reconstruido deterministicamente pelos resultados das
+        # Activities de completude no replay); nao precisa cruzar
+        # continue_as_new porque o loop de intake completa dentro de um run.
+        self._clarification_missing_union: set[str] = set()
 
     # ------------------------------------------------------------------
     # Signals — WSB-E2-T4, WSB-E3-T1, WSB-E3-T4, WSB-E5-T2
@@ -501,6 +515,12 @@ class WorkItemLifecycleWorkflow:
             audit_action="escalated",
             details={"reason": reason},
         )
+        # Fase 4 — se ja havia um PR finalizado, esta escalacao e uma fronteira
+        # terminal do PR: emite a metrica de qualidade (pilot gate) para nao
+        # perder dados de PRs que nao mergeiam. Escalacoes pre-PR (ex.:
+        # clarificacao) nao tem PR e sao puladas.
+        if self._input.pr_finalized_at_epoch is not None:
+            await self._emit_pr_quality_metric("escalated")
         return WorkItemLifecycleResult(
             work_item_id=self._input.work_item_id,
             status=WorkItemStatus.escalated.value,
@@ -737,6 +757,17 @@ class WorkItemLifecycleWorkflow:
                     f"clarification_round_cap_exhausted (missing={completeness['missing']})"
                 )
 
+            # Fase 4 (WSC-E4-T2, source=clarification) — deteccao de lacuna
+            # RECORRENTE: um campo que continua faltando DEPOIS de ja termos
+            # pedido clarificacao ao menos uma vez neste intake. Puro set-arith
+            # (deterministico, P1); a escrita do insumo vive numa Activity.
+            # NENHUMA skill e criada aqui — so o episodio, que o WS-C consome.
+            missing = list(completeness["missing"])
+            recurring = sorted(set(missing) & self._clarification_missing_union)
+            if recurring:
+                await self._emit_clarification_episode(recurring, missing)
+            self._clarification_missing_union |= set(missing)
+
             await self._set_status(
                 WorkItemStatus.needs_clarification,
                 audit_action="clarification_requested",
@@ -814,6 +845,40 @@ class WorkItemLifecycleWorkflow:
             return True
         except asyncio.TimeoutError:
             return False
+
+    async def _emit_clarification_episode(self, recurring: list[str], missing: list[str]) -> None:
+        """Fase 4 (WSC-E4-T2) — grava UM skill_episode (source=clarification)
+        quando a mesma lacuna de clarificacao recorre. Proveniencia completa
+        (repo/campos/round/requester) para a esteira de promocao do WS-C
+        governar. NENHUMA skill e criada aqui (fronteira testada em
+        packages/contracts) — so o insumo. `pattern_key` agrupa ocorrencias do
+        MESMO conjunto de campos recorrentes por tenant."""
+        input = self._input
+        pattern_key = "clarification_missing:" + "+".join(recurring)
+        result = await workflow.execute_activity(
+            LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
+            {
+                "tenant_id": input.tenant_id,
+                "source": "clarification",
+                "work_item_id": input.work_item_id,
+                "pattern_key": pattern_key,
+                "provenance": {
+                    "repo": input.repo,
+                    "recurring_missing": recurring,
+                    "missing_now": list(missing),
+                    "clarification_round": input.clarification_rounds,
+                    "requester": input.requester,
+                },
+            },
+            start_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=5),
+        )
+        await self._audit(
+            "skill_episode_recorded",
+            {"source": "clarification", "pattern_key": pattern_key,
+             "recurring_missing": recurring,
+             "occurrence_n": (result or {}).get("occurrence_n")},
+        )
 
     # ------------------------------------------------------------------
     # Fase 2 — implementacao (WSB-E2-T3 estendida, WSB-E3-T2/T3, WSB-E4, WSB-E5-T1)
@@ -983,6 +1048,10 @@ class WorkItemLifecycleWorkflow:
         )
         input.pr_number = pr_ref.pr_number
         input.pr_url = pr_ref.url
+        # Fase 4 — marca o instante de PR finalizado (leitura deterministica/
+        # replay-safe de workflow.now()) para o "tempo ate merge" do pilot gate.
+        if input.pr_finalized_at_epoch is None:
+            input.pr_finalized_at_epoch = workflow.now().timestamp()
 
         await self._boundary_gate()
         await workflow.execute_activity(
@@ -1287,6 +1356,86 @@ class WorkItemLifecycleWorkflow:
                 f"review_round_cap_exhausted:{self._input.review_round - 1}"
             )
 
+    async def _update_base_branch_before_review_fix(self) -> None:
+        """Fase 4 (WSE-E6-T16, wiring WS-B) — no caminho changes_requested,
+        ANTES de re-rodar o Coder: atualiza o branch da tarefa com o drift da
+        base SEM reescrever historia.
+
+        `first_human_review_done=True` aqui e nao-negociavel: chegamos a este
+        ponto justamente PORQUE um humano ja revisou o PR e pediu mudancas —
+        depois do 1o review a estrategia so pode ser merge-base-into-branch. Um
+        rebase+force-push orfanaria as threads de review ancoradas nos commits
+        reescritos (comportamento verificado do GitHub, failure mode 11). A
+        estrategia e deterministica (P1: codigo no WS-E, nao modelo). Conflito
+        nao-resolvivel -> escala a humano (NUNCA resolve a forca)."""
+        input = self._input
+        if not (input.repo and input.branch and input.base_branch):
+            # Modo estrito/sem branch conhecido: nada a mesclar. Declina limpo.
+            await self._audit("base_branch_update_skipped_no_branch", {})
+            return
+        await self._boundary_gate()
+        result: UpdateBaseBranchResult = await workflow.execute_activity(
+            ACTIVITY_UPDATE_BASE_BRANCH,
+            {
+                "work_item_id": input.work_item_id,
+                "tenant_id": input.tenant_id,
+                "repo": input.repo,
+                "branch": input.branch,
+                "base_branch": input.base_branch,
+                "first_human_review_done": True,
+            },
+            result_type=UpdateBaseBranchResult,
+            **self._activity_timeouts(),
+        )
+        await self._audit(
+            "base_branch_updated",
+            {"strategy": result.strategy, "conflict": result.conflict,
+             "orphaned_threads": result.orphaned_threads, "detail": result.detail},
+        )
+        if result.conflict:
+            # P6: nunca resolve a forca; escala com a identidade do drift.
+            raise _EscalateNow(
+                f"base_branch_merge_conflict:repo={input.repo} branch={input.branch} "
+                f"base={input.base_branch} ({result.detail})"
+            )
+        if result.orphaned_threads:
+            # Invariante de exit da Fase 4: merge-base NUNCA orfana threads
+            # (rebase pos-review e proibido por construcao). Se o dono (WS-E)
+            # reportou >0, algo violou a garantia — nao seguimos adivinhando (P6).
+            raise _EscalateNow(
+                f"base_branch_orphaned_threads:{result.orphaned_threads} "
+                f"(strategy={result.strategy}) — viola invariante de zero orfas"
+            )
+
+    async def _emit_pr_quality_metric(self, outcome: str) -> None:
+        """Fase 4 — emite as metricas de qualidade de PR (pilot gate "PR quality
+        thresholds"). Leitura deterministica no workflow (contadores + tempo via
+        workflow.now); emissao OTel na Activity local. Best-effort: falha de
+        metrica jamais afeta o fluxo. Chamada nas fronteiras terminais do PR
+        (merge/escalacao)."""
+        input = self._input
+        time_to_merge = None
+        if outcome == "merged" and input.pr_finalized_at_epoch is not None:
+            time_to_merge = max(0.0, workflow.now().timestamp() - input.pr_finalized_at_epoch)
+        payload = {
+            "work_item_id": input.work_item_id,
+            "tenant_id": input.tenant_id,
+            "outcome": outcome,
+            "review_rounds": input.review_round,
+            "changes_requested_count": input.changes_requested_count,
+            "evidence_refreshes": input.evidence_refreshes,
+            "time_to_merge_seconds": time_to_merge,
+        }
+        try:
+            await workflow.execute_activity(
+                LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC,
+                payload,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError:
+            logger.warning("emit_pr_quality_metric falhou; metrica e best-effort, fluxo segue")
+
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
         """Loop `while True` (NAO `continue_as_new` por iteracao — ver
         comentario em `_run_implementation_phase` sobre a corrida de sinais):
@@ -1388,10 +1537,16 @@ class WorkItemLifecycleWorkflow:
 
             if "changes_requested" in verdicts:
                 self._bump_review_round()
+                input.changes_requested_count += 1
                 texts = [str(c.get("comment") or "") for c in comments
                          if c.get("verdict") == "changes_requested"]
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="changes_requested",
                                         details={"comments": texts, "batched": len(comments)})
+                # Fase 4 (WSE-E6-T16) — merge-base ANTES de re-rodar o Coder:
+                # o humano ja revisou (first_human_review_done=True), entao o
+                # drift da base entra por merge-base-into-branch, nunca rebase
+                # (preserva as threads de review). Conflito -> escala.
+                await self._update_base_branch_before_review_fix()
                 fix_result = await self._apply_coder_fix_cycle(texts)
                 # ADR-26: 1 lote de comentarios -> 1 fix cycle -> no maximo 1
                 # refresh de evidencia (o refresh e disparado pelo COMMIT do
@@ -1420,6 +1575,9 @@ class WorkItemLifecycleWorkflow:
                     except ActivityError:
                         logger.warning("teardown falhou apos merge; seguindo mesmo assim (nao bloqueia Done)")
                 await self._set_status(WorkItemStatus.done, audit_action="merged_by_human")
+                # Fase 4 — metrica de qualidade de PR na fronteira de merge
+                # (pilot gate). Best-effort, apos o Done ja estar persistido.
+                await self._emit_pr_quality_metric("merged")
                 return WorkItemLifecycleResult(
                     work_item_id=input.work_item_id, status=WorkItemStatus.done.value,
                     pr_number=input.pr_number,

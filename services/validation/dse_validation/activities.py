@@ -32,6 +32,7 @@ from dse_contracts.activities import (
     ACTIVITY_RUN_DEMO_EVIDENCE,
     ACTIVITY_RUN_VISUAL_DIFF,
     ACTIVITY_TRIGGER_PREVIEW,
+    ACTIVITY_UPDATE_BASE_BRANCH,
     ArtifactRef,
     DemoEvidenceResult,
     PreviewRef,
@@ -39,6 +40,8 @@ from dse_contracts.activities import (
     RunDemoEvidenceInput,
     RunVisualDiffInput,
     TriggerPreviewInput,
+    UpdateBaseBranchInput,
+    UpdateBaseBranchResult,
     VisualDiffResult,
 )
 from pydantic import BaseModel, Field
@@ -69,6 +72,11 @@ WSE_ACTIVITY_QUARANTINE_ARTIFACTS = "wse_quarantine_artifacts"
 WSE_ACTIVITY_REAP_PREVIEWS = "wse_reap_previews"
 WSE_ACTIVITY_SHOULD_REFRESH_EVIDENCE = "wse_should_refresh_evidence"
 WSE_ACTIVITY_PUBLISH_EVIDENCE = "wse_publish_evidence"
+
+# Fase 4 — ACTIVITY_UPDATE_BASE_BRANCH (dse_contracts) é do WS-E (merge-base,
+# WSE-E6-T16). O episódio de review-feedback (WSE-E6-T18) é auxiliar (prefixo
+# wse_, não-contratual — só grava o episódio; a promoção é do WS-C).
+WSE_ACTIVITY_RECORD_REVIEW_EPISODE = "wse_record_review_episode"
 
 try:
     from temporalio import activity
@@ -192,6 +200,20 @@ class PublishEvidenceInput(BaseModel):
     pr_number: int | None = None
     files_changed: list[str] = Field(default_factory=list)
     human_requested: bool = False
+
+
+class RecordReviewEpisodeInput(BaseModel):
+    """WSE-E6-T18 — grava 1 episódio de skill-learning de review feedback ACEITO.
+    NENHUMA skill é criada/ativada (só o episódio; promoção é do WS-C)."""
+
+    work_item_id: str
+    tenant_id: str
+    reviewer: str
+    comment_body: str
+    pr_number: int | None = None
+    path: str | None = None
+    diff_hunk: str | None = None
+    accepted: bool = True
 
 
 def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
@@ -344,6 +366,58 @@ def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
 
 
 # ---------------------------------------------------------------------------
+# Fase 4 — merge-base (WSE-E6-T16) e episódio de review-feedback (WSE-E6-T18)
+# ---------------------------------------------------------------------------
+def _update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
+    """Wrapper de Activity: resolve o workspace git e as threads de review
+    ancoradas (via PR rastreado + GitHub client) e chama o core determinístico.
+    Como o LocalFakeSandbox no L1, os TESTES chamam `update_base_branch_core`
+    diretamente com um bare repo local real — este wrapper é o seam de
+    integração com o WS-C (workspace do sandbox) + GitHub App reais."""
+    from dse_validation.github.client import build_github_client
+    from dse_validation.merge_base import MergeBaseConfig, update_base_branch_core
+
+    _origin, workspace_dir = MergeBaseConfig().locations(inp.work_item_id)
+
+    # threads de review ancoradas em commits — resolvidas pelo PR rastreado.
+    anchored: list[str] = []
+    tracked = db.get_tracked_pr(inp.work_item_id)
+    pr_number = tracked.get("pr_number") if tracked else None
+    if pr_number is not None:
+        github_client = build_github_client(GitHubConfig())
+        for t in github_client.list_review_threads(inp.repo, int(pr_number)):
+            sha = t.get("original_commit_id") or t.get("commit_id")
+            if sha:
+                anchored.append(sha)
+
+    return update_base_branch_core(
+        work_item_id=inp.work_item_id,
+        tenant_id=inp.tenant_id,
+        repo=inp.repo,
+        branch=inp.branch,
+        base_branch=inp.base_branch,
+        workspace_dir=workspace_dir,
+        first_human_review_done=inp.first_human_review_done,
+        anchored_review_shas=anchored,
+    )
+
+
+def _record_review_episode(inp: RecordReviewEpisodeInput) -> dict | None:
+    from dse_validation.review_learning import record_review_feedback_episode
+
+    return record_review_feedback_episode(
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        pr_number=inp.pr_number,
+        reviewer=inp.reviewer,
+        comment_body=inp.comment_body,
+        path=inp.path,
+        diff_hunk=inp.diff_hunk,
+        accepted=inp.accepted,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fase 3 — cores das Activities de evidência (contrato)
 # ---------------------------------------------------------------------------
 def _publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
@@ -477,6 +551,15 @@ if _HAS_TEMPORAL:
     async def wse_publish_evidence(inp: PublishEvidenceInput) -> dict:
         return _publish_evidence(inp)
 
+    # --- Fase 4: merge-base (contrato) + episódio de review-feedback (aux) ---
+    @activity.defn(name=ACTIVITY_UPDATE_BASE_BRANCH)
+    async def update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
+        return _update_base_branch(inp)
+
+    @activity.defn(name=WSE_ACTIVITY_RECORD_REVIEW_EPISODE)
+    async def wse_record_review_episode(inp: RecordReviewEpisodeInput) -> dict | None:
+        return _record_review_episode(inp)
+
     ALL_ACTIVITIES = [
         run_l1_pipeline,
         finalize_pr,
@@ -493,6 +576,9 @@ if _HAS_TEMPORAL:
         wse_reap_previews,
         wse_should_refresh_evidence,
         wse_publish_evidence,
+        # Fase 4
+        update_base_branch,
+        wse_record_review_episode,
     ]
 else:  # pragma: no cover
     ALL_ACTIVITIES = []

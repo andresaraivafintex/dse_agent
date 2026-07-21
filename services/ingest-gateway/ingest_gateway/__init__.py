@@ -16,6 +16,7 @@ from .security import (
     verify_slack_signature,
     verify_github_signature,
     verify_jira_signature,
+    verify_teams_signature,
     SignatureCheck,
 )
 from .sanitize import sanitize_content
@@ -33,6 +34,7 @@ __all__ = [
     "verify_slack_signature",
     "verify_github_signature",
     "verify_jira_signature",
+    "verify_teams_signature",
     "SignatureCheck",
     "sanitize_content",
     "resolve_tenant",

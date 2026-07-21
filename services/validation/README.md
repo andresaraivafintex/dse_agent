@@ -8,6 +8,16 @@ adiciona: orquestração do loop L2 de contexto fresco (WSE-E2-T4), loop de
 fix-retries bounded L2->Coder (WSE-E2-T5), e o **modo estrito de PR** em que um
 humano abre o PR (WSE-E3-T8, desbloqueado pelo `PrRef.compare_url` novo).
 
+> **Fase 4 — resumo do que foi adicionado** (detalhe abaixo em §Fase 4):
+> merge-base contra git REAL (`merge_base.py` — nunca rebase durante review
+> humano, zero threads órfãs, failure mode 11) exposto como a Activity do
+> contrato `update_base_branch` (`ACTIVITY_UPDATE_BASE_BRANCH`); emissão de
+> episódios de skill-learning de review feedback aceito (`review_learning.py`,
+> `skill_episode` source=`review_feedback` da migração 0019 — NENHUMA skill
+> criada/ativada, fronteira testada); migração `migrations/0020_wse4.sql`
+> (`wse_base_updates`). **114 testes passando** (45 F1 + 26 F2 + 32 F3 + 11 F4),
+> git/Postgres/Temporal/Garage/k3d+Argo CD/Playwright reais — nada mockado.
+
 > **Fase 3 — resumo do que foi adicionado** (detalhe abaixo em §Fase 3):
 > artifact store Garage real (`evidence/garage.py` + `docker-compose.wse.yml`),
 > vídeo @demo Playwright real (`evidence/demo.py` + runner pinado em
@@ -370,6 +380,77 @@ boundary tests da fundação intactos):
 | `wse_should_refresh_evidence` | `ShouldRefreshEvidenceInput` | `dict` | não (contrato de decisão ADR-26 p/ WS-B) |
 | `wse_publish_evidence` | `PublishEvidenceInput` | `dict` | não (publicação consolidada) |
 
+## Fase 4 ("Loop hardening & learning") — o que WS-E adicionou
+
+### WSE-E6-T16 — merge-base, nunca rebase durante review (P0, CONSTRUÇÃO NOVA)
+
+Achado #2 do adendo 03: merge-base **não existia** — a Fase 1 descreveu no
+plano mas nunca implementou; o review loop só re-rodava o Coder no mesmo
+branch. Construído do zero em `dse_validation/merge_base.py`, exposto como a
+Activity do CONTRATO `update_base_branch` (`ACTIVITY_UPDATE_BASE_BRANCH`;
+input/output `UpdateBaseBranchInput`/`UpdateBaseBranchResult` importados, não
+redefinidos).
+
+- `update_base_branch_core(...)` — quando a base (main) avança durante um review
+  humano ativo, atualiza o branch da tarefa por **merge-base-into-branch**
+  (`git merge origin/main` NO branch da task) — NUNCA rebase+force-push. A
+  escolha de estratégia é 100% DETERMINÍSTICA (P1, código, nunca modelo):
+  - sem drift → `noop_no_drift`;
+  - drift + já houve review humano (`first_human_review_done=True`, o **default
+    seguro** do contrato) OU já existem threads ancoradas → `merge_base`
+    (preserva a história → preserva as âncoras das threads);
+  - drift + ainda não houve review E zero threads ancoradas →
+    `rebase_prefirst_review` (único momento em que rebase é seguro: não há o que
+    orfanar; push `--force-with-lease`);
+  - **belt-and-suspenders (P6)**: mesmo com `first_human_review_done=False`, se
+    já existem threads ancoradas, jamais rebase — cai em `merge_base`.
+- **Conflito não-resolvível** → `git merge --abort` (ou `rebase --abort`),
+  retorna `conflict=True` (tip inalterado, working tree limpa). O workflow do
+  WS-B escala a um humano — **o agente NUNCA resolve à força** (P1/P6).
+- **A ASSERÇÃO DE EXIT DA FASE 4** (`tests/test_merge_base.py`): cria um PR com
+  drift de base + 2 threads de review humanas ancoradas em commits, aplica
+  merge-base, e prova `orphaned_threads == 0` comparando a alcançabilidade dos
+  shas ancorados (`git merge-base --is-ancestor <sha> <branch>`) — merge
+  preserva, rebase quebraria. Um **teste negativo** (`test_rebase_would_orphan_
+  threads_documented_negative`) executa um rebase real e prova que TODAS as
+  threads ficariam órfãs — documentando por que merge-base é obrigatório.
+- **NÃO quebra a invariante anti-merge-AUTOMÁTICO (FR-16)**: merge-base atualiza
+  o BRANCH DA TAREFA com o drift da base (`origin/main → branch`); o merge do PR
+  na base continua 100% humano. São operações opostas em direção.
+- Evidência durável (P8): `wse_base_updates` (`migrations/0020_wse4.sql`) +
+  audit `base_branch_updated` / `base_update_conflict`.
+
+### WSE-E6-T18 — Emissão de episódios de skill-learning (review feedback)
+
+`dse_validation/review_learning.py` — 3ª "source at launch" de episódios
+(§10.17), par das de CI-repair (Fase 3) e clarificação (WS-B). Quando um
+feedback de review humano é ACEITO, grava um `skill_episode`
+(`source='review_feedback'`, tabela da migração 0019/WS-C — SÓ INSERT/SELECT):
+
+- `review_pattern_key(comment_body, path)` — assinatura DETERMINÍSTICA (P1):
+  normalização de string (lower + colapsa espaços) escopada pelo path, hash
+  curto estável — nenhum LLM. Feedbacks com o mesmo texto normalizado no mesmo
+  path colidem de propósito (é o "mesmo padrão repetido").
+- `record_review_feedback_episode(...)` — `occurrence_n` conta as repetições do
+  MESMO `(tenant, source, pattern_key)` (tenant-scoped); proveniência completa
+  (PR, reviewer, path, comentário, diff_hunk). **P3**: só feedback ACEITO por um
+  humano vira episódio (`accepted=False` → nada). Audit
+  `review_feedback_episode_recorded` (P8).
+- **FRONTEIRA testada** (`tests/test_review_learning.py::test_boundary_no_skill_
+  created_or_activated`): gravar o episódio NÃO cria/ativa nenhuma skill
+  (`skill_registry` inalterado antes/depois). A promoção candidate→eval→
+  approved→canary→active é 100% do **WS-C** (WSC-E4-T2/T3), com aprovação humana
+  (P3: nenhuma skill se auto-promove). WS-C consome estes episódios.
+- Exposto como a Activity auxiliar `wse_record_review_episode`
+  (`RecordReviewEpisodeInput`; prefixo `wse_`, não-contratual).
+
+### Fixture / real / gap — Fase 4
+
+| Componente | REAL nesta sessão | Fixture | Gap p/ produção |
+|---|---|---|---|
+| merge-base | **git real** (bare repo local + clones), merge/rebase/abort/push reais, alcançabilidade de sha real; Postgres real (`wse_base_updates`) + audit | — | O **wrapper de Activity** (`_update_base_branch`) resolve o workspace via `MergeBaseConfig` (env `DSE_WSE_GIT_ROOT`) e as threads ancoradas via `list_review_threads` do GitHub client — seam de integração com o workspace do sandbox do WS-C + a GitHub App real (mesma pendência das Fases 1-3: sem App registrada, `FakeGitHubClient.list_review_threads` é fixture). O core é chamado direto pelos testes com paths explícitos (como o `LocalFakeSandbox` no L1). |
+| episódios de review-feedback | Postgres real (`skill_episode`), occurrence_n/tenant-scope/audit reais | O feedback aceito é fornecido pelo caller (WS-B decide "aceito" a partir do review humano) | Fio de disparo no workflow do WS-B: chamar `wse_record_review_episode` quando um `changes_requested` é endereçado e o revisor aceita. Correlação de "aceite" é do WS-B/WS-A. |
+
 ## Sandbox execution — `SandboxHandle` vs `SandboxExecutor`
 
 `dse_contracts.activities.SandboxHandle` (dono: WS-C) só carrega dados do
@@ -455,6 +536,12 @@ passa a aceitar NULL + coluna `compare_url`). Aplicada com:
 DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse python3 scripts/migrate.py
 ```
 
+`migrations/0020_wse4.sql` (Fase 4, reservada para WS-E) adiciona:
+`wse_base_updates` (evidência de cada merge-base/rebase: estratégia, conflito,
+`orphaned_threads`, shas antes/depois). Os episódios de review-feedback usam a
+`skill_episode` (`source='review_feedback'`) da migração 0019 (WS-C) — WS-E só
+faz INSERT/SELECT (grant da 0019), nenhuma tabela nova para isso.
+
 `migrations/0017_wse3.sql` (Fase 3, reservada para WS-E) adiciona:
 `wse_artifacts` (registro de artefatos publicados + estado de quarentena),
 `wse_artifact_access_log` (log de acesso associável ao PR — métrica evidence
@@ -496,8 +583,19 @@ preview (`test_preview_e2e_real_cluster_create_serve_and_ttl_reap`) leva
 ## Resultado real da última execução
 
 ```
-103 passed in ~349s   (45 Fase 1 + 26 Fase 2 + 32 Fase 3)
+114 passed in ~274s   (45 Fase 1 + 26 Fase 2 + 32 Fase 3 + 11 Fase 4)
 ```
+
+Fase 4 adicionou `tests/test_merge_base.py` (6 — inclui a asserção de exit
+"zero threads órfãs" + o teste negativo que prova que rebase quebraria) e
+`tests/test_review_learning.py` (5) — git real + Postgres real; audit rows de
+`base_branch_updated`/`base_update_conflict`/`review_feedback_episode_recorded`
+conferidos no `audit_log` real (P8). A fronteira "nenhuma skill criada/ativada"
+é verificada contra `skill_registry` real. Nenhum teste mockado/skipado. Os
+boundary tests da fundação (`test_activity_boundaries.py`, agora 15 com os 4 da
+Fase 4) seguem passando SEM alteração — nenhum call site do workflow foi mudado
+por este WS (a Activity `update_base_branch` usa exatamente o
+`UpdateBaseBranchInput`/`Result` do contrato).
 
 Fase 3 adicionou `tests/test_artifact_store.py` (5), `tests/test_demo_evidence.py`
 (3), `tests/test_trigger_preview.py` (8, inclui o e2e real contra o k3d),

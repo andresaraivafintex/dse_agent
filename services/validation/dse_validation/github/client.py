@@ -51,6 +51,15 @@ class GitHubClient(Protocol):
         registra e segue (nunca bloqueia por isso)."""
         ...
 
+    def list_review_threads(self, repo: str, pr_number: int) -> list[dict]:
+        """Fase 4 (WSE-E6-T16) — threads de review do PR, cada uma ANCORADA em
+        um commit. `GET /repos/{repo}/pulls/{n}/comments` (review comments).
+        Retorna `[{id, commit_id, original_commit_id, path}]`. O
+        `original_commit_id` é o sha em que a thread foi ancorada — é ele que
+        rebase+force-push orfanaria (merge-base preserva). Usado pelo wrapper de
+        Activity para saber quais shas NÃO podem sumir da história do branch."""
+        ...
+
     def authenticated_remote_url(self, repo: str) -> str:
         """URL https://x-access-token:<token>@github.com/<repo>.git para git push
         autenticado como a GitHub App, sem expor o token em nenhum argv de log."""
@@ -148,6 +157,24 @@ class RealGitHubClient:
         resp.raise_for_status()
         return True
 
+    def list_review_threads(self, repo: str, pr_number: int) -> list[dict]:
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/pulls/{pr_number}/comments",
+            headers=self._headers(),
+            params={"per_page": 100},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return [
+            {
+                "id": c.get("id"),
+                "commit_id": c.get("commit_id"),
+                "original_commit_id": c.get("original_commit_id"),
+                "path": c.get("path"),
+            }
+            for c in resp.json()
+        ]
+
     def authenticated_remote_url(self, repo: str) -> str:
         token = self._installation_token()
         return f"https://x-access-token:{token}@github.com/{repo}.git"
@@ -225,6 +252,16 @@ class FakeGitHubClient:
                     run["status"] = "queued"
                     run["conclusion"] = None
         return True
+
+    # Fase 4 (WSE-E6-T16) — threads de review ancoradas em commits.
+    _review_threads: dict[tuple[str, int], list[dict]] = field(default_factory=dict)
+
+    def set_review_threads(self, repo: str, pr_number: int, threads: list[dict]) -> None:
+        """Só para teste — popula as threads de review "ancoradas em commits"."""
+        self._review_threads[(repo, pr_number)] = threads
+
+    def list_review_threads(self, repo: str, pr_number: int) -> list[dict]:
+        return list(self._review_threads.get((repo, pr_number), []))
 
     def authenticated_remote_url(self, repo: str) -> str:
         return f"https://x-access-token:fake-local-token@github.com/{repo}.git"

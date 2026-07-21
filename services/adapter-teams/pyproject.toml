@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dse-adapter-teams"
+version = "0.1.0"
+description = "WS-A (Fase 4, PROVISÃO): adapter Microsoft Teams (inbound Bot Framework/outgoing-webhook + outbound status message via MutableCommentWriter). Não ativado — ver README."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.6",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "requests>=2.31",
+    "dse-contracts",
+    "dse-audit",
+    "dse-identity",
+    "dse-ingest-gateway",
+]
+
+[tool.setuptools.packages.find]
+include = ["adapter_teams*"]

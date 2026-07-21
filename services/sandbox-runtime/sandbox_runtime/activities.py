@@ -732,6 +732,77 @@ async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Ve
     return verdict
 
 
+# ===========================================================================
+# Fase 4 — esteira de promoção de skill (WSC-E4-T3). Activities registradas
+# como `@activity.defn` com os nomes/tipos de `dse_contracts.activities`
+# (definidos no gate de entrada da Fase 4, antes do build). A lógica
+# determinística vive em `skill_promotion` (P1); aqui só o wrapper Activity +
+# tradução para os models de retorno do contrato.
+# ===========================================================================
+from dse_contracts import (  # noqa: E402
+    ACTIVITY_EVAL_SKILL_CANDIDATE,
+    ACTIVITY_PROMOTE_SKILL,
+    EvalSkillCandidateInput,
+    EvalSkillCandidateResult,
+    PromoteSkillInput,
+    PromoteSkillResult,
+)
+
+from . import skill_promotion  # noqa: E402
+
+
+@activity.defn(name=ACTIVITY_EVAL_SKILL_CANDIDATE)
+async def eval_skill_candidate(inp: EvalSkillCandidateInput) -> EvalSkillCandidateResult:
+    """Replay do candidate contra o eval set histórico (positivos/negativos).
+    Determinístico (P1) — produz um SCORE e as contagens, nunca uma decisão de
+    promoção. `negative_regressions>0` ⇒ `passed=False`, o que bloqueia a
+    transição candidate→approved por construção (o gate está em `promote_skill`).
+    Grava em `skill_eval` (P8)."""
+    outcome = skill_promotion.evaluate_candidate(
+        inp.tenant_id, inp.skill_key, inp.candidate_version
+    )
+    return EvalSkillCandidateResult(
+        skill_key=inp.skill_key,
+        candidate_version=inp.candidate_version,
+        passed=outcome.passed,
+        score=outcome.score,
+        positive_hits=outcome.positive_hits,
+        negative_regressions=outcome.negative_regressions,
+        detail=outcome.detail,
+    )
+
+
+@activity.defn(name=ACTIVITY_PROMOTE_SKILL)
+async def promote_skill(inp: PromoteSkillInput) -> PromoteSkillResult:
+    """Transição de estado GOVERNADA (candidate→approved→canary→active +
+    rollback). P1/P3 NÃO-NEGOCIÁVEL: `to_status in {approved,active}` sem
+    `approver` humano levanta `ApproverRequired` ANTES de qualquer escrita —
+    promoção sem humano nomeado é impossível por construção (não há code path;
+    a Activity propaga a exceção, o workflow do WS-B nunca "cai" numa promoção
+    silenciosa). Toda transição → dse_audit.emit com a identidade do aprovador."""
+    outcome = skill_promotion.promote(
+        inp.tenant_id,
+        inp.skill_key,
+        inp.version,
+        inp.to_status,
+        approver=inp.approver,
+        reason=inp.reason,
+    )
+    detail = ""
+    if outcome.superseded_version is not None:
+        detail = f"superseded v{outcome.superseded_version}"
+    if outcome.restored_version is not None:
+        detail = f"rollback: restored v{outcome.restored_version} to active"
+    return PromoteSkillResult(
+        skill_key=outcome.skill_key,
+        version=outcome.version,
+        from_status=outcome.from_status,
+        to_status=outcome.to_status,
+        ok=True,
+        detail=detail,
+    )
+
+
 # Consumido pelo loader defensivo do worker unico (services/orchestrator/
 # src/dse_orchestrator/worker.py:_load_cross_workstream_activities) — nome
 # `ACTIVITIES` e o contrato que o integrador espera (ver docstring de lá).
@@ -744,4 +815,6 @@ ACTIVITIES = [
     run_planner_turn,
     run_tester_turn,
     run_l2_review,
+    eval_skill_candidate,
+    promote_skill,
 ]

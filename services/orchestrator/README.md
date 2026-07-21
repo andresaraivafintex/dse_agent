@@ -8,6 +8,88 @@ blocked/failed/escalated como estados terminais e nenhuma decisão de fluxo
 tomada por LLM (P1) ou por uma sessão de agente sobre o próprio trabalho
 (P3).
 
+## Fase 4 ("Loop hardening & learning") — o que foi adicionado
+
+A Fase 4 estende (não reescreve) a máquina de estados das Fases 1-3. Três
+entregas de WS-B, todas cobertas por teste real contra Postgres/Temporal da
+fundação (7 testes novos em `tests/test_phase4_merge_base_and_learning.py`;
+suíte total **54 passed**). **Nenhuma migração nova de WS-B** — reuso a tabela
+`skill_episode` da migração `0019_wsc4.sql` (dona WS-C) só para INSERT. Só
+IMPORTO de `dse_contracts.activities` (`ACTIVITY_UPDATE_BASE_BRANCH` +
+`UpdateBaseBranchResult`, já promovidos no gate de entrada) — nenhuma
+redefinição local.
+
+### WSE-E6-T16 — merge-base no review loop (wiring WS-B)
+
+No caminho `changes_requested` do review loop, ANTES de re-rodar o Coder, o
+workflow chama `ACTIVITY_UPDATE_BASE_BRANCH` (helper
+`_update_base_branch_before_review_fix`). Invariantes:
+
+- **`first_human_review_done=True` sempre** neste ponto: chegamos aqui
+  justamente porque um humano já revisou o PR e pediu mudanças. Depois do 1º
+  review a estratégia só pode ser merge-base-into-branch — um rebase+force-push
+  orfanaria as threads de review ancoradas nos commits reescritos
+  (comportamento verificado do GitHub, failure mode 11). A escolha da
+  estratégia é determinística e vive no WS-E (P1: código, não modelo); o WS-B
+  só passa a flag correta e reage ao resultado.
+- **`conflict=True` → escala a humano** (`_EscalateNow`), NUNCA resolve à força
+  (P6). A escalação carrega repo/branch/base para o humano agir.
+- **`orphaned_threads>0` → escala** também: é a asserção de exit da Fase 4
+  (zero órfãs). Se o dono (WS-E) reportar >0, a invariante foi violada e o
+  workflow não segue adivinhando (P6). O merge-base real garante 0 por
+  construção; esta é uma defesa-em-profundidade do lado do chamador.
+- O call site é o payload EXATO de `WSB_UPDATE_BASE_PAYLOAD` em
+  `packages/contracts/tests/test_activity_boundaries.py` (regra do arquivo:
+  call site + boundary test mudam juntos — aqui o payload já existia e bate,
+  então nada mudou na fundação). As fakes de teste decodificam com o model REAL
+  `UpdateBaseBranchInput` e retornam `UpdateBaseBranchResult`.
+- **Escopo deliberado**: só o caminho `changes_requested`. É exatamente onde há
+  threads de review para orfanar. No caminho CI-red (antes de qualquer review
+  humano) não há threads ancoradas — o drift ali é absorvido pelo próprio ciclo
+  de fix, e rebase seria até permitido; por isso o merge-base não é forçado lá.
+
+### WSC-E4-T2 — episódio de clarificação (source do insumo de skill-learning)
+
+O gate de clarificação já detecta a mesma lacuna recorrendo. Quando um campo
+que **já faltou num round anterior deste intake** reaparece faltando (detecção
+por set-arithmetic pura no workflow — determinística, P1), o workflow grava UM
+`skill_episode` (source=`clarification`) na tabela da migração 0019 via a
+Activity local `record_skill_episode`:
+
+- `pattern_key = "clarification_missing:<campos+recorrentes>"` agrupa
+  ocorrências do mesmo padrão; `occurrence_n` é o contador tenant-wide;
+  `provenance` (JSONB) carrega repo/campos/round/requester.
+- **NENHUMA skill é criada/ativada aqui** (fronteira testada em
+  `packages/contracts` — WS-B não tem activity de promoção). O episódio é só o
+  insumo governável que a esteira de promoção do WS-C consome. A primeira lacuna
+  (round inicial, antes de qualquer pedido) NUNCA vira episódio — só a
+  recorrência conta (`test_non_recurring_clarification_emits_no_episode`).
+
+### Pilot gate "PR quality thresholds" — métricas de qualidade de PR
+
+Emito quatro métricas OTel via o mesmo mecanismo da Fase 3 (`metrics.py` +
+Activity local `emit_pr_quality_metric`, leitura determinística no workflow /
+emissão fora do sandbox — P1), numa fronteira TERMINAL do PR (merge OU
+escalação, com o atributo `dse.pr.outcome`):
+
+| Métrica | Significado |
+|---|---|
+| `dse.pr.review_rounds` | rounds de review humano/CI-red por PR (`review_round`) |
+| `dse.pr.changes_requested_total` | quantos lotes de `changes_requested` o PR acumulou |
+| `dse.pr.time_to_merge_seconds` | de PR finalizado (`workflow.now()`, replay-safe) até `merged_by_human` |
+| `dse.pr.evidence_refreshes` | refreshes de evidência do PR (proxy de evidence-consumption) |
+
+**Estas quatro alimentam o pilot gate "PR quality thresholds" (adendo 03).** O
+`time_to_merge` só é emitido no desfecho `merged`. A **evidence-consumption
+autoritativa** (quem acessou qual artefato, quando) é logada pelo WS-E no seu
+access log — o WS-B contribui o refresh count como proxy do lado do workflow.
+Honestidade do adendo 03 (bloqueio administrativo): **os NÚMEROS reais só saem
+operando contra repos/modelos reais** — GitHub App / Slack / conta Bedrock
+reais são pré-requisito dos pilot gates e são o item de maior lead time. Aqui a
+INSTRUMENTAÇÃO está pronta e testada (emite determinística e corretamente com
+os atributos que o gate consulta); falta só a operação real para popular os
+histogramas com dados de piloto.
+
 ## Fase 3 ("Evidence") — o que foi adicionado
 
 A Fase 3 estende (não reescreve) a máquina de estados das Fases 1+2. Tudo

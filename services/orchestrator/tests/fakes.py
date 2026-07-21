@@ -68,6 +68,7 @@ from dse_contracts.activities import (
     ACTIVITY_RUN_VISUAL_DIFF,
     ACTIVITY_TEARDOWN_SANDBOX,
     ACTIVITY_TRIGGER_PREVIEW,
+    ACTIVITY_UPDATE_BASE_BRANCH,
     CheckpointRef,
     CiStatusResult,
     CoderTurnResult,
@@ -81,6 +82,8 @@ from dse_contracts.activities import (
     RunVisualDiffInput,
     SandboxHandle,
     TriggerPreviewInput,
+    UpdateBaseBranchInput,
+    UpdateBaseBranchResult,
     VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
@@ -150,6 +153,14 @@ class FakeControlPlane:
     last_preview_payload: dict | None = None
     last_demo_payload: dict | None = None
     last_visual_diff_payload: dict | None = None
+
+    # --- Fase 4: merge-base / base-drift (fronteira WS-E, WSE-E6-T16) ---
+    update_base_calls: int = 0
+    # controla o retorno da fake: drift presente? conflito? threads orfas?
+    base_has_drift: bool = True
+    base_conflict: bool = False
+    base_orphaned_threads: int = 0  # exit da Fase 4 exige 0 no merge-base real
+    last_update_base_payload: dict | None = None
 
 
 def build_fake_activities(state: FakeControlPlane) -> list[Any]:
@@ -342,7 +353,33 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             baseline_created=baseline_created,
         )
 
+    async def update_base_branch(payload: dict) -> UpdateBaseBranchResult:
+        state.update_base_calls += 1
+        state.calls_log.append("update_base_branch")
+        state.last_update_base_payload = dict(payload)
+        inp = UpdateBaseBranchInput(**payload)  # decode REAL do contrato (WSE-E6-T16)
+        if state.base_conflict:
+            # conflito nao-resolvivel: o workflow deve escalar (nunca resolve a forca)
+            return UpdateBaseBranchResult(
+                work_item_id=inp.work_item_id, strategy="merge_base",
+                conflict=True, orphaned_threads=0, detail="merge conflict (fake)",
+            )
+        if not state.base_has_drift:
+            return UpdateBaseBranchResult(
+                work_item_id=inp.work_item_id, strategy="noop_no_drift",
+                conflict=False, orphaned_threads=0, detail="no drift (fake)",
+            )
+        # P1: a estrategia e determinada pelo first_human_review_done. Depois do
+        # 1o review (True) -> SEMPRE merge_base (nunca rebase). Zero orfas por
+        # construcao — a menos que o teste force o cenario de violacao.
+        strategy = "merge_base" if inp.first_human_review_done else "rebase_prefirst_review"
+        return UpdateBaseBranchResult(
+            work_item_id=inp.work_item_id, strategy=strategy, conflict=False,
+            orphaned_threads=state.base_orphaned_threads, detail="fake merge-base",
+        )
+
     return [
+        activity.defn(name=ACTIVITY_UPDATE_BASE_BRANCH)(update_base_branch),
         activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)(run_planner_turn),
         activity.defn(name=ACTIVITY_RUN_TESTER_TURN)(run_tester_turn),
         activity.defn(name=ACTIVITY_RUN_L2_REVIEW)(run_l2_review),

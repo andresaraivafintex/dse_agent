@@ -523,3 +523,84 @@ infra/k8s-local/eso/          (ClusterSecretStore dse-vault + exemplo de preview
 infra/otel-collector-config.yaml  (+ pipeline metrics/history_alert — §3 ATIVA)
 docker-compose.wsf.yml        (+ serviço platform-jobs)
 ```
+
+## Fase 4 — o que foi adicionado (loop hardening & learning)
+
+A Fase 4 do WS-F é o **pacote do pilot gate de segurança** + a decisão de escopo Webex. Nada de
+código de plataforma novo em `dse_platform/` — a Fase 4 do WS-F é **documentação de segurança
+formal + uma suíte de red-team executável** que ATACA os controles já construídos (não os
+reescreve).
+
+### Mapa de entrega (Fase 4)
+
+| Tarefa | Entregável | Estado |
+|---|---|---|
+| **WSF-E8-T1** threat model + data-flow | `infra/THREAT-MODEL.md` — matriz ameaça→controle→teste por componente + diagramas mermaid Tier 1 (PrivateLink) / Tier 2 (air-gapped) | Completo; cada linha cita arquivo+teste reais; gaps honestos listados (§4) |
+| **WSF-E8-T3** programa de red-team | `infra/RED-TEAM-PROGRAM.md` (dono/cadência/escopo/itens manuais) + `services/platform/tests/test_red_team.py` (21 ataques executáveis) | Completo; 21/21 passando contra infra real |
+| **WSF-E5-T3** topologia B | `infra/helm/dse/values-topology-b.yaml` + `templates/model-server.yaml` + `infra/helm/dse/TOPOLOGY-B.md` (custo NFR-08 × N) | Completo; `helm lint`+`template` validam A e B |
+| **Decisão Webex (ADR-25)** | `infra/ADR-25-webex-decision.md` — de-scope formal com sign-off + como reverter | Completo (pendente ratificação arquiteto/stakeholder) |
+
+### Suíte de red-team (`tests/test_red_team.py`) — o que ela ATACA de verdade
+
+Ataques contra controles REAIS (não mocks), com skip claro se o controle-alvo não estiver no
+ambiente (P6/P8 — "não pude verificar" > falso-positivo):
+
+- **`TestForgedWebhook`** → HMAC de `ingest_gateway.security` (WS-A): assinatura forjada / chave
+  errada / ausente / replay fora da janela recusados; controle positivo prova que não é "sempre
+  nega".
+- **`TestPromptInjection`** → `ingest_gateway.sanitize` (unicode invisível/bidi + secret plantado)
+  E a contenção real: egress default-deny (:8806) recusa exfiltração para pastebin/telegram/cloud
+  metadata + bypass por confusão de host.
+- **`TestCrossTenant`** → `dse_platform.tenant_isolation`: A lê skill/retrieval/audit/token de B →
+  `CrossTenantViolation` + linha `cross_tenant_access_denied` no audit; path traversal de artifact
+  bloqueado.
+- **`TestMaliciousSkill`** → `sandbox_runtime.skill_promotion` (WS-C, liga com WSC-E4-T3): candidate
+  tenta virar `active`/`approved` sem aprovador humano → `ApproverRequired`; candidate nunca é
+  servida ao Planner (`read_approved_skills`).
+
+Como rodar (venv do WS-F, infra no ar):
+```bash
+export DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse
+pytest -q services/platform/tests/test_red_team.py     # 21 passed
+```
+
+### Validar as topologias do Helm (Fase 4)
+```bash
+helm lint infra/helm/dse
+helm lint infra/helm/dse -f infra/helm/dse/values-topology-b.yaml
+helm template dse-acme infra/helm/dse                                              # topologia A
+helm template dse-acme infra/helm/dse -f infra/helm/dse/values.yaml \
+    -f infra/helm/dse/values-topology-b.yaml                                       # topologia B
+```
+Topologia B liga o `model-server` air-gapped in-cluster (GPU), força Postgres/Temporal/Vault
+self-hosted e allowlist de egress só-interna. Custo operacional documentado em `TOPOLOGY-B.md`
+(NFR-08 × N — sem amortização, a GPU dedicada por cliente é o driver dominante).
+
+### Gaps honestos (Fase 4)
+
+- **Credenciais reais** (GitHub App/Slack/Jira/AWS-Bedrock) continuam ausentes — assinatura e
+  PrivateLink têm a lógica de produção mas rodam com segredo de env/fixture/echo. Pilot gate
+  administrativo (adendo 03 §Parte 3).
+- **Supply-chain**: sem SBOM/assinatura de imagem/scan de CVE no CI — item manual de maior
+  prioridade do RED-TEAM-PROGRAM (§5).
+- **Replay de credencial contra upstream real** e **console sem IdP real** permanecem itens
+  manuais do programa (documentados em §5, não escondidos).
+- **`model-server` air-gapped** é empacotamento validado (lint/template); a imagem de serving real
+  é P2 (WSD-E5-T2/T3), não bloqueia piloto.
+
+### Estrutura adicionada (Fase 4)
+
+```
+infra/THREAT-MODEL.md                    (WSF-E8-T1 — matriz + data-flow Tier 1/2)
+infra/RED-TEAM-PROGRAM.md                (WSF-E8-T3 — dono/cadência/escopo/manuais)
+infra/ADR-25-webex-decision.md           (de-scope formal + reversão)
+infra/helm/dse/values-topology-b.yaml    (WSF-E5-T3 — overlay estrito)
+infra/helm/dse/templates/model-server.yaml  (model air-gapped, gated modelServer.enabled)
+infra/helm/dse/TOPOLOGY-B.md             (custo operacional NFR-08 × N)
+infra/helm/dse/values.yaml               (+ bloco modelServer, disabled por default — A intacta)
+services/platform/tests/test_red_team.py (21 ataques executáveis)
+```
+
+Sem migração nova na Fase 4 (WS-F): a suíte de red-team reusa as tabelas existentes
+(`skill_registry`/`skill_episode` da 0019, `virtual_keys`, `audit_log`). `0020_wsf4.sql` ficou
+reservada mas não foi necessária.

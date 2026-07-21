@@ -44,6 +44,11 @@ LOCAL_ACTIVITY_RECORD_GATE = "record_plan_approval"
 # e emissao da metrica OTel de tamanho de history (ALERTING-RULES.md §3).
 LOCAL_ACTIVITY_RECORD_EVIDENCE = "record_evidence_state"
 LOCAL_ACTIVITY_EMIT_HISTORY_METRIC = "emit_history_metric"
+# Fase 4 — insumo de skill-learning (episodio source=clarification, migracao
+# 0019, dona WS-C; WS-B so INSERE o insumo) e metrica de qualidade de PR
+# (pilot gate "PR quality thresholds").
+LOCAL_ACTIVITY_RECORD_SKILL_EPISODE = "record_skill_episode"
+LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
 
 _DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
@@ -331,6 +336,74 @@ async def emit_history_metric(payload: dict[str, Any]) -> None:
     )
 
 
+@activity.defn(name=LOCAL_ACTIVITY_RECORD_SKILL_EPISODE)
+async def record_skill_episode(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fase 4 (WSC-E4-T2, source=clarification) — grava UM episodio de
+    skill-learning em skill_episode (migracao 0019, tabela dona do WS-C; o WS-B
+    so escreve o INSUMO). NENHUMA skill e criada/ativada aqui (fronteira testada
+    em packages/contracts): o episodio e apenas o insumo governavel que a
+    esteira de promocao do WS-C consome. `occurrence_n` e o contador tenant-wide
+    de ocorrencias do mesmo `pattern_key` (proveniencia completa em JSONB).
+    Idempotencia: cada recorrencia detectada gera uma linha nova (append-only,
+    como o audit ledger) — a deduplicacao/gatilho de promocao e do WS-C."""
+    tenant_id = payload["tenant_id"]
+    pattern_key = payload["pattern_key"]
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover - sem Postgres
+        logger.warning("record_skill_episode: sem Postgres (%s); pulando insumo", exc)
+        return {"persisted": False}
+    try:
+        import json
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(MAX(occurrence_n), 0) FROM skill_episode "
+                "WHERE tenant_id = %s AND pattern_key = %s",
+                (tenant_id, pattern_key),
+            )
+            occurrence_n = int((cur.fetchone() or [0])[0] or 0) + 1
+            cur.execute(
+                """
+                INSERT INTO skill_episode
+                    (tenant_id, source, work_item_id, pattern_key, occurrence_n, provenance)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    tenant_id,
+                    payload.get("source", "clarification"),
+                    payload.get("work_item_id"),
+                    pattern_key,
+                    occurrence_n,
+                    json.dumps(payload.get("provenance") or {}),
+                ),
+            )
+            episode_id = cur.fetchone()[0]
+        conn.commit()
+        return {"persisted": True, "occurrence_n": occurrence_n, "episode_id": episode_id}
+    finally:
+        conn.close()
+
+
+@activity.defn(name=LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC)
+async def emit_pr_quality_metric(payload: dict[str, Any]) -> None:
+    """Fase 4 — emite as metricas OTel de qualidade de PR (pilot gate). A
+    LEITURA (rounds/counts/tempo) e deterministica no workflow; a EMISSAO
+    acontece aqui (I/O fora do sandbox — P1). Best-effort."""
+    from dse_orchestrator import metrics
+
+    metrics.record_pr_quality_metric(
+        work_item_id=payload["work_item_id"],
+        tenant_id=payload["tenant_id"],
+        outcome=payload.get("outcome", "unknown"),
+        review_rounds=int(payload.get("review_rounds", 0)),
+        changes_requested_count=int(payload.get("changes_requested_count", 0)),
+        evidence_refreshes=int(payload.get("evidence_refreshes", 0)),
+        time_to_merge_seconds=payload.get("time_to_merge_seconds"),
+    )
+
+
 @activity.defn(name=LOCAL_ACTIVITY_CHECK_CLARIFICATION)
 async def check_clarification_completeness(payload: dict[str, Any]) -> dict[str, Any]:
     """Checklist deterministico e simples por task-class (Fase 1: uma unica
@@ -368,4 +441,6 @@ LOCAL_ACTIVITIES = [
     record_plan_approval,
     record_evidence_state,
     emit_history_metric,
+    record_skill_episode,
+    emit_pr_quality_metric,
 ]

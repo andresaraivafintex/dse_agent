@@ -159,6 +159,28 @@ vive aqui e é compartilhada, não duplicada.
   `dse_audit.emit(action="steering_rejected_unauthorized")` e retorna
   `"unauthorized"` em vez de `"signal"`.
 
+### WSA-E6-T2b (Fase 4) — Steering sobre o identity map REAL
+A implementação de `is_authorized_to_steer` foi trocada por baixo (a
+assinatura `(tenant_id, principal_id) -> bool` **não mudou** — contrato
+estável desde a Fase 1). Agora resolve **papel**, não só pertencimento a
+lista, usando as fontes da verdade do WS-F (Fase 2). Ordem determinística
+(P1), nega por default:
+  0. **Offboarding sobrepõe tudo** (WSF-E3-T3): principal com linha em
+     `dse_console_identity` inativa/expirada → negado, mesmo em allowlist/bundle.
+  1. **Papel RBAC via `dse_console_identity.roles`** (∩ `STEERING_ROLES` =
+     operator/approver/steerer/maintainer/platform_admin/admin), escopado ao
+     home tenant (ou `tenant_id IS NULL` = operador de plataforma).
+  2. **Papel de approver via `dse_access_bundle.designated_approvers`** do
+     bundle efetivo (channel default) do tenant.
+  3. **Fallback documentado**: a allowlist explícita da Fase 1
+     (`tenant_steering_allowlist`) = requester + CODEOWNERS-equivalentes,
+     enquanto o identity map não resolve um papel.
+  - **P8**: o GRANT emite `dse_audit.emit(action="steering_authorized")` com o
+    `method` de resolução; a REJEIÇÃO continua auditada por `correlate`
+    (`steering_rejected_unauthorized`) — invariante da Fase 1 preservada.
+  - A troca não quebra os testes de steering da Fase 1 (allowlist ainda
+    autoriza). Ver `tests/test_steering.py`.
+
 ## O que é fixture/mock local (documentado, não é produção)
 
 - `FakeSlackClient` (`adapter_slack/backend.py`) e `FakeGithubClient`
