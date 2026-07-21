@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dse-console-projector"
+version = "0.1.0"
+description = "Plano 06: projeta o system of record (work_items/audit_log/model_call_ledger) no read model console_rm consumido pelo dse_console_pane — cursores idempotentes, replay determinístico"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg2-binary>=2.9",
+    "dse-contracts",
+]
+
+[tool.setuptools.packages.find]
+include = ["console_projector*"]

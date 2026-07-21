@@ -1,0 +1,20 @@
+# Plano 06 (console dados reais) — projector SoR -> console_rm.
+# Nome wsg.yml de propósito: o Makefile compõe docker-compose.ws*.yml.
+services:
+  console-projector:
+    build:
+      context: .
+      dockerfile: services/console-projector/Dockerfile
+    container_name: dse_console_projector
+    environment:
+      DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
+      DSE_PROJECTOR_INTERVAL_SECONDS: ${DSE_PROJECTOR_INTERVAL_SECONDS:-2}
+      DSE_PROJECTOR_BATCH: ${DSE_PROJECTOR_BATCH:-2000}
+    depends_on:
+      - postgres
+    networks: [dse_net]
+    restart: unless-stopped
+
+networks:
+  dse_net:
+    external: true
