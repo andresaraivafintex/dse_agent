@@ -46,6 +46,12 @@ class WorkItemLifecycleInput:
     review_round: int = 0
 
     sandbox_id: str | None = None
+    # S7 (Fase 5): SandboxHandle serializado (sandbox_id, work_item_id,
+    # tenant_id, branch, container_id) retido do provision. L1 e finalize exigem
+    # o handle COMPLETO (nao so o sandbox_id) para resolver o executor — o call
+    # site antigo so guardava sandbox_id, causando `Failed decoding arguments`
+    # (RunL1PipelineInput.sandbox faltando). Sobrevive a continue_as_new.
+    sandbox_handle: dict = field(default_factory=dict)
     branch: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None
@@ -105,7 +111,12 @@ class WorkItemLifecycleInput:
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
     activity_start_to_close_seconds: float = 3600.0
-    activity_heartbeat_seconds: float = 30.0
+    # S7-b (Fase 5): um turno REAL do Coder/Planner/Reviewer Claude bloqueia por
+    # vários minutos sem heartbeat (o substrato é uma chamada síncrona). Com
+    # heartbeat de 30s o Temporal expirava e RETENTAVA (cada retry = outro turno
+    # caro). Elevado para cobrir turnos longos; start_to_close (1h) segue como
+    # teto duro. Correção futura: heartbeat periódico dentro do substrato.
+    activity_heartbeat_seconds: float = 1800.0
     activity_schedule_to_close_seconds: float = 7200.0
 
     # Fase 2 (WSB-E3-T2/E3-T3/E4) — caps/politica novos. `require_approval_risk_classes`

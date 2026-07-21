@@ -33,8 +33,28 @@ services:
       # e minta a virtual key via /key/generate com a master key (control plane).
       DSE_CODER_MODEL: ${DSE_CODER_MODEL:-anthropic/claude}
       DSE_CODER_SUBSTRATE: ${DSE_CODER_SUBSTRATE:-fake}
+      # S7 (Fase 5) — L1 configurado para o repo de PoC (fintex-wallet, JS):
+      # os checks Python (lint/typecheck/build) são pulados (comando vazio);
+      # o teste real é um syntax-check do entrypoint (node --check, sem
+      # node_modules). secret-scan + diff-budget/forbidden-paths (agnósticos
+      # de linguagem) seguem ativos. NOTA: derivar os comandos de L1 do próprio
+      # repo (package.json/Makefile) é trabalho futuro — hoje é config por env.
+      DSE_L1_LINT_CMD: ${DSE_L1_LINT_CMD:-}
+      DSE_L1_TYPECHECK_CMD: ${DSE_L1_TYPECHECK_CMD:-}
+      DSE_L1_BUILD_CMD: ${DSE_L1_BUILD_CMD:-}
+      DSE_L1_TEST_CMD: ${DSE_L1_TEST_CMD:-node --check server.js}
       DSE_LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
       DSE_MODEL_GATEWAY_ALLOW_FIXTURE: ${DSE_MODEL_GATEWAY_ALLOW_FIXTURE:-1}
+      # S7-c: imagem do sandbox com git+node (L1 `node --check` + finalize push
+      # rodam via docker exec DENTRO do sandbox). dse-sandbox-base (WSC-E3-T4b).
+      DSE_SANDBOX_IMAGE: ${DSE_SANDBOX_IMAGE:-dse-sandbox-base:wsc3}
+      # S7 (Fase 5) — modo IN-PROCESS do PoC: o substrato do Coder (claude-agent-
+      # sdk) roda NESTE processo de control-plane, então o código real vive no
+      # workspace LOCAL (DSE_SANDBOX_STATE_DIR/<wi>/workspace) e NÃO no /workspace
+      # do container efêmero (que fica vazio no docker-out-of-docker). Com isto,
+      # L1 e finalize (git push) operam nesse workspace local via subprocesso.
+      # Produção (agente DENTRO do container) NÃO seta esta flag → usa DockerExec.
+      DSE_SANDBOX_INPROCESS: ${DSE_SANDBOX_INPROCESS:-1}
       # Credenciais do GitHub App injetadas do Vault no boot (ver make up-poc);
       # o finalize_pr (WS-E) roda aqui no orchestrator e precisa delas p/ abrir PR.
       GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}

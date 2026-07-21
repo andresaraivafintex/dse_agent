@@ -18,6 +18,7 @@ este módulo:
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +34,11 @@ LABEL_TENANT = "dse.tenant_id"
 LABEL_COMPONENT = "dse.component"
 LABEL_ROLE = "dse.role"  # "sandbox" | "egress_proxy" | "checkpoint_helper"
 
-DEFAULT_SANDBOX_IMAGE = "python:3.11-slim"
+# S7-c (Fase 5): a imagem do sandbox precisa ter as ferramentas que rodam
+# DENTRO dele via `docker exec` — git (finalize_pr push) e a toolchain do repo
+# (ex.: node para o L1 `node --check` de um repo JS). A `dse-sandbox-base`
+# (WSC-E3-T4b) traz git+node+Playwright. Configurável por env para não fixar.
+DEFAULT_SANDBOX_IMAGE = os.environ.get("DSE_SANDBOX_IMAGE", "python:3.11-slim")
 DEFAULT_NONROOT_USER = "10001:10001"
 
 # Resource class -> defaults, usado quando o WorkItem.budget não especifica

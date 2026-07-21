@@ -22,6 +22,7 @@ consome não mudam.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -107,6 +108,23 @@ def executor_for_handle(sandbox_handle, repo_dir: str = "/workspace/repo") -> Sa
     pelo wrapper de Activity (`activities.py`) — os testes chamam a lógica
     core diretamente com um `LocalFakeSandbox` injetado, sem passar por aqui.
     """
+    # S7 (Fase 5) — modo IN-PROCESS do PoC. Quando o substrato do agente roda no
+    # processo do control-plane (claude-agent-sdk no orchestrator, não DENTRO do
+    # container efêmero), o código real vive no workspace LOCAL
+    # (`$DSE_SANDBOX_STATE_DIR/<wi>/workspace`) — o clone, o Coder e o checkpoint
+    # rodam todos ali. O `/workspace` do container fica VAZIO (docker-out-of-
+    # docker: o daemon monta um path do host que não corresponde ao path interno
+    # do orchestrator). Logo L1 e finalize (git push) TÊM que operar nesse
+    # workspace local, via subprocesso. PRODUÇÃO (agente DENTRO do container)
+    # mantém o DockerExec — este ramo é gated por env e é OFF por default, então
+    # não muda o comportamento de produção nem dos testes do WS-C/WS-E.
+    if os.environ.get("DSE_SANDBOX_INPROCESS") == "1":
+        wi = getattr(sandbox_handle, "work_item_id", None)
+        if not wi:
+            raise RuntimeError("DSE_SANDBOX_INPROCESS=1 exige SandboxHandle com work_item_id")
+        state_dir = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
+        local_ws = Path(state_dir) / wi / "workspace"
+        return LocalFakeSandbox(local_ws)
     if getattr(sandbox_handle, "container_id", None):
         return DockerExecSandbox(sandbox_handle.container_id, default_cwd=repo_dir)
     raise RuntimeError(

@@ -160,6 +160,10 @@ class _BlockNow(Exception):
 class WorkItemLifecycleWorkflow:
     def __init__(self) -> None:
         self._input: Optional[WorkItemLifecycleInput] = None
+        # ultimo CheckpointRef (dict) de um checkpoint bem-sucedido — o rebuild
+        # reconstroi a partir dele. None ate o primeiro checkpoint (nao
+        # sobrevive a continue_as_new de proposito: cada fase refaz o seu).
+        self._last_checkpoint_ref: dict | None = None
 
         # --- controles de operador (WSB-E5-T2) ---
         self._paused = False
@@ -436,6 +440,19 @@ class WorkItemLifecycleWorkflow:
                     parts.append(f"Objeção do review a corrigir: {str(obj).strip()}")
         return "\n\n".join(parts) or "Implementar a tarefa solicitada."
 
+    def _pr_summary(self) -> str:
+        """S7 (Fase 5): corpo do PR (campo `summary` do FinalizePrInput).
+        Determinístico (P1): usa o `summary` do plano se houver, senão a 1a
+        linha do conteúdo da tarefa. Nenhum LLM decide aqui."""
+        input = self._input
+        plan_summary = None
+        if isinstance(input.plan_json, dict):
+            plan_summary = (input.plan_json.get("summary") or "").strip() or None
+        title = ""
+        if (input.task_content or "").strip():
+            title = input.task_content.strip().splitlines()[0].strip()
+        return plan_summary or title or f"DSE: alteração automatizada ({input.work_item_id})"
+
     async def _boundary_gate(self) -> None:
         """Checado antes de CADA Activity de negocio (nao antes de bookkeeping
         local). Pausa nunca interrompe uma Activity em andamento — so atrasa
@@ -667,25 +684,35 @@ class WorkItemLifecycleWorkflow:
             return
         for _ in range(self._input.checkpoint_retry_cap):
             try:
-                await workflow.execute_activity(
+                # S7 (Fase 5): CheckpointSandboxInput exige `tenant_id` (o call
+                # site antigo nao o enviava — boundary bug latente escondido
+                # pelos fakes; mesma classe dos outros). Capturamos o
+                # CheckpointRef retornado para o rebuild poder reconstruir dele.
+                ref = await workflow.execute_activity(
                     ACTIVITY_CHECKPOINT_SANDBOX,
                     {
                         "sandbox_id": self._input.sandbox_id,
                         "work_item_id": self._input.work_item_id,
+                        "tenant_id": self._input.tenant_id,
                         "phase": phase_name,
                     },
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
+                self._last_checkpoint_ref = ref  # dict do CheckpointRef
                 return
             except ActivityError:
                 continue
         await self._audit("checkpoint_exhausted_attempting_rebuild", {"phase": phase_name})
+        # rebuild so e possivel se ha um checkpoint anterior de onde reconstruir.
+        if not self._last_checkpoint_ref:
+            raise _EscalateNow(f"checkpoint_failed_no_prior_ref:{phase_name}")
         for _ in range(self._input.rebuild_retry_cap):
             try:
                 handle: SandboxHandle = await workflow.execute_activity(
                     ACTIVITY_REBUILD_SANDBOX,
-                    {"work_item_id": self._input.work_item_id, "sandbox_id": self._input.sandbox_id},
+                    {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
+                     "checkpoint_ref": self._last_checkpoint_ref},
                     result_type=SandboxHandle,
                     start_to_close_timeout=timedelta(seconds=300),
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -962,6 +989,14 @@ class WorkItemLifecycleWorkflow:
             )
             input.sandbox_id = handle.sandbox_id
             input.branch = handle.branch
+            # S7: retem o handle COMPLETO (L1/finalize precisam dele, nao so do id).
+            input.sandbox_handle = {
+                "sandbox_id": handle.sandbox_id,
+                "work_item_id": handle.work_item_id,
+                "tenant_id": handle.tenant_id,
+                "branch": handle.branch,
+                "container_id": handle.container_id,
+            }
             await self._set_status(WorkItemStatus.implementing, audit_action="sandbox_provisioned",
                                     details={"sandbox_id": handle.sandbox_id})
 
@@ -1020,7 +1055,15 @@ class WorkItemLifecycleWorkflow:
             await self._budget_boundary("l1")
             l1_result: L1Result = await self._run_model_activity(
                 ACTIVITY_RUN_L1_PIPELINE,
-                {"work_item_id": input.work_item_id, "sandbox_id": input.sandbox_id},
+                {
+                    # S7: RunL1PipelineInput exige o handle COMPLETO + plan +
+                    # tenant + base_branch (o call site antigo so mandava
+                    # work_item_id/sandbox_id -> Failed decoding arguments).
+                    "sandbox": self._input.sandbox_handle,
+                    "plan": input.plan_json,
+                    "tenant_id": input.tenant_id,
+                    "base_branch": input.base_branch or "main",
+                },
                 L1Result,
             )
             await self._audit(
@@ -1087,12 +1130,17 @@ class WorkItemLifecycleWorkflow:
         pr_ref: PrRef = await workflow.execute_activity(
             ACTIVITY_FINALIZE_PR,
             {
+                # S7: FinalizePrInput exige `summary` e resolve o executor pelo
+                # `sandbox` (handle completo — no modo in-process do PoC o git
+                # push sai do workspace LOCAL). O call site antigo mandava
+                # `sandbox_id` (extra ignorado) e omitia `summary` -> decode fail.
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
-                "sandbox_id": input.sandbox_id,
+                "sandbox": self._input.sandbox_handle,
                 "repo": input.repo,
-                "base_branch": input.base_branch,
+                "base_branch": input.base_branch or "main",
                 "branch": input.branch,
+                "summary": self._pr_summary(),
             },
             result_type=PrRef,
             **self._activity_timeouts(),
@@ -1648,13 +1696,20 @@ class WorkItemLifecycleWorkflow:
         await self._budget_boundary("review_fix_coder")
         await self._maybe_retry_from_checkpoint()
 
+        review_notes = "\n".join(f"- {c.strip()}" for c in comments if c and c.strip())
+        fix_instruction = self._agent_instruction(include_objections=True)
+        if review_notes:
+            fix_instruction += "\n\nComentários de review a resolver:\n" + review_notes
         coder_result: CoderTurnResult = await self._run_model_activity(
             ACTIVITY_RUN_CODER_TURN,
             {
+                # S7: RunCoderTurnInput usa `instruction` (str) + `branch` — o
+                # call site antigo mandava `instructions` (lista, campo inexistente).
                 "sandbox_id": input.sandbox_id,
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
-                "instructions": [c for c in comments if c] or [""],
+                "branch": input.branch,
+                "instruction": fix_instruction,
                 "model_override": self._model_override,
                 "runtime_override": self._runtime_override,
             },
@@ -1670,7 +1725,12 @@ class WorkItemLifecycleWorkflow:
         await self._budget_boundary("review_fix_l1")
         l1_result: L1Result = await self._run_model_activity(
             ACTIVITY_RUN_L1_PIPELINE,
-            {"work_item_id": input.work_item_id, "sandbox_id": input.sandbox_id},
+            {
+                "sandbox": self._input.sandbox_handle,
+                "plan": input.plan_json,
+                "tenant_id": input.tenant_id,
+                "base_branch": input.base_branch or "main",
+            },
             L1Result,
         )
         if not l1_result.passed:
@@ -1684,13 +1744,17 @@ class WorkItemLifecycleWorkflow:
         pr_ref: PrRef = await workflow.execute_activity(
             ACTIVITY_FINALIZE_PR,
             {
+                # S7: mesmo shape do finalize primario (summary + sandbox handle).
+                # `existing_pr_number` nao e campo do modelo — o PR ja rastreado
+                # e resolvido por work_item_id dentro do finalize; mantido no
+                # branch/PR original (idempotente).
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
-                "sandbox_id": input.sandbox_id,
+                "sandbox": self._input.sandbox_handle,
                 "repo": input.repo,
-                "base_branch": input.base_branch,
+                "base_branch": input.base_branch or "main",
                 "branch": input.branch,
-                "existing_pr_number": input.pr_number,
+                "summary": self._pr_summary(),
             },
             result_type=PrRef,
             **self._activity_timeouts(),

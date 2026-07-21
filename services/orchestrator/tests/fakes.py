@@ -87,6 +87,11 @@ from dse_contracts.activities import (
     VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
+# S7 (Fase 5): os modelos de input de L1/finalize vivem no WS-E. As fakes os
+# decodificam (como trigger_preview/visual_diff ja faziam) para que uma
+# divergencia entre o call site do workflow e o contrato quebre AQUI, no teste,
+# e nao so no decode real da Activity em producao (licao do adendo 02).
+from dse_validation.activities import FinalizePrInput, RunL1PipelineInput
 
 
 @dataclass
@@ -104,6 +109,10 @@ class FakeControlPlane:
     rebuild_calls: int = 0
     teardown_calls: int = 0
     finalize_calls: int = 0
+    # S7: mapeia work_item_id -> pr_number para o finalize ser idempotente por
+    # work item (o call site nao passa mais `existing_pr_number` — o PR e
+    # resolvido por work_item_id dentro do finalize real).
+    pr_by_wi: dict = field(default_factory=dict)
     l1_calls: int = 0
     pr_counter: int = 1000
     calls_log: list[str] = field(default_factory=list)
@@ -257,15 +266,17 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def run_l1_pipeline(payload: dict) -> L1Result:
         state.l1_calls += 1
         state.calls_log.append("run_l1_pipeline")
+        inp = RunL1PipelineInput(**payload)  # decode REAL do contrato (S7)
+        wi = inp.sandbox.work_item_id
         if state.l1_fail_times > 0:
             state.l1_fail_times -= 1
             return L1Result(
-                work_item_id=payload["work_item_id"],
+                work_item_id=wi,
                 passed=False,
                 findings=[L1Finding(check="test", passed=False, detail="simulated failure")],
             )
         return L1Result(
-            work_item_id=payload["work_item_id"],
+            work_item_id=wi,
             passed=True,
             findings=[L1Finding(check="test", passed=True)],
         )
@@ -273,12 +284,15 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def finalize_pr(payload: dict) -> PrRef:
         state.finalize_calls += 1
         state.calls_log.append("finalize_pr")
-        existing = payload.get("existing_pr_number")
-        pr_number = existing or state.pr_counter
-        if not existing:
+        inp = FinalizePrInput(**payload)  # decode REAL (exige summary + sandbox)
+        wi = inp.work_item_id
+        pr_number = state.pr_by_wi.get(wi)
+        if pr_number is None:
+            pr_number = state.pr_counter  # usa o valor atual ANTES de incrementar
             state.pr_counter += 1
+            state.pr_by_wi[wi] = pr_number
         return PrRef(
-            work_item_id=payload["work_item_id"],
+            work_item_id=wi,
             pr_number=pr_number,
             url=f"https://github.com/x/y/pull/{pr_number}",
         )
