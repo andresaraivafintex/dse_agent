@@ -91,7 +91,26 @@ from dse_contracts.plan_artifact import PlanArtifact
 # decodificam (como trigger_preview/visual_diff ja faziam) para que uma
 # divergencia entre o call site do workflow e o contrato quebre AQUI, no teste,
 # e nao so no decode real da Activity em producao (licao do adendo 02).
-from dse_validation.activities import FinalizePrInput, RunL1PipelineInput
+from dse_validation.activities import (
+    ConsumeCiStatusInput,
+    FinalizePrInput,
+    RunL1PipelineInput,
+)
+# Auditoria pós-S7: fecha a CLASSE inteira — toda fake de Activity do WS-C
+# decodifica com o modelo real (a auditoria achou 3 decode-fails escondidos por
+# fakes lenientes: consume_ci_status, teardown_sandbox x4, rebuild no retry).
+from sandbox_runtime.activities import (
+    CheckpointSandboxInput,
+    ProvisionSandboxInput,
+    RebuildSandboxInput,
+    RunCoderTurnInput,
+    TeardownSandboxInput,
+)
+from dse_contracts.activities import (
+    RunL2ReviewInput,
+    RunPlannerTurnInput,
+    RunTesterTurnInput,
+)
 
 
 @dataclass
@@ -177,6 +196,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.planner_calls += 1
         state.calls_log.append("run_planner_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_PLANNER_TURN)
+        RunPlannerTurnInput(**payload)  # decode REAL do contrato
         return PlanArtifact(
             work_item_id=payload["work_item_id"],
             steps=["passo 1", "passo 2"],
@@ -189,6 +209,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.tester_calls += 1
         state.calls_log.append("run_tester_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
+        RunTesterTurnInput(**payload)  # decode REAL do contrato
         return CoderTurnResult(
             sandbox_id=payload["sandbox_id"],
             diff_summary="fake tests",
@@ -201,6 +222,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.calls_log.append("run_l2_review")
         state.last_l2_payload = dict(payload)
         _maybe_fail_closed(state, ACTIVITY_RUN_L2_REVIEW)
+        RunL2ReviewInput(**payload)  # decode REAL (extra=forbid — P3 estrutural)
         if state.l2_fail_times > 0:
             state.l2_fail_times -= 1
             return L2Verdict(
@@ -216,11 +238,13 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.provision_calls += 1
         state.calls_log.append("provision_sandbox")
         _maybe_fail_closed(state, ACTIVITY_PROVISION_SANDBOX)
+        inp = ProvisionSandboxInput(**payload)  # decode REAL
         return SandboxHandle(
-            sandbox_id=f"sbx-{payload['work_item_id']}",
-            work_item_id=payload["work_item_id"],
-            tenant_id=payload["tenant_id"],
-            branch=f"dse/{payload['work_item_id']}",
+            sandbox_id=f"sbx-{inp.work_item_id}",
+            work_item_id=inp.work_item_id,
+            tenant_id=inp.tenant_id,
+            branch=f"dse/{inp.work_item_id}",
+            container_id=f"ctr-{inp.work_item_id}",
         )
 
     async def run_coder_turn(payload: dict) -> CoderTurnResult:
@@ -230,6 +254,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         _maybe_fail_closed(state, ACTIVITY_RUN_CODER_TURN)
         if state.coder_turn_hang_event is not None:
             await state.coder_turn_hang_event.wait()
+        RunCoderTurnInput(**payload)  # decode REAL
         return CoderTurnResult(
             sandbox_id=payload["sandbox_id"],
             diff_summary="fake diff",
@@ -242,26 +267,29 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def checkpoint_sandbox(payload: dict) -> CheckpointRef:
         state.checkpoint_calls += 1
         state.calls_log.append("checkpoint_sandbox")
+        inp = CheckpointSandboxInput(**payload)  # decode REAL
         if state.checkpoint_fail_times > 0:
             state.checkpoint_fail_times -= 1
             raise RuntimeError("simulated checkpoint failure")
         return CheckpointRef(
-            work_item_id=payload["work_item_id"], git_ref="deadbeef", phase=payload["phase"]
+            work_item_id=inp.work_item_id, git_ref="deadbeef", phase=inp.phase
         )
 
     async def rebuild_sandbox(payload: dict) -> SandboxHandle:
         state.rebuild_calls += 1
         state.calls_log.append("rebuild_sandbox")
+        inp = RebuildSandboxInput(**payload)  # decode REAL (exige checkpoint_ref)
         return SandboxHandle(
-            sandbox_id=payload.get("sandbox_id") or f"sbx-{payload['work_item_id']}-rebuilt",
-            work_item_id=payload["work_item_id"],
-            tenant_id="t",
+            sandbox_id=f"sbx-{inp.work_item_id}-rebuilt",
+            work_item_id=inp.work_item_id,
+            tenant_id=inp.tenant_id,
             branch="dse/rebuilt",
         )
 
     async def teardown_sandbox(payload: dict) -> None:
         state.teardown_calls += 1
         state.calls_log.append("teardown_sandbox")
+        TeardownSandboxInput(**payload)  # decode REAL (exige tenant_id)
 
     async def run_l1_pipeline(payload: dict) -> L1Result:
         state.l1_calls += 1
@@ -304,9 +332,10 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
 
     async def consume_ci_status(payload: dict) -> CiStatusResult:
         state.calls_log.append("consume_ci_status")
+        inp = ConsumeCiStatusInput(**payload)  # decode REAL (exige tenant/repo/ref)
         status = state.ci_sequence.pop(0) if state.ci_sequence else "green"
         return CiStatusResult(
-            work_item_id=payload["work_item_id"], pr_number=payload["pr_number"], status=status
+            work_item_id=inp.work_item_id, pr_number=inp.pr_number, status=status
         )
 
     # ------------------------------------------------------------------

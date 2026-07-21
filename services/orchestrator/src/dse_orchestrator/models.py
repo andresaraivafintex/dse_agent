@@ -57,6 +57,10 @@ class WorkItemLifecycleInput:
     # site antigo so guardava sandbox_id, causando `Failed decoding arguments`
     # (RunL1PipelineInput.sandbox faltando). Sobrevive a continue_as_new.
     sandbox_handle: dict = field(default_factory=dict)
+    # Ultimo CheckpointRef (dict) bem-sucedido — fonte do rebuild. Vive no INPUT
+    # (nao em atributo de instancia) para sobreviver a continue_as_new: um
+    # rebuild na fase de review reconstroi do checkpoint da implementacao.
+    last_checkpoint_ref: dict = field(default_factory=dict)
     branch: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None

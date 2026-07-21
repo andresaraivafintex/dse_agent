@@ -160,10 +160,6 @@ class _BlockNow(Exception):
 class WorkItemLifecycleWorkflow:
     def __init__(self) -> None:
         self._input: Optional[WorkItemLifecycleInput] = None
-        # ultimo CheckpointRef (dict) de um checkpoint bem-sucedido — o rebuild
-        # reconstroi a partir dele. None ate o primeiro checkpoint (nao
-        # sobrevive a continue_as_new de proposito: cada fase refaz o seu).
-        self._last_checkpoint_ref: dict | None = None
 
         # --- controles de operador (WSB-E5-T2) ---
         self._paused = False
@@ -536,10 +532,13 @@ class WorkItemLifecycleWorkflow:
             try:
                 await workflow.execute_activity(
                     ACTIVITY_TEARDOWN_SANDBOX,
+                    # Boundary fix (auditoria pós-S7): TeardownSandboxInput exige
+                    # tenant_id — sem ele o decode falhava e NENHUM teardown rodava
+                    # (sandboxes órfãos). `reason` vira `stage` (campo real do modelo).
                     {
-                        "sandbox_id": self._input.sandbox_id,
                         "work_item_id": self._input.work_item_id,
-                        "reason": "cancelled_by_operator",
+                        "tenant_id": self._input.tenant_id,
+                        "stage": "cancelled_by_operator",
                     },
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -588,8 +587,8 @@ class WorkItemLifecycleWorkflow:
             try:
                 await workflow.execute_activity(
                     ACTIVITY_TEARDOWN_SANDBOX,
-                    {"sandbox_id": self._input.sandbox_id,
-                     "work_item_id": self._input.work_item_id, "reason": audit_action},
+                    {"work_item_id": self._input.work_item_id,
+                     "tenant_id": self._input.tenant_id, "stage": audit_action},
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
@@ -712,20 +711,20 @@ class WorkItemLifecycleWorkflow:
                     start_to_close_timeout=timedelta(seconds=120),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
-                self._last_checkpoint_ref = ref  # dict do CheckpointRef
+                self._input.last_checkpoint_ref = ref  # dict do CheckpointRef (sobrevive a CAN)
                 return
             except ActivityError:
                 continue
         await self._audit("checkpoint_exhausted_attempting_rebuild", {"phase": phase_name})
         # rebuild so e possivel se ha um checkpoint anterior de onde reconstruir.
-        if not self._last_checkpoint_ref:
+        if not self._input.last_checkpoint_ref:
             raise _EscalateNow(f"checkpoint_failed_no_prior_ref:{phase_name}")
         for _ in range(self._input.rebuild_retry_cap):
             try:
                 handle: SandboxHandle = await workflow.execute_activity(
                     ACTIVITY_REBUILD_SANDBOX,
                     {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
-                     "checkpoint_ref": self._last_checkpoint_ref},
+                     "checkpoint_ref": self._input.last_checkpoint_ref},
                     result_type=SandboxHandle,
                     start_to_close_timeout=timedelta(seconds=300),
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -775,10 +774,17 @@ class WorkItemLifecycleWorkflow:
             return
         self._retry_from_checkpoint_requested = False
         await self._audit("retry_from_checkpoint_applied", {})
+        # Boundary fix (auditoria pós-S7): RebuildSandboxInput exige tenant_id +
+        # checkpoint_ref — o payload antigo {work_item_id, sandbox_id} falhava no
+        # decode. Sem checkpoint anterior nesta fase, escala limpo (P6) em vez de
+        # reconstruir de lugar nenhum.
+        if not self._input.last_checkpoint_ref:
+            raise _EscalateNow("retry_from_checkpoint_no_prior_ref")
         try:
             handle: SandboxHandle = await workflow.execute_activity(
                 ACTIVITY_REBUILD_SANDBOX,
-                {"work_item_id": self._input.work_item_id, "sandbox_id": self._input.sandbox_id},
+                {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
+                 "checkpoint_ref": self._input.last_checkpoint_ref},
                 result_type=SandboxHandle,
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1095,8 +1101,8 @@ class WorkItemLifecycleWorkflow:
                     try:
                         await workflow.execute_activity(
                             ACTIVITY_TEARDOWN_SANDBOX,
-                            {"sandbox_id": input.sandbox_id, "work_item_id": input.work_item_id,
-                             "reason": "l1_retry_cap_exhausted"},
+                            {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                             "stage": "l1_retry_cap_exhausted"},
                             start_to_close_timeout=timedelta(seconds=120),
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
@@ -1572,7 +1578,12 @@ class WorkItemLifecycleWorkflow:
             await self._emit_history_metric("review_loop")
             ci: CiStatusResult = await workflow.execute_activity(
                 ACTIVITY_CONSUME_CI_STATUS,
-                {"work_item_id": input.work_item_id, "pr_number": input.pr_number},
+                # Boundary fix (auditoria pós-S7): ConsumeCiStatusInput exige
+                # tenant_id/repo/ref — o payload antigo quebrava TODO ciclo de
+                # review com CI. `ref` = branch da tarefa (o modelo aceita sha ou branch).
+                {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                 "repo": input.repo, "ref": input.branch or "",
+                 "pr_number": input.pr_number},
                 result_type=CiStatusResult,
                 **self._activity_timeouts(),
             )
@@ -1684,8 +1695,8 @@ class WorkItemLifecycleWorkflow:
                     try:
                         await workflow.execute_activity(
                             ACTIVITY_TEARDOWN_SANDBOX,
-                            {"sandbox_id": input.sandbox_id, "work_item_id": input.work_item_id,
-                             "reason": "done"},
+                            {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                             "stage": "done"},
                             start_to_close_timeout=timedelta(seconds=120),
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )

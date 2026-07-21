@@ -11,7 +11,11 @@ CI e não em produção. Se o workflow mudar o shape, ATUALIZE os literais aqui.
 """
 from __future__ import annotations
 
-from dse_validation.activities import FinalizePrInput, RunL1PipelineInput
+from dse_validation.activities import (
+    ConsumeCiStatusInput,
+    FinalizePrInput,
+    RunL1PipelineInput,
+)
 from dse_contracts import PlanArtifact, SandboxHandle
 
 
@@ -68,3 +72,15 @@ def test_finalize_input_tolerates_absent_issue_and_evidence():
         issue_ref=None, evidence_url="",
     )
     assert inp.issue_ref is None and inp.evidence_url == ""
+
+
+def test_consume_ci_input_accepts_exact_workflow_payload():
+    # Auditoria pós-S7: o call site do loop de review mandava só
+    # {work_item_id, pr_number} — faltavam tenant_id/repo/ref (obrigatorios).
+    # Todo ciclo de review com CI quebrava no decode. Literal corrigido:
+    inp = ConsumeCiStatusInput(
+        **{"work_item_id": "wi-1", "tenant_id": "tnt-1",
+           "repo": "andre2654/fintex-wallet", "ref": "dse/wi-1", "pr_number": 6}
+    )
+    assert inp.ref == "dse/wi-1"
+    assert inp.pr_number == 6
