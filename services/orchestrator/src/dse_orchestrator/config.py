@@ -68,8 +68,13 @@ class OrchestratorConfig:
     # timeouts de activity (segundos) — generosos porque Coder/L1 podem ser lentos;
     # heartbeat permite deteccao de worker morto sem esperar o timeout inteiro.
     activity_start_to_close_seconds: float = 3600.0
-    activity_heartbeat_seconds: float = 30.0
+    # ~1 min de detecção de worker morto (spec §6); o substrato emite beats
+    # periódicos, então este teto curto não expira turnos longos legítimos.
+    activity_heartbeat_seconds: float = 60.0
     activity_schedule_to_close_seconds: float = 7200.0
+    activity_retry_cap: int = 3
+    ci_poll_interval_seconds: float = 60.0
+    ci_pending_poll_cap: int = 1440
 
     @classmethod
     def from_env(cls) -> "OrchestratorConfig":
@@ -81,8 +86,11 @@ class OrchestratorConfig:
             checkpoint_retry_cap=_int_env("DSE_CHECKPOINT_RETRY_CAP", 2),
             rebuild_retry_cap=_int_env("DSE_REBUILD_RETRY_CAP", 1),
             activity_start_to_close_seconds=_float_env("DSE_ACTIVITY_START_TO_CLOSE_SECONDS", 3600.0),
-            activity_heartbeat_seconds=_float_env("DSE_ACTIVITY_HEARTBEAT_SECONDS", 30.0),
+            activity_heartbeat_seconds=_float_env("DSE_ACTIVITY_HEARTBEAT_SECONDS", 60.0),
             activity_schedule_to_close_seconds=_float_env("DSE_ACTIVITY_SCHEDULE_TO_CLOSE_SECONDS", 7200.0),
+            activity_retry_cap=_int_env("DSE_ACTIVITY_RETRY_CAP", 3),
+            ci_poll_interval_seconds=_float_env("DSE_CI_POLL_INTERVAL_SECONDS", 60.0),
+            ci_pending_poll_cap=_int_env("DSE_CI_PENDING_POLL_CAP", 1440),
             require_approval_risk_classes=_csv_env("DSE_REQUIRE_APPROVAL_RISK_CLASSES", ("high",)),
             plan_round_cap=_int_env("DSE_PLAN_ROUND_CAP", 3),
             l2_retry_cap=_int_env("DSE_L2_RETRY_CAP", 2),
@@ -111,6 +119,9 @@ def apply_to_input(input, cfg: "OrchestratorConfig | None" = None):
     input.activity_start_to_close_seconds = cfg.activity_start_to_close_seconds
     input.activity_heartbeat_seconds = cfg.activity_heartbeat_seconds
     input.activity_schedule_to_close_seconds = cfg.activity_schedule_to_close_seconds
+    input.activity_retry_cap = cfg.activity_retry_cap
+    input.ci_poll_interval_seconds = cfg.ci_poll_interval_seconds
+    input.ci_pending_poll_cap = cfg.ci_pending_poll_cap
     input.require_approval_risk_classes = cfg.require_approval_risk_classes
     input.plan_round_cap = cfg.plan_round_cap
     input.l2_retry_cap = cfg.l2_retry_cap

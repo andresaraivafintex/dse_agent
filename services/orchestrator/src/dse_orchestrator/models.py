@@ -62,8 +62,15 @@ class WorkItemLifecycleInput:
     # rebuild na fase de review reconstroi do checkpoint da implementacao.
     last_checkpoint_ref: dict = field(default_factory=dict)
     branch: str | None = None
+    # SHAs imutaveis delimitam todos os gates. Defaults preservam histories
+    # antigos; execucoes novas capturam base_sha antes do primeiro turno e
+    # head_sha em cada checkpoint anterior ao L1.
+    base_sha: str | None = None
+    head_sha: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None
+    ci_status: str | None = None
+    state_version: int = 0
 
     # payload textual acumulado de respostas de clarificacao (para o Coder
     # eventualmente consumir via Activity — Fase 1 nao interpreta com LLM
@@ -81,6 +88,7 @@ class WorkItemLifecycleInput:
     # gate). Passado para o Reviewer L2 junto do diff final — e SO isto +
     # diff, nunca o historico do Coder (P3).
     plan_json: dict = field(default_factory=dict)
+    plan_hash: str | None = None
     # classe de risco EFETIVA (planner + classificacao deterministica de
     # defesa-em-profundidade — ver policy.classify_risk). Dirige o gate.
     risk_class: str = "low"
@@ -120,13 +128,24 @@ class WorkItemLifecycleInput:
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
     activity_start_to_close_seconds: float = 3600.0
-    # S7-b (Fase 5): um turno REAL do Coder/Planner/Reviewer Claude bloqueia por
-    # vários minutos sem heartbeat (o substrato é uma chamada síncrona). Com
-    # heartbeat de 30s o Temporal expirava e RETENTAVA (cada retry = outro turno
-    # caro). Elevado para cobrir turnos longos; start_to_close (1h) segue como
-    # teto duro. Correção futura: heartbeat periódico dentro do substrato.
-    activity_heartbeat_seconds: float = 1800.0
+    # Remediação (spec §6): o substrato agora emite heartbeat periódico durante
+    # turnos longos (sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat),
+    # então o timeout volta a ser curto — morte do worker é detectada em ~1 min,
+    # não em 10-30 min. O paliativo de 1800s (quando o substrato bloqueava sem
+    # heartbeat) fica só na história. start_to_close (1h) segue como teto duro do
+    # turno inteiro; config.from_env pode sobrescrever por env.
+    activity_heartbeat_seconds: float = 60.0
     activity_schedule_to_close_seconds: float = 7200.0
+    # Retries de Activities de negocio devem terminar. O schedule-to-close
+    # continua sendo o teto temporal, e este cap limita tentativas/custo.
+    activity_retry_cap: int = 3
+
+    # CI pending e uma espera duravel, nao permissao para review. O cap
+    # default equivale a 24h com polling por minuto; ambos vivem no input para
+    # replay deterministico e podem ser reduzidos nos testes.
+    ci_poll_interval_seconds: float = 60.0
+    ci_pending_poll_cap: int = 1440
+    ci_pending_polls: int = 0
 
     # Fase 2 (WSB-E3-T2/E3-T3/E4) — caps/politica novos. `require_approval_risk_classes`
     # e a POLITICA de quais classes de risco exigem aprovacao humana; vive no
