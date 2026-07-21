@@ -142,6 +142,12 @@ def finalize_pr_core(
     if tracked is not None:
         if tracked.get("pr_number") is not None:
             # PR já aberto (por nós no modo normal, ou adotado no modo estrito).
+            # REFINALIZE (fix cycle do review, observado ao vivo): este caminho
+            # chega com commits NOVOS no branch — sem push, o fix do Coder
+            # nunca aparecia no PR (no-op silencioso). O push é idempotente
+            # (mesmo tip -> up-to-date), então empurrar sempre é seguro.
+            if push:
+                push_branch(executor, github_client, repo, branch)
             return PrRef(work_item_id=work_item_id, pr_number=tracked["pr_number"], url=tracked["pr_url"])
         # Modo estrito: compare link já postado, PR ainda não aberto. Um humano
         # pode ter aberto o PR nesse meio tempo — detecta e adota.
