@@ -84,6 +84,21 @@ model_list:
       dse_tier: "local-dev"
       dse_requires_infra: "none"
 
+  # PoC (2026-07-21): Anthropic API direta para o teste end-to-end real —
+  # o Coder/Planner escrevem código de verdade. A key vem do Vault
+  # (secret/dse/model-gateway/providers → anthropic_api_key), injetada como
+  # ANTHROPIC_API_KEY no container do gateway no boot (NUNCA em arquivo/git).
+  # NOTA DE POSTURA: este é o atalho de PoC — chama a API pública da Anthropic,
+  # não o Bedrock/PrivateLink in-VPC (Tier 1 do proposal). Para produção,
+  # trocar por bedrock/* (já registrado acima). Documentado, não silencioso.
+  - model_name: anthropic/claude
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      dse_tier: "poc-direct-api"
+      dse_requires_infra: "anthropic_public_api"
+
 # Fase 3 (WSD-E4-T1): failover intra-tier NATIVO do proxy (router do LiteLLM).
 # Declarativo, fora do código dos agentes (P1): se o deployment do primário
 # falhar (connection refused / 5xx / timeout), o router tenta o fallback DA

@@ -25,6 +25,14 @@ from dse_contracts import GatewayCallHeaders
 
 DEFAULT_GATEWAY_URL = os.environ.get("DSE_MODEL_GATEWAY_URL", "http://localhost:4000")
 _FIXTURE_ENV_VAR = "DSE_MODEL_GATEWAY_ALLOW_FIXTURE"
+# Master key do LiteLLM — usada SÓ aqui, no control plane (a Activity
+# run_coder_turn roda no orchestrator, confiável), para mintar a virtual key
+# escopada por tarefa via `/key/generate`. NUNCA entra no sandbox: o substrato
+# recebe apenas a virtual key de curta duração + base_url (ver substrate.py).
+_MASTER_KEY = os.environ.get("DSE_LITELLM_MASTER_KEY", "sk-dse-local-dev-master-key")
+# Modelo que a virtual key pode acessar (escopo mínimo). Default alinhado ao
+# alias registrado no litellm_config.yaml para o Coder.
+_CODER_MODEL = os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
 
 
 class VirtualKeyResult(BaseModel):
@@ -48,17 +56,29 @@ def mint_virtual_key(
 ) -> VirtualKeyResult:
     base = gateway_base_url or DEFAULT_GATEWAY_URL
     try:
+        # Via REAL (WS-D): a API nativa do LiteLLM `/key/generate`, autenticada
+        # com a master key (só no control plane), escopada ao modelo do Coder
+        # e ao par tenant/work_item nos metadados (para atribuição de custo).
+        # Duração curta (1h) espelha o padrão dos tokens GitHub por tarefa.
         with httpx.Client(timeout=timeout_s) as client:
             resp = client.post(
-                f"{base}/internal/virtual-keys",
-                json=headers.model_dump(mode="json"),
-                headers=headers.to_http_headers(),
+                f"{base}/key/generate",
+                headers={"Authorization": f"Bearer {_MASTER_KEY}"},
+                json={
+                    "models": [_CODER_MODEL],
+                    "duration": "1h",
+                    "metadata": {
+                        "tenant_id": headers.tenant_id,
+                        "work_item_id": headers.work_item_id,
+                        "stage": headers.stage.value if hasattr(headers.stage, "value") else headers.stage,
+                    },
+                },
             )
             resp.raise_for_status()
             data = resp.json()
         return VirtualKeyResult(
-            virtual_key=data["virtual_key"],
-            expires_at=datetime.fromisoformat(data["expires_at"]),
+            virtual_key=data["key"],
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
             gateway_base_url=base,
             fixture=False,
         )

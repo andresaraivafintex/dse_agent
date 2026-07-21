@@ -29,6 +29,14 @@ services:
       # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
       DSE_MODEL_GATEWAY_URL: http://model-gateway:4000
       DSE_SANDBOX_STATE_DIR: /tmp/dse-sandboxes
+      # PoC (2026-07-21): Coder aponta para o alias real da Anthropic no gateway
+      # e minta a virtual key via /key/generate com a master key (control plane).
+      DSE_CODER_MODEL: ${DSE_CODER_MODEL:-anthropic/claude}
+      DSE_CODER_SUBSTRATE: ${DSE_CODER_SUBSTRATE:-fake}
+      DSE_LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
+      DSE_MODEL_GATEWAY_ALLOW_FIXTURE: ${DSE_MODEL_GATEWAY_ALLOW_FIXTURE:-1}
+      # Credenciais do GitHub App injetadas do Vault no boot (ver make up-poc);
+      # o finalize_pr (WS-E) roda aqui no orchestrator e precisa delas p/ abrir PR.
       GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}

@@ -55,6 +55,10 @@ services:
       DSE_ECHO_PROVIDER_URL: "http://model-gateway-echo:9000"
       DSE_ECHO_PROVIDER_B_URL: "http://model-gateway-echo-b:9000"
       DSE_ECHO_PROVIDER_API_KEY: ${DSE_ECHO_PROVIDER_API_KEY:-sk-eco-local-dev-not-a-real-key}
+      # PoC: key da Anthropic injetada do Vault no boot (ver Makefile/README);
+      # nunca hardcoded aqui. Se vazia, o modelo anthropic/claude simplesmente
+      # não responde — o resto do gateway (echo/failover) segue funcionando.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Placeholders de produção (Bedrock/PrivateLink) — sem valor real
       # disponível nesta sessão de dev; ver litellm_config.yaml e README.
       DSE_AWS_REGION: ${DSE_AWS_REGION:-us-east-1}
