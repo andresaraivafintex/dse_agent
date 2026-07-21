@@ -18,6 +18,9 @@ dependencies = [
     "dse-contracts",
     "dse-audit",
     "dse-identity",
+    # Fase 3 (WSE-E5/E4): artifact store Garage (S3) + visual diff self-hosted
+    "boto3>=1.34",
+    "Pillow>=10.0",
 ]
 
 [tool.setuptools.packages.find]

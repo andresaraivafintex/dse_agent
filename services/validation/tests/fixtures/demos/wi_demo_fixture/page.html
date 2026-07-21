@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DSE demo fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; background: #f8f8f8; }
+    #counter { font-size: 3rem; }
+    button { font-size: 1.2rem; padding: .5rem 1rem; }
+    .done { color: green; }
+  </style>
+</head>
+<body>
+  <h1>Fintex DSE — página fixture determinística (@demo)</h1>
+  <div id="counter">0</div>
+  <button id="inc">Incrementar</button>
+  <p id="status">aguardando</p>
+  <script>
+    const counter = document.getElementById('counter');
+    const status = document.getElementById('status');
+    document.getElementById('inc').addEventListener('click', () => {
+      counter.textContent = String(Number(counter.textContent) + 1);
+      if (Number(counter.textContent) >= 3) {
+        status.textContent = 'concluído';
+        status.className = 'done';
+      }
+    });
+  </script>
+</body>
+</html>

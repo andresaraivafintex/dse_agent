@@ -47,9 +47,18 @@ def _with_codeowners(owners: list[str]):
 
 
 async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
+    from temporalio.service import RPCError
+
     status = None
     for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
+        try:
+            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
+        except RPCError:
+            # Query pode estourar timeout TRANSIENTE quando aterrissa exatamente
+            # na janela de continue_as_new (re_clarify) no servidor de
+            # time-skipping — flake de infra de teste, nao de logica; re-polla.
+            await asyncio.sleep(0.05)
+            continue
         if status in expected:
             return status
         await asyncio.sleep(0.05)

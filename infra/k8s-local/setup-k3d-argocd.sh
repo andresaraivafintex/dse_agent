@@ -46,6 +46,6 @@ cat <<EOF
 OK. Cluster '${CLUSTER_NAME}' pronto com Argo CD ${ARGOCD_VERSION}.
 - UI (quando precisar):  kubectl -n ${ARGOCD_NS} port-forward svc/argocd-server 8091:443
 - senha admin inicial:   kubectl -n ${ARGOCD_NS} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
-- ESO (WS-F instala):    helm repo add external-secrets https://charts.external-secrets.io && helm install external-secrets external-secrets/external-secrets -n external-secrets --create-namespace
+- ESO (WS-F instala):    ./infra/k8s-local/setup-eso.sh  (versão pinada + SecretStore Vault + exemplo — WSF-E2-T3b)
 - destruir:              k3d cluster delete ${CLUSTER_NAME}
 EOF

@@ -19,5 +19,16 @@ dependencies = [
     "dse-audit",
 ]
 
+[project.optional-dependencies]
+# Substratos reais (WSC-E3-T1/T6): opcionais por design — o default de
+# testes/dev é o FakeSubstrate (nenhum SDK precisa estar instalado). Pins
+# de piso testados de verdade nesta sessão: openhands-sdk 1.21.0,
+# claude-agent-sdk 0.2.124 (NFR-09: compatibility suite =
+# tests/test_substrate_conformance.py roda contra ambos).
+substrates = [
+    "openhands-sdk>=1.21.0",
+    "claude-agent-sdk>=0.2.124",
+]
+
 [tool.setuptools.packages.find]
 include = ["sandbox_runtime*"]

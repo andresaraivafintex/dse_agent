@@ -58,9 +58,49 @@ model_list:
       # scanner não precisar de uma exceção especial, movida para env var
       # com default não-sensível.
       api_key: os.environ/DSE_ECHO_PROVIDER_API_KEY
+      # Fase 3 (WSD-E4-T1): endpoints locais — falha de conexão deve ser
+      # detectada RÁPIDO para o failover intra-tier ser determinístico
+      # (sem isso, connect-timeouts default de ~10s × retries internos do SDK
+      # empurram o failover para além do timeout do cliente).
+      timeout: 5
+      max_retries: 0
     model_info:
       dse_tier: "local-dev"
       dse_requires_infra: "none"
+
+  # Fase 3 (WSD-E4-T1): segunda instância eco — alvo do failover INTRA-TIER.
+  # MESMO dse_tier ("local-dev") do primário, por construção: o teste negativo
+  # test_failover_intra_tier.py::test_no_fallback_route_crosses_tier parseia
+  # este arquivo e falha o CI se qualquer rota de fallback apontar para um
+  # model de tier diferente (NFR-07/P2 — nunca fallback silencioso entre tiers).
+  - model_name: eco/echo-model-b
+    litellm_params:
+      model: openai/echo-model-b
+      api_base: os.environ/DSE_ECHO_PROVIDER_B_URL
+      api_key: os.environ/DSE_ECHO_PROVIDER_API_KEY
+      timeout: 5
+      max_retries: 0
+    model_info:
+      dse_tier: "local-dev"
+      dse_requires_infra: "none"
+
+# Fase 3 (WSD-E4-T1): failover intra-tier NATIVO do proxy (router do LiteLLM).
+# Declarativo, fora do código dos agentes (P1): se o deployment do primário
+# falhar (connection refused / 5xx / timeout), o router tenta o fallback DA
+# MESMA LINHA — e somente ele. Não há rota de fallback para bedrock/* aqui
+# (cruzaria o tier contratado) nem haverá: ver teste negativo citado acima.
+# O cliente detecta a degradação pelo header x-litellm-attempted-fallbacks
+# (>0) + x-litellm-model-api-base, e emite o audit row de degradação (P8) —
+# ver model_gateway_client/failover.py.
+router_settings:
+  num_retries: 1
+  # cooldown curto: depois de uma falha o deployment primário volta a ser
+  # tentado quase imediatamente — os testes de chaos sobem/derrubam o
+  # primário e precisam de recuperação rápida e determinística.
+  cooldown_time: 1
+  allowed_fails: 1
+  fallbacks:
+    - eco/echo-model: ["eco/echo-model-b"]
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

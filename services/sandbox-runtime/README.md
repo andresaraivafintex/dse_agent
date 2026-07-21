@@ -204,6 +204,105 @@ failed, 0 skipped**.
   injeção de credencial efêmera da Fase 1 continua válido e é a rota de rede
   das novas sessões (LLM sempre via model-gateway).
 
+## Fase 3 ("Evidence") — o que a Fase 3 adicionou (WSC-E3-T4b, WSC-E3-T6)
+
+Sem migração nova (`0015_wsc3.sql` reservado, NÃO criado — nenhuma tabela
+nova foi necessária) e sem mudança no egress-proxy (a toolchain Playwright é
+instalada em BUILD TIME da imagem; em runtime o sandbox continua sem
+internet — nenhuma entrada nova de allowlist).
+
+### WSC-E3-T4b — Playwright no sandbox + convenção `demos/<work_item_id>/` (P0)
+
+- **(a) Imagem base com toolchain Playwright real**
+  (`docker/Dockerfile.sandbox-base`): base pinada em
+  `python:3.11-slim-bookworm` (a tag `-slim` migrou para trixie, que o
+  `playwright install --with-deps` não suporta — falha real observada e
+  documentada no Dockerfile), node/npm do apt bookworm,
+  `@playwright/test@1.49.1` + `playwright@1.49.1` pinados (P7) em
+  `/opt/dse-playwright`, chromium headless via
+  `npx playwright install --with-deps chromium` em
+  `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers` (world-readable — o uid de
+  runtime é aleatório não-root), `HOME=/tmp`, e symlink `/node_modules` →
+  toolchain (o `npx` do npm 9 resolve por local prefix, não pelo `$PATH`;
+  sem o symlink ele tentaria INSTALAR do registry — impossível sem internet
+  no sandbox; falha real observada e testada). **Imagem buildada de verdade
+  nesta sessão: `dse-sandbox-base:wsc3`, 2.35GB** (custo do chromium +
+  deps de sistema; a imagem da Fase 1 `python:3.11-slim`+git continua sendo
+  o default para sessões que não produzem evidência — a imagem é parâmetro
+  de `provision_sandbox`).
+- **(b) Convenção `demos/<work_item_id>/` no TesterToolset**
+  (`toolsets.py::demo_dir_for/is_demo_path`): path de escrita PERMITIDO
+  adicional, ESCOPADO ao work item da sessão. Endurecimento descoberto por
+  teste: dentro de `demos/` a regra genérica de test path (`*.spec.js` em
+  qualquer lugar, herdada da Fase 2) NÃO se aplica — senão o Tester de uma
+  tarefa escreveria no demo de outra só nomeando o arquivo `*.spec.js`.
+  Bloqueados e provados: código de produção, `demos/` de OUTRO work item,
+  path traversal (`demos/<wi>/../../src/...`), e qualquer write em `demos/`
+  numa sessão sem work item (`tests/test_tester_demo_convention.py`).
+- **(c) Fixture `@demo` determinístico** (`demo_fixture.py`): template
+  commitado (page HTML estática com interação visível + spec Playwright com
+  tag `@demo` + `playwright.config.js` com `video: 'on'`/`trace: 'on'` e
+  `webServer: python3 -m http.server` — página SERVIDA localmente dentro do
+  container, não `file://`). O Tester roteirizado o autora via
+  `demo_authoring_script(work_item_id)` — autor fixture, artefatos reais.
+  `DSE_DEMO_BASE_URL` liga o mesmo spec a um preview real
+  (`TriggerPreview`/`PreviewRef.url` do WS-B/WS-E) quando houver.
+- **Aceitação REAL** (`tests/test_demo_playwright_in_sandbox.py`):
+  `npx playwright test --grep @demo` executado DENTRO de um container
+  provisionado pelo `docker_driver` de produção (rootless uid 10001,
+  `--read-only`, `--cap-drop ALL`, rede interna SEM internet,
+  `budget={"resource_class": "large", "tmp_mb": 512}`) termina `1 passed` e
+  grava **vídeo `.webm` real** (+ `trace.zip`) no workspace. Nota de
+  formato: Playwright grava `.webm` nativamente (não mp4); transcodificação
+  é pós-processamento do pipeline do WS-E se a superfície exigir —
+  documentado em `demo_fixture.py`, combinado com o path da convenção que o
+  WS-E consome (`RunDemoEvidenceInput.demo_dir` default
+  `demos/<work_item_id>/`).
+- Mudança aditiva no driver: `ResourceCaps.tmp_mb` (budget key `tmp_mb`,
+  default 64MB inalterado) — chromium precisa de mais scratch em `/tmp`.
+
+### WSC-E3-T6 — Segundo substrato: Claude Agent SDK + conformidade (P1)
+
+- **`ClaudeAgentSubstrate`** (`substrate.py`): adapter real sobre o pacote
+  PyPI `claude-agent-sdk` (**`pip install claude-agent-sdk` funcionou nesta
+  sessão — v0.2.124**; o wheel embute o CLI). Gateway-only pelo mesmo
+  triângulo do OpenHands: `ANTHROPIC_BASE_URL=<model-gateway>`,
+  `ANTHROPIC_API_KEY=<virtual key por tarefa>`, `ANTHROPIC_CUSTOM_HEADERS=`
+  headers do contrato (`GatewayCallHeaders`) — nunca endpoint de provider.
+  Toolset restrito a `Read/Write/Edit/Glob/Grep` (sem Bash/git/PR — P1: o
+  commit/push continua determinístico na Activity), `setting_sources=[]`
+  (sessão hermética, nada do host).
+- **Troca de substrato é CONFIG POR DEPLOYMENT**
+  (`substrate.substrate_from_env`, env `DSE_CODER_SUBSTRATE` em
+  `fake|openhands|claude-agent`, default `fake`): a Activity
+  `run_coder_turn` constrói via a factory; o workflow do WS-B chama a
+  Activity por nome e não conhece o substrato — zero mudança de código de
+  workflow para trocar. Nome desconhecido = `ValueError` limpo (P6), nunca
+  fallback silencioso.
+- **Suíte de conformidade** (`tests/test_substrate_conformance.py`): os
+  mesmos testes parametrizados contra `OpenHandsSubstrate` E
+  `ClaudeAgentSubstrate` (ambos os SDKs REAIS instalados neste venv):
+  protocolo `AgentSubstrate`, base_url == gateway e nenhum fragmento de
+  endpoint de provider em nenhum lugar da config, headers de policy/budget
+  do contrato presentes (caps no call time do WS-D), superfície sem
+  git/PR/bash, erro limpo sem sessão, e seleção por env (incluindo o ponto
+  de construção da Activity). É a compatibility suite do NFR-09 — pins de
+  piso em `pyproject.toml [project.optional-dependencies].substrates`.
+- **Limite honesto (igual ao OpenHands desde a Fase 1)**: nenhum turno com
+  inferência REAL é exercitado — exige o model-gateway atendendo uma
+  virtual key válida com provider de verdade. A conformidade cobre
+  construção/wiring/seleção; o turno real fica para a janela de integração
+  com o WS-D.
+
+### Testes da Fase 3 (reais, contra Docker/Postgres + SDKs instalados)
+
+`test_tester_demo_convention.py` (6), `test_demo_playwright_in_sandbox.py`
+(1 — o aceite ponta-a-ponta com vídeo real), `test_substrate_conformance.py`
+(16, parametrizados) — **23 testes novos**. **Resultado real desta sessão:
+`65 passed` em sandbox-runtime** (15 Fase 1 + 27 Fase 2 + 23 Fase 3) +
+`13 passed` em egress-proxy + `14 passed` em packages/contracts (boundary —
+inalterados, nenhum call site de workflow mudou) = **0 failed, 0 skipped**.
+
 ## O que está com fixture/mock local (documentado, não escondido)
 
 - **`FakeSubstrate`** é o substrato usado em TODOS os testes desta suíte —
@@ -243,18 +342,15 @@ failed, 0 skipped**.
   agente fica de fato dentro do sandbox isolado. Não implementado por não
   ser exercitável sem o model-gateway do WS-D de pé com um provider real
   configurado no LiteLLM.
-- **Imagem de sandbox com git pré-instalado**
-  (`docker/Dockerfile.sandbox-base`): escrita e documentada, mas não
-  publicada em nenhum registry — os testes usam `python:3.11-slim` puro
-  (sem git) para os cenários que não precisam de git dentro do container
-  (isolamento de rede), e os cenários que precisam de git
-  (checkpoint/scoped-git) rodam os comandos git contra o path do host que é
-  o mesmo bind mount do workspace do container (documentado em
-  `git_checkpoint.py` — o conteúdo é idêntico dos dois lados por ser bind
-  mount, então isso é real, só não exercita o binário `git` de dentro do
-  processo do container). Produção deveria usar
-  `docker build -f docker/Dockerfile.sandbox-base` e publicar a imagem, e aí
-  sim rodar os comandos git via `docker exec` de dentro do container.
+- **Imagem de sandbox** (`docker/Dockerfile.sandbox-base`): desde a Fase 3
+  ela é BUILDADA e EXERCITADA de verdade (`dse-sandbox-base:wsc3`, 2.35GB —
+  o teste de aceitação do `@demo` roda `npx playwright` via `docker exec`
+  dentro dela), mas continua não publicada em registry (build local; os
+  testes buildam se a tag não existir). Os cenários de checkpoint/scoped-git
+  seguem rodando os comandos git contra o path do host que é o mesmo bind
+  mount do workspace do container (documentado em `git_checkpoint.py`);
+  produção deveria publicar a imagem num registry e rodar git via
+  `docker exec` também.
 - **Integração real com `services/model-gateway` (WS-D)**: `mint_virtual_key`
   já tenta o endpoint real primeiro; a integração ponta-a-ponta acontece na
   fase de integração entre workstreams, quando o WS-D estiver publicando
@@ -284,7 +380,10 @@ Requer Docker rodando (containers reais são criados/destruídos) e Postgres
 da fundação em `localhost:5432` (não precisa do Temporal server — ver nota
 acima sobre `ActivityEnvironment`).
 
-**Resultado real nesta sessão**: `15 passed` neste pacote isoladamente / `28
-passed` somando `services/egress-proxy` (13 testes, ver README de lá), `0
-failed`, `0 skipped` (o teste condicional de `OpenHandsSubstrate` roda de
-verdade porque `openhands-sdk` instalou com sucesso neste ambiente).
+**Resultado real na sessão da Fase 3**: `65 passed` neste pacote (15 Fase 1 +
+27 Fase 2 + 23 Fase 3) / `78 passed` somando `services/egress-proxy` (13), `0
+failed`, `0 skipped` (os testes condicionais de `OpenHandsSubstrate` e
+`ClaudeAgentSubstrate` rodam de verdade porque `openhands-sdk` e
+`claude-agent-sdk` instalaram com sucesso neste ambiente). O teste de
+aceitação do `@demo` exige a imagem `dse-sandbox-base:wsc3` (builda sozinho
+na primeira vez — minutos; cacheada depois).

@@ -153,6 +153,95 @@ comporta exatamente como na Fase 1. Migração: `migrations/0011_wsd2.sql`
   Tier-2 air-gapped serving completo (Fase 4) — é a estrutura mínima de eval
   (gap 6) com dono nomeado.
 
+## Fase 3 ("Evidence") — o que foi adicionado (WSD-E4-T1 + WSD-E4-T3)
+
+Tudo ADITIVO sobre as Fases 1+2 (os 39 testes anteriores continuam passando
+inalterados). Sem migração nova: a Fase 3 do WS-D não precisa de tabela
+própria (`migrations/0016_wsd3.sql` reservado ficou sem uso — failover é
+config declarativa; degradação/falha viram linhas no `audit_log` via
+`dse_audit.emit`, e custo continua no `model_call_ledger` da Fase 2).
+
+### WSD-E4-T1 — Failover e degradação intra-tier
+
+- **Segunda instância do modelo eco** (`dse_model_gateway_echo_b`, mesmo tier
+  `local-dev`, `docker-compose.wsd.yml`) registrada no LiteLLM como
+  `eco/echo-model-b`. Existe para provar failover DE VERDADE: os testes dão
+  `docker stop` no container primário e a chamada seguinte é servida pela B.
+- **Fallback nativo do proxy** (`router_settings.fallbacks` em
+  `litellm_config.yaml`): `eco/echo-model -> [eco/echo-model-b]`, com
+  `num_retries: 1`, `cooldown_time: 1` e, nos deployments eco, `timeout: 5` +
+  `max_retries: 0` (falha de conexão local detectada rápido — failover
+  determinístico). Declarativo, fora do código dos agentes (P1).
+- **Estritamente intra-tier (NFR-07/P2)**: nenhuma rota de fallback cruza o
+  tier contratado. Teste negativo automatizado
+  (`test_no_fallback_route_crosses_tier`) parseia o config real do proxy e
+  falha o CI se qualquer par (primário, fallback) tiver `dse_tier` diferente.
+- **Degradação nunca é silenciosa (P8)**: `model_gateway_client/failover.py`
+  detecta fallback pelos headers do LiteLLM (`x-litellm-attempted-fallbacks`
+  \> 0 + `x-litellm-model-api-base` = endpoint que serviu) e emite audit row
+  `gateway.call_degraded_fallback` com o endpoint servidor, os candidatos e o
+  veredito de política de cada um. Custo/atribuição continuam corretos: a
+  linha do `model_call_ledger` sai com o MESMO tenant/work_item/stage/
+  task_class.
+- **Fallback não burla política** (mesma regra do reassign da Fase 2): se
+  NENHUM fallback declarado do model group é permitido pela política do
+  tenant/stage, a resposta degradada é recusada na fronteira (P6) com
+  `policy_denied`/`kind=fallback_model_not_allowed` + audit — o custo real já
+  incorrido ainda é gravado no ledger (accounting honesto).
+- **Ambos fora => recusa limpa (P6)**: erro tipado na fronteira
+  (`GatewayCallError` 408/5xx com mensagem clara) + audit
+  `gateway.call_failed_upstream`; o workflow do WS-B trata como fronteira de
+  Activity (retry automático do Temporal ou Failed).
+- **Espelho declarativo no cliente**: `failover.intra_tier_fallbacks()`
+  (sobrescrevível via `DSE_INTRA_TIER_FALLBACKS`, JSON) espelha o mapa do
+  proxy; a consistência é garantida por teste
+  (`test_client_fallback_mirror_matches_litellm_config`). Call sites que
+  mintam keys escopadas devem usar
+  `mint_virtual_key(..., models=intra_tier_failover_set(model))`.
+- **Achado empírico honesto (LiteLLM 1.93.0)**: o fallback do router acontece
+  MESMO com uma virtual key escopada só no modelo primário — o model-scoping
+  da key NÃO restringe o alvo do fallback (verificado nesta sessão com key
+  `models=["eco/echo-model"]` sendo servida pela B). Ou seja, o backstop
+  server-side da Fase 2 não cobre o caminho de fallback; por isso o check de
+  política do modelo servido roda no cliente. Para 100% non-bypassable, vale
+  a mesma pendência da Fase 2: espelhar o enforcement como pre-call hook do
+  proxy (ver "O que falta para produção" #6).
+
+### WSD-E4-T3 — Bateria de chaos do caminho de modelo (extensão)
+
+Os cenários egress-fail-closed / key-expiry / gateway-oscillation JÁ EXISTEM
+em `services/orchestrator/tests/test_chaos.py` (WSB-E5-T3b) — **não foram
+duplicados**. `tests/test_chaos_gateway.py` adiciona, contra infra REAL:
+
+- **Outage total de provider** (docker stop nos DOIS ecos): recusa tipada na
+  fronteira + audit `gateway.call_failed_upstream` + ZERO linha no ledger
+  (nenhum custo fantasma/output truncado). Medido: ~50s até o erro final do
+  LiteLLM com ambos fora (connect-timeouts × retries × fallback).
+- **Exaustão de quota (429 fim-a-fim)**: o eco responde 429 determinístico
+  (marcador `[[SIMULATE_QUOTA_EXHAUSTED]]` na última mensagem de user — shape
+  de erro OpenAI, ver `echo_provider/server.py`); o LiteLLM propaga
+  RateLimitError; o cliente levanta `GatewayCallError(429)` limpo + audit.
+- **Failover intra-tier sob falha**: `tests/test_failover_intra_tier.py`
+  (T1 acima — mesmo conjunto de mudanças).
+- **Budget exhaustion mid-task**: cap $1.00; chamada abaixo do cap completa
+  INTEIRA; gasto estoura o cap; a chamada seguinte é recusada na FRONTEIRA
+  (402 `budget_exhausted` + audit) — zero truncamento em qualquer ponto (P6).
+- **Egress a endpoint de modelo não-allowlisted** (failure mode 12), contra o
+  egress-proxy REAL do WS-C na `:8806`: `api.openai.com` (HTTP plain) => 403;
+  `api.anthropic.com` (túnel CONNECT) => proxy recusa; controle positivo — a
+  ÚNICA rota de modelo permitida (`model-gateway:4000`, resolvida dentro da
+  rede Docker pelo próprio proxy) funciona através do MESMO proxy. Testes
+  skipam com mensagem clara se o proxy não estiver no ar.
+- **Audit de falha upstream/transporte (novo, P8)**: `gateway_call.py` agora
+  emite `gateway.call_failed_upstream` (com status_code, modelo, corpo de
+  erro truncado; `status_code=0` para erro de transporte) para TODA falha
+  vinda do gateway/provider — falha nunca é só uma exceção que se perde.
+
+Pedidos de contrato (para quando alguém tocar a fundação; nada bloqueante):
+- Nenhum campo novo necessário em `dse_contracts` para esta entrega. O corpo
+  de recusa degradada reusa `GatewayErrorResponse` com extras
+  (`kind`/`fallback_candidates`), mesmo padrão dos denies da Fase 2.
+
 ## API pública estável (`model_gateway_client`)
 
 ```python
@@ -304,11 +393,16 @@ acima estiver no ar.
 
 ### Resultado real (rodado nesta sessão)
 
-Fase 1 (20 testes) + Fase 2 (19 testes) contra a MESMA infra real:
+Fase 1 (20) + Fase 2 (19) + Fase 3 (12) contra a MESMA infra real:
 
 ```
-39 passed in 6.79s
+51 passed in 66.58s
 ```
+
+(O tempo subiu porque os testes de failover/chaos da Fase 3 derrubam e
+religam containers de verdade e esperam o primário voltar a servir. Os
+testes de chaos derrubam SOMENTE os containers eco do próprio WS-D — nunca
+a infra compartilhada — e restauram em `finally`.)
 
 Cobertura Fase 1: `echo_provider` isolado (determinismo, shape OpenAI, 404),
 round-trip completo mint→call→revoke→denied contra o LiteLLM real,
@@ -336,6 +430,21 @@ Cobertura Fase 2:
 Também verificado à mão nesta sessão (não em pytest): o export OTLP real chega
 ao `dse_otel_collector` do WS-F (1 span `dse.model_gateway.chat_completion`
 recebido) e o `python -m model_gateway_client.eval_suite` roda (3 pass, 1 skip).
+
+Cobertura Fase 3:
+- `test_failover_intra_tier.py` — WSD-E4-T1: espelho cliente/proxy do mapa de
+  fallbacks consistente; teste negativo de tier (nenhuma rota cruza
+  `dse_tier`); primário saudável sem falso positivo de degradação; primário
+  DERRUBADO (docker stop real) -> fallback assume com resposta completa +
+  atribuição correta no ledger + audit de degradação; fallback não burla
+  política (recusa 403 `fallback_model_not_allowed` + custo real ainda
+  contabilizado).
+- `test_chaos_gateway.py` — WSD-E4-T3: outage total (ambos ecos fora) ->
+  recusa tipada + audit + zero ledger; quota 429 fim-a-fim; budget exhaustion
+  mid-task na fronteira; egress default-deny a endpoints de modelo públicos
+  pelo proxy REAL :8806 com controle positivo pela única rota permitida.
+- `scripts/smoke_test.py` re-rodado após a mudança de config do LiteLLM
+  (fallbacks/timeout): resposta idêntica à baseline byte-a-byte.
 
 ## Version pinning e upgrade simulado (WSD-E1-T1)
 
@@ -378,6 +487,8 @@ services/model-gateway/
     enforcement.py                               # ponto único de enforcement (policy+budget+kill+reassign)
     ledger.py                                    # WSD-E3-T4 ledger de custo DURÁVEL (Postgres)
     control_api.py                               # FastAPI de operador (kill switch/reassign/budget/policy)
+    # --- Fase 3 ---
+    failover.py                                  # WSD-E4-T1 espelho de fallbacks + detecção/audit de degradação
     eval_suite/
       __init__.py                                # WSD-E5-T1 suite de eval Tier-2 (dono: WS-D)
       cases.yaml                                 # prompts de referência + asserções
@@ -401,4 +512,7 @@ services/model-gateway/
     test_kill_switch_reassign.py                  # Fase 2 WSD-E4-T2
     test_ledger_durable.py                        # Fase 2 WSD-E3-T4
     test_eval_suite.py                            # Fase 2 WSD-E5-T1
+    chaos_helpers.py                              # Fase 3: docker stop/start + espera de recuperação
+    test_failover_intra_tier.py                   # Fase 3 WSD-E4-T1
+    test_chaos_gateway.py                         # Fase 3 WSD-E4-T3
 ```

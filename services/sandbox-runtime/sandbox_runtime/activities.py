@@ -58,7 +58,7 @@ from .sessions import (
     classify_risk_class,
     hydrate_planner_context,
 )
-from .substrate import AgentSubstrate, FakeSubstrate
+from .substrate import AgentSubstrate, FakeSubstrate, substrate_from_env
 from .toolsets import PlannerToolset, TesterToolset
 
 _STATE_DIR = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
@@ -306,11 +306,13 @@ class RunCoderTurnInput(BaseModel):
 
 
 def _build_substrate(script: list[dict[str, Any]] | None) -> AgentSubstrate:
-    """Fábrica de substrato. Fase 1 P0: `FakeSubstrate` por padrão (nenhuma
-    dependência de model-gateway/OpenHands real precisa estar de pé para os
-    testes rodarem). Produção troca isto por `OpenHandsSubstrate()` — ver
-    `substrate.py`."""
-    return FakeSubstrate(script or [])
+    """Fábrica de substrato. Fase 3 (WSC-E3-T6): a escolha é CONFIG POR
+    DEPLOYMENT — `DSE_CODER_SUBSTRATE` em {fake|openhands|claude-agent},
+    default `fake` (nenhuma dependência de gateway/SDK precisa estar de pé
+    para os testes). Trocar de substrato nunca muda código de workflow: o
+    WS-B continua chamando `run_coder_turn` por nome, e esta factory resolve
+    o adapter atrás da mesma interface `AgentSubstrate`."""
+    return substrate_from_env(script=script)
 
 
 @activity.defn(name=ACTIVITY_RUN_CODER_TURN)
@@ -582,8 +584,11 @@ async def _run_tester_turn_impl(
     )
     vk = mint_virtual_key(headers)
 
+    # Fase 3 (WSC-E3-T4b): o toolset é escopado ao work item — além de test
+    # paths, `demos/<work_item_id>/` é escrita permitida (convenção do teste
+    # `@demo`); `demos/` de OUTRO work item continua bloqueado.
     session = ScriptedAgentSession(
-        toolset=TesterToolset(),
+        toolset=TesterToolset(work_item_id=inp.work_item_id),
         workspace_dir=workspace_dir,
         retrieval=retrieval,
         tenant_id=inp.tenant_id,

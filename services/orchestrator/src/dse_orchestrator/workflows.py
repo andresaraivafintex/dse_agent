@@ -35,17 +35,23 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_PROVISION_SANDBOX,
         ACTIVITY_REBUILD_SANDBOX,
         ACTIVITY_RUN_CODER_TURN,
+        ACTIVITY_RUN_DEMO_EVIDENCE,
         ACTIVITY_RUN_L1_PIPELINE,
         ACTIVITY_RUN_L2_REVIEW,
         ACTIVITY_RUN_PLANNER_TURN,
         ACTIVITY_RUN_TESTER_TURN,
+        ACTIVITY_RUN_VISUAL_DIFF,
         ACTIVITY_TEARDOWN_SANDBOX,
+        ACTIVITY_TRIGGER_PREVIEW,
         CiStatusResult,
         CoderTurnResult,
+        DemoEvidenceResult,
         L1Result,
         L2Verdict,
+        PreviewRef,
         PrRef,
         SandboxHandle,
+        VisualDiffResult,
     )
     from dse_contracts.constants import WORKFLOW_TYPE
     from dse_contracts.plan_artifact import PlanArtifact
@@ -54,7 +60,9 @@ with workflow.unsafe.imports_passed_through():
     from dse_orchestrator import policy
     from dse_orchestrator.local_activities import (
         LOCAL_ACTIVITY_CHECK_CLARIFICATION,
+        LOCAL_ACTIVITY_EMIT_HISTORY_METRIC,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
+        LOCAL_ACTIVITY_RECORD_EVIDENCE,
         LOCAL_ACTIVITY_RECORD_GATE,
         LOCAL_ACTIVITY_RESOLVE_APPROVER,
         LOCAL_ACTIVITY_UPDATE_STATUS,
@@ -167,7 +175,15 @@ class WorkItemLifecycleWorkflow:
         self._clarification_payload: dict[str, Any] | None = None
         self._review_received = False
         self._review_payload: dict[str, Any] | None = None
+        # Fase 3 (WSB-E4-T2/ADR-26): comentarios de review ACUMULAM numa lista
+        # (em vez de payload unico) para o loop de review consumir em LOTE —
+        # N comentarios numa janela de debounce viram UM ciclo de fix + UM
+        # refresh de evidencia, nunca N.
+        self._review_comments: list[dict[str, Any]] = []
         self._merged = False
+        # Fase 3 (ADR-26): pedido humano EXPLICITO de refresh de evidencia —
+        # o unico gatilho de refresh alem de um fix cycle (commit novo).
+        self._refresh_evidence_requested = False
 
         # --- Fase 2: gate de aprovacao de plano (WSB-E3-T2/T3) ---
         self._plan_approval_received = False
@@ -186,8 +202,20 @@ class WorkItemLifecycleWorkflow:
 
     @workflow.signal
     def review_comment(self, payload: dict[str, Any]) -> None:
+        # Fase 3: acumula (nao sobrescreve) — o loop de review consome o LOTE
+        # inteiro de uma vez (debounce ADR-26). `_review_payload` continua
+        # guardando o ultimo, por compatibilidade de observabilidade/queries.
+        self._review_comments.append(payload)
         self._review_payload = payload
         self._review_received = True
+
+    @workflow.signal
+    def refresh_evidence(self, payload: dict[str, Any] | None = None) -> None:
+        """Fase 3 (ADR-26) — pedido humano EXPLICITO de re-geracao de evidencia
+        (preview/demo/visual diff) sem commit novo. Junto com "fix cycle
+        executado", e o UNICO gatilho de refresh — comentarios de review por si
+        so NUNCA re-geram evidencia (decisao 100%% deterministica, P1)."""
+        self._refresh_evidence_requested = True
 
     @workflow.signal
     def merged_by_human(self, payload: dict[str, Any] | None = None) -> None:
@@ -329,7 +357,7 @@ class WorkItemLifecycleWorkflow:
             input.terminal_detail = f"force_clarification: {exc.reason}"
             await self._audit("force_clarification_applied", {"reason": exc.reason})
             await self._persist_status()
-            return workflow.continue_as_new(input)
+            return await self._continue_as_new(input)
 
     # ------------------------------------------------------------------
     # Helpers genericos
@@ -626,6 +654,39 @@ class WorkItemLifecycleWorkflow:
                 continue
         raise _EscalateNow(f"checkpoint_and_rebuild_exhausted:{phase_name}")
 
+    async def _continue_as_new(self, input: WorkItemLifecycleInput):
+        """Todo `continue_as_new` passa por aqui: incrementa a contagem de
+        Continue-As-New (parte da metrica de history — ALERTING-RULES.md §3)
+        e emite a metrica uma ultima vez antes de fechar o run atual."""
+        input.continue_as_new_count += 1
+        await self._emit_history_metric("continue_as_new")
+        return workflow.continue_as_new(input)
+
+    async def _emit_history_metric(self, checkpoint: str) -> None:
+        """Fase 3 — ativacao do alerta de history (WS-F ativa a regra §3).
+        Leitura DETERMINISTICA no workflow (get_current_history_length/size
+        sao replay-safe no SDK); emissao OTel na Activity local. Best-effort:
+        falha de metrica jamais afeta o fluxo."""
+        info = workflow.info()
+        payload = {
+            "work_item_id": self._input.work_item_id,
+            "tenant_id": self._input.tenant_id,
+            "phase": self._input.phase,
+            "checkpoint": checkpoint,
+            "history_length": info.get_current_history_length(),
+            "history_size_bytes": info.get_current_history_size(),
+            "continue_as_new_count": self._input.continue_as_new_count,
+        }
+        try:
+            await workflow.execute_activity(
+                LOCAL_ACTIVITY_EMIT_HISTORY_METRIC,
+                payload,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError:
+            logger.warning("emit_history_metric falhou; metrica e best-effort, fluxo segue")
+
     async def _maybe_retry_from_checkpoint(self) -> None:
         if not self._retry_from_checkpoint_requested:
             return
@@ -669,7 +730,7 @@ class WorkItemLifecycleWorkflow:
                 await self._set_status(WorkItemStatus.ready, audit_action="clarification_complete")
                 input.phase = PHASE_IMPLEMENTATION
                 input.status = WorkItemStatus.queued.value
-                return workflow.continue_as_new(input)
+                return await self._continue_as_new(input)
 
             if input.clarification_rounds >= self._input.clarification_round_cap:
                 raise _EscalateNow(
@@ -940,6 +1001,16 @@ class WorkItemLifecycleWorkflow:
         await self._set_status(WorkItemStatus.pr_ready, audit_action="pr_finalized",
                                 details={"pr_number": pr_ref.pr_number, "url": pr_ref.url})
 
+        # Fase 3 — pipeline de evidencia INICIAL (depois de finalize_pr):
+        # trigger_preview (paths-filter deterministico com o files_changed do
+        # CoderTurnResult, FR-20) -> se created, run_demo_evidence (base_url do
+        # preview; o publish acontece DENTRO dela, WS-E) -> run_visual_diff.
+        # Falha/degradacao NUNCA bloqueia o PR (failure mode 9) — evidencia
+        # degradada e registrada e o fluxo segue para review humano.
+        input.last_files_changed = list(coder_result.files_changed)
+        await self._run_evidence_pipeline(coder_result.files_changed, reason="initial")
+        await self._emit_history_metric("pr_finalized")
+
         # NAO fazemos `continue_as_new` aqui (deliberado — ver README.md,
         # secao "continue_as_new e a corrida de sinais"): um humano/CI pode
         # reagir ao status `pr_ready` (que acabou de ficar visivel via query)
@@ -1017,14 +1088,22 @@ class WorkItemLifecycleWorkflow:
             )
 
         # Estaciona em espera DURAVEL (novo estado awaiting_plan_approval).
+        # ORDEM (corrigida na integração da Fase 3): grava a projeção do gate
+        # ANTES de flipar o status para awaiting_plan_approval. Invariante: o
+        # gate durável (consumido pelo queue board e pelo roteamento de signal
+        # do WS-A, que dispara SIGNAL_PLAN_APPROVAL com base no status) tem que
+        # existir no instante em que o estado se torna observável — senão um
+        # observador que vê o status pode ler o gate ainda ausente (corrida
+        # real reproduzida por teste; a edição da Fase 3 do review loop mudou
+        # o timing e expôs a inversão).
+        await self._record_gate(status="pending", auto_approved=False,
+                                approvers=approvers, decided_by=None)
         await self._set_raw_status(
             STATUS_AWAITING_PLAN_APPROVAL,
             audit_action="awaiting_plan_approval",
             details={"risk_class": effective_risk, "approvers": approvers,
                      "source": resolved.get("source")},
         )
-        await self._record_gate(status="pending", auto_approved=False,
-                                approvers=approvers, decided_by=None)
         # Renderiza o pedido de aprovacao via adapters (WS-A edita a mensagem
         # de status unica in-place; aqui so pedimos que ela reflita o gate).
         try:
@@ -1164,7 +1243,7 @@ class WorkItemLifecycleWorkflow:
             input.approvers = []
             await self._audit("plan_rejected_route_re_clarify", {"decided_by": exc.actor})
             await self._persist_status()
-            return workflow.continue_as_new(input)
+            return await self._continue_as_new(input)
 
         if exc.route == "re_plan":
             # Re-planeja: limpa o plano e reentra a fase de implementacao, que
@@ -1188,16 +1267,43 @@ class WorkItemLifecycleWorkflow:
     # GitHub aqui — so espera `merged_by_human` (P3: nenhuma sessao de agente
     # aprova/mergeia o proprio trabalho).
     # ------------------------------------------------------------------
+    def _drain_review_comments(self) -> list[dict[str, Any]]:
+        """Consome o LOTE inteiro de comentarios pendentes. Anti-clobber: so e
+        chamado DEPOIS de `_review_received` ficar True; o handler do sinal
+        apenas acrescenta a lista, entao nada se perde entre o drain e a
+        proxima espera."""
+        comments = list(self._review_comments)
+        self._review_comments.clear()
+        self._review_received = False
+        return comments
+
+    def _bump_review_round(self) -> None:
+        """WSB-E4-T2 — cap explicito de rounds de review (o loop de review e o
+        unico `while` do workflow que ainda nao tinha cap proprio). Esgotado ->
+        escalated (nunca um loop infinito por construcao)."""
+        self._input.review_round += 1
+        if self._input.review_round > self._input.review_round_cap:
+            raise _EscalateNow(
+                f"review_round_cap_exhausted:{self._input.review_round - 1}"
+            )
+
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
         """Loop `while True` (NAO `continue_as_new` por iteracao — ver
         comentario em `_run_implementation_phase` sobre a corrida de sinais):
         cada volta reconsulta CI, espera veredito humano, e se for
         `changes_requested` (ou CI red) aplica o ciclo de fix no MESMO
-        branch/PR e volta ao topo, tudo na MESMA execucao de workflow."""
+        branch/PR e volta ao topo, tudo na MESMA execucao de workflow.
+        Fase 3 (WSB-E4-T2): rounds capados por `review_round_cap`; comentarios
+        consumidos em LOTE com janela de debounce (ADR-26) — N comentarios numa
+        janela viram UM ciclo de fix + UM refresh de evidencia."""
         input = self._input
 
         while True:
             await self._boundary_gate()
+            # Ativacao do alerta de history: o loop de review e onde o history
+            # cresce sem Continue-As-New (limitacao documentada) — emite a
+            # metrica a cada volta para o collector/WS-F.
+            await self._emit_history_metric("review_loop")
             ci: CiStatusResult = await workflow.execute_activity(
                 ACTIVITY_CONSUME_CI_STATUS,
                 {"work_item_id": input.work_item_id, "pr_number": input.pr_number},
@@ -1212,9 +1318,13 @@ class WorkItemLifecycleWorkflow:
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     raise _EscalateNow("ci_red_after_retry_cap_exhausted")
+                self._bump_review_round()
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="ci_red_retrying")
-                await self._apply_coder_fix_cycle()
-                input.review_round += 1
+                fix_result = await self._apply_coder_fix_cycle(["ci red: corrigir o pipeline"])
+                # ADR-26: fix cycle = commit novo que muda comportamento -> 1 refresh
+                input.last_files_changed = list(fix_result.files_changed)
+                await self._run_evidence_pipeline(fix_result.files_changed,
+                                                  reason="fix_cycle_ci_red")
                 continue
 
             # IMPORTANTE: nao resetamos `_review_received` aqui antes de
@@ -1223,27 +1333,74 @@ class WorkItemLifecycleWorkflow:
             # controle) enquanto ainda estavamos na Activity de CI acima.
             # Resetar aqui apagaria essa resposta legitima e o workflow
             # ficaria esperando para sempre por um sinal que ja veio. So
-            # consumimos e resetamos DEPOIS de ler `verdict` abaixo.
+            # consumimos e resetamos DEPOIS de drenar o lote, abaixo.
             await self._set_status(WorkItemStatus.pr_ready, audit_action="awaiting_human_review")
             await workflow.wait_condition(
-                lambda: self._review_received or self._cancelled or self._operator_escalate_requested
+                lambda: self._review_received or self._refresh_evidence_requested
+                or self._cancelled or self._operator_escalate_requested
             )
             if self._cancelled:
                 raise _CancelledByOperator()
             if self._operator_escalate_requested:
                 raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
 
-            verdict = (self._review_payload or {}).get("verdict")
-            self._review_received = False  # consumido — proxima volta espera um sinal NOVO
-
-            if verdict == "changes_requested":
-                await self._set_status(WorkItemStatus.review_feedback, audit_action="changes_requested",
-                                        details={"comment": (self._review_payload or {}).get("comment")})
-                await self._apply_coder_fix_cycle()
-                input.review_round += 1
+            if self._refresh_evidence_requested and not self._review_received:
+                # ADR-26 — pedido humano explicito: o UNICO gatilho de refresh
+                # sem commit novo. Sem files novos, reusa o ultimo conjunto
+                # conhecido para o paths-filter deterministico (FR-20).
+                # Consome o pedido AQUI (nao so dentro do pipeline): um refresh
+                # DECLINADO pelo cap tambem conta como atendido — senao a flag
+                # pendente viraria um hot-loop nesta espera.
+                self._refresh_evidence_requested = False
+                await self._audit("evidence_refresh_requested_by_human", {})
+                await self._run_evidence_pipeline(list(input.last_files_changed),
+                                                  reason="human_request")
                 continue
 
-            if verdict == "approved":
+            comments = self._drain_review_comments()
+
+            # ADR-26 — debounce: se o lote pede mudancas e ha janela
+            # configurada, espera a janela para agrupar comentarios que ainda
+            # estao chegando — 6 comentarios numa janela = 1 fix + 1 refresh.
+            # Decisao 100% deterministica: contagem/comparacao + timer durauel
+            # do Temporal; nenhum LLM decide nada aqui (P1).
+            if (input.evidence_debounce_seconds > 0
+                    and any(c.get("verdict") == "changes_requested" for c in comments)):
+                try:
+                    await workflow.wait_condition(
+                        lambda: self._cancelled or self._operator_escalate_requested,
+                        timeout=timedelta(seconds=input.evidence_debounce_seconds),
+                    )
+                except asyncio.TimeoutError:
+                    pass
+                if self._cancelled:
+                    raise _CancelledByOperator()
+                if self._operator_escalate_requested:
+                    raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
+                late = self._drain_review_comments()
+                comments.extend(late)
+                await self._audit(
+                    "review_comments_debounced",
+                    {"count": len(comments), "window_s": input.evidence_debounce_seconds},
+                )
+
+            verdicts = [c.get("verdict") for c in comments]
+
+            if "changes_requested" in verdicts:
+                self._bump_review_round()
+                texts = [str(c.get("comment") or "") for c in comments
+                         if c.get("verdict") == "changes_requested"]
+                await self._set_status(WorkItemStatus.review_feedback, audit_action="changes_requested",
+                                        details={"comments": texts, "batched": len(comments)})
+                fix_result = await self._apply_coder_fix_cycle(texts)
+                # ADR-26: 1 lote de comentarios -> 1 fix cycle -> no maximo 1
+                # refresh de evidencia (o refresh e disparado pelo COMMIT do
+                # fix, nunca pelos comentarios em si).
+                input.last_files_changed = list(fix_result.files_changed)
+                await self._run_evidence_pipeline(fix_result.files_changed, reason="fix_cycle")
+                continue
+
+            if "approved" in verdicts:
                 await self._set_status(WorkItemStatus.pr_ready, audit_action="approved_awaiting_merge")
                 # (sem reset de `_merged` aqui pela mesma razao acima — comeca
                 # False no __init__ e so este ramo o consome, uma vez por run)
@@ -1269,11 +1426,13 @@ class WorkItemLifecycleWorkflow:
                 )
 
             # veredito desconhecido: nunca adivinha (P6) — escala.
-            raise _EscalateNow(f"unknown_review_verdict:{verdict!r}")
+            raise _EscalateNow(f"unknown_review_verdict:{verdicts!r}")
 
-    async def _apply_coder_fix_cycle(self) -> None:
-        """`changes_requested` (humano) ou CI red: volta ao Coder no MESMO
-        branch/PR, re-valida L1, re-finaliza o MESMO PR (idempotente)."""
+    async def _apply_coder_fix_cycle(self, comments: list[str]) -> CoderTurnResult:
+        """`changes_requested` (humano, possivelmente um LOTE debounced) ou CI
+        red: volta ao Coder no MESMO branch/PR, re-valida L1, re-finaliza o
+        MESMO PR (idempotente). Retorna o resultado do Coder — o caller usa
+        `files_changed` para o refresh de evidencia (paths-filter FR-20)."""
         input = self._input
         await self._boundary_gate()
         await self._budget_boundary("review_fix_coder")
@@ -1285,7 +1444,7 @@ class WorkItemLifecycleWorkflow:
                 "sandbox_id": input.sandbox_id,
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
-                "instructions": [(self._review_payload or {}).get("comment", "")],
+                "instructions": [c for c in comments if c] or [""],
                 "model_override": self._model_override,
                 "runtime_override": self._runtime_override,
             },
@@ -1309,8 +1468,7 @@ class WorkItemLifecycleWorkflow:
             if input.coder_retry_count > self._input.coder_retry_cap:
                 raise _EscalateNow("l1_revalidation_failed_after_retry_cap")
             # tenta mais uma vez recursivamente ate o cap (mantem no mesmo branch/PR)
-            await self._apply_coder_fix_cycle()
-            return
+            return await self._apply_coder_fix_cycle(comments)
 
         await self._boundary_gate()
         pr_ref: PrRef = await workflow.execute_activity(
@@ -1342,3 +1500,175 @@ class WorkItemLifecycleWorkflow:
         )
         await self._set_status(WorkItemStatus.pr_ready, audit_action="pr_refinalized",
                                 details={"pr_number": pr_ref.pr_number})
+        return coder_result
+
+    # ------------------------------------------------------------------
+    # Fase 3 — pipeline de evidencia (WS-E implementa as Activities; aqui so
+    # a orquestracao deterministica, pelos NOMES/models de dse_contracts).
+    # trigger_preview -> (created) run_demo_evidence -> run_visual_diff.
+    # O publish do video/trace acontece DENTRO de run_demo_evidence (WS-E).
+    # Failure mode 9: preview/demo degradado NUNCA bloqueia o PR — evidencia
+    # degradada e registrada (audit + projecao 0014) e o fluxo segue para
+    # review humano.
+    # ------------------------------------------------------------------
+    async def _run_evidence_pipeline(self, files_changed: list[str], *, reason: str) -> None:
+        input = self._input
+        if input.pr_number is None:
+            # Modo estrito (compare_url sem PR): sem pr_number nao ha preview
+            # por PR — declina limpo e auditado (P6), nunca bloqueia.
+            await self._audit("evidence_skipped_no_pr", {"reason": reason})
+            return
+        if reason != "initial":
+            if input.evidence_refreshes >= input.evidence_refresh_cap:
+                # ADR-26: cap de refreshes — declina LIMPO (auditado); a
+                # evidencia fica stale, o PR nao e bloqueado (P6).
+                await self._audit(
+                    "evidence_refresh_declined_cap",
+                    {"reason": reason, "refreshes": input.evidence_refreshes,
+                     "cap": input.evidence_refresh_cap},
+                )
+                return
+            input.evidence_refreshes += 1
+        # Qualquer pedido humano pendente e atendido por ESTE refresh (nunca
+        # empilha um segundo refresh para o mesmo estado do branch).
+        self._refresh_evidence_requested = False
+
+        try:
+            preview: PreviewRef = await workflow.execute_activity(
+                ACTIVITY_TRIGGER_PREVIEW,
+                {
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "repo": input.repo,
+                    "pr_number": input.pr_number,
+                    "files_changed": list(files_changed),
+                },
+                result_type=PreviewRef,
+                start_to_close_timeout=timedelta(seconds=900),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            input.preview_status = "degraded"
+            await self._audit(
+                "evidence_degraded",
+                {"stage": "trigger_preview", "reason": reason,
+                 "error": str(exc.cause or exc)[:300]},
+            )
+            await self._record_evidence(reason=reason, detail="trigger_preview_failed")
+            return
+
+        input.preview_status = preview.status
+        input.preview_url = preview.url
+        await self._audit(
+            "preview_triggered",
+            {"status": preview.status, "url": preview.url,
+             "namespace": preview.namespace, "reason": reason},
+        )
+
+        if preview.status == "skipped_backend_only":
+            # FR-20: decisao por paths-filter puro (WS-E) — conta como sucesso.
+            await self._audit("evidence_skipped_backend_only", {"reason": reason})
+            await self._record_evidence(reason=reason, detail="backend_only")
+            return
+        if preview.status != "created":
+            # "degraded" ou qualquer status desconhecido: degrada limpo (P6),
+            # nunca bloqueia nem adivinha.
+            await self._audit(
+                "evidence_degraded",
+                {"stage": "trigger_preview", "reason": reason,
+                 "status": preview.status, "detail": (preview.detail or "")[:300]},
+            )
+            await self._record_evidence(reason=reason, detail=(preview.detail or "")[:300])
+            return
+
+        try:
+            demo: DemoEvidenceResult = await workflow.execute_activity(
+                ACTIVITY_RUN_DEMO_EVIDENCE,
+                {
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "base_url": preview.url,
+                },
+                result_type=DemoEvidenceResult,
+                start_to_close_timeout=timedelta(seconds=900),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            await self._audit(
+                "evidence_degraded",
+                {"stage": "run_demo_evidence", "reason": reason,
+                 "error": str(exc.cause or exc)[:300]},
+            )
+            await self._record_evidence(reason=reason, detail="demo_evidence_failed")
+            return
+
+        input.evidence_passed = demo.passed
+        input.evidence_video_key = demo.video_artifact_key
+        input.evidence_trace_key = demo.trace_artifact_key
+        await self._audit(
+            "demo_evidence_completed",
+            {"passed": demo.passed, "video_artifact_key": demo.video_artifact_key,
+             "trace_artifact_key": demo.trace_artifact_key,
+             "duration_s": demo.duration_s, "reason": reason},
+        )
+
+        # Visual diff quando ha screenshot. Gap de contrato documentado no
+        # README: DemoEvidenceResult nao carrega uma chave de screenshot, entao
+        # o gatilho deterministico e "a demo produziu midia" (video/trace) e o
+        # candidato segue a convencao demos/<work_item_id>/ (ADR-27, WSC-E3-T4b).
+        if demo.video_artifact_key or demo.trace_artifact_key:
+            try:
+                vd: VisualDiffResult = await workflow.execute_activity(
+                    ACTIVITY_RUN_VISUAL_DIFF,
+                    {
+                        "work_item_id": input.work_item_id,
+                        "tenant_id": input.tenant_id,
+                        "base_screenshot_key": input.visual_baseline_key,
+                        "candidate_screenshot_path": f"demos/{input.work_item_id}/screenshot.png",
+                    },
+                    result_type=VisualDiffResult,
+                    start_to_close_timeout=timedelta(seconds=300),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                if vd.baseline_created and vd.diff_artifact_key:
+                    # 1o run: WS-E publica o candidato como baseline e retorna a
+                    # chave em diff_artifact_key (assuncao documentada no README).
+                    input.visual_baseline_key = vd.diff_artifact_key
+                await self._audit(
+                    "visual_diff_completed",
+                    {"passed": vd.passed, "changed_pct": vd.changed_pct,
+                     "baseline_created": vd.baseline_created, "reason": reason},
+                )
+            except ActivityError as exc:
+                await self._audit(
+                    "evidence_degraded",
+                    {"stage": "run_visual_diff", "reason": reason,
+                     "error": str(exc.cause or exc)[:300]},
+                )
+        await self._record_evidence(reason=reason, detail="ok")
+
+    async def _record_evidence(self, *, reason: str, detail: str) -> None:
+        """Projecao duravel do estado de evidencia (migracao 0014) — best-effort:
+        a projecao nunca bloqueia o fluxo (o audit ledger e a fonte imutavel)."""
+        input = self._input
+        try:
+            await workflow.execute_activity(
+                LOCAL_ACTIVITY_RECORD_EVIDENCE,
+                {
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "preview_status": input.preview_status,
+                    "preview_url": input.preview_url,
+                    "demo_passed": input.evidence_passed,
+                    "video_artifact_key": input.evidence_video_key,
+                    "trace_artifact_key": input.evidence_trace_key,
+                    "visual_baseline_key": input.visual_baseline_key,
+                    "refresh_count": input.evidence_refreshes,
+                    "last_refresh_reason": reason,
+                    "detail": detail,
+                },
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError:
+            logger.warning("record_evidence_state falhou; projecao e best-effort, fluxo segue")

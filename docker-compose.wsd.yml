@@ -19,11 +19,31 @@ services:
       ECHO_PORT: "9000"
     networks: [dse_net]
 
+  # Fase 3 (WSD-E4-T1): SEGUNDA instância do modelo eco — mesmo tier
+  # ("local-dev"), mesma imagem, endpoint distinto. É o alvo do fallback
+  # intra-tier nativo do LiteLLM (ver router_settings em litellm_config.yaml).
+  # Os testes de failover derrubam `dse_model_gateway_echo` DE VERDADE
+  # (docker stop) e provam que esta instância assume, com atribuição de
+  # custo/audit corretas — e que ambas fora => recusa limpa (P6).
+  model-gateway-echo-b:
+    build:
+      context: ./services/model-gateway/echo_provider
+    image: dse-model-gateway-echo:local
+    container_name: dse_model_gateway_echo_b
+    environment:
+      ECHO_PORT: "9000"
+      # Nome de upstream distinto: permite distinguir nos logs/respostas qual
+      # instância serviu (o LiteLLM reescreve `model` para o alias, mas o
+      # header x-litellm-model-api-base preserva o endpoint real).
+      ECHO_MODEL_NAME: "echo-model-b"
+    networks: [dse_net]
+
   model-gateway:
     image: ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b236757f0f69b71392722
     container_name: dse_model_gateway
     depends_on:
       - model-gateway-echo
+      - model-gateway-echo-b
     environment:
       LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
       # Banco DEDICADO do LiteLLM (schema interno do proxy p/ /key/generate,
@@ -33,6 +53,7 @@ services:
       #   docker exec dse_postgres psql -U dse -d dse -c "CREATE DATABASE dse_litellm OWNER dse;"
       DATABASE_URL: ${DSE_LITELLM_DATABASE_URL:-postgresql://dse:dse_dev_only@dse_postgres:5432/dse_litellm}
       DSE_ECHO_PROVIDER_URL: "http://model-gateway-echo:9000"
+      DSE_ECHO_PROVIDER_B_URL: "http://model-gateway-echo-b:9000"
       DSE_ECHO_PROVIDER_API_KEY: ${DSE_ECHO_PROVIDER_API_KEY:-sk-eco-local-dev-not-a-real-key}
       # Placeholders de produção (Bedrock/PrivateLink) — sem valor real
       # disponível nesta sessão de dev; ver litellm_config.yaml e README.

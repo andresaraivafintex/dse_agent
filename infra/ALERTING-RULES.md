@@ -62,7 +62,32 @@ OTEL_ATTR_TOKENS_OUT = "dse.tokens_out"
   de egress, assim que o WS-C começar a gravá-las — nenhum código adicional
   necessário no lado de consulta.
 
-## 3. Aproximação do limite de history do Temporal
+## 3. Aproximação do limite de history do Temporal — **ATIVADA (Fase 3)**
+
+> **Status: regra ATIVA no collector** (não mais só especificação). Pipeline
+> dedicada `metrics/history_alert` em `infra/otel-collector-config.yaml`:
+> um `filter` (OTTL) descarta tudo abaixo do threshold, um `transform` marca
+> o que sobra com `dse.alert=temporal_history_threshold_exceeded` +
+> `dse.alert_severity=warning|critical`, e o exporter `debug/history_alert`
+> imprime — a presença da linha no stdout do collector É o alerta (MVP).
+> Prova real: `services/platform/tests/test_history_alert.py` (envia OTLP
+> real acima/abaixo do threshold e verifica o canal).
+>
+> **Contrato de nome de métrica com o WS-B** (emit_history_metric): o filtro
+> aceita `dse.workflow.history_length`/`temporal_workflow_event_history_length`
+> (nº de eventos) e `dse.workflow.history_size_bytes`/
+> `temporal_workflow_event_history_size` (bytes). Thresholds ativos:
+> eventos ≥ 35.840 (70% de 51.200) = warning, ≥ 46.080 (90%) = critical;
+> bytes ≥ 36.700.160 (70% de 50MB) = warning, ≥ 47.185.920 (90%) = critical.
+> Recomendação: pinar UM nome canônico em `dse_contracts.constants` na
+> próxima janela de contrato (pedido registrado; não editamos a fundação
+> unilateralmente).
+>
+> **Upgrade para alerting real (documentado, não escondido):** manter
+> `filter/history_alert` + `transform/history_alert` e trocar o exporter
+> `debug/history_alert` por `prometheusremotewrite` (+ regra de alerta no
+> Alertmanager) ou pelo exporter nativo do backend do cliente. Nenhuma
+> mudança em quem emite.
 
 - **Condição**: Temporal recomenda manter o event history de um workflow
   abaixo de ~10.000 eventos / 50MB (limites hard em ~51.200 eventos / 50MB

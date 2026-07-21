@@ -311,3 +311,8 @@ class VisualDiffResult(BaseModel):
     changed_pct: float = 0.0
     diff_artifact_key: str | None = None
     baseline_created: bool = False
+    # Aditivo (pedido do WS-E na integração da Fase 3): a chave da baseline no
+    # artifact store, para o chamador persistir e reenviar como
+    # `base_screenshot_key` nos runs seguintes — antes disso a chave voltava
+    # sobrecarregada em `diff_artifact_key` quando baseline_created=True.
+    baseline_artifact_key: str | None = None

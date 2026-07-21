@@ -42,6 +42,22 @@ from .sso import (
     offboard,
     provision_console_user,
 )
+from .retention import (
+    RetentionPolicy,
+    RetentionPolicyError,
+    RetentionReport,
+    get_retention_policies,
+    run_retention,
+    run_retention_all_tenants,
+    set_retention_policy,
+)
+from .secret_rotation import (
+    RotationError,
+    RotationResult,
+    default_generator,
+    rotate_from_manifest,
+    rotate_secret,
+)
 from .steering_resolution import is_steering_allowed
 from .tenant_isolation import (
     CrossTenantViolation,
@@ -106,4 +122,18 @@ __all__ = [
     "query_retrieval_scoped",
     "query_audit_scoped",
     "assert_token_belongs_to_tenant",
+    # rotação agendada de secrets (WSF-E2-T3b, Fase 3)
+    "RotationError",
+    "RotationResult",
+    "default_generator",
+    "rotate_secret",
+    "rotate_from_manifest",
+    # retenção por classificação (WSF-E8-T2, Fase 3)
+    "RetentionPolicy",
+    "RetentionPolicyError",
+    "RetentionReport",
+    "get_retention_policies",
+    "set_retention_policy",
+    "run_retention",
+    "run_retention_all_tenants",
 ]

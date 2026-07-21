@@ -1,0 +1,53 @@
+# WS-E — fragment de docker-compose (ver CONVENTIONS.md §Fase 3). Conecta à
+# rede externa `dse_net` já declarada na fundação. `make up` faz o merge de
+# todos os fragments `docker-compose.ws*.yml` presentes.
+#
+# Serviços da Fase 3 (WSE-E5-T12 / WSE-E4-T10):
+#
+#   garage        — artifact store S3 self-hosted (dxflrs/garage, tag PINADA —
+#                   P7/NFR-09, upgrade é ato explícito). Single-node dev layout;
+#                   o bootstrap de layout/bucket/chave é idempotente e feito em
+#                   código (dse_validation.evidence.garage.ensure_garage_ready)
+#                   via admin API (:3903). Portas reservadas em CONVENTIONS.md:
+#                   3900 (S3 API) / 3903 (admin).
+#
+#   wse-gitserver — git SMART HTTP (git-http-backend atrás de nginx+fcgiwrap,
+#                   imagem própria em services/validation/gitserver/) servindo
+#                   o repo git BARE de manifests de preview para o Argo CD do
+#                   cluster k3d (rede dse_net — os pods alcançam
+#                   `dse-wse-gitserver` pelo nome). Smart HTTP é obrigatório:
+#                   o go-git do Argo CD não fala o protocolo dumb. O host
+#                   escreve no repo direto pelo filesystem (bind mount) —
+#                   fetch-only na rede, sem porta publicada no host.
+
+networks:
+  dse_net:
+    external: true
+    name: dse_net
+
+services:
+  garage:
+    image: dxflrs/garage:v1.1.0
+    container_name: dse_garage
+    restart: unless-stopped
+    volumes:
+      - ./services/validation/garage/garage.toml:/etc/garage.toml:ro
+      - dse_garage_meta:/var/lib/garage/meta
+      - dse_garage_data:/var/lib/garage/data
+    ports:
+      - "3900:3900" # S3 API
+      - "3903:3903" # admin API
+    networks: [dse_net]
+
+  wse-gitserver:
+    build:
+      context: ./services/validation/gitserver
+    container_name: dse-wse-gitserver
+    restart: unless-stopped
+    volumes:
+      - ./services/validation/preview_repo:/srv/git:ro
+    networks: [dse_net]
+
+volumes:
+  dse_garage_meta:
+  dse_garage_data:

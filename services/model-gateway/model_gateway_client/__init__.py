@@ -25,6 +25,12 @@ from .controls import (
 )
 from .enforcement import EnforcementResult, enforce_call
 from .errors import GatewayCallError, ModelGatewayError, VirtualKeyNotFoundError
+from .failover import (
+    Degradation,
+    detect_degradation,
+    intra_tier_failover_set,
+    intra_tier_fallbacks,
+)
 from .gateway_call import ChatCompletionResult, chat_completion
 from .policy import PolicyDecision, load_policies_from_file, resolve_policy
 from .virtual_keys import IssuedVirtualKey, mint_virtual_key, revoke_virtual_key
@@ -57,4 +63,9 @@ __all__ = [
     "resolve_reassignment",
     "reassign_model",
     "clear_reassignment",
+    # Fase 3 — WSD-E4-T1 failover intra-tier (degradação declarada)
+    "Degradation",
+    "detect_degradation",
+    "intra_tier_fallbacks",
+    "intra_tier_failover_set",
 ]

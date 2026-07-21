@@ -57,6 +57,14 @@ class OrchestratorConfig:
     plan_round_cap: int = 3   # re_plan capado (rejection path)
     l2_retry_cap: int = 2     # objecoes do L2 -> Coder, capadas
 
+    # Fase 3 — WSB-E4-T2 (ADR-26): caps de iteracao + debounce de refresh de
+    # evidencia. Configuraveis por env (sem redeploy — o dispatcher preenche o
+    # input do workflow por WorkItem; por-tenant e possivel lendo tenant_config
+    # antes de chamar apply_to_input).
+    review_round_cap: int = 20            # rounds de review humano/CI-red, capados
+    evidence_debounce_seconds: float = 300.0  # janela p/ agrupar comentarios (prod)
+    evidence_refresh_cap: int = 5         # refreshes de evidencia alem do inicial
+
     # timeouts de activity (segundos) — generosos porque Coder/L1 podem ser lentos;
     # heartbeat permite deteccao de worker morto sem esperar o timeout inteiro.
     activity_start_to_close_seconds: float = 3600.0
@@ -78,6 +86,9 @@ class OrchestratorConfig:
             require_approval_risk_classes=_csv_env("DSE_REQUIRE_APPROVAL_RISK_CLASSES", ("high",)),
             plan_round_cap=_int_env("DSE_PLAN_ROUND_CAP", 3),
             l2_retry_cap=_int_env("DSE_L2_RETRY_CAP", 2),
+            review_round_cap=_int_env("DSE_REVIEW_ROUND_CAP", 20),
+            evidence_debounce_seconds=_float_env("DSE_EVIDENCE_DEBOUNCE_SECONDS", 300.0),
+            evidence_refresh_cap=_int_env("DSE_EVIDENCE_REFRESH_CAP", 5),
         )
 
 
@@ -103,4 +114,7 @@ def apply_to_input(input, cfg: "OrchestratorConfig | None" = None):
     input.require_approval_risk_classes = cfg.require_approval_risk_classes
     input.plan_round_cap = cfg.plan_round_cap
     input.l2_retry_cap = cfg.l2_retry_cap
+    input.review_round_cap = cfg.review_round_cap
+    input.evidence_debounce_seconds = cfg.evidence_debounce_seconds
+    input.evidence_refresh_cap = cfg.evidence_refresh_cap
     return input

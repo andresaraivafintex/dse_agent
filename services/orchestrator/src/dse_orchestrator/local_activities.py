@@ -40,6 +40,10 @@ LOCAL_ACTIVITY_LOAD_WORK_ITEM = "load_work_item"
 # projecao duravel do gate (WSB migracao 0009).
 LOCAL_ACTIVITY_RESOLVE_APPROVER = "resolve_plan_approver"
 LOCAL_ACTIVITY_RECORD_GATE = "record_plan_approval"
+# Fase 3 — projecao duravel do estado do pipeline de evidencia (migracao 0014)
+# e emissao da metrica OTel de tamanho de history (ALERTING-RULES.md §3).
+LOCAL_ACTIVITY_RECORD_EVIDENCE = "record_evidence_state"
+LOCAL_ACTIVITY_EMIT_HISTORY_METRIC = "emit_history_metric"
 
 _DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
@@ -254,6 +258,79 @@ async def record_plan_approval(payload: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+@activity.defn(name=LOCAL_ACTIVITY_RECORD_EVIDENCE)
+async def record_evidence_state(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fase 3 — projecao duravel do estado do pipeline de evidencia (migracao
+    0014, tabela work_item_evidence). Upsert idempotente por work_item_id.
+    NAO substitui o audit ledger (P8): o workflow emite os eventos de evidencia
+    via emit_audit_event; esta tabela e a projecao mutavel consultavel pelo
+    queue board (WS-F)/operadores ("qual o preview/video mais recente?")."""
+    work_item_id = payload["work_item_id"]
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("record_evidence_state: sem Postgres (%s); pulando projecao", exc)
+        return {"persisted": False}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO work_item_evidence
+                    (work_item_id, tenant_id, preview_status, preview_url, demo_passed,
+                     video_artifact_key, trace_artifact_key, visual_baseline_key,
+                     refresh_count, last_refresh_reason, detail)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (work_item_id) DO UPDATE SET
+                    preview_status = EXCLUDED.preview_status,
+                    preview_url = EXCLUDED.preview_url,
+                    demo_passed = EXCLUDED.demo_passed,
+                    video_artifact_key = EXCLUDED.video_artifact_key,
+                    trace_artifact_key = EXCLUDED.trace_artifact_key,
+                    visual_baseline_key = EXCLUDED.visual_baseline_key,
+                    refresh_count = EXCLUDED.refresh_count,
+                    last_refresh_reason = EXCLUDED.last_refresh_reason,
+                    detail = EXCLUDED.detail
+                """,
+                (
+                    work_item_id,
+                    payload["tenant_id"],
+                    payload.get("preview_status"),
+                    payload.get("preview_url"),
+                    payload.get("demo_passed"),
+                    payload.get("video_artifact_key"),
+                    payload.get("trace_artifact_key"),
+                    payload.get("visual_baseline_key"),
+                    int(payload.get("refresh_count", 0)),
+                    payload.get("last_refresh_reason"),
+                    payload.get("detail"),
+                ),
+            )
+        conn.commit()
+        return {"persisted": True}
+    finally:
+        conn.close()
+
+
+@activity.defn(name=LOCAL_ACTIVITY_EMIT_HISTORY_METRIC)
+async def emit_history_metric(payload: dict[str, Any]) -> None:
+    """Fase 3 — ativacao do alerta de history (ALERTING-RULES.md §3, com WS-F).
+    O workflow LE o tamanho do history de forma deterministica
+    (workflow.info().get_current_history_length()/size()) e esta Activity
+    EMITE a metrica OTel para o collector (I/O fora do sandbox — P1).
+    Best-effort: o workflow trata falha aqui como nao-fatal."""
+    from dse_orchestrator import metrics
+
+    metrics.record_history_metric(
+        work_item_id=payload["work_item_id"],
+        tenant_id=payload["tenant_id"],
+        phase=payload.get("phase", "unknown"),
+        checkpoint=payload.get("checkpoint", "unknown"),
+        history_length=int(payload.get("history_length", 0)),
+        history_size_bytes=int(payload.get("history_size_bytes", 0)),
+        continue_as_new_count=int(payload.get("continue_as_new_count", 0)),
+    )
+
+
 @activity.defn(name=LOCAL_ACTIVITY_CHECK_CLARIFICATION)
 async def check_clarification_completeness(payload: dict[str, Any]) -> dict[str, Any]:
     """Checklist deterministico e simples por task-class (Fase 1: uma unica
@@ -289,4 +366,6 @@ LOCAL_ACTIVITIES = [
     load_work_item,
     resolve_plan_approver,
     record_plan_approval,
+    record_evidence_state,
+    emit_history_metric,
 ]

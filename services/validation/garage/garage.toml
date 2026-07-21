@@ -1,0 +1,23 @@
+# WSE-E5-T12 — Garage (artifact store S3 self-hosted), single-node DEV layout.
+# Produção: multi-nó com replication_factor >= 2 e segredos via Vault/ESO — este
+# arquivo é o análogo local (mesma disciplina do vault dev-mode da fundação).
+# O rpc_secret/admin_token abaixo são DEV-ONLY (repo local), não segredos reais.
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+rpc_secret = "1b118d7bd7e105f2245538126c080fc70e90221d443bfb1a445e029af3fee904"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.localhost"
+
+[admin]
+api_bind_addr = "[::]:3903"
+admin_token = "dse_garage_admin_dev"
+metrics_token = "dse_garage_metrics_dev"

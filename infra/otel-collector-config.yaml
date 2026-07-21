@@ -20,8 +20,66 @@ processors:
   # WS-F) — nenhuma transformação adicional é necessária aqui além de
   # agrupar em batch para eficiência de export.
 
+  # ---------------------------------------------------------------------
+  # ALERTING-RULES.md §3 ATIVADA (Fase 3) — aproximação do limite de history
+  # do Temporal. O WS-B emite a métrica a cada fronteira de workflow
+  # (emit_history_metric); esta pipeline dedicada descarta tudo que está
+  # abaixo do threshold e marca o que sobra com dse.alert/severity — a linha
+  # que o debug exporter imprime É o alerta (MVP; upgrade real documentado em
+  # infra/ALERTING-RULES.md: trocar o exporter por Alertmanager/backend).
+  #
+  # Thresholds (limites default do Temporal: 51.200 eventos / 50MB hard):
+  #   comprimento (nº de eventos): warning >= 35.840 (70%), critical >= 46.080 (90%)
+  #   tamanho (bytes):             warning >= 36.700.160 (70% de 50MB),
+  #                                critical >= 47.185.920 (90%)
+  # Nomes de métrica aceitos (contrato a pinar com o WS-B — qualquer um):
+  #   dse.workflow.history_length | temporal_workflow_event_history_length (eventos)
+  #   dse.workflow.history_size_bytes | temporal_workflow_event_history_size (bytes)
+  filter/history_alert:
+    error_mode: ignore
+    metrics:
+      datapoint:
+        # drop 1: qualquer métrica que não seja de history
+        - >-
+          not(IsMatch(metric.name,
+          "^(dse\\.workflow\\.history_length|temporal_workflow_event_history_length|dse\\.workflow\\.history_size_bytes|temporal_workflow_event_history_size)$"))
+        # drop 2: comprimento abaixo do warning (70% de 51.200 eventos).
+        # Nota OTTL: num datapoint int, value_double avalia para 0.0 (zero
+        # value, não nil) — por isso o AND das duas comparações: a clausula
+        # do tipo NÃO usado é sempre verdadeira (0 < threshold) e a do tipo
+        # usado decide. Guardas de nil cobrem a outra semântica.
+        - >-
+          IsMatch(metric.name, "^(dse\\.workflow\\.history_length|temporal_workflow_event_history_length)$")
+          and (value_int == nil or value_int < 35840)
+          and (value_double == nil or value_double < 35840.0)
+        # drop 3: bytes abaixo do warning (70% de 50MB)
+        - >-
+          IsMatch(metric.name, "^(dse\\.workflow\\.history_size_bytes|temporal_workflow_event_history_size)$")
+          and (value_int == nil or value_int < 36700160)
+          and (value_double == nil or value_double < 36700160.0)
+
+  transform/history_alert:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(attributes["dse.alert"], "temporal_history_threshold_exceeded")
+          - set(attributes["dse.alert_severity"], "warning")
+          - set(attributes["dse.alert_severity"], "critical")
+            where IsMatch(metric.name, "^(dse\\.workflow\\.history_length|temporal_workflow_event_history_length)$")
+            and ((value_int != nil and value_int >= 46080) or (value_double != nil and value_double >= 46080.0))
+          - set(attributes["dse.alert_severity"], "critical")
+            where IsMatch(metric.name, "^(dse\\.workflow\\.history_size_bytes|temporal_workflow_event_history_size)$")
+            and ((value_int != nil and value_int >= 47185920) or (value_double != nil and value_double >= 47185920.0))
+
 exporters:
   debug:
+    verbosity: detailed
+  # Canal do alerta de history (MVP): as ÚNICAS linhas que chegam aqui já
+  # passaram pelo threshold — presença no stdout do collector = alerta ativo.
+  # Produção: substituir por um exporter real (prometheusremotewrite +
+  # Alertmanager, ou o backend do cliente) mantendo filter/transform acima.
+  debug/history_alert:
     verbosity: detailed
 
 service:
@@ -34,6 +92,11 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [debug]
+    # Pipeline DEDICADA do alerta §3 — sem batch (latência de alerta > eficiência).
+    metrics/history_alert:
+      receivers: [otlp]
+      processors: [filter/history_alert, transform/history_alert]
+      exporters: [debug/history_alert]
   telemetry:
     logs:
       level: info

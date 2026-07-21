@@ -11,7 +11,15 @@ services:
       DSE_IDENTITY_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-dev}
       DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
+      # Fase 3 (ativacao do alerta de history, ALERTING-RULES.md §3 com WS-F):
+      # aponte DSE_OTEL_EXPORTER=otlp para enviar traces + a metrica
+      # dse.workflow.history_length ao otel-collector do WS-F (porta 4317).
       DSE_OTEL_EXPORTER: ${DSE_OTEL_EXPORTER:-console}
+      DSE_OTEL_EXPORTER_OTLP_ENDPOINT: ${DSE_OTEL_EXPORTER_OTLP_ENDPOINT:-otel-collector:4317}
+      # Fase 3 (WSB-E4-T2/ADR-26) — caps e debounce configuraveis sem redeploy:
+      DSE_REVIEW_ROUND_CAP: ${DSE_REVIEW_ROUND_CAP:-20}
+      DSE_EVIDENCE_DEBOUNCE_SECONDS: ${DSE_EVIDENCE_DEBOUNCE_SECONDS:-300}
+      DSE_EVIDENCE_REFRESH_CAP: ${DSE_EVIDENCE_REFRESH_CAP:-5}
       # Fase 2 (WSB-E1-T3) — fairness worker-side (caps de concorrencia por
       # tenant lidos de tenant_config). "native" so quando o server for 1.31+.
       DSE_FAIRNESS_MODE: ${DSE_FAIRNESS_MODE:-worker-side}

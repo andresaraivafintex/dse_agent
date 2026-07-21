@@ -81,6 +81,23 @@ def read_gate_row(work_item_id: str):
         conn.close()
 
 
+def read_evidence_row(work_item_id: str):
+    """Fase 3 — le a projecao duravel do pipeline de evidencia (migracao 0014)."""
+    conn = psycopg2.connect(DSN)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT preview_status, preview_url, demo_passed, video_artifact_key, "
+                "       trace_artifact_key, visual_baseline_key, refresh_count, "
+                "       last_refresh_reason, detail "
+                "FROM work_item_evidence WHERE work_item_id = %s",
+                (work_item_id,),
+            )
+            return cur.fetchone()
+    finally:
+        conn.close()
+
+
 def set_tenant_config(tenant_id: str, *, max_concurrent_work_items: int = 5,
                       max_concurrent_activities: int | None = None) -> None:
     """Semeia/atualiza tenant_config (WS-F, migracao 0007) para o teste de

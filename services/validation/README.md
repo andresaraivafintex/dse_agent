@@ -1,4 +1,4 @@
-# services/validation — WS-E (Validação L1/L2 + PR finalizer)
+# services/validation — WS-E (Validação L1/L2/L3 + PR finalizer + evidência)
 
 Fintex DSE. Implementa o `services/validation/` descrito em `CONVENTIONS.md`:
 pipeline L1 (lint/typecheck/test/build + SAST/secret-scan + diff-budget/
@@ -7,6 +7,19 @@ o handler de resume-por-review-comment (UC4). **Fase 2 ("Judgment & queue")**
 adiciona: orquestração do loop L2 de contexto fresco (WSE-E2-T4), loop de
 fix-retries bounded L2->Coder (WSE-E2-T5), e o **modo estrito de PR** em que um
 humano abre o PR (WSE-E3-T8, desbloqueado pelo `PrRef.compare_url` novo).
+
+> **Fase 3 — resumo do que foi adicionado** (detalhe abaixo em §Fase 3):
+> artifact store Garage real (`evidence/garage.py` + `docker-compose.wse.yml`),
+> vídeo @demo Playwright real (`evidence/demo.py` + runner pinado em
+> `playwright/`), previews por PR via Argo CD ApplicationSet contra o cluster
+> k3d real (`preview/` + git smart HTTP próprio em `gitserver/`), L3 completo
+> (`github/l3.py`), visual diff Pillow (`evidence/visual_diff.py`), publicação
+> consolidada/debounced (`evidence/publication.py`), migração
+> `migrations/0017_wse3.sql`. As 4 Activities do CONTRATO da Fase 3
+> (`publish_artifact`, `run_demo_evidence`, `trigger_preview`,
+> `run_visual_diff`) registradas em `ALL_ACTIVITIES`. **103 testes passando**
+> (45 F1 + 26 F2 + 32 F3), Garage/Postgres/Temporal/k3d+Argo CD/Playwright
+> reais — nada mockado para durabilidade/política.
 
 > **Fase 2 — resumo do que foi adicionado** (detalhe abaixo em §Fase 2):
 > `dse_validation/l2/` (session/l2_review/fix_loop), 3 Activities novas
@@ -215,6 +228,148 @@ dona do WS-C. Os nomes de WS-E têm prefixo `wse_` para não colidirem no Worker
 `FinalizePrInput` ganhou `strict_mode` (opcional; se `None`, resolve via
 `StrictModeConfig`) e `surface_ref` (onde postar o compare link).
 
+## Fase 3 ("Evidence") — o que WS-E adicionou
+
+Infra nova deste workstream (fragment `docker-compose.wse.yml`, rede `dse_net`):
+
+- **`garage`** (`dxflrs/garage:v1.1.0`, pinado) — artifact store S3 self-hosted,
+  portas reservadas 3900 (S3)/3903 (admin). Single-node dev layout; bootstrap
+  idempotente por código (`evidence/garage.ensure_garage_ready`) via admin API —
+  layout, chave S3 do serviço e bucket por tenant. Config em `garage/garage.toml`
+  (segredos DEV-ONLY; produção = Vault/ESO, WS-F).
+- **`wse-gitserver`** (imagem própria em `gitserver/`, base `alpine:3.20` pinada) —
+  git **smart HTTP** (`git-http-backend` atrás de nginx+fcgiwrap) servindo o repo
+  bare de manifests de preview (`preview_repo/preview-manifests.git`) ao Argo CD
+  do cluster k3d. **Por quê**: o go-git do Argo CD não fala o protocolo dumb
+  (nginx estático falha com `unexpected EOF` no ls-remote — visto na prática).
+  Fetch-only; o host escreve por filesystem (bind mount).
+
+### WSE-E5-T12 — Artifact store Garage
+
+`evidence/garage.py` — Activity `publish_artifact` (nome do CONTRATO
+`ACTIVITY_PUBLISH_ARTIFACT`; input/output `PublishArtifactInput`/`ArtifactRef`
+importados, não redefinidos):
+
+- **bucket por tenant** (`dse-tenant-<slug>`, NFR-03) + chave prefixada por
+  WorkItem (`<wi>/<kind>/<arquivo>`); upload real via boto3; **multipart
+  explícito** (create/upload_part/complete) acima de 5 MiB — validado com um
+  **vídeo mp4 real >5MB gerado por ffmpeg** e conferido byte a byte no round-trip
+  (obrigação do ADR-18 revisado).
+- **links EXPIRAM por política** (exit da Fase 3): presigned URL com TTL do
+  input; teste real prova que a URL expirada retorna **negado** (Garage nega com
+  400; AWS usaria 403 — documentado no teste) e que `resolve_artifact_url`
+  recusa com `PermissionError` (P6).
+- **QUARENTENA** (costura EXISTENTE do WS-F, Fase 2): work item quarantinado via
+  `dse_platform.kill_switches.quarantine_work_item` (`dse_work_item_quarantine`)
+  => `sweep_quarantined_work_items()`/`quarantine_artifacts_for_work_item()` move
+  os objetos para o prefixo `quarantine/` e **invalida o acesso antes do TTL**
+  (a chave original deixa de existir — URL antiga passa a 404/403; teste real
+  com TTL de 1h ainda vigente). Objeto preservado (não deletado) para auditoria.
+- **LOG DE ACESSO**: toda resolução de link (`resolve_artifact_url`) grava
+  `wse_artifact_access_log` (associável ao PR — insumo da métrica *evidence
+  consumption*) + audit `artifact_link_resolved` (P8).
+
+### WSE-E5-T11 — Vídeo @demo Playwright
+
+`evidence/demo.py` — Activity `run_demo_evidence` (contrato): roda `npx
+playwright test --grep @demo` REAL (runner pinado `@playwright/test 1.55.1` em
+`playwright/`, Chromium instalado via `npx playwright install chromium`) com
+`video: 'on'` + `trace: 'on'`, publica o vídeo (.webm) e o trace (.zip) via
+`publish_artifact_core` e retorna `DemoEvidenceResult`. Vídeo verificado como
+REAL (tamanho>0 + header EBML/mp4, `is_real_video`). P6: sem diretório de demo
+ou sem teste `@demo` => `passed=False` com detail explícito, nunca evidência
+fingida. O fixture @demo determinístico do WS-C (WSC-E3-T4b) estava em
+construção paralela — o fixture local mínimo deste WS vive em
+`tests/fixtures/demos/wi_demo_fixture/` (página HTML estática + spec `@demo`),
+convenção de path `demos/<work_item_id>/`.
+
+### WSE-E4-T10 — Previews por PR via Argo CD ApplicationSet (cluster k3d REAL)
+
+`preview/paths_filter.py` + `preview/gitops.py` + `preview/argocd.py` —
+Activity `trigger_preview` (contrato):
+
+- decisão UI-touching por **paths-filter determinístico** (FR-20, fnmatch dos
+  `files_changed` contra `ui_path_globs`; semântica de `**/` documentada e
+  testada). Backend-only => `skipped_backend_only` (sucesso, NUNCA bloqueia).
+- quando UI-touching: escreve `previews/preview-<wi>/` (Namespace + Deployment
+  `nginx:1.27-alpine` pinado + Service) no repo git de manifests e o
+  **ApplicationSet `dse-previews`** (generator git `previews/*`,
+  `requeueAfterSeconds: 15`, `goTemplate`) do **Argo CD v2.13.3 real** cria a
+  Application e sincroniza => namespace efêmero `preview-<work_item_id>` no
+  cluster `k3d-dse-preview`. Teste de integração real: namespace criado, **URL
+  respondendo HTTP 200** (probe curl in-cluster contra o Service), TTL
+  destruindo.
+- falha/timeout de provisionamento => status **`degraded`** (failure mode 9 —
+  PR nunca bloqueia; testado com kubecontext inexistente).
+- **caps de concorrência por tenant desde o dia 1** (ADR-26): tabela
+  `wse_preview_caps` (default `DSE_PREVIEW_MAX_CONCURRENT`); no cap =>
+  `degraded` com detail explícito; teste de contagem real no Postgres.
+- **TTL reaper — decisão documentada**: o adendo prefere kube-janitor (P7), mas
+  com Argo CD em `automated.selfHeal` a fonte de verdade é o GIT — kube-janitor
+  deletaria o namespace e o Argo CD o RECRIARIA (dois controllers brigando).
+  O reaper correto em GitOps é `reap_expired_previews()` (job Python
+  determinístico, real): remove o diretório do repo, o ApplicationSet poda a
+  Application e o finalizer `resources-finalizer` cascateia a deleção do
+  namespace (provado no teste e2e). kube-janitor fica como upgrade path para
+  recursos não-GitOps; a annotation `janitor/ttl` já é gravada no Namespace.
+
+### WSE-E4-T9b — L3 completo
+
+`github/l3.py` — `consume_ci_status_l3` (a Activity `consume_ci_status` ganhou
+o campo ADITIVO `surface_ref`; payloads antigos do WS-B seguem decodificando —
+boundary tests da fundação intactos):
+
+- **reflexão** do status agregado no tracking comment único do PR (mesmo
+  `MutableCommentWriter` da fundação, surface `github_pr_ci`, editado in-place)
+  na MESMA chamada do consumo — <1min por construção, medido no teste;
+- **targeted re-runs** em fix commit: novo sha após estado `red` => re-request
+  SÓ dos check-runs falhos (`rerequest_check_run`, implementado de verdade no
+  `RealGitHubClient` contra `POST .../check-runs/{id}/rerequest` e exercitado
+  com `FakeGitHubClient`); CI sem suporte a re-run por job (403/422) => segue
+  sem re-run, sem bloquear. Evidência em `wse_ci_reruns` + audit;
+- **episódios de skill-learning** de CI-repair: transição red(sha A) ->
+  green(sha B) emite episódio tenant-scoped em `wse_ci_repair_episodes` com
+  proveniência (repo/PR/shas) e `occurrence_n` do padrão
+  (`failure_signature` determinística). **NENHUMA skill criada/ativada**
+  (conferido no teste contra `skill_registry`) — promoção é Fase 4.
+
+### WSE-E5-T13/T14 — Visual diff + publicação debounced
+
+- `evidence/visual_diff.py` — Activity `run_visual_diff` (contrato): pixel-diff
+  **Pillow** com tolerância por canal (8/255, anti-ruído de encoding) e
+  threshold percentual; **self-hosted, sem SaaS** (Argos/Percy/`toHaveScreenshot`
+  = upgrade path documentado). Baseline no artifact store (kind
+  `visual_baseline`, TTL 30d): primeiro run cria baseline
+  (`baseline_created=true`); regressão gera imagem de diff (pixels mudados em
+  vermelho) publicada como `visual_diff`. Tamanhos diferentes = 100% (mudança
+  estrutural). **Pedido de campo no contrato** (regra do adendo — documentar em
+  vez de editar a fundação): `VisualDiffResult` não tem campo para devolver a
+  chave da baseline recém-criada; hoje ela volta em `diff_artifact_key` quando
+  `baseline_created=true` (documentado aqui e na docstring) — um
+  `baseline_artifact_key: str | None` dedicado seria mais limpo.
+- `evidence/publication.py` — publicação CONSOLIDADA: vídeo/trace/diff/preview/
+  status de CI num único tracking comment (surface `github_pr_evidence`),
+  corpo re-renderizado do ESTADO DO BANCO (crash-consistente); artefato
+  quarantinado aparece como revogado, nunca como link. **Debounce (ADR-26)**:
+  `should_refresh_evidence()` é a decisão 100% determinística consumida pelo
+  workflow do WS-B (Activity `wse_should_refresh_evidence`, retorno
+  `{"refresh": bool, "reason": str}`): refresh SÓ a pedido humano explícito ou
+  commit novo que muda comportamento (docs-only e mesmo-commit são debounced);
+  cada decisão de debounce audita `evidence_refresh_debounced`.
+
+### Activities novas (Fase 3) registradas no Worker único
+
+| Nome | Input | Retorno | Contrato? |
+|---|---|---|---|
+| `publish_artifact` | `PublishArtifactInput` | `ArtifactRef` | SIM (`ACTIVITY_PUBLISH_ARTIFACT`) |
+| `run_demo_evidence` | `RunDemoEvidenceInput` | `DemoEvidenceResult` | SIM (`ACTIVITY_RUN_DEMO_EVIDENCE`) |
+| `trigger_preview` | `TriggerPreviewInput` | `PreviewRef` | SIM (`ACTIVITY_TRIGGER_PREVIEW`) |
+| `run_visual_diff` | `RunVisualDiffInput` | `VisualDiffResult` | SIM (`ACTIVITY_RUN_VISUAL_DIFF`) |
+| `wse_quarantine_artifacts` | `QuarantineArtifactsInput` | `list[str]` | não (aux; par do kill switch do WS-F) |
+| `wse_reap_previews` | — | `list[str]` | não (aux; cron/timer do WS-B) |
+| `wse_should_refresh_evidence` | `ShouldRefreshEvidenceInput` | `dict` | não (contrato de decisão ADR-26 p/ WS-B) |
+| `wse_publish_evidence` | `PublishEvidenceInput` | `dict` | não (publicação consolidada) |
+
 ## Sandbox execution — `SandboxHandle` vs `SandboxExecutor`
 
 `dse_contracts.activities.SandboxHandle` (dono: WS-C) só carrega dados do
@@ -271,6 +426,18 @@ importar aquele em vez de manter uma segunda implementação HTTP da mesma API
 | Sessão L2 (chamada de modelo, contexto fresco) | `FakeL2ReviewSession` (determinístico, sem LLM) — só a orquestração (recording/custo/guard/P3) é de produção | A sessão real é do WS-C (`dse_sandbox_runtime.l2.build_review_session`), em construção paralela; `build_l2_session()` já a resolve por import defensivo quando publicada |
 | Interpretação de `review_state` em `source_ref` | Assume que WS-A anexa `review_state` (`approved`/`changes_requested`) a comentários de review formais do GitHub | Depende do formato real que `services/adapter-github` (WS-A) produzir — ajuste pontual quando integrado |
 
+## Fixture / real / gap — Fase 3 (honestidade sobre o que foi exercitado)
+
+| Componente | REAL nesta sessão | Fixture | Gap p/ produção |
+|---|---|---|---|
+| Garage (S3) | Container real `dxflrs/garage:v1.1.0`, upload/presign/multipart/copy/delete reais, política de expiração provada com relógio real | — | Segredos (rpc_secret/admin_token) são dev-only no repo; produção injeta via Vault/ESO (WS-F). Single-node; multi-nó é config |
+| Playwright @demo | Execução real (`npx playwright test --grep @demo`), Chromium real, vídeo webm + trace zip reais publicados no Garage | A PÁGINA demo é o fixture local mínimo (`tests/fixtures/demos/wi_demo_fixture/`) — o WS-C entrega o fixture oficial em paralelo | Rodar os @demo DENTRO do sandbox do WS-C (Playwright na imagem do sandbox, WSC-E3-T4b) em vez do host; `base_url` de preview real já é suportado no input |
+| Previews Argo CD | Cluster k3d real, Argo CD v2.13.3 real, ApplicationSet real, namespace criado, URL 200 provada, TTL reap destruindo namespace de verdade | — | `PreviewRef.url` é o DNS in-cluster (`*.svc.cluster.local`) — exposição externa (ingress/port-forward gerenciado) não implementada; imagem do preview é nginx estático, não o build do PR (precisa do pipeline de imagem do repo alvo) |
+| L3 (reflexão/re-runs/episódios) | Postgres real, comment store real, lógica completa | `FakeGitHubClient` (mesma interface; `RealGitHubClient.rerequest_check_run` implementado contra a API real mas sem GitHub App registrada nesta sessão) | Mesma pendência das Fases 1-2: exercitar contra `api.github.com` real |
+| Visual diff | Pillow real, baseline round-trip real no Garage | Screenshots dos testes são PNGs gerados (não capturas de browser) — a captura em si é do fluxo @demo/preview | Integrar captura de screenshot do Playwright ao fluxo (hoje o caller fornece o PNG candidato) |
+| Publicação/debounce | Postgres real, render do estado real, debounce provado | `FakeGitHubClient` p/ o comentário | Idem GitHub App real |
+| Quarentena | Costura real com `dse_platform` (WS-F) — tabela e função da Fase 2, audit dos dois lados | — | Disparo automático (hoje `sweep_quarantined_work_items()`/Activity é chamado por quem quarantina ou por cron; falta o hook do WS-F chamar o sweep no próprio `quarantine_work_item`, decisão dele) |
+
 ## Migração
 
 `migrations/0006_wse.sql` (Fase 1, reservada para WS-E) cria: `validation_runs`
@@ -288,6 +455,14 @@ passa a aceitar NULL + coluna `compare_url`). Aplicada com:
 DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse python3 scripts/migrate.py
 ```
 
+`migrations/0017_wse3.sql` (Fase 3, reservada para WS-E) adiciona:
+`wse_artifacts` (registro de artefatos publicados + estado de quarentena),
+`wse_artifact_access_log` (log de acesso associável ao PR — métrica evidence
+consumption), `wse_previews` (estado/TTL dos previews), `wse_preview_caps`
+(caps ADR-26 por tenant), `wse_ci_reruns` (targeted re-runs),
+`wse_ci_repair_episodes` (episódios de skill-learning tenant-scoped) e
+`wse_evidence_publications` (estado do debounce ADR-26).
+
 ## Como rodar os testes
 
 ```bash
@@ -297,7 +472,12 @@ pip install -e /Users/saraiva/Documents/DSE/fase1/packages/contracts \
             -e /Users/saraiva/Documents/DSE/fase1/packages/dse_audit \
             -e /Users/saraiva/Documents/DSE/fase1/packages/dse_identity
 pip install -e /Users/saraiva/Documents/DSE/fase1/services/validation
+pip install -e /Users/saraiva/Documents/DSE/fase1/services/platform  # Fase 3: costura de quarentena (WS-F)
 pip install pytest pytest-asyncio ruff mypy   # ruff/mypy só para os testes de L1 exercitarem os defaults reais
+
+# Fase 3 — runner Playwright pinado + browser (uma vez):
+(cd /Users/saraiva/Documents/DSE/fase1/services/validation/playwright && npm install && npx playwright install chromium)
+
 pytest -q /Users/saraiva/Documents/DSE/fase1/services/validation
 ```
 
@@ -306,12 +486,33 @@ Requer a infra da fundação no ar (Postgres em `localhost:5432` com
 `localhost:7233`) — os testes de idempotência de PR e de audit usam Postgres
 real, e os testes de `review_signal` usam Temporal real (nunca mockados,
 por design: são as garantias de durabilidade/idempotência do próprio sistema).
+**Fase 3 requer ainda**: `0017_wse3.sql` aplicada; Garage + wse-gitserver no ar
+(`docker compose -f docker-compose.wse.yml up -d --build`); o cluster k3d
+`dse-preview` com Argo CD (fundação, `infra/k8s-local/setup-k3d-argocd.sh`);
+`ffmpeg` no host (fixture de vídeo >5MB do teste de multipart). O teste e2e de
+preview (`test_preview_e2e_real_cluster_create_serve_and_ttl_reap`) leva
+~4-5min (sync do Argo CD + cascade delete reais).
 
 ## Resultado real da última execução
 
 ```
-71 passed in ~12s   (45 Fase 1 + 26 Fase 2)
+103 passed in ~349s   (45 Fase 1 + 26 Fase 2 + 32 Fase 3)
 ```
+
+Fase 3 adicionou `tests/test_artifact_store.py` (5), `tests/test_demo_evidence.py`
+(3), `tests/test_trigger_preview.py` (8, inclui o e2e real contra o k3d),
+`tests/test_l3.py` (6), `tests/test_visual_diff.py` (5) e
+`tests/test_evidence_publication.py` (5) — Garage/Postgres/k3d+Argo CD/
+Playwright/ffmpeg reais; GitHub via `FakeGitHubClient` (mesma interface do
+Real, ver tabela fixture/real/gap). Audit rows de `artifact_published`/
+`artifact_link_resolved`/`artifact_quarantined`/`demo_evidence_run`/
+`preview_created`/`preview_reaped`/`ci_status_reflected`/`ci_targeted_rerun`/
+`ci_repair_episode_recorded`/`evidence_published`/`evidence_refresh_debounced`
+conferidos no `audit_log` real (P8). Nenhum teste skipado. Os testes de
+boundary da fundação (`packages/contracts/tests/test_activity_boundaries.py`,
+11) seguem passando sem alteração — nenhum call site do workflow foi mudado
+por este WS (o campo novo `surface_ref` de `ConsumeCiStatusInput` é aditivo e
+opcional, model do próprio WS-E).
 
 Fase 2 adicionou `tests/test_l2_review.py` (6), `tests/test_fix_loop.py` (11),
 `tests/test_strict_mode.py` (9) — todos contra Postgres real (audit rows de
@@ -345,3 +546,21 @@ Postgres/Temporal. Nenhum teste skipado. Tabelas usam `tenant_id`/`work_item_id`
    tabela acima.
 5. **Flag de modo estrito por env** em vez de `tenant_config` (WS-F) — quando
    a tabela de flags por tenant existir, trocar só `StrictModeConfig.is_strict_for`.
+
+Fase 3 (novas):
+
+6. **`VisualDiffResult` sem campo para a chave da baseline criada** — pedido de
+   campo novo no contrato (`baseline_artifact_key`); enquanto isso a chave volta
+   em `diff_artifact_key` quando `baseline_created=true` (documentado).
+7. **@demo roda no host, não dentro do sandbox do WS-C** — quando a imagem do
+   sandbox tiver Playwright (WSC-E3-T4b), `run_demo_evidence_core` ganha um
+   caminho via `SandboxExecutor` (o input do contrato já carrega `sandbox`).
+8. **URL de preview é in-cluster** (`*.svc.cluster.local`) — exposição externa
+   (ingress) e imagem de preview construída do PR (em vez de nginx estático)
+   ficam para a integração com o pipeline de build do repo alvo.
+9. **Reaper de previews é chamado sob demanda** (Activity `wse_reap_previews`)
+   — falta o WS-B agendar o timer/cron durável; a annotation `janitor/ttl` já
+   permite migrar para kube-janitor em recursos não-GitOps.
+10. **Fixture @demo oficial do WS-C** em construção paralela — quando publicar
+    `demos/<wi>/` no repo alvo, os testes deste WS podem apontar para lá (o
+    fixture local mínimo continua como fallback documentado).

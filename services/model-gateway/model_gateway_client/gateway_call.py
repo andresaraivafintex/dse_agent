@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from dse_audit.client import emit as _audit_emit
 from dse_contracts.gateway_contract import GatewayCallHeaders, GatewayErrorResponse
 
-from . import enforcement, ledger, settings, telemetry
+from . import enforcement, failover, ledger, settings, telemetry
 from .errors import GatewayCallError
 
 # Header que o LiteLLM usa para reportar o custo real da chamada (calculado
@@ -78,6 +79,22 @@ def chat_completion(
         except httpx.HTTPError as exc:
             span.record_exception(exc)
             span.set_status(trace_status_error())
+            # P8: falha de transporte (gateway inalcançável / timeout) também
+            # é evidência — mesmo action do erro upstream, status_code=0.
+            with _best_effort():
+                _audit_emit(
+                    actor="system:model-gateway",
+                    action="gateway.call_failed_upstream",
+                    tenant_id=headers.tenant_id,
+                    work_item_id=headers.work_item_id,
+                    details={
+                        "stage": headers.stage.value,
+                        "task_class": headers.task_class,
+                        "model": model,
+                        "status_code": 0,
+                        "error_body": f"transport_error: {exc}",
+                    },
+                )
             raise GatewayCallError(0, {"error": "transport_error", "message": str(exc)}) from exc
 
         if resp.status_code >= 300:
@@ -88,6 +105,27 @@ def chat_completion(
             # ele (documenta o shape esperado; não muda o comportamento).
             with _best_effort():
                 GatewayErrorResponse.model_validate(error_body)
+            # WSD-E4-T3 (P8): falha vinda do upstream (outage total de
+            # provider, quota 429, auth) também vira evidência no ledger de
+            # audit — nunca só uma exceção que se perde no log. Guardada em
+            # best-effort: uma falha do audit não pode MASCARAR o erro real.
+            with _best_effort():
+                _audit_emit(
+                    actor="system:model-gateway",
+                    action="gateway.call_failed_upstream",
+                    tenant_id=headers.tenant_id,
+                    work_item_id=headers.work_item_id,
+                    details={
+                        "stage": headers.stage.value,
+                        "task_class": headers.task_class,
+                        "model": model,
+                        "status_code": resp.status_code,
+                        "attempted_fallbacks": resp.headers.get(
+                            failover.ATTEMPTED_FALLBACKS_HEADER
+                        ),
+                        "error_body": _truncate_for_audit(error_body),
+                    },
+                )
             raise GatewayCallError(resp.status_code, error_body)
 
         payload = resp.json()
@@ -109,6 +147,54 @@ def chat_completion(
         choices = payload.get("choices") or []
         if choices:
             content = choices[0].get("message", {}).get("content", "")
+
+        # WSD-E4-T1 (Fase 3): a resposta pode ter vindo de um FALLBACK
+        # intra-tier (router do LiteLLM). Nunca silencioso (P8): detecta pelos
+        # headers e emite o audit row de degradação. E fallback não burla
+        # política (mesma regra do reassign): se NENHUM dos fallbacks
+        # declarados do model group é permitido pela política do tenant/stage,
+        # a resposta degradada é recusada na fronteira (P6) — o custo real já
+        # incorrido ainda é gravado no ledger (accounting honesto).
+        degradation = failover.detect_degradation(model, resp.headers)
+        if degradation is not None:
+            permits = failover.audit_degradation(headers, degradation)
+            if permits and not any(permits.values()):
+                ledger.record_call(
+                    tenant_id=headers.tenant_id,
+                    work_item_id=headers.work_item_id,
+                    stage=headers.stage.value,
+                    task_class=headers.task_class,
+                    model=returned_model,
+                    cost_usd=cost_usd,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                )
+                body = GatewayErrorResponse(
+                    error="policy_denied",
+                    message=(
+                        f"response served by intra-tier fallback of '{model}' "
+                        f"but no declared fallback is permitted by policy for "
+                        f"stage={headers.stage.value} tenant={headers.tenant_id}"
+                    ),
+                    retryable=False,
+                ).model_dump()
+                body["kind"] = "fallback_model_not_allowed"
+                body["fallback_candidates"] = degradation.fallback_candidates
+                with _best_effort():
+                    _audit_emit(
+                        actor="system:model-gateway",
+                        action="gateway.call_denied_policy",
+                        tenant_id=headers.tenant_id,
+                        work_item_id=headers.work_item_id,
+                        details={
+                            "stage": headers.stage.value,
+                            "kind": "fallback_model_not_allowed",
+                            "requested_model": model,
+                            "fallback_candidates": degradation.fallback_candidates,
+                        },
+                    )
+                span.set_status(trace_status_error())
+                raise GatewayCallError(403, body)
 
         # WSD-E3-T4: grava o custo REAL no ledger durável (sobrevive a restart;
         # é a fonte do cost_export e do accounting de budget). Só chamadas
@@ -142,6 +228,15 @@ def _extract_cost(resp: httpx.Response) -> float:
         return float(raw)
     except ValueError:
         return 0.0
+
+
+def _truncate_for_audit(body: dict, limit: int = 2000) -> str:
+    """Corpo de erro upstream vira string LIMITADA nos details do audit —
+    evidência suficiente sem inflar o ledger com payloads arbitrários."""
+    import json as _json
+
+    raw = _json.dumps(body, default=str)
+    return raw if len(raw) <= limit else raw[:limit] + "...[truncated-for-audit]"
 
 
 def _safe_json(resp: httpx.Response) -> dict:

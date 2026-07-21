@@ -8,6 +8,113 @@ blocked/failed/escalated como estados terminais e nenhuma decisão de fluxo
 tomada por LLM (P1) ou por uma sessão de agente sobre o próprio trabalho
 (P3).
 
+## Fase 3 ("Evidence") — o que foi adicionado
+
+A Fase 3 estende (não reescreve) a máquina de estados das Fases 1+2. Tudo
+abaixo é coberto por teste real contra Postgres/Temporal da fundação (10
+testes novos; suíte total **47 passed**). Migração nova:
+`migrations/0014_wsb3.sql` (tabela `work_item_evidence`). Contratos: só
+IMPORTA de `dse_contracts.activities` (nomes + models de evidência já
+promovidos à fundação no gate de entrada) — nenhuma redefinição local.
+
+### WSB-E4-T2 — Iteration caps + debounce de refresh de evidência (ADR-26)
+
+- **Nenhum loop do workflow é infinito por construção** — todo `while` tem cap
+  testado: clarificação (`clarification_round_cap`, Fase 1), fix L1
+  (`coder_retry_cap`, Fase 1), objeções L2 (`l2_retry_cap`, Fase 2), re_plan
+  (`plan_round_cap`, Fase 2) e — novo — **rounds de review**
+  (`review_round_cap`, default 20; esgotado → `escalated`, testado em
+  `test_iteration_caps_debounce.py`). Todos os caps vêm do INPUT do workflow,
+  preenchidos por `config.from_env()` (`DSE_REVIEW_ROUND_CAP` etc.) — mudam
+  sem redeploy; por-tenant é possível lendo `tenant_config` antes de
+  `apply_to_input` no dispatcher.
+- **Debounce de evidência (ADR-26), 100% determinístico (P1)**: evidência é
+  re-gerada **somente** quando (a) um fix cycle executou (= commit novo que
+  muda comportamento) ou (b) um humano pediu explicitamente (novo
+  `@workflow.signal refresh_evidence`). Comentários de review **acumulam numa
+  lista** e são consumidos em LOTE: se o lote pede mudanças e há janela
+  configurada (`evidence_debounce_seconds`, default prod 300s; 0 = sem
+  janela), o workflow espera a janela num timer durável para agrupar
+  comentários ainda chegando → **6 comentários numa janela = 1 ciclo de fix +
+  1 refresh** (provado com time-skipping em
+  `test_six_review_comments_in_window_trigger_at_most_one_refresh`).
+- **Cap de refreshes** (`evidence_refresh_cap`, default 5, além do inicial):
+  excedido → declina LIMPO e auditado (`evidence_refresh_declined_cap`, P6);
+  a evidência fica stale mas o PR nunca é bloqueado.
+
+### Wiring do pipeline de evidência (depois de `finalize_pr`)
+
+```
+finalize_pr -> trigger_preview(files_changed do CoderTurnResult, FR-20)
+   ├─ skipped_backend_only -> registra e segue (conta como sucesso)
+   ├─ degraded / Activity caiu -> evidence_degraded (failure mode 9) e SEGUE
+   └─ created -> run_demo_evidence(base_url do preview; publish INTERNO, WS-E)
+                   -> run_visual_diff (base_screenshot_key=None no 1º run -> baseline)
+```
+
+- Nomes/models importados de `dse_contracts` (`ACTIVITY_TRIGGER_PREVIEW`/
+  `RUN_DEMO_EVIDENCE`/`RUN_VISUAL_DIFF`, `PreviewRef`/`DemoEvidenceResult`/
+  `VisualDiffResult`). **Falha de preview NÃO bloqueia o PR** (failure mode
+  9): qualquer degradação vira audit `evidence_degraded` + projeção e o fluxo
+  segue para review humano — provado em `test_evidence_pipeline.py`
+  (degraded e crash total da Activity).
+- Os testes usam fakes **tipadas pelos models REAIS do contrato**: cada fake
+  decodifica o payload com `TriggerPreviewInput(**payload)` etc. — payload
+  derivado do contrato quebra no teste, não no wire (lição do adendo 02).
+  Os payloads exatos dos call sites também estão em
+  `packages/contracts/tests/test_activity_boundaries.py` (única edição feita
+  em `packages/`, permitida pela regra do arquivo: call site e boundary test
+  mudam juntos).
+- Projeção durável consultável: tabela `work_item_evidence` (migração 0014,
+  upsert idempotente via Activity local `record_evidence_state`) — o queue
+  board (WS-F) lê "qual o preview/vídeo mais recente deste PR?" sem varrer o
+  audit ledger (que continua a fonte imutável, P8).
+
+### Ativação do alerta de history (com WS-F — ALERTING-RULES.md §3)
+
+- O workflow lê `workflow.info().get_current_history_length()` /
+  `get_current_history_size()` (APIs replay-safe do SDK) e a contagem de
+  Continue-As-New (`continue_as_new_count`, incrementada em TODA transição
+  `_continue_as_new`) e emite via Activity local `emit_history_metric`
+  (I/O fora do sandbox — P1) as métricas OTel:
+  - `dse.workflow.history_length` (histogram, `{event}`)
+  - `dse.workflow.history_size_bytes` (histogram, `By`)
+  - `dse.workflow.continue_as_new_count` (histogram, `{run}`)
+  com atributos `dse.work_item_id`, `dse.tenant_id`, `dse.stage`,
+  `dse.checkpoint`. Emitida: antes de cada `continue_as_new`, após
+  `pr_finalized` e a **cada volta do review loop** (exatamente onde o history
+  cresce sem Continue-As-New — a limitação documentada da Fase 1 que o
+  debounce mitiga). Best-effort: falha de métrica nunca afeta o fluxo.
+- Exporter: mesmo env do tracing — `DSE_OTEL_EXPORTER=console` (default) ou
+  `otlp` + `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` (o fragment
+  `docker-compose.wsb.yml` já aponta `otel-collector:4317` do WS-F). **WS-F
+  aponta a regra §3 (Warning 70% / Critical 90% de ~10k eventos) para
+  `dse.workflow.history_length`.** Testado com `InMemoryMetricReader` real do
+  SDK OTel em `test_history_metric.py`.
+
+### Pedidos de campo ao contrato (documentados, NÃO editei a fundação)
+
+1. **`DemoEvidenceResult` não carrega chave/caminho de screenshot** — o
+   gatilho "run_visual_diff quando houver screenshot" hoje é aproximado
+   deterministicamente por "a demo produziu mídia (video/trace)" + a convenção
+   `demos/<work_item_id>/screenshot.png` (ADR-27). Pedido: campo
+   `screenshot_artifact_key: str | None` (ou `screenshot_path`) em
+   `DemoEvidenceResult`.
+2. **`VisualDiffResult` não retorna a chave da baseline criada** — quando
+   `baseline_created=True`, assumo que WS-E devolve a chave da baseline em
+   `diff_artifact_key` (guardada em `visual_baseline_key` para o próximo run).
+   Pedido: campo `baseline_artifact_key: str | None`.
+
+### Novos signals/campos (Fase 3)
+
+- `@workflow.signal refresh_evidence(payload=None)` — pedido humano explícito
+  de refresh (roteável pelo WS-A a partir de um comentário/botão dedicado).
+- `WorkItemLifecycleInput`: `review_round_cap`, `evidence_debounce_seconds`,
+  `evidence_refresh_cap`, `evidence_refreshes`, `preview_status/url`,
+  `evidence_passed/video_key/trace_key`, `visual_baseline_key`,
+  `last_files_changed` (refresh humano não tem commit novo — reusa o último
+  conjunto para o paths-filter FR-20), `continue_as_new_count`.
+
 ## Fase 2 ("Judgment & queue") — o que foi adicionado
 
 A Fase 2 estende (não reescreve) a máquina de estados da Fase 1. Tudo abaixo é
@@ -320,17 +427,22 @@ services/orchestrator/
     local_activities.py   # update_work_item_status, check_clarification_completeness,
                            # emit_audit_event (ACTIVITY_EMIT_AUDIT), load_work_item
     otel_interceptor.py   # setup_tracing() -> TracingInterceptor real
+    metrics.py             # Fase 3: metrica OTel dse.workflow.history_length (§3)
     workflows.py           # WorkItemLifecycleWorkflow (a maquina de estados)
     worker.py              # entrypoint: Client.connect + Worker + health endpoint
   tests/
     conftest.py            # helpers de Postgres real + fixture time_skipping_env
-    fakes.py                # Activities FAKE (mesma assinatura de dse_contracts.activities)
+    fakes.py                # Activities FAKE (mesma assinatura de dse_contracts.activities;
+                            # Fase 3: fakes de evidencia decodificam com os models REAIS)
     test_lifecycle_happy_path.py
     test_clarification_gate.py
     test_review_loop.py
     test_operator_controls.py
     test_chaos.py           # WSB-E5-T3 (chaos real, worker process morto)
     chaos_worker_process.py # subprocesso usado pelo chaos test
+    test_evidence_pipeline.py       # Fase 3: wiring preview/demo/visual diff + failure mode 9
+    test_iteration_caps_debounce.py # Fase 3: WSB-E4-T2 (caps + debounce ADR-26)
+    test_history_metric.py          # Fase 3: metrica de history com InMemoryMetricReader
 ../../docker-compose.wsb.yml  # fragment reservado do WS-B (porta 8900)
 ../../migrations/0003_wsb.sql # NAO CRIADO — ver nota abaixo
 ```

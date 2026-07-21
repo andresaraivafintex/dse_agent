@@ -23,6 +23,7 @@ from dse_contracts import (
     RunL2ReviewInput,
     RunPlannerTurnInput,
     RunTesterTurnInput,
+    RunVisualDiffInput,
     TesterTurnResult,
     TriggerPreviewInput,
 )
@@ -118,3 +119,53 @@ def test_demo_evidence_input_defaults():
     inp = RunDemoEvidenceInput(work_item_id="wi_x", tenant_id="t")
     assert inp.timeout_s == 120
     assert inp.demo_dir == ""  # derivado no dono: demos/<work_item_id>/
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — payloads EXATOS dos call sites do pipeline de evidencia do workflow
+# (services/orchestrator/src/dse_orchestrator/workflows.py::
+# _run_evidence_pipeline). Regra do arquivo: call site e teste de boundary
+# mudam JUNTOS, no mesmo conjunto de mudancas (WS-B).
+# ---------------------------------------------------------------------------
+WSB_TRIGGER_PREVIEW_PAYLOAD = {
+    "work_item_id": "wi_x",
+    "tenant_id": "tenant_dev",
+    "repo": "acme/repo",
+    "pr_number": 1000,
+    "files_changed": ["frontend/App.tsx", "api/handler.py"],
+}
+
+WSB_DEMO_EVIDENCE_PAYLOAD = {
+    "work_item_id": "wi_x",
+    "tenant_id": "tenant_dev",
+    "base_url": "http://preview-wi_x.local",  # PreviewRef.url do trigger_preview
+}
+
+WSB_VISUAL_DIFF_PAYLOAD = {
+    "work_item_id": "wi_x",
+    "tenant_id": "tenant_dev",
+    "base_screenshot_key": None,  # None no 1o run -> baseline (visual_baseline_key depois)
+    "candidate_screenshot_path": "demos/wi_x/screenshot.png",  # convencao ADR-27
+}
+
+
+def test_trigger_preview_accepts_exact_wsb_payload():
+    inp = TriggerPreviewInput(**WSB_TRIGGER_PREVIEW_PAYLOAD)
+    # WS-B NAO envia ui_path_globs — a politica de paths e default do contrato
+    # (dono WS-E pode sobrepor); files_changed vem do CoderTurnResult.
+    assert inp.ui_path_globs
+    assert inp.files_changed == ["frontend/App.tsx", "api/handler.py"]
+
+
+def test_demo_evidence_accepts_exact_wsb_payload():
+    inp = RunDemoEvidenceInput(**WSB_DEMO_EVIDENCE_PAYLOAD)
+    assert inp.base_url == "http://preview-wi_x.local"
+    # WS-B nao envia demo_dir/timeout_s/sandbox — defaults do dono (WS-E)
+    assert inp.demo_dir == "" and inp.timeout_s == 120 and inp.sandbox is None
+
+
+def test_visual_diff_accepts_exact_wsb_payload():
+    inp = RunVisualDiffInput(**WSB_VISUAL_DIFF_PAYLOAD)
+    assert inp.base_screenshot_key is None
+    assert inp.candidate_screenshot_path == "demos/wi_x/screenshot.png"
+    assert inp.threshold_pct == 0.1  # default do contrato — WS-B nao sobrepoe

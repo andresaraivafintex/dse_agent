@@ -44,6 +44,13 @@ class GitHubClient(Protocol):
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]: ...
 
+    def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
+        """Fase 3 (WSE-E4-T9b) — targeted re-run de UM check-run (fix commit).
+        `POST /repos/{repo}/check-runs/{id}/rerequest`. Retorna False quando o
+        CI do repo NÃO suporta re-run por job (403/422 da API) — o caller
+        registra e segue (nunca bloqueia por isso)."""
+        ...
+
     def authenticated_remote_url(self, repo: str) -> str:
         """URL https://x-access-token:<token>@github.com/<repo>.git para git push
         autenticado como a GitHub App, sem expor o token em nenhum argv de log."""
@@ -129,6 +136,18 @@ class RealGitHubClient:
         resp.raise_for_status()
         return resp.json().get("check_runs", [])
 
+    def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
+        resp = httpx.post(
+            f"{self._cfg.api_base_url}/repos/{repo}/check-runs/{check_run_id}/rerequest",
+            headers=self._headers(),
+            timeout=15.0,
+        )
+        if resp.status_code in (403, 404, 422):
+            # CI do repo não suporta re-run por job (ou o run não é re-rodável).
+            return False
+        resp.raise_for_status()
+        return True
+
     def authenticated_remote_url(self, repo: str) -> str:
         token = self._installation_token()
         return f"https://x-access-token:{token}@github.com/{repo}.git"
@@ -190,6 +209,22 @@ class FakeGitHubClient:
     def set_check_runs(self, repo: str, ref: str, runs: list[dict]) -> None:
         """Só para teste — popula os check-runs "reportados pelo CI"."""
         self._check_runs[(repo, ref)] = runs
+
+    # Fase 3 (WSE-E4-T9b) — targeted re-runs
+    rerequest_supported: bool = True
+    rerequested: list[tuple[str, int]] = field(default_factory=list)
+
+    def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
+        if not self.rerequest_supported:
+            return False
+        self.rerequested.append((repo, check_run_id))
+        # imita o GitHub: o check-run re-rodado volta a "queued"
+        for runs in self._check_runs.values():
+            for run in runs:
+                if run.get("id") == check_run_id:
+                    run["status"] = "queued"
+                    run["conclusion"] = None
+        return True
 
     def authenticated_remote_url(self, repo: str) -> str:
         return f"https://x-access-token:fake-local-token@github.com/{repo}.git"

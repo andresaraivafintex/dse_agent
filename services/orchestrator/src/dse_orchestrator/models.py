@@ -111,6 +111,44 @@ class WorkItemLifecycleInput:
     plan_round_cap: int = 3  # re_plan capado (rejection path — WSB-E3-T3)
     l2_retry_cap: int = 2  # objecoes do L2 -> Coder, capadas
 
+    # ------------------------------------------------------------------
+    # Fase 3 — WSB-E4-T2: iteration caps + debounce de refresh de evidencia
+    # (ADR-26) e o estado do pipeline de evidencia (preview/demo/visual diff)
+    # que sobrevive a `continue_as_new` como o resto do estado deterministico.
+    # ------------------------------------------------------------------
+    # Cap de rounds de review (loop humano changes_requested/CI-red). Todo
+    # `while` do workflow tem cap: clarificacao (clarification_round_cap),
+    # fix L1 (coder_retry_cap), objecoes L2 (l2_retry_cap), re_plan
+    # (plan_round_cap) e agora rounds de review. Esgotado -> escalated.
+    review_round_cap: int = 20
+    # Janela de debounce (segundos) para agrupar comentarios de review antes
+    # de UM ciclo de fix + UM refresh de evidencia (ADR-26: 6 comentarios numa
+    # janela = no maximo 1 refresh). 0 = sem janela (compat/testes legados);
+    # producao recebe o valor de config.from_env via apply_to_input.
+    evidence_debounce_seconds: float = 0.0
+    # Cap de refreshes de evidencia ALEM do inicial. Excedido -> declina limpo
+    # (auditado, P6) sem bloquear o PR — a evidencia apenas fica "stale".
+    evidence_refresh_cap: int = 5
+    evidence_refreshes: int = 0
+
+    # Estado do pipeline de evidencia (projetado tambem em work_item_evidence,
+    # migracao 0014, via Activity local record_evidence_state).
+    preview_status: str | None = None   # PreviewRef.status
+    preview_url: str | None = None
+    evidence_passed: bool | None = None
+    evidence_video_key: str | None = None
+    evidence_trace_key: str | None = None
+    visual_baseline_key: str | None = None
+    # ultimo files_changed conhecido (Coder inicial ou ultimo fix cycle) — um
+    # refresh a pedido humano nao tem commit novo, entao reusa este conjunto
+    # para a decisao deterministica de paths-filter do trigger_preview (FR-20).
+    last_files_changed: list[str] = field(default_factory=list)
+
+    # Ativacao do alerta de history (infra/ALERTING-RULES.md §3, com WS-F):
+    # contagem de Continue-As-New desta cadeia de execucoes, emitida junto com
+    # o history length/size em cada fronteira via emit_history_metric.
+    continue_as_new_count: int = 0
+
 
 @dataclass
 class WorkItemLifecycleResult:

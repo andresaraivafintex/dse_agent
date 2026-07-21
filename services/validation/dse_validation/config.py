@@ -94,6 +94,60 @@ class StrictModeConfig:
         return self.global_enabled
 
 
+class GarageConfig:
+    """WSE-E5-T12 (Fase 3) — artifact store Garage (S3 self-hosted, sem SaaS).
+
+    Endpoints default apontam para o serviço `garage` do docker-compose.wse.yml
+    (portas reservadas 3900/3903 em CONVENTIONS.md). O token admin é DEV-ONLY —
+    produção injeta via Vault/ESO (WS-F). A chave S3 usada pelo serviço é criada
+    (idempotente) via admin API pelo próprio bootstrap — nenhum segredo S3 fica
+    em env/arquivo."""
+
+    def __init__(self) -> None:
+        self.s3_endpoint = os.environ.get("DSE_GARAGE_S3_ENDPOINT", "http://localhost:3900")
+        self.admin_endpoint = os.environ.get("DSE_GARAGE_ADMIN_ENDPOINT", "http://localhost:3903")
+        self.admin_token = os.environ.get("DSE_GARAGE_ADMIN_TOKEN", "dse_garage_admin_dev")
+        self.region = os.environ.get("DSE_GARAGE_REGION", "garage")
+        self.key_name = os.environ.get("DSE_GARAGE_KEY_NAME", "dse-validation")
+        # capacidade declarada do nó dev single-node (layout)
+        self.layout_capacity = os.environ.get("DSE_GARAGE_LAYOUT_CAPACITY", "10G")
+        # multipart a partir de 5 MiB (mínimo do protocolo S3; ADR-18 revisado)
+        self.multipart_threshold_bytes = int(
+            os.environ.get("DSE_GARAGE_MULTIPART_THRESHOLD", str(5 * 1024 * 1024))
+        )
+        self.bucket_prefix = os.environ.get("DSE_GARAGE_BUCKET_PREFIX", "dse-tenant-")
+
+
+class PreviewConfig:
+    """WSE-E4-T10 (Fase 3) — previews por PR via Argo CD no cluster k3d real.
+
+    `repo_dir` é o repo git BARE de manifests servido ao cluster pelo container
+    `dse-wse-gitserver` (nginx, dumb HTTP) — o host escreve por filesystem e o
+    Argo CD lê por http://dse-wse-gitserver/<nome>.git (rede dse_net)."""
+
+    def __init__(self) -> None:
+        self.kube_context = os.environ.get("DSE_PREVIEW_KUBE_CONTEXT", "k3d-dse-preview")
+        self.repo_dir = os.environ.get(
+            "DSE_PREVIEW_REPO_DIR",
+            os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "preview_repo"
+            ),
+        )
+        # URL do repo VISTA DE DENTRO do cluster (rede dse_net)
+        self.repo_url_in_cluster = os.environ.get(
+            "DSE_PREVIEW_REPO_URL", "http://dse-wse-gitserver/preview-manifests.git"
+        )
+        self.argocd_namespace = os.environ.get("DSE_PREVIEW_ARGOCD_NS", "argocd")
+        self.applicationset_name = os.environ.get("DSE_PREVIEW_APPSET_NAME", "dse-previews")
+        self.default_ttl_seconds = int(os.environ.get("DSE_PREVIEW_TTL_SECONDS", "3600"))
+        # ADR-26: cap de previews concorrentes por tenant desde o dia 1.
+        # Override por tenant na tabela wse_preview_caps; este é o default.
+        self.default_max_concurrent = int(os.environ.get("DSE_PREVIEW_MAX_CONCURRENT", "3"))
+        # imagem do Deployment mínimo do preview (pinada, P7)
+        self.preview_image = os.environ.get("DSE_PREVIEW_IMAGE", "nginx:1.27-alpine")
+        self.sync_timeout_s = int(os.environ.get("DSE_PREVIEW_SYNC_TIMEOUT_S", "180"))
+
+
 class L2Config:
     """WSE-E2 — parâmetros do loop L2 fresh-context + fix-retries bounded.
 

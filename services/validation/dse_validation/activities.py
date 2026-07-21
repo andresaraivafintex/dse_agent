@@ -27,6 +27,20 @@ from dse_contracts import (
     PrRef,
     SandboxHandle,
 )
+from dse_contracts.activities import (
+    ACTIVITY_PUBLISH_ARTIFACT,
+    ACTIVITY_RUN_DEMO_EVIDENCE,
+    ACTIVITY_RUN_VISUAL_DIFF,
+    ACTIVITY_TRIGGER_PREVIEW,
+    ArtifactRef,
+    DemoEvidenceResult,
+    PreviewRef,
+    PublishArtifactInput,
+    RunDemoEvidenceInput,
+    RunVisualDiffInput,
+    TriggerPreviewInput,
+    VisualDiffResult,
+)
 from pydantic import BaseModel, Field
 
 from dse_validation.config import GitHubConfig, L1Config, L2Config
@@ -47,6 +61,14 @@ from dse_validation.sandbox_exec import executor_for_handle
 WSE_ACTIVITY_RUN_L2_REVIEW = "wse_run_l2_review"  # orquestra a sessão + grava evidência
 WSE_ACTIVITY_RECORD_FIX_LOOP = "wse_record_fix_loop"
 WSE_ACTIVITY_ADOPT_PR = "wse_adopt_pr"
+
+# Fase 3 — os 4 nomes do CONTRATO (dse_contracts) são do WS-E (dono declarado
+# no próprio contrato): run_demo_evidence, publish_artifact, trigger_preview,
+# run_visual_diff. Os auxiliares abaixo têm prefixo wse_ (não-contratuais).
+WSE_ACTIVITY_QUARANTINE_ARTIFACTS = "wse_quarantine_artifacts"
+WSE_ACTIVITY_REAP_PREVIEWS = "wse_reap_previews"
+WSE_ACTIVITY_SHOULD_REFRESH_EVIDENCE = "wse_should_refresh_evidence"
+WSE_ACTIVITY_PUBLISH_EVIDENCE = "wse_publish_evidence"
 
 try:
     from temporalio import activity
@@ -130,6 +152,46 @@ class ConsumeCiStatusInput(BaseModel):
     repo: str
     pr_number: int
     ref: str = Field(description="commit sha (ou nome de branch) para consultar check-runs")
+    # Fase 3 (WSE-E4-T9b) — aditivo: quando `surface_ref` vem preenchido, o
+    # consumo L3 reflete o status no tracking comment único do PR e habilita
+    # targeted re-runs/episódios de repair. Payloads da Fase 1/2 (sem o campo)
+    # continuam decodificando igual.
+    surface_ref: dict | None = None
+
+
+class QuarantineArtifactsInput(BaseModel):
+    """WSE-E5-T12 — aceite do WS-F: artefato de work item quarantinado é movido
+    p/ prefixo de quarentena e o acesso é invalidado antes do TTL."""
+
+    work_item_id: str
+    tenant_id: str
+    actor: str = "system:validation"
+
+
+class ShouldRefreshEvidenceInput(BaseModel):
+    """WSE-E5-T14 / ADR-26 — contrato de decisão de debounce consumido pelo
+    workflow do WS-B (em construção paralela): re-gerar evidência SÓ a pedido
+    humano explícito ou commit que muda comportamento. Retorno:
+    {"refresh": bool, "reason": str} — decisão 100% determinística (P1)."""
+
+    work_item_id: str
+    tenant_id: str
+    commit_sha: str
+    files_changed: list[str] = Field(default_factory=list)
+    human_requested: bool = False
+
+
+class PublishEvidenceInput(BaseModel):
+    """WSE-E5-T14 — publicação consolidada (vídeo/preview/diff/trace num único
+    tracking comment) com debounce embutido."""
+
+    work_item_id: str
+    tenant_id: str
+    commit_sha: str
+    surface_ref: dict
+    pr_number: int | None = None
+    files_changed: list[str] = Field(default_factory=list)
+    human_requested: bool = False
 
 
 def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
@@ -248,13 +310,110 @@ def _adopt_pr(inp: AdoptPrInput) -> PrRef | None:
 
 def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
     github_client = build_github_client(GitHubConfig())
-    return consume_ci_status_core(
+    if inp.surface_ref is None:
+        # comportamento Fase 1/2 inalterado (poll + agregação + persistência)
+        return consume_ci_status_core(
+            github_client=github_client,
+            work_item_id=inp.work_item_id,
+            tenant_id=inp.tenant_id,
+            repo=inp.repo,
+            pr_number=inp.pr_number,
+            ref=inp.ref,
+        )
+    # Fase 3 (WSE-E4-T9b): L3 completo — reflexão no tracking comment +
+    # targeted re-runs em fix commit + episódios de CI-repair.
+    from dse_contracts.mutable_comment import MutableCommentWriter
+
+    from dse_validation.db import PostgresCommentStateStore
+    from dse_validation.github.comment_backend import GitHubCommentBackend
+    from dse_validation.github.l3 import consume_ci_status_l3
+
+    writer = MutableCommentWriter(
+        GitHubCommentBackend(github_client), PostgresCommentStateStore(), surface="github_pr_ci"
+    )
+    return consume_ci_status_l3(
         github_client=github_client,
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
         repo=inp.repo,
         pr_number=inp.pr_number,
         ref=inp.ref,
+        comment_writer=writer,
+        surface_ref=inp.surface_ref,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fase 3 — cores das Activities de evidência (contrato)
+# ---------------------------------------------------------------------------
+def _publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
+    from dse_validation.evidence.garage import publish_artifact_core
+
+    return publish_artifact_core(inp)
+
+
+def _run_demo_evidence(inp: RunDemoEvidenceInput) -> DemoEvidenceResult:
+    from dse_validation.evidence.demo import run_demo_evidence_core
+
+    return run_demo_evidence_core(inp)
+
+
+def _trigger_preview(inp: TriggerPreviewInput) -> PreviewRef:
+    from dse_validation.preview.argocd import trigger_preview_core
+
+    return trigger_preview_core(inp)
+
+
+def _run_visual_diff(inp: RunVisualDiffInput) -> VisualDiffResult:
+    from dse_validation.evidence.visual_diff import run_visual_diff_core
+
+    return run_visual_diff_core(inp)
+
+
+def _quarantine_artifacts(inp: QuarantineArtifactsInput) -> list[str]:
+    from dse_validation.evidence.garage import quarantine_artifacts_for_work_item
+
+    return quarantine_artifacts_for_work_item(inp.work_item_id, actor=inp.actor)
+
+
+def _reap_previews() -> list[str]:
+    from dse_validation.preview.argocd import reap_expired_previews
+
+    return reap_expired_previews()
+
+
+def _should_refresh_evidence(inp: ShouldRefreshEvidenceInput) -> dict:
+    from dse_validation.evidence.publication import should_refresh_evidence
+
+    decision = should_refresh_evidence(
+        work_item_id=inp.work_item_id,
+        commit_sha=inp.commit_sha,
+        files_changed=inp.files_changed or None,
+        human_requested=inp.human_requested,
+    )
+    return {"refresh": decision.refresh, "reason": decision.reason}
+
+
+def _publish_evidence(inp: PublishEvidenceInput) -> dict:
+    from dse_contracts.mutable_comment import MutableCommentWriter
+
+    from dse_validation.db import PostgresCommentStateStore
+    from dse_validation.evidence.publication import publish_evidence_bundle
+    from dse_validation.github.comment_backend import GitHubCommentBackend
+
+    github_client = build_github_client(GitHubConfig())
+    writer = MutableCommentWriter(
+        GitHubCommentBackend(github_client), PostgresCommentStateStore(), surface="github_pr_evidence"
+    )
+    return publish_evidence_bundle(
+        work_item_id=inp.work_item_id,
+        tenant_id=inp.tenant_id,
+        commit_sha=inp.commit_sha,
+        comment_writer=writer,
+        surface_ref=inp.surface_ref,
+        pr_number=inp.pr_number,
+        files_changed=inp.files_changed or None,
+        human_requested=inp.human_requested,
     )
 
 
@@ -284,6 +443,40 @@ if _HAS_TEMPORAL:
     async def wse_adopt_pr(inp: AdoptPrInput) -> PrRef | None:
         return _adopt_pr(inp)
 
+    # --- Fase 3: Activities de evidência do CONTRATO (dono: WS-E) ---
+    @activity.defn(name=ACTIVITY_PUBLISH_ARTIFACT)
+    async def publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
+        return _publish_artifact(inp)
+
+    @activity.defn(name=ACTIVITY_RUN_DEMO_EVIDENCE)
+    async def run_demo_evidence(inp: RunDemoEvidenceInput) -> DemoEvidenceResult:
+        return _run_demo_evidence(inp)
+
+    @activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)
+    async def trigger_preview(inp: TriggerPreviewInput) -> PreviewRef:
+        return _trigger_preview(inp)
+
+    @activity.defn(name=ACTIVITY_RUN_VISUAL_DIFF)
+    async def run_visual_diff(inp: RunVisualDiffInput) -> VisualDiffResult:
+        return _run_visual_diff(inp)
+
+    # --- Fase 3: auxiliares (não-contratuais, prefixo wse_) ---
+    @activity.defn(name=WSE_ACTIVITY_QUARANTINE_ARTIFACTS)
+    async def wse_quarantine_artifacts(inp: QuarantineArtifactsInput) -> list[str]:
+        return _quarantine_artifacts(inp)
+
+    @activity.defn(name=WSE_ACTIVITY_REAP_PREVIEWS)
+    async def wse_reap_previews() -> list[str]:
+        return _reap_previews()
+
+    @activity.defn(name=WSE_ACTIVITY_SHOULD_REFRESH_EVIDENCE)
+    async def wse_should_refresh_evidence(inp: ShouldRefreshEvidenceInput) -> dict:
+        return _should_refresh_evidence(inp)
+
+    @activity.defn(name=WSE_ACTIVITY_PUBLISH_EVIDENCE)
+    async def wse_publish_evidence(inp: PublishEvidenceInput) -> dict:
+        return _publish_evidence(inp)
+
     ALL_ACTIVITIES = [
         run_l1_pipeline,
         finalize_pr,
@@ -291,6 +484,15 @@ if _HAS_TEMPORAL:
         wse_run_l2_review,
         wse_record_fix_loop,
         wse_adopt_pr,
+        # Fase 3
+        publish_artifact,
+        run_demo_evidence,
+        trigger_preview,
+        run_visual_diff,
+        wse_quarantine_artifacts,
+        wse_reap_previews,
+        wse_should_refresh_evidence,
+        wse_publish_evidence,
     ]
 else:  # pragma: no cover
     ALL_ACTIVITIES = []

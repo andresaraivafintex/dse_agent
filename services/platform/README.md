@@ -3,11 +3,12 @@
 Implementação Fase 1 dos P0 do WS-F. Lê `../../CONVENTIONS.md` primeiro se
 ainda não leu — este README assume o vocabulário/contratos de lá.
 
-> **A Fase 2 ("Judgment & queue") está na seção no final deste README**
-> ("## Fase 2 — o que foi adicionado"). A Fase 1 abaixo permanece válida e
-> intacta. Resultado atual da suíte completa do WS-F (Fase 1 + Fase 2):
-> `90 passed, 2 skipped` (os 2 skips são testes adversariais do egress-proxy
-> que exigem sandbox real do WS-C — herança da Fase 1).
+> **A Fase 2 e a Fase 3 estão em seções no final deste README**
+> ("## Fase 2 — o que foi adicionado", "## Fase 3 — o que foi adicionado").
+> A Fase 1 abaixo permanece válida e intacta. Resultado atual da suíte
+> completa do WS-F (Fases 1+2+3): `121 passed, 2 skipped` (os 2 skips são
+> testes adversariais do egress-proxy que exigem sandbox real do WS-C —
+> herança da Fase 1).
 
 ## O que está implementado e funcionando (contra infra real)
 
@@ -409,4 +410,116 @@ migrations/0013_wsf2.sql      (dse_access_bundle, dse_console_identity,
                                dse_kill_switch_global, dse_work_item_quarantine)
 infra/ADR-22-identity.md      (design doc SSO/SCIM/offboarding)
 docker-compose.wsf.yml        (+ serviço queue-board na 8890)
+```
+
+---
+
+## Fase 3 — o que foi adicionado
+
+WS-F Fase 3 ("Evidence"): **ADR-28 completo** (rotação agendada de secrets +
+secrets de preview via ESO), **retenção por classificação de dados**
+(WSF-E8-T2/§12.2) e **ativação do alerta de history do Temporal**
+(ALERTING-RULES §3). Tudo aditivo sobre Fases 1+2. Migração reservada:
+`migrations/0018_wsf3.sql`. Nenhuma porta nova.
+
+### Mapa de entrega (Fase 3)
+
+| Tarefa | Onde | Prova |
+|---|---|---|
+| **WSF-E2-T3b(a) — rotação AGENDADA de secrets de serviço** | `dse_platform/secret_rotation.py` (`rotate_secret`/`rotate_from_manifest`) + `dse_platform/jobs_scheduler.py` + serviço `platform-jobs` no `docker-compose.wsf.yml` | `tests/test_secret_rotation.py` — contra o Vault REAL: **leitor ativo concorrente em loop durante 5 rotações = zero janela de erro** (aceite literal da tarefa), 1 audit row por rotação (`service_secret_rotated`) SEM nunca vazar o material, generator igual/vazio recusado (P6), manifest isola falhas, entrypoint agendado exercitado. Rodado também DENTRO do container (`docker exec dse_platform_jobs python -m dse_platform.jobs_scheduler --once` → rotacionou `dse/service/queue-board-session` v1→v2) |
+| **WSF-E2-T3b(b) — secrets de preview via ESO** | `infra/k8s-local/setup-eso.sh` (ESO **2.8.0 pinado** via helm, instalado DE VERDADE no k3d `dse-preview`) + `infra/k8s-local/eso/*.yaml` (ClusterSecretStore `dse-vault` + exemplo) | `tests/test_eso_preview_secrets.py` — Secret k8s **materializa num namespace de preview a partir do Vault do compose** (rede dse_net, `http://vault:8200`), rotação no Vault se propaga no refreshInterval, e **teste negativo de escopo**: ExternalSecret apontando para `dse/service/*` NUNCA fica Ready (token do ESO é escopado por policy `dse-preview-read` a `secret/data/dse/preview/*` — nenhum root token entra no cluster) |
+| **WSF-E8-T2 — retenção por classificação** | `dse_platform/retention.py` + `migrations/0018_wsf3.sql` (`tenant_config.retention` JSONB + índice em `ingest_events.received_at`) | `tests/test_retention.py` (16 testes, Postgres real) — política por tenant/classe com validação de shape, anonimização de `ingest_events.payload` (tombstone; só `processed`, só a classe, idempotente), expurgo de `wse_artifacts` (JOIN `work_items` p/ data_class; **quarentenado nunca expurgado**; chaves deletadas no audit row p/ cleanup compensatório no Garage), dry-run sem mutação, **audit_log recusado como alvo em código** + linhas antigas de audit sobrevivem, falha de 1 tenant não aborta a sweep (auditada como `retention_failed`) |
+| **ALERTING-RULES §3 ATIVADA — history do Temporal** | `infra/otel-collector-config.yaml` (pipeline `metrics/history_alert`: `filter` OTTL + `transform` severity + exporter `debug/history_alert`) | `tests/test_history_alert.py` — OTLP real contra o collector da fundação: acima do threshold aparece no canal de alerta com `dse.alert_severity=warning|critical` corretos (eventos E bytes), abaixo do threshold e métricas não-history NUNCA vazam |
+
+### Decisão P7 (pedida pelo aceite): scheduler Python no compose, não CronJob no k3d
+
+Justificativa completa no docstring de `dse_platform/jobs_scheduler.py`. Curto:
+os consumidores dos secrets de serviço (adapters/gateway/broker) e o Postgres
+alvo da retenção vivem no docker-compose — agendar no cluster criaria
+dependência cruzada de runtime sem ganho. O MESMO módulo roda como CronJob em
+K8s real (`python -m dse_platform.jobs_scheduler --once` — testado). Temporal
+Schedules foi rejeitado por acoplar a rotação à disponibilidade de um
+consumidor indireto dela.
+
+### Contratos de consumo (cross-workstream) da Fase 3
+
+```python
+# WS-E (previews, WSE-E4-T10): secrets de preview via ESO —
+#   secretStoreRef: { kind: ClusterSecretStore, name: dse-vault }
+#   paths no Vault: secret/dse/preview/<...>   (KV v2, mount "secret")
+# (exemplo vivo: kubectl -n dse-preview-example get externalsecret)
+
+# WS-E (lifecycle do artifact store): política de retenção é fonte única daqui
+from dse_platform import get_retention_policies, set_retention_policy, run_retention
+
+# rotação para qualquer serviço que precise trocar um secret interno
+from dse_platform import rotate_secret
+rotate_secret("dse/service/meu-secret", actor="system:secret-rotator")
+```
+
+### Pedidos registrados para outros workstreams (não editamos nada deles)
+
+- **WS-E**: (1) `GRANT DELETE ON wse_artifacts TO dse_app` na integração —
+  até lá o expurgo real de artifacts reporta `skipped` com razão explícita
+  (dry-run/contagem funciona; o teste prova o expurgo com conexão
+  privilegiada); (2) consumir `purged_store_keys` do audit row
+  `retention_executed` para deletar os objetos correspondentes no Garage.
+- **WS-B**: pinar o nome canônico da métrica de history (o filtro aceita
+  `dse.workflow.history_length`/`history_size_bytes` e as variantes
+  `temporal_workflow_event_history_*` — ver ALERTING-RULES §3 atualizado).
+- **Fundação**: promover o nome da métrica a `dse_contracts.constants`
+  (`OTEL_METRIC_HISTORY_LENGTH`) na próxima janela de contrato.
+
+### Gaps honestos (Fase 3)
+
+- **Rotação de credenciais de PROVEDOR externo** (Slack bot/GitHub App/Jira):
+  o mecanismo (versionamento KV v2 + verificação + audit + agenda) está
+  completo e provado; emitir a credencial nova na API do provedor exige apps
+  reais (pendência administrativa herdada) — é implementar um `Generator`
+  por integração (interface documentada em `secret_rotation.py`).
+- **Vault continua dev-mode** (fundação, Fases 1-3): o hardening do deploy
+  (HA/auto-unseal) é infra de produção — o caminho ESO/policies/tokens
+  escopados já é o de produção. `setup-eso.sh --rotate` troca o token do ESO.
+- **Alerta de history**: canal MVP é o stdout do collector (linha com
+  `dse.alert=...`); upgrade para Alertmanager documentado em
+  ALERTING-RULES §3. A emissão CONTÍNUA da métrica é do WS-B (em paralelo
+  nesta fase); o teste prova o pipeline com OTLP real emitido pelo teste.
+- **k3d/ESO indisponíveis** ⇒ os testes de ESO skipam com razão explícita
+  (mesmo padrão do egress-proxy na Fase 1) — rode
+  `infra/k8s-local/setup-k3d-argocd.sh` e `infra/k8s-local/setup-eso.sh`.
+
+### Rodar (Fase 3)
+
+```bash
+source .venv-wsf/bin/activate   # mesmo venv das fases anteriores
+export DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse \
+       DSE_AUDIT_DATABASE_URL=postgresql://dse_app:dse_app_dev_only@localhost:5432/dse \
+       DSE_PLATFORM_DATABASE_URL=postgresql://dse_app:dse_app_dev_only@localhost:5432/dse \
+       VAULT_ADDR=http://localhost:8200 VAULT_DEV_ROOT_TOKEN=dse_dev_root
+python scripts/migrate.py                      # aplica 0018_wsf3.sql
+./infra/k8s-local/setup-eso.sh                 # ESO 2.8.0 + SecretStore + exemplo
+pytest -q packages/dse_audit services/platform # 121 passed, 2 skipped
+
+# jobs agendados (compose)
+docker compose -f docker-compose.yml -f docker-compose.wsf.yml up -d platform-jobs
+docker exec dse_platform_jobs python -m dse_platform.jobs_scheduler --once  # modo CronJob
+```
+
+### Estrutura adicionada (Fase 3)
+
+```
+services/platform/
+  dse_platform/
+    secret_rotation.py       (WSF-E2-T3b(a) — rotação sem downtime + audit)
+    retention.py              (WSF-E8-T2 — política por classe + expurgo/anonimização)
+    jobs_scheduler.py         (agendador; compose service OU CronJob --once)
+  tests/
+    test_secret_rotation.py  test_retention.py
+    test_eso_preview_secrets.py  test_history_alert.py
+
+migrations/0018_wsf3.sql      (tenant_config.retention + índice received_at)
+infra/k8s-local/setup-eso.sh  (ESO 2.8.0 pinado + policy/token escopados)
+infra/k8s-local/eso/          (ClusterSecretStore dse-vault + exemplo de preview)
+infra/otel-collector-config.yaml  (+ pipeline metrics/history_alert — §3 ATIVA)
+docker-compose.wsf.yml        (+ serviço platform-jobs)
 ```

@@ -26,7 +26,18 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("ECHO_PORT", "9000"))
-MODEL_NAME = "echo-model"
+# Fase 3 (WSD-E4-T1): o nome do "modelo" servido é configurável para que a
+# segunda instância (fallback intra-tier, container dse_model_gateway_echo_b)
+# seja distinguível da primária em logs/respostas.
+MODEL_NAME = os.environ.get("ECHO_MODEL_NAME", "echo-model")
+
+# Fase 3 (WSD-E4-T3, chaos "exaustão de quota"): se a última mensagem de user
+# contiver este marcador, o servidor responde 429 no shape de erro OpenAI —
+# simulação DETERMINÍSTICA (mesma entrada -> mesma saída, sem estado, sem
+# relógio) do throttling de quota de um provider real (ex.: Bedrock
+# ThrottlingException). Permite provar a fronteira limpa (P6) do gateway sob
+# quota exhaustion sem depender de uma quota real esgotável.
+QUOTA_EXHAUSTED_MARKER = "[[SIMULATE_QUOTA_EXHAUSTED]]"
 
 
 def _deterministic_completion(messages: list[dict]) -> str:
@@ -95,6 +106,27 @@ class EchoHandler(BaseHTTPRequestHandler):
             return
 
         messages = payload.get("messages", [])
+
+        # Chaos hook determinístico (WSD-E4-T3): quota exhaustion simulada.
+        last_user = ""
+        for m in reversed(messages or []):
+            if m.get("role") == "user":
+                last_user = str(m.get("content", ""))
+                break
+        if QUOTA_EXHAUSTED_MARKER in last_user:
+            self._send_json(
+                429,
+                {
+                    "error": {
+                        "message": f"simulated provider quota exhausted ({MODEL_NAME})",
+                        "type": "rate_limit_error",
+                        "param": None,
+                        "code": "429",
+                    }
+                },
+            )
+            return
+
         completion_text = _deterministic_completion(messages)
 
         prompt_text = " ".join(str(m.get("content", "")) for m in messages)

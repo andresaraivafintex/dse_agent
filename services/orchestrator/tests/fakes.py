@@ -60,19 +60,28 @@ from dse_contracts.activities import (
     ACTIVITY_PROVISION_SANDBOX,
     ACTIVITY_REBUILD_SANDBOX,
     ACTIVITY_RUN_CODER_TURN,
+    ACTIVITY_RUN_DEMO_EVIDENCE,
     ACTIVITY_RUN_L1_PIPELINE,
     ACTIVITY_RUN_L2_REVIEW,
     ACTIVITY_RUN_PLANNER_TURN,
     ACTIVITY_RUN_TESTER_TURN,
+    ACTIVITY_RUN_VISUAL_DIFF,
     ACTIVITY_TEARDOWN_SANDBOX,
+    ACTIVITY_TRIGGER_PREVIEW,
     CheckpointRef,
     CiStatusResult,
     CoderTurnResult,
+    DemoEvidenceResult,
     L1Finding,
     L1Result,
     L2Verdict,
+    PreviewRef,
     PrRef,
+    RunDemoEvidenceInput,
+    RunVisualDiffInput,
     SandboxHandle,
+    TriggerPreviewInput,
+    VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
 
@@ -121,6 +130,26 @@ class FakeControlPlane:
     # simula oscilacao TRANSIENTE do gateway (LiteLLM instavel mid-task): nome
     # da activity -> {"times": N}. Erro RETRYABLE -> Temporal retenta ate passar.
     transient_fail_on: dict = field(default_factory=dict)
+
+    # --- Fase 3: pipeline de evidencia (fronteira WS-E) ---
+    # Os fakes DECODIFICAM o payload com os models REAIS do contrato
+    # (TriggerPreviewInput/RunDemoEvidenceInput/RunVisualDiffInput) — nada de
+    # dict leniente (licao do adendo 02: 14 bugs de boundary nas Fases 1-2).
+    trigger_preview_calls: int = 0
+    demo_evidence_calls: int = 0
+    visual_diff_calls: int = 0
+    # files_changed que o fake Coder reporta (dirige o paths-filter do preview)
+    coder_files_changed: list[str] = field(default_factory=lambda: ["app.py"])
+    # "auto" = paths-filter deterministico (espelho do FR-20 do WS-E);
+    # "created"/"degraded" forcam o status; "raise" derruba a Activity inteira.
+    preview_mode: str = "auto"
+    demo_passed: bool = True
+    demo_video_key: str | None = "evidence/demo.webm"
+    demo_trace_key: str | None = "evidence/trace.zip"
+    visual_diff_changed_pct: float = 0.0
+    last_preview_payload: dict | None = None
+    last_demo_payload: dict | None = None
+    last_visual_diff_payload: dict | None = None
 
 
 def build_fake_activities(state: FakeControlPlane) -> list[Any]:
@@ -184,7 +213,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         return CoderTurnResult(
             sandbox_id=payload["sandbox_id"],
             diff_summary="fake diff",
-            files_changed=["app.py"],
+            files_changed=list(state.coder_files_changed),
             cost_usd=state.coder_cost_usd,
             tokens_in=10,
             tokens_out=10,
@@ -253,6 +282,66 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             work_item_id=payload["work_item_id"], pr_number=payload["pr_number"], status=status
         )
 
+    # ------------------------------------------------------------------
+    # Fase 3 — pipeline de evidencia (fronteira WS-E). Cada fake decodifica o
+    # payload com o MODEL REAL do contrato: se o call site do workflow deriva
+    # do contrato, o teste quebra AQUI (nao no wire) — licao do adendo 02.
+    # ------------------------------------------------------------------
+    def _ui_touching(files: list[str]) -> bool:
+        # espelho do paths-filter deterministico do WS-E (FR-20) para o fake:
+        # prefixos ui/ e frontend/ + extensoes de UI dos globs default.
+        for f in files:
+            if f.startswith(("ui/", "frontend/")) or f.endswith((".css", ".tsx", ".jsx")):
+                return True
+        return False
+
+    async def trigger_preview(payload: dict) -> PreviewRef:
+        state.trigger_preview_calls += 1
+        state.calls_log.append("trigger_preview")
+        state.last_preview_payload = dict(payload)
+        inp = TriggerPreviewInput(**payload)  # decode REAL do contrato
+        if state.preview_mode == "raise":
+            raise ApplicationError("argocd unreachable (fake)",
+                                   type="PreviewProvisionError", non_retryable=True)
+        if state.preview_mode == "degraded":
+            return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
+                              status="degraded", detail="argocd sync failed (fake)")
+        if state.preview_mode == "created" or _ui_touching(inp.files_changed):
+            return PreviewRef(
+                work_item_id=inp.work_item_id, pr_number=inp.pr_number, status="created",
+                namespace=f"preview-{inp.work_item_id}",
+                url=f"http://preview-{inp.work_item_id}.local",
+            )
+        return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
+                          status="skipped_backend_only",
+                          detail="paths-filter: nenhum path de UI (FR-20)")
+
+    async def run_demo_evidence(payload: dict) -> DemoEvidenceResult:
+        state.demo_evidence_calls += 1
+        state.calls_log.append("run_demo_evidence")
+        state.last_demo_payload = dict(payload)
+        inp = RunDemoEvidenceInput(**payload)  # decode REAL do contrato
+        return DemoEvidenceResult(
+            work_item_id=inp.work_item_id, passed=state.demo_passed,
+            video_artifact_key=state.demo_video_key,
+            trace_artifact_key=state.demo_trace_key,
+            duration_s=1.2, detail="fake demo (publish interno ao WS-E)",
+        )
+
+    async def run_visual_diff(payload: dict) -> VisualDiffResult:
+        state.visual_diff_calls += 1
+        state.calls_log.append("run_visual_diff")
+        state.last_visual_diff_payload = dict(payload)
+        inp = RunVisualDiffInput(**payload)  # decode REAL do contrato
+        baseline_created = inp.base_screenshot_key is None
+        return VisualDiffResult(
+            work_item_id=inp.work_item_id,
+            passed=state.visual_diff_changed_pct <= inp.threshold_pct,
+            changed_pct=state.visual_diff_changed_pct,
+            diff_artifact_key=f"evidence/{inp.work_item_id}/visual.png",
+            baseline_created=baseline_created,
+        )
+
     return [
         activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)(run_planner_turn),
         activity.defn(name=ACTIVITY_RUN_TESTER_TURN)(run_tester_turn),
@@ -266,4 +355,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         activity.defn(name=ACTIVITY_FINALIZE_PR)(finalize_pr),
         activity.defn(name=ACTIVITY_POST_TRACKING_COMMENT)(post_tracking_comment),
         activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)(consume_ci_status),
+        activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)(trigger_preview),
+        activity.defn(name=ACTIVITY_RUN_DEMO_EVIDENCE)(run_demo_evidence),
+        activity.defn(name=ACTIVITY_RUN_VISUAL_DIFF)(run_visual_diff),
     ]

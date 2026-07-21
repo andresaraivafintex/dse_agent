@@ -52,6 +52,11 @@ class ResourceCaps:
     cpu_limit: float
     memory_mb: int
     pids_limit: int
+    # Fase 3 (WSC-E3-T4b): tamanho do tmpfs de /tmp. O default de 64MB da
+    # Fase 1 continua; o run de evidência @demo (chromium headless escreve
+    # scratch/crashpad em /tmp) usa `budget={"tmp_mb": 256}`. Aditivo — não
+    # muda nenhum comportamento existente.
+    tmp_mb: int = 64
 
     @classmethod
     def from_budget(cls, budget: dict[str, Any] | None) -> "ResourceCaps":
@@ -63,6 +68,7 @@ class ResourceCaps:
             cpu_limit=float(budget.get("cpu_limit", defaults["cpu_limit"])),
             memory_mb=int(budget.get("memory_mb", defaults["memory_mb"])),
             pids_limit=int(budget.get("pids_limit", defaults["pids_limit"])),
+            tmp_mb=int(budget.get("tmp_mb", 64)),
         )
 
 
@@ -161,7 +167,7 @@ def provision_container(
         detach=True,
         user=user,
         read_only=True,
-        tmpfs={"/tmp": "size=64m,mode=1777"},
+        tmpfs={"/tmp": f"size={caps.tmp_mb}m,mode=1777"},
         cap_drop=["ALL"],
         security_opt=["no-new-privileges"],
         network=SANDBOX_NETWORK_NAME,
