@@ -147,6 +147,47 @@ def _upsert_work_item(cur, wi) -> None:
 
 
 # ---------------------------------------------------------------------------
+# work_item_evidence -> work_items_view (preview_status/url) — plano 08 §D (D5)
+# ---------------------------------------------------------------------------
+
+def _project_evidence(cur) -> int:
+    """Reflete o estado do pipeline de evidência (preview/demo) na view. Keyset
+    (updated_at, work_item_id) — mesmo padrão de _project_work_items; drena até
+    0. Só ATUALIZA a linha da view (o work item sempre existe antes da
+    evidência); se a linha ainda não foi projetada, o UPDATE é no-op e o cursor
+    avança (a evidência entra quando o work item for projetado — idempotente)."""
+    _, last_seen, last_key = _cursor(cur, "work_item_evidence")
+    if last_seen is None:
+        cur.execute(
+            "SELECT work_item_id, preview_status, preview_url, demo_passed, "
+            "video_artifact_key, trace_artifact_key, updated_at "
+            "FROM work_item_evidence ORDER BY updated_at, work_item_id LIMIT %s", (_BATCH,))
+    else:
+        cur.execute(
+            "SELECT work_item_id, preview_status, preview_url, demo_passed, "
+            "video_artifact_key, trace_artifact_key, updated_at "
+            "FROM work_item_evidence WHERE (updated_at, work_item_id) > (%s, %s) "
+            "ORDER BY updated_at, work_item_id LIMIT %s",
+            (last_seen, last_key or "", _BATCH),
+        )
+    rows = cur.fetchall()
+    if not rows:
+        return 0
+    for row in rows:
+        cur.execute(
+            "UPDATE console_rm.work_items_view SET "
+            "preview_status = %s, preview_url = %s, demo_passed = %s, "
+            "video_artifact_key = %s, trace_artifact_key = %s "
+            "WHERE work_item_id = %s",
+            (row["preview_status"], row["preview_url"], row["demo_passed"],
+             row["video_artifact_key"], row["trace_artifact_key"], row["work_item_id"]),
+        )
+    tail = rows[-1]
+    _advance(cur, "work_item_evidence", last_seen=tail["updated_at"], last_key=tail["work_item_id"])
+    return len(rows)
+
+
+# ---------------------------------------------------------------------------
 # audit_log -> timeline_events (+ last_event na view)
 # ---------------------------------------------------------------------------
 
@@ -267,6 +308,8 @@ def run_once(conn) -> dict[str, int]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             counts = {
                 "work_items": _project_work_items(cur),
+                # depois de work_items: a evidência ATUALIZA a linha da view (§D D5)
+                "work_item_evidence": _project_evidence(cur),
                 "audit_log": _project_audit(cur),
                 "model_call_ledger": _project_ledger(cur),
             }

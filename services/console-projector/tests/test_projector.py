@@ -37,6 +37,7 @@ def _cleanup(wi_id: str) -> None:
                 "DELETE FROM console_rm.timeline_events WHERE work_item_id = %s",
                 "DELETE FROM console_rm.runs_view WHERE work_item_id = %s",
                 "DELETE FROM console_rm.work_items_view WHERE work_item_id = %s",
+                "DELETE FROM work_item_evidence WHERE work_item_id = %s",
                 "DELETE FROM model_call_ledger WHERE work_item_id = %s",
                 "DELETE FROM ingest_events WHERE work_item_id = %s",
                 "DELETE FROM work_items WHERE id = %s",
@@ -181,6 +182,39 @@ def test_status_transition_reprojects():
             )
             status, phase = cur.fetchone()
             assert (status, phase) == ("blocked", "escalated")
+    finally:
+        conn.rollback()
+        conn.close()
+        _cleanup(wi_id)
+
+
+def test_projects_evidence_preview_into_view():
+    """Plano 08 §D (D5): o preview_status/url de work_item_evidence chega na
+    work_items_view (o painel mostra o link do preview ao lado do PR)."""
+    conn = psycopg2.connect(DSN)
+    wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
+    try:
+        _seed(conn, wi_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO work_item_evidence (work_item_id, tenant_id, preview_status, "
+                "preview_url, demo_passed, video_artifact_key) "
+                "VALUES (%s, 'crm-test', 'created', %s, true, 'evidence/demo.webm')",
+                (wi_id, "https://preview-x.preview.dse.local"),
+            )
+        conn.commit()
+        drain(conn)
+        drain(conn)  # idempotência
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT preview_status, preview_url, demo_passed, video_artifact_key "
+                "FROM console_rm.work_items_view WHERE work_item_id = %s", (wi_id,),
+            )
+            row = cur.fetchone()
+            assert row["preview_status"] == "created"
+            assert row["preview_url"] == "https://preview-x.preview.dse.local"
+            assert row["demo_passed"] is True
+            assert row["video_artifact_key"] == "evidence/demo.webm"
     finally:
         conn.rollback()
         conn.close()
