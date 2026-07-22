@@ -39,6 +39,9 @@ COPY services/orchestrator /app/services/orchestrator
 # instaladas neste mesmo venv para o import defensivo achar `ACTIVITIES`.
 COPY services/sandbox-runtime /app/services/sandbox-runtime
 COPY services/validation /app/services/validation
+# Planner real: o proposer chama o modelo via model_gateway_client (enforcement
+# client-side + LEDGER de custo do stage=planner no caminho — WSD).
+COPY services/model-gateway /app/services/model-gateway
 
 RUN pip install --no-cache-dir \
         -e /app/packages/contracts \
@@ -46,6 +49,7 @@ RUN pip install --no-cache-dir \
         -e /app/packages/dse_identity \
         -e /app/services/sandbox-runtime \
         -e /app/services/validation \
+        -e /app/services/model-gateway \
         -e /app/services/orchestrator
 
 # S5 (Fase 5): só o Claude Agent SDK (o substrato do Coder real). NÃO uso o

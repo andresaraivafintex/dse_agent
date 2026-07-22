@@ -38,6 +38,8 @@ services:
       # Consumidos pelas Activities cross-workstream registradas neste worker
       # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
       DSE_MODEL_GATEWAY_URL: http://model-gateway:4000
+      # model_gateway_client (planner real via gateway) usa ESTE nome de env:
+      DSE_MODEL_GATEWAY_BASE_URL: http://model-gateway:4000
       DSE_SANDBOX_STATE_DIR: /tmp/dse-sandboxes
       # PoC (2026-07-21): Coder aponta para o alias real da Anthropic no gateway
       # e minta a virtual key via /key/generate com a master key (control plane).

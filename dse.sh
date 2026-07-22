@@ -12,6 +12,10 @@
 #    ./dse.sh status           saúde de cada peça
 #    ./dse.sh logs [svc]       logs (compose) ou do painel (console-api|console-ui)
 #    ./dse.sh secrets          cria/mostra o template do secrets.env
+#    ./dse.sh tunnel           túnel público → adapter-github (webhook do GitHub
+#                              App). Quick tunnel: a URL MUDA a cada subida —
+#                              atualize-a no GitHub App (Settings → Developer
+#                              settings → GitHub Apps → Webhook URL)
 #
 #  Secrets: o arquivo ./secrets.env (gitignored, chmod 600) é a fonte local.
 #  Sem ele o sistema sobe em "modo local" (echo model, sem GitHub/Slack/Jira
@@ -114,7 +118,15 @@ cmd_start() {
   if [ "$SECRETS_LOADED" = yes ]; then
     say "$G" "secrets.env carregado"
     [ -z "${GITHUB_APP_ID:-}" ]     && say "$Y" "GITHUB_APP_* vazio — PRs/comentários reais desativados"
-    [ -z "${ANTHROPIC_API_KEY:-}" ] && say "$Y" "ANTHROPIC_API_KEY vazia — só o echo model (sem Coder real)"
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      # com a key, o Planner/Coder rodam com o Claude REAL (via gateway +
+      # virtual key). Sem export, o compose cai no default 'fake' — que gera
+      # plano vazio e a tarefa escala no gate (achado do primeiro disparo real).
+      export DSE_CODER_SUBSTRATE="${DSE_CODER_SUBSTRATE:-claude-agent}"
+      say "$G" "substrato do Coder: $DSE_CODER_SUBSTRATE (Claude real via gateway)"
+    else
+      say "$Y" "ANTHROPIC_API_KEY vazia — substrato fake (sem Coder real)"
+    fi
   else
     secrets_template
     say "$Y" "secrets.env não existia — TEMPLATE criado em $SECRETS_FILE"
@@ -233,6 +245,11 @@ cmd_status() {
   else
     say "$Y" "GitHub App creds AUSENTES (fluxo real de PR desativado — preencha secrets.env)"
   fi
+  if [ -f "$TUNNEL_DIR/webhook.pid" ] && kill -0 "$(cat "$TUNNEL_DIR/webhook.pid")" 2>/dev/null; then
+    say "$G" "túnel do webhook: $(tunnel_url)"
+  else
+    say "$Y" "túnel do webhook parado (./dse.sh tunnel para o GitHub alcançar o adapter)"
+  fi
 }
 
 # --------------------------------------------------------------------- stop --
@@ -245,6 +262,7 @@ cmd_stop() {
   pkill -f "tsx src/server.ts" 2>/dev/null || true
   pkill -f "next dev -p ${CONSOLE_UI_PORT}" 2>/dev/null || true
   say "$G" "painel parado"
+  [ -f "$TUNNEL_DIR/webhook.pid" ] && kill "$(cat "$TUNNEL_DIR/webhook.pid")" 2>/dev/null && rm -f "$TUNNEL_DIR/webhook.pid" && say "$G" "túnel parado" || true
   step "parando serviços"
   if [ "$ALL" = yes ]; then
     # shellcheck disable=SC2086
@@ -256,6 +274,34 @@ cmd_stop() {
     docker compose $COMPOSE_ARGS stop
     say "$G" "containers parados (estado preservado — ./dse.sh start religa)"
   fi
+}
+
+# ------------------------------------------------------------------- tunnel --
+TUNNEL_DIR="$ROOT/.tunnel"
+tunnel_url() { grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$TUNNEL_DIR/webhook.log" 2>/dev/null | head -1; }
+
+cmd_tunnel() {
+  command -v cloudflared >/dev/null || { say "$R" "cloudflared não instalado (brew install cloudflared)"; exit 1; }
+  mkdir -p "$TUNNEL_DIR"
+  if [ -f "$TUNNEL_DIR/webhook.pid" ] && kill -0 "$(cat "$TUNNEL_DIR/webhook.pid")" 2>/dev/null; then
+    say "$G" "túnel já rodando: $(tunnel_url)"
+  else
+    : > "$TUNNEL_DIR/webhook.log"
+    nohup cloudflared tunnel --url http://localhost:8802 > "$TUNNEL_DIR/webhook.log" 2>&1 &
+    echo $! > "$TUNNEL_DIR/webhook.pid"
+    until tunnel_url >/dev/null 2>&1 && [ -n "$(tunnel_url)" ]; do sleep 1; done
+    say "$G" "túnel no ar: $(tunnel_url)"
+  fi
+  cat <<EOF
+
+  Webhook URL para o GitHub App (atualize se mudou):
+    $(tunnel_url)/github/webhook
+
+  GitHub → Settings → Developer settings → GitHub Apps → DSE Fintex Demo
+  → Webhook URL. (Quick tunnel: a URL muda a cada subida do túnel. Para URL
+  fixa: túnel nomeado com seu domínio — ver infra/preview-exposure.md, mesmo
+  mecanismo.)
+EOF
 }
 
 # --------------------------------------------------------------------- logs --
@@ -275,6 +321,7 @@ case "${1:-}" in
   stop)    shift; cmd_stop "${1:-}" ;;
   status)  load_secrets; cmd_status ;;
   logs)    shift; cmd_logs "${1:-}" ;;
+  tunnel)  cmd_tunnel ;;
   secrets) [ -f "$SECRETS_FILE" ] && { echo "já existe: $SECRETS_FILE (chaves:)"; grep -oE "^[A-Z_]+" "$SECRETS_FILE"; } || { secrets_template; echo "template criado: $SECRETS_FILE"; } ;;
   *) sed -n '3,20p' "$0" ;;
 esac

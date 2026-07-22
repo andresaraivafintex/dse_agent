@@ -19,10 +19,14 @@ NUNCA guarda estado em memória de processo entre chamadas. Todo estado vive:
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("sandbox_runtime.activities")
 
 from pydantic import BaseModel, Field, model_validator
 from temporalio import activity
@@ -47,8 +51,16 @@ from dse_contracts import (
 )
 
 from . import docker_driver, git_checkpoint, leases_store, metrics
+from .activity_heartbeat import run_sync_with_heartbeat
+from .driver import DEFAULT_SANDBOX_DRIVER
 from .model_gateway_client import mint_virtual_key
 from .retrieval import RetrievalService
+from .runtime_profile import (
+    RuntimeProfile,
+    reject_local_agent_execution,
+    validate_runtime_profile,
+    validate_runtime_startup,
+)
 from .scoped_git import GitScopeViolation, ScopedGitSession
 from .sessions import (
     FreshReviewerSession,
@@ -58,7 +70,7 @@ from .sessions import (
     classify_risk_class,
     hydrate_planner_context,
 )
-from .substrate import AgentSubstrate, FakeSubstrate, substrate_from_env
+from .substrate import SUBSTRATE_ENV_VAR, AgentSubstrate, FakeSubstrate, substrate_from_env
 from .toolsets import PlannerToolset, TesterToolset
 
 _STATE_DIR = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
@@ -93,6 +105,7 @@ class ProvisionSandboxInput(BaseModel):
 
 @activity.defn(name=ACTIVITY_PROVISION_SANDBOX)
 async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
+    profile = validate_runtime_startup()
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
@@ -115,6 +128,12 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
             )
             if cloned and not repo_clone.token_absent_from_config(workspace_dir):
                 raise RuntimeError("SEGURANCA: token vazou no git config do workspace")
+            if not cloned and profile is RuntimeProfile.production:
+                validate_runtime_profile(
+                    local_fallback=(
+                        f"clone de {inp.repo!r} falhou/sem credencial e cairia para workspace vazio"
+                    )
+                )
         if not cloned:
             git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
 
@@ -207,6 +226,7 @@ class RebuildSandboxInput(BaseModel):
 
 @activity.defn(name=ACTIVITY_REBUILD_SANDBOX)
 async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
+    validate_runtime_startup()
     branch = inp.branch or _default_branch(inp.work_item_id)
     old_workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
@@ -340,6 +360,7 @@ async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
     injeção de dependência para teste (`substrate`/`script`) vivem em
     `_run_coder_turn_impl`, chamada tanto por aqui (produção, sem overrides)
     quanto diretamente pelos testes (com `FakeSubstrate` roteirizado)."""
+    reject_local_agent_execution("coder")
     return await _run_coder_turn_impl(inp)
 
 
@@ -385,7 +406,13 @@ async def _run_coder_turn_impl(
     max_turns = 8
     turns = 0
     while not done and turns < max_turns:
-        log = agent.run_turn(inp.instruction)
+        log = await run_sync_with_heartbeat(
+            agent.run_turn,
+            inp.instruction,
+            stage=inp.stage,
+            work_item_id=inp.work_item_id,
+            operation=f"substrate_turn_{turns + 1}",
+        )
         done = log.done
         turns += 1
 
@@ -450,10 +477,10 @@ from dse_contracts import RunPlannerTurnInput  # noqa: E402
 
 def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> dict[str, Any]:
     """Proposta MÍNIMA de plano quando nenhum substrato real está plugado —
-    fixture claramente marcado (mesmo espírito do `FakeSubstrate` do Coder). Em
-    produção, uma sessão OpenHands read-only (toolset planner) propõe
-    steps/expected_files/test_plan a partir de `ctx.render()`; o override real
-    é wireável por `_run_planner_turn_impl(..., proposer=...)`. Ver README."""
+    fixture claramente marcado (mesmo espírito do `FakeSubstrate` do Coder).
+    Com a guarda anti-PR-oco do WS-B (`planner_expected_files_empty_...`), um
+    plano deste fixture ESCALA no gate — comportamento deliberado: sem modelo
+    real, o DSE não finge planejar."""
     return {
         "steps": [f"Analisar e implementar: {inp.instruction[:120]}"],
         "expected_files": [],
@@ -461,11 +488,85 @@ def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> d
     }
 
 
+_PLAN_PROMPT = """Você é o Planner do Fintex DSE (engenheiro de software autônomo).
+Com base na tarefa abaixo, produza um plano de implementação MÍNIMO e verificável.
+
+Responda APENAS com um objeto JSON válido (sem markdown, sem comentários), no formato:
+{{"steps": ["passo 1", "passo 2", ...],
+  "expected_files": ["caminho/relativo/provavel1", "caminho2", ...],
+  "test_plan": "como verificar a mudança"}}
+
+Regras:
+- "expected_files": os caminhos de arquivo que você espera CRIAR/EDITAR no repo
+  (relativos à raiz). Proponha os caminhos mais prováveis pela convenção do
+  ecossistema do repo; a lista guia o gate de completude, não precisa ser exata,
+  mas NUNCA pode ser vazia.
+- 2 a 6 steps, específicos e executáveis.
+- Não inclua nada além do JSON.
+
+## Tarefa
+{context}
+"""
+
+
+def _model_plan_proposer(
+    ctx: PlannerContext, inp: "RunPlannerTurnInput", headers: Any, virtual_key: str
+) -> dict[str, Any] | None:
+    """Plano proposto pelo MODELO REAL via gateway (stage=planner, virtual key,
+    enforcement + ledger de custo no caminho — WSD). Retorna None em qualquer
+    falha (import ausente, chamada recusada, JSON inválido) — o caller cai no
+    fixture e a guarda do WS-B escala LIMPO (P6), nunca um plano inventado.
+
+    P1 preservado: o modelo só PROPÕE steps/expected_files/test_plan; risco e
+    gates continuam derivados deterministicamente (classify_risk_class)."""
+    try:
+        from model_gateway_client.gateway_call import chat_completion
+    except ImportError:
+        logger.warning("model_gateway_client indisponível — planner segue no fixture")
+        return None
+
+    model = os.environ.get("DSE_PLANNER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
+    prompt = _PLAN_PROMPT.format(context=ctx.render()[:12000])
+    try:
+        result = chat_completion(
+            headers=headers,
+            virtual_key=virtual_key,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=120.0,
+            max_tokens=1500,
+            temperature=0,
+        )
+    except Exception as exc:  # noqa: BLE001 — recusa/erro => fixture (escala limpa)
+        logger.warning("planner via modelo falhou (%s: %s) — fixture", type(exc).__name__, str(exc)[:200])
+        return None
+
+    text = (result.content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`\n")
+        text = text[4:] if text.startswith("json") else text
+    try:
+        proposal = json.loads(text.strip())
+        steps = [str(s) for s in proposal.get("steps", []) if str(s).strip()]
+        files = [str(f) for f in proposal.get("expected_files", []) if str(f).strip()]
+        if not steps or not files:
+            raise ValueError("steps/expected_files vazios")
+        return {
+            "steps": steps[:10],
+            "expected_files": files[:30],
+            "test_plan": str(proposal.get("test_plan") or "Cobrir a mudança com testes (Tester turn)."),
+        }
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning("plano do modelo não parseou (%s) — fixture; resposta: %.200s", exc, text)
+        return None
+
+
 @activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)
 async def run_planner_turn(inp: RunPlannerTurnInput) -> PlanArtifact:
     """Wrapper fino registrado como Activity Temporal (mesmo padrão de
     `run_coder_turn`). A lógica e os pontos de injeção para teste vivem em
     `_run_planner_turn_impl`."""
+    reject_local_agent_execution("planner")
     return await _run_planner_turn_impl(inp)
 
 
@@ -527,9 +628,35 @@ async def _run_planner_turn_impl(
         },
     )
     if exploration_script:
-        session.run_script(exploration_script)
+        await run_sync_with_heartbeat(
+            session.run_script,
+            exploration_script,
+            stage=Stage.planner.value,
+            work_item_id=inp.work_item_id,
+            operation="planner_exploration",
+        )
 
-    proposal = (proposer or (lambda c: _default_plan_proposer(c, inp)))(ctx)
+    # Seleção do proposer (P1 — por CONFIG, nunca por modelo):
+    #   proposer explícito (testes) > modelo real (substrato != fake) com
+    #   fallback ao fixture > fixture. O fixture tem expected_files vazio e a
+    #   guarda do WS-B escala — deliberado quando não há modelo.
+    if proposer is not None:
+        proposal_fn = proposer
+    elif os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
+        def proposal_fn(c):  # noqa: ANN001 — assinatura do run_sync_with_heartbeat
+            return (
+                _model_plan_proposer(c, inp, headers, vk.virtual_key)
+                or _default_plan_proposer(c, inp)
+            )
+    else:
+        proposal_fn = lambda c: _default_plan_proposer(c, inp)  # noqa: E731
+    proposal = await run_sync_with_heartbeat(
+        proposal_fn,
+        ctx,
+        stage=Stage.planner.value,
+        work_item_id=inp.work_item_id,
+        operation="planner_proposal",
+    )
     expected_files = list(proposal.get("expected_files", []))
     forbidden = PlanArtifact.model_fields["forbidden_paths"].default_factory()
     risk_class = classify_risk_class(expected_files, inp.diff_budget_lines, forbidden)
@@ -574,6 +701,7 @@ from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
 
 @activity.defn(name=ACTIVITY_RUN_TESTER_TURN)
 async def run_tester_turn(inp: RunTesterTurnInput) -> TesterTurnResult:
+    reject_local_agent_execution("tester")
     return await _run_tester_turn_impl(inp)
 
 
@@ -616,8 +744,15 @@ async def _run_tester_turn_impl(
     tests_ran = False
     tests_passed = False
     returncode = -1
-    for step in authoring_script or []:
-        res = session.invoke(step["tool"], **{k: v for k, v in step.items() if k != "tool"})
+    for index, step in enumerate(authoring_script or [], start=1):
+        res = await run_sync_with_heartbeat(
+            session.invoke,
+            step["tool"],
+            stage=Stage.tester.value,
+            work_item_id=inp.work_item_id,
+            operation=f"tester_tool_{index}_{step['tool']}",
+            **{k: v for k, v in step.items() if k != "tool"},
+        )
         if step["tool"] == "write_file":
             test_files.append(step["path"])
         if step["tool"] == "run_tests":
@@ -721,6 +856,7 @@ def _default_reviewer_verdict(ctx: ReviewerContext):
 
 @activity.defn(name=ACTIVITY_RUN_L2_REVIEW)
 async def run_l2_review(inp: RunL2ReviewInput) -> L2Verdict:
+    reject_local_agent_execution("reviewer")
     return await _run_l2_review_impl(inp)
 
 
@@ -731,7 +867,13 @@ async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Ve
     merge continua humano (P1)."""
     context = ReviewerContext(work_item_id=inp.work_item_id, plan=inp.plan, diff=inp.diff)
     session = FreshReviewerSession(context)
-    verdict = session.review(verdict_fn or _default_reviewer_verdict)
+    verdict = await run_sync_with_heartbeat(
+        session.review,
+        verdict_fn or _default_reviewer_verdict,
+        stage=Stage.reviewer.value,
+        work_item_id=inp.work_item_id,
+        operation="reviewer_verdict",
+    )
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -818,6 +960,17 @@ async def promote_skill(inp: PromoteSkillInput) -> PromoteSkillResult:
         ok=True,
         detail=detail,
     )
+
+
+# Preflight no momento em que o worker importa/registra as Activities. Em
+# produção, o adapter atual declara honestamente que ainda não executa stages
+# dentro do sandbox; logo o worker recusa boot em vez de operar no fallback
+# local. Em dev/test a compatibilidade existente é preservada.
+validate_runtime_startup(
+    isolated_stage_execution_available=(
+        DEFAULT_SANDBOX_DRIVER.supports_isolated_stage_execution
+    )
+)
 
 
 # Consumido pelo loader defensivo do worker unico (services/orchestrator/
