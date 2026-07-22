@@ -127,13 +127,14 @@ def _upsert_work_item(cur, wi) -> None:
         INSERT INTO console_rm.work_items_view (
             work_item_id, tenant_id, source, source_id, repo, base_branch, title,
             description, requester, data_class, status, current_phase,
-            pr_number, pr_url, budget_usd, risk_class, created_at, updated_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            pr_number, pr_url, budget_usd, risk_class, task_class, created_at, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (work_item_id) DO UPDATE SET
             status = EXCLUDED.status, current_phase = EXCLUDED.current_phase,
             title = EXCLUDED.title, description = EXCLUDED.description,
             pr_number = EXCLUDED.pr_number, pr_url = EXCLUDED.pr_url,
             risk_class = EXCLUDED.risk_class, budget_usd = EXCLUDED.budget_usd,
+            task_class = EXCLUDED.task_class,
             updated_at = EXCLUDED.updated_at
         """,
         (
@@ -141,7 +142,7 @@ def _upsert_work_item(cur, wi) -> None:
             wi["base_branch"], title, description, wi["requester"], wi["data_class"],
             status, phase, wi.get("pr_number_eff") or wi["pr_number"],
             wi.get("pr_url_eff"), budget_usd,
-            wi["risk_class"], wi["created_at"], wi["updated_at"],
+            wi["risk_class"], wi.get("task_class"), wi["created_at"], wi["updated_at"],
         ),
     )
 
@@ -301,6 +302,33 @@ def _project_ledger(cur) -> int:
 # API
 # ---------------------------------------------------------------------------
 
+def _refresh_cost_rollup(cur) -> int:
+    """Plano 08 §E — recomputa o rollup de custo do SoR (model_call_ledger, a
+    verdade de custo P8), agregando por dia×repo×model×task_class. Recompute
+    total (DELETE+INSERT) → idempotente por construção (o teste de reconciliação
+    garante rollup == ledger). Chamado só quando o ledger avançou nesta passada
+    (barato o suficiente na escala do dev; um rollup incremental é o upgrade
+    quando o volume exigir). Retorna o nº de células do rollup."""
+    cur.execute("DELETE FROM console_rm.cost_rollup")
+    cur.execute(
+        """
+        INSERT INTO console_rm.cost_rollup
+            (tenant_id, day, repo, model, task_class, run_count, cost_usd, tokens_in, tokens_out)
+        SELECT l.tenant_id,
+               (l.created_at AT TIME ZONE 'UTC')::date AS day,
+               COALESCE(NULLIF(wi.repo, ''), '(unknown)') AS repo,
+               COALESCE(NULLIF(l.model, ''), '(unknown)') AS model,
+               COALESCE(NULLIF(l.task_class, ''), 'chore') AS task_class,
+               count(*), COALESCE(sum(l.cost_usd), 0),
+               COALESCE(sum(l.tokens_in), 0), COALESCE(sum(l.tokens_out), 0)
+        FROM model_call_ledger l
+        LEFT JOIN work_items wi ON wi.id = l.work_item_id
+        GROUP BY 1, 2, 3, 4, 5
+        """
+    )
+    return cur.rowcount
+
+
 def run_once(conn) -> dict[str, int]:
     """Uma passada por todas as fontes. Transação única: saída + cursores
     comitam juntos; qualquer erro faz rollback do lote inteiro (re-tentável)."""
@@ -313,14 +341,27 @@ def run_once(conn) -> dict[str, int]:
                 "audit_log": _project_audit(cur),
                 "model_call_ledger": _project_ledger(cur),
             }
+            # §E — rollup de custo: recomputa só quando o ledger avançou (evita
+            # trabalho a cada tick ocioso). NÃO conta para a convergência do
+            # drain (é derivado, não uma fonte com cursor).
+            if counts["model_call_ledger"] > 0:
+                _refresh_cost_rollup(cur)
     return counts
 
 
 def drain(conn, *, max_iterations: int = 1000) -> None:
     """Roda run_once até todas as fontes zerarem (backfill/testes). Progresso
-    é garantido pelos cursores estritos; o cap é so um backstop."""
+    é garantido pelos cursores estritos; o cap é so um backstop.
+
+    §E: ao final força UM refresh do rollup de custo — o backfill/DR deve
+    reconstruir o rollup mesmo quando o cursor do ledger já está no fim (nenhum
+    row novo dispararia o refresh incremental do run_once). Recompute total é
+    idempotente."""
     for _ in range(max_iterations):
         if not any(run_once(conn).values()):
+            with conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    _refresh_cost_rollup(cur)
             return
     raise RuntimeError("drain não convergiu — cursor sem progresso?")
 

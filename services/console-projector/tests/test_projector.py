@@ -188,6 +188,64 @@ def test_status_transition_reprojects():
         _cleanup(wi_id)
 
 
+def test_cost_rollup_reconciles_with_ledger():
+    """Plano 08 §E: o rollup de custo bate EXATAMENTE com o ledger (a verdade de
+    custo, P8) para o tenant. Reconciliação — se divergir, o CI quebra AQUI."""
+    conn = psycopg2.connect(DSN)
+    wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
+    try:
+        _seed(conn, wi_id)  # 1 linha no ledger: cost 1.23, model anthropic/claude
+        # mais uma chamada de modelo no MESMO work item (agrega na mesma célula)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO model_call_ledger (tenant_id, work_item_id, stage, task_class, "
+                "model, cost_usd, tokens_in, tokens_out) VALUES "
+                "('crm-test', %s, 'planner', 'default', 'anthropic/claude', 0.77, 200, 100)",
+                (wi_id,),
+            )
+        conn.commit()
+        drain(conn)
+        drain(conn)  # idempotência: recompute total não duplica
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT COALESCE(sum(cost_usd),0) AS c FROM console_rm.cost_rollup WHERE tenant_id='crm-test'")
+            rollup_cost = float(cur.fetchone()["c"])
+            cur.execute(
+                "SELECT COALESCE(sum(cost_usd),0) AS c FROM model_call_ledger WHERE tenant_id='crm-test'")
+            ledger_cost = float(cur.fetchone()["c"])
+            assert rollup_cost == pytest.approx(ledger_cost)  # reconciliação exata
+            # a célula do nosso repo/model existe e soma as 2 chamadas (1.23+0.77)
+            cur.execute(
+                "SELECT run_count, cost_usd FROM console_rm.cost_rollup "
+                "WHERE tenant_id='crm-test' AND repo='acme/repo' AND model='anthropic/claude'")
+            row = cur.fetchone()
+            assert row is not None and row["run_count"] >= 2
+    finally:
+        conn.rollback()
+        conn.close()
+        _cleanup(wi_id)
+
+
+def test_task_class_projected_into_view():
+    """§E: task_class do work_item chega na view (gráficos 'por categoria')."""
+    conn = psycopg2.connect(DSN)
+    wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
+    try:
+        _seed(conn, wi_id)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE work_items SET task_class = 'bug_fix' WHERE id = %s", (wi_id,))
+        conn.commit()
+        drain(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT task_class FROM console_rm.work_items_view WHERE work_item_id = %s", (wi_id,))
+            assert cur.fetchone()[0] == "bug_fix"
+    finally:
+        conn.rollback()
+        conn.close()
+        _cleanup(wi_id)
+
+
 def test_projects_evidence_preview_into_view():
     """Plano 08 §D (D5): o preview_status/url de work_item_evidence chega na
     work_items_view (o painel mostra o link do preview ao lado do PR)."""
