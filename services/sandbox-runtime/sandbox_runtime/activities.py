@@ -770,6 +770,8 @@ REGRAS CRÍTICAS:
   pacote que não esteja nas dependências do package.json mostrado — o repo pode
   não ter nenhuma dependência (runner nativo).
 - Crie APENAS arquivo(s) NOVO(s) — NUNCA reescreva um teste existente.
+  PATHS PROIBIDOS (já existem): {existing_tests}
+  Use um nome novo, ex.: test/<assunto>-dse.test.js
 - Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py…).
 - 1 arquivo (no máximo 2); CONCISO (~40-80 linhas). JSON cortado = falha.
 - Não modifique código de produção — só testes.
@@ -856,6 +858,7 @@ def _model_authored_test_script(
         plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:1500],
         package_json=package_json,
         example_test=example_test,
+        existing_tests=", ".join(sorted(existing_tests)) or "(nenhum)",
         diff=diff or "(diff indisponível)",
         error_feedback=(
             f"\n## ERRO DA TENTATIVA ANTERIOR (corrija!)\n{error_feedback}\n" if error_feedback else ""
@@ -891,13 +894,38 @@ def _model_authored_test_script(
             logger.warning("path de teste recusado (fora de test paths): %r", path)
             continue
         if path in existing_tests:
-            logger.warning("path de teste recusado (JÁ EXISTE — nunca sobrescrever): %r", path)
-            continue
+            # Em vez de descartar (deixava o script vazio quando o modelo
+            # insistia no teste existente), RENOMEIA deterministicamente para
+            # um arquivo novo no MESMO diretório — imports relativos intactos.
+            renamed = _dedupe_test_path(path, existing_tests, workspace_dir)
+            logger.warning("path de teste JÁ EXISTE — renomeado %r → %r", path, renamed)
+            path = renamed
         script.append({"tool": "write_file", "path": path, "content": content})
     if not script:
         return None
     script.append({"tool": "run_tests"})
     return script
+
+
+def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
+    """Nome novo no mesmo diretório, ainda casando is_test_path:
+    test/api.test.js → test/api-dse.test.js; tests/test_x.py → tests/test_x_dse.py."""
+    base, name = os.path.split(path)
+    for pattern, repl in ((".test.", "-dse.test."), (".spec.", "-dse.spec.")):
+        if pattern in name:
+            candidate = name.replace(pattern, repl, 1)
+            break
+    else:
+        stem, ext = os.path.splitext(name)
+        candidate = f"{stem}_dse{ext}"
+    new_path = os.path.join(base, candidate) if base else candidate
+    n = 2
+    while new_path in existing or os.path.exists(os.path.join(workspace_dir, new_path)):
+        new_path = new_path.replace("-dse.", f"-dse{n}.").replace("_dse.", f"_dse{n}.")
+        n += 1
+        if n > 5:
+            break
+    return new_path
 
 
 _TEST_INFRA_ERROR_MARKERS = (
