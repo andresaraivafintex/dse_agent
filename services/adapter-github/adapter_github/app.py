@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from ingest_gateway import (
     AdmissionBlocked,
     admit_work_item,
+    classify_task_class,
     correlate,
     get_connection,
     record_signal_event,
@@ -78,7 +79,8 @@ def _resolve_tenant_for(payload: dict) -> str:
         conn.close()
 
 
-def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str, base_branch: str | None = None) -> dict:
+def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str,
+                                base_branch: str | None = None, task_class: str = "chore") -> dict:
     """Path usado por eventos que PODEM legitimamente abrir um WorkItem
     novo (issues assigned/labeled, comentário com menção numa issue comum).
     """
@@ -124,6 +126,7 @@ def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str, b
                 requester_principal=principal,
                 repo=conv_event.source_ref["repo"],
                 base_branch=base_branch,
+                task_class=task_class,
                 sanitized_content=sanitized,
                 conn=conn,
             )
@@ -273,8 +276,12 @@ async def github_webhook(request: Request) -> dict:
         # chamada extra a API. Preenche o WorkItem para o gate de completude
         # (S2) nao pedir clarificacao a toa e o clone (S4) saber a branch base.
         default_branch = (payload.get("repository") or {}).get("default_branch")
+        # §A: classifica pela lista de labels da issue (não só o label do gatilho).
+        labels = [lbl.get("name", "") for lbl in (payload.get("issue") or {}).get("labels") or []]
+        task_class = classify_task_class(labels=labels)
         return _handle_task_creating_event(
-            conv_event, principal=principal, tenant_id=tenant_id, base_branch=default_branch
+            conv_event, principal=principal, tenant_id=tenant_id,
+            base_branch=default_branch, task_class=task_class,
         )
 
     if event_type == "issue_comment" and action == "created":
@@ -288,7 +295,11 @@ async def github_webhook(request: Request) -> dict:
         mention = f"@{get_bot_mention_login()}".lower()
         if mention in conv_event.content_snapshot.lower():
             conv_event = conv_event.model_copy(update={"kind": EventKind.task_request})
-        return _handle_task_creating_event(conv_event, principal=principal, tenant_id=tenant_id)
+        labels = [lbl.get("name", "") for lbl in (payload.get("issue") or {}).get("labels") or []]
+        task_class = classify_task_class(labels=labels)
+        return _handle_task_creating_event(
+            conv_event, principal=principal, tenant_id=tenant_id, task_class=task_class,
+        )
 
     if event_type == "pull_request_review_comment" and action == "created":
         sender = payload["comment"]["user"]["login"]

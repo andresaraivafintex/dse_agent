@@ -72,6 +72,7 @@ def admit_work_item(
     repo: str | None = None,
     base_branch: str | None = None,
     data_class: str = "internal",
+    task_class: str = "chore",
     sanitized_content: str | None = None,
     conn=None,
 ) -> str:
@@ -105,8 +106,8 @@ def admit_work_item(
                 """
                 INSERT INTO work_items
                     (id, tenant_id, source, source_ref, repo, base_branch,
-                     requester, data_class, idempotency_key)
-                VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+                     requester, data_class, task_class, idempotency_key)
+                VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (idempotency_key) DO NOTHING
                 """,
                 (
@@ -118,6 +119,7 @@ def admit_work_item(
                     base_branch,
                     requester_principal,
                     data_class,
+                    task_class,
                     idempotency_key,
                 ),
             )

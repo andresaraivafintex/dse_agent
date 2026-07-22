@@ -22,6 +22,7 @@ from .security import (
 from .sanitize import sanitize_content
 from .tenant_binding import resolve_tenant, default_tenant, ResolvedTenant
 from .repo_resolver import resolve_repo, parse_explicit_repo
+from .task_class import classify_task_class, TASK_CLASSES
 
 __all__ = [
     "get_connection",
@@ -41,6 +42,8 @@ __all__ = [
     "resolve_tenant",
     "resolve_repo",
     "parse_explicit_repo",
+    "classify_task_class",
+    "TASK_CLASSES",
     "default_tenant",
     "ResolvedTenant",
 ]
