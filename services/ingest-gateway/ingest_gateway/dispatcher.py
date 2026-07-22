@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, NamedTuple
 
 from dse_audit import emit as audit_emit
@@ -93,6 +94,26 @@ def _actor_principal(raw_payload: dict[str, Any]) -> str | None:
     return actor.get("resolved_principal")
 
 
+# C4 (relatório 07): marcadores de repo/branch numa resposta de clarificação.
+# Aceita `repo=owner/name` ou `repo: owner/name` (idem branch/base_branch).
+# owner/name segue o formato do GitHub (slug). Determinístico.
+_RE_REPO = re.compile(r"\brepo(?:sitory)?\s*[:=]\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)", re.I)
+_RE_BRANCH = re.compile(r"\b(?:base[_-]?)?branch\s*[:=]\s*([A-Za-z0-9._/-]+)", re.I)
+
+
+def _extract_repo_markers(content: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if not content:
+        return out
+    m = _RE_REPO.search(content)
+    if m:
+        out["repo"] = m.group(1)
+    b = _RE_BRANCH.search(content)
+    if b:
+        out["base_branch"] = b.group(1)
+    return out
+
+
 def _review_signal_payload(raw_payload: dict[str, Any], content: str) -> dict[str, Any] | None:
     """Formato FLAT que `WorkItemLifecycleWorkflow.review_comment` lê.
     Retorna None quando o comentário de review não carrega veredito formal
@@ -144,8 +165,14 @@ def _route_signal(status: str | None, kind: str, raw_payload: dict[str, Any]) ->
             "merged_by_human",
         )
 
-    if kind == "clarification_answer":  # PRESERVA Fase 1
-        return SignalRoute(SIGNAL_CLARIFICATION_ANSWER, {"text": content, "acceptance_criteria": content}, "clarification")
+    if kind == "clarification_answer":  # PRESERVA Fase 1 + C4 (relatório 07)
+        payload = {"text": content, "acceptance_criteria": content}
+        # C4: tarefas de Slack/Jira nascem sem repo — a resposta de clarificação
+        # é o caminho de resgate. Extrai marcadores DETERMINÍSTICOS do texto
+        # (`repo=org/x`, `branch=main`) para o workflow repor input.repo/
+        # base_branch e o gate de completude passar. P1: só regex, nenhum LLM.
+        payload.update(_extract_repo_markers(content))
+        return SignalRoute(SIGNAL_CLARIFICATION_ANSWER, payload, "clarification")
 
     if kind == "review_comment":  # PRESERVA Fase 1
         payload = _review_signal_payload(raw_payload, content)

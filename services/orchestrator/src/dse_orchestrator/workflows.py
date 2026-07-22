@@ -622,6 +622,12 @@ class WorkItemLifecycleWorkflow:
         fonte de verdade; o comentario e conveniencia). A Activity resolve
         repo/issue e e no-op auditado para origens nao-github (Slack/Jira terao
         seu proprio caminho de saida com o MESMO vocabulario de status)."""
+        # Guard de replay (spec §5): a superficie de status foi adicionada
+        # depois — histories antigas NAO tem esta Activity e devem replayar sem
+        # ela. UM marker cobre TODAS as transicoes (terminais + implementing);
+        # execucoes novas postam, replays antigos pulam deterministicamente.
+        if not workflow.patched("status-comment-surfacing-v1"):
+            return
         try:
             await workflow.execute_activity(
                 ACTIVITY_POST_TRACKING_COMMENT,
@@ -1154,8 +1160,8 @@ class WorkItemLifecycleWorkflow:
             # Estado visível durante a fase MAIS LONGA (coding): sem isto, uma
             # tarefa low-risk auto-aprovada some da superfície entre a admissão
             # e o pr_ready. O comentário único é editado in-place (sem spam).
-            if workflow.patched("status-comment-on-implementing-v1"):
-                await self._post_status_comment("implementing")
+            # (guard de replay vive dentro de _post_status_comment.)
+            await self._post_status_comment("implementing")
             # Nova Activity protegida por patch marker: histories antigos
             # replayam sem o comando; execucoes novas persistem a base antes
             # do primeiro turno do Coder.

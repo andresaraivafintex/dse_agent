@@ -18,6 +18,8 @@ DSN = os.environ.get(
 # não resolve no host — apontamos para uma porta local morta (connection
 # refused = falha instantânea) para o best-effort não somar timeouts.
 os.environ.setdefault("DSE_ADAPTER_GITHUB_URL", "http://127.0.0.1:1")
+os.environ.setdefault("DSE_ADAPTER_SLACK_URL", "http://127.0.0.1:1")
+os.environ.setdefault("DSE_ADAPTER_JIRA_URL", "http://127.0.0.1:1")
 
 
 def new_work_item_id(prefix: str = "wi") -> str:

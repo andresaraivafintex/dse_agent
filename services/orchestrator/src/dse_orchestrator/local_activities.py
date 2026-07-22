@@ -577,14 +577,19 @@ _STATUS_BODIES = {
 
 @activity.defn(name=ACTIVITY_POST_TRACKING_COMMENT)
 async def post_tracking_comment(payload: dict[str, Any]) -> dict[str, Any]:
-    """S3 (Fase 5): posta/edita O comentário de status único na superfície de
-    origem (issue do GitHub), via o `/internal/status-comment` do adapter-github
-    (que usa a MutableCommentWriter + token do Vault). Auto-resolve repo +
-    issue_number a partir de `work_items.source_ref` — os call sites só precisam
-    passar work_item_id + status (+ detail opcional). Determinístico (P1).
+    """Posta/edita O comentário de status único na superfície de ORIGEM
+    (github/slack/jira), via o `/internal/status-comment` do adapter da fonte
+    (todos usam a MESMA MutableCommentWriter). Auto-resolve o alvo de
+    `work_items.source/source_ref` — os call sites só passam work_item_id +
+    status (+ detail opcional). Determinístico (P1); best-effort (nunca derruba
+    o workflow — o audit ledger é a fonte de verdade).
 
-    Só age em WorkItems de origem `github` nesta fase; outras superfícies são
-    no-op auditado (o outbound de Slack/Jira tem seu próprio caminho)."""
+    C3 (relatório 07): generalizado além de github. Cada fonte tem seu adapter
+    e seu campo de correlação:
+      github -> {repo, issue_number}   @ DSE_ADAPTER_GITHUB_URL
+      slack  -> {channel}              @ DSE_ADAPTER_SLACK_URL
+      jira   -> {ticket_key}           @ DSE_ADAPTER_JIRA_URL
+    Fonte desconhecida = no-op auditado."""
     work_item_id = payload["work_item_id"]
     tenant_id = payload.get("tenant_id", "")
     status = payload.get("status", "")
@@ -601,39 +606,60 @@ async def post_tracking_comment(payload: dict[str, Any]) -> dict[str, Any]:
     if not row:
         return {"ok": False, "reason": "work_item_not_found"}
     source, repo, source_ref = row
-    if source != "github":
-        return {"ok": True, "skipped": f"source={source}_not_github"}
-    issue_number = None
-    if isinstance(source_ref, dict):
-        issue_number = source_ref.get("number") or source_ref.get("issue_number")
-    if not repo or not issue_number:
-        return {"ok": False, "reason": "missing_repo_or_issue_number"}
+    source_ref = source_ref if isinstance(source_ref, dict) else {}
+
+    target = _resolve_comment_target(source, repo, source_ref)
+    if target is None:
+        return {"ok": True, "skipped": f"source={source}_no_target"}
 
     if not body:
         template = _STATUS_BODIES.get(status, "Status do DSE: {status}")
         body = template.format(detail=detail or "—", status=status)
 
-    # URL lida por-chamada (não no import) para testes poderem sobrepor via env.
-    adapter_url = os.environ.get("DSE_ADAPTER_GITHUB_URL", "http://adapter-github:8802")
+    adapter_url, extra_fields = target
     import httpx
     try:
         with httpx.Client(timeout=httpx.Timeout(8.0, connect=2.0)) as client:
             resp = client.post(
                 f"{adapter_url}/internal/status-comment",
-                json={"work_item_id": work_item_id, "repo": repo,
-                      "issue_number": int(issue_number), "body": body,
-                      "actor": "system:orchestrator"},
+                json={"work_item_id": work_item_id, "body": body,
+                      "actor": "system:orchestrator", **extra_fields},
             )
             resp.raise_for_status()
     except Exception as exc:  # noqa: BLE001 — outbound é best-effort; nunca derruba o workflow
         logging.getLogger("dse_orchestrator").warning(
-            "post_tracking_comment falhou para %s: %s", work_item_id, exc
+            "post_tracking_comment falhou para %s (%s): %s", work_item_id, source, exc
         )
         return {"ok": False, "reason": "adapter_unavailable", "error": str(exc)[:200]}
     dse_audit.emit(actor="system:orchestrator", action="tracking_comment_posted",
                    tenant_id=tenant_id, work_item_id=work_item_id,
-                   details={"repo": repo, "issue_number": issue_number, "status": status})
+                   details={"source": source, "status": status, **extra_fields})
     return {"ok": True}
+
+
+def _resolve_comment_target(source, repo, source_ref: dict[str, Any]):
+    """(adapter_url, campos_de_correlação) por fonte, ou None se não dá para
+    endereçar (ex.: github sem issue_number). URLs lidas por-chamada (não no
+    import) para os testes poderem sobrepor via env."""
+    if source == "github":
+        issue_number = source_ref.get("number") or source_ref.get("issue_number")
+        if not repo or not issue_number:
+            return None
+        url = os.environ.get("DSE_ADAPTER_GITHUB_URL", "http://adapter-github:8802")
+        return url, {"repo": repo, "issue_number": int(issue_number)}
+    if source == "slack":
+        channel = source_ref.get("channel")
+        if not channel:
+            return None
+        url = os.environ.get("DSE_ADAPTER_SLACK_URL", "http://adapter-slack:8801")
+        return url, {"channel": channel}
+    if source == "jira":
+        ticket_key = source_ref.get("ticket_key")
+        if not ticket_key:
+            return None
+        url = os.environ.get("DSE_ADAPTER_JIRA_URL", "http://adapter-jira:8804")
+        return url, {"ticket_key": ticket_key}
+    return None
 
 
 LOCAL_ACTIVITIES = [
