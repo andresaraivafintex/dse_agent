@@ -109,7 +109,7 @@ def _seed(conn, wi_id: str) -> None:
         cur.execute(
             "INSERT INTO audit_log (work_item_id, tenant_id, actor, action, details) "
             "VALUES (%s, 'crm-test', 'system:test', 'work_item_admitted', '{}'::jsonb), "
-            "       (%s, 'crm-test', 'system:test', 'coder_turn_completed', %s::jsonb)",
+            "       (%s, 'crm-test', 'system:orchestrator', 'coder_turn_completed', %s::jsonb)",
             (wi_id, wi_id, json.dumps({"cost_usd": 1.23})),
         )
         cur.execute(

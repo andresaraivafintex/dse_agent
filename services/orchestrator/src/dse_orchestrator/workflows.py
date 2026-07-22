@@ -1300,6 +1300,20 @@ class WorkItemLifecycleWorkflow:
                 else l1_result.passed
             )
             if not l1_passed:
+                # Achado do disparo real (queimou ~$8 em fix cycles inúteis):
+                # manifesto L1 ausente/erro é problema de CONFIG DO REPO —
+                # nenhum turno de Coder conserta isso. Escala com instrução
+                # clara em vez de re-rodar o Coder (P6, custo).
+                if workflow.patched("l1-manifest-escalates-v1"):
+                    manifest_bad = next(
+                        (f for f in l1_result.findings
+                         if f.check == "l1_manifest" and not f.passed), None,
+                    )
+                    if manifest_bad is not None:
+                        raise _EscalateNow(
+                            "l1_manifest_not_configured: o repo alvo precisa do "
+                            f".dse/validation.json no branch base ({manifest_bad.detail[:160]})"
+                        )
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     self._input.terminal_detail = (

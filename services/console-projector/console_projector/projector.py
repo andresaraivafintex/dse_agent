@@ -195,7 +195,7 @@ def _project_evidence(cur) -> int:
 def _project_audit(cur) -> int:
     last_id, _, _ = _cursor(cur, "audit_log")
     cur.execute(
-        "SELECT id, ts, work_item_id, tenant_id, action, details FROM audit_log "
+        "SELECT id, ts, work_item_id, tenant_id, actor, action, details FROM audit_log "
         "WHERE id > %s AND work_item_id IS NOT NULL ORDER BY id LIMIT %s",
         (last_id, _BATCH),
     )
@@ -241,9 +241,16 @@ def _maybe_run_from_audit(cur, row) -> None:
     """Custo real dos turnos in-process (F0): o substrato fala com o gateway
     direto (nao passa pelo client Python que grava o ledger), entao o custo
     duravel esta em details->>'cost_usd' dos *_turn_completed. run_key
-    'audit:<id>' nao colide com 'ledger:<id>'."""
+    'audit:<id>' nao colide com 'ledger:<id>'.
+
+    Dedup (achado do painel mostrando ~2× o gasto real): o MESMO turno é
+    auditado DUAS vezes — pela activity (system:sandbox-runtime) e pelo
+    workflow (system:orchestrator). Só o row do ORQUESTRADOR vira run; o da
+    activity fica na timeline mas não soma custo de novo."""
     engine = _AUDIT_COST_ACTIONS.get(row["action"])
     if not engine:
+        return
+    if row.get("actor") != "system:orchestrator":
         return
     details = row["details"] or {}
     cost = details.get("cost_usd")
