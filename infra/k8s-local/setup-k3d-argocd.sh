@@ -15,15 +15,35 @@ ARGOCD_VERSION="${DSE_ARGOCD_VERSION:-v2.13.3}"  # pinado (P7/NFR-09) — upgrad
 ARGOCD_NS="argocd"
 
 echo "==> 1/4 cluster k3d '${CLUSTER_NAME}'"
+# Plano 08 §D (D4) — registry local: o worker pusha a imagem do PR via
+# localhost:5510 (porta publicada); os nodes do cluster puxam via
+# k3d-dse-registry:5510 (mesmo storage, nome resolvível pelo k3d).
+REGISTRY_NAME="${DSE_K3D_REGISTRY:-dse-registry}"
+REGISTRY_PORT="${DSE_K3D_REGISTRY_PORT:-5510}"
+if k3d registry list | grep -q "k3d-${REGISTRY_NAME}\b"; then
+  echo "    registry k3d-${REGISTRY_NAME} já existe — pulando"
+else
+  k3d registry create "${REGISTRY_NAME}" --port "${REGISTRY_PORT}"
+fi
+
 if k3d cluster list | grep -q "^${CLUSTER_NAME}\b"; then
   echo "    já existe — pulando"
 else
   # --network dse_net: o cluster enxerga os serviços do docker-compose da
   # fundação (Vault, Garage, model-gateway) pelo nome do container.
+  #
+  # Plano 08 §D (D3): Traefik HABILITADO (era desabilitado na Fase 3, quando
+  # nenhum Ingress era necessário) + porta 80 do loadbalancer publicada em
+  # localhost:8081 — o browser do operador acessa
+  # http://<ns>.preview.localhost:8081 (Ingress por hostname; *.localhost
+  # resolve para 127.0.0.1 nos browsers modernos). O MESMO caminho serve o
+  # túnel Cloudflare/VPS depois: o túnel aponta para localhost:8081 e só o
+  # DSE_PREVIEW_EXTERNAL_HOST muda.
   k3d cluster create "${CLUSTER_NAME}" \
     --servers 1 --agents 1 \
     --network dse_net \
-    --k3s-arg "--disable=traefik@server:0" \
+    --registry-use "k3d-${REGISTRY_NAME}:${REGISTRY_PORT}" \
+    -p "8081:80@loadbalancer" \
     --wait --timeout 180s
 fi
 

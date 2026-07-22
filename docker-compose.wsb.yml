@@ -71,6 +71,20 @@ services:
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      # Plano 08 §D (D1/D3/D4) — o trigger_preview roda NESTE worker.
+      # KUBECONFIG interno (rede dse_net; gere com infra/k8s-local/
+      # gen-kubeconfig-internal.sh após criar o cluster). O link do PR usa o
+      # EXTERNAL_HOST: local = *.preview.localhost:8081 (Traefik do k3d
+      # publicado no host). Para expor via túnel Cloudflare/VPS depois: só
+      # trocar o template (ver infra/preview-exposure.md) — o Ingress segue o
+      # mesmo hostname.
+      KUBECONFIG: /app/infra/kubeconfig-internal.yaml
+      DSE_PREVIEW_KUBE_CONTEXT: ${DSE_PREVIEW_KUBE_CONTEXT:-k3d-dse-preview}
+      DSE_PREVIEW_EXTERNAL_HOST: ${DSE_PREVIEW_EXTERNAL_HOST:-http://{namespace}.preview.localhost:8081}
+      DSE_PREVIEW_BUILD_IMAGE: ${DSE_PREVIEW_BUILD_IMAGE:-true}
+      DSE_PREVIEW_REGISTRY_PUSH: ${DSE_PREVIEW_REGISTRY_PUSH:-localhost:5510}
+      DSE_PREVIEW_REGISTRY_PULL: ${DSE_PREVIEW_REGISTRY_PULL:-k3d-dse-registry:5510}
+      DSE_PREVIEW_APP_PORT: ${DSE_PREVIEW_APP_PORT:-80}
     ports:
       - "8900:8900"
     volumes:
@@ -88,6 +102,11 @@ services:
       # /workspace do sandbox, entao o container do sandbox passa a ver os
       # arquivos reais (antes via um diretorio vazio).
       - /tmp/dse-sandboxes:/tmp/dse-sandboxes
+      # Plano 08 §D — preview: kubeconfig interno (ro) + o repo GitOps de
+      # manifests (rw — o worker escreve; o dse-wse-gitserver serve o MESMO
+      # path do host em ro para o Argo CD puxar).
+      - ./infra/k8s-local/kubeconfig-internal.yaml:/app/infra/kubeconfig-internal.yaml:ro
+      - ./services/validation/preview_repo:/app/services/validation/preview_repo
     depends_on:
       - postgres
       - temporal

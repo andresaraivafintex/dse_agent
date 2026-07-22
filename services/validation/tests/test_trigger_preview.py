@@ -137,6 +137,58 @@ def test_external_url_is_browser_reachable_when_configured():
 
 
 # ---------------------------------------------------------------------------
+# Plano 08 §D — D3 (Ingress) + D4 (imagem do PR) nos manifests
+# ---------------------------------------------------------------------------
+def _manifests(cfg, **kw):
+    from datetime import datetime, timedelta, timezone
+    from dse_validation.preview.argocd import build_manifests
+    exp = datetime.now(timezone.utc) + timedelta(seconds=600)
+    return build_manifests("preview-wi-x", "wi-x", "tenant_dev", exp, 600, cfg, **kw)
+
+
+def test_ingress_generated_with_hostname_from_template():
+    cfg = PreviewConfig()
+    cfg.external_host_template = "http://{namespace}.preview.localhost:8081"
+    m = _manifests(cfg)
+    assert "ingress.yaml" in m
+    assert "host: preview-wi-x.preview.localhost" in m["ingress.yaml"]  # sem scheme/porta
+    assert "ingressClassName: traefik" in m["ingress.yaml"]
+
+
+def test_no_ingress_without_external_host():
+    cfg = PreviewConfig()
+    cfg.external_host_template = ""
+    assert "ingress.yaml" not in _manifests(cfg)
+
+
+def test_pr_image_and_app_port_flow_into_deployment():
+    cfg = PreviewConfig()
+    cfg.app_port = 3000
+    m = _manifests(cfg, image="k3d-dse-registry:5510/dse-preview/wallet:abc123")
+    assert "image: k3d-dse-registry:5510/dse-preview/wallet:abc123" in m["deployment.yaml"]
+    assert "containerPort: 3000" in m["deployment.yaml"]
+    assert "targetPort: 3000" in m["service.yaml"]  # Service publica 80 → app_port
+
+
+def test_build_pr_image_fail_safe_reasons(tmp_path, monkeypatch):
+    from dse_validation.preview.pr_image import build_pr_image
+    cfg = PreviewConfig()
+    # flag desligada → placeholder
+    cfg.build_image = False
+    ref, reason = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
+    assert ref is None and reason == "build_disabled"
+    # ligada mas sem workspace → placeholder com motivo
+    cfg.build_image = True
+    monkeypatch.setenv("DSE_SANDBOX_STATE_DIR", str(tmp_path))
+    ref, reason = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
+    assert ref is None and reason.startswith("workspace_not_found")
+    # workspace sem Dockerfile → placeholder com motivo
+    ws = tmp_path / "wi-nodf" / "workspace"; ws.mkdir(parents=True)
+    ref, reason = build_pr_image(work_item_id="wi-nodf", repo="a/b", head_sha="s", cfg=cfg)
+    assert ref is None and reason == "no_dockerfile_in_workspace"
+
+
+# ---------------------------------------------------------------------------
 # 1b. caps de concorrência por tenant (ADR-26, dia 1)
 # ---------------------------------------------------------------------------
 def test_concurrency_cap_counts_and_degrades(work_item_id, tenant_id):

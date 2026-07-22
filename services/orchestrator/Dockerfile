@@ -10,6 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-cer
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Plano 08 §D — o trigger_preview roda NESTE worker:
+#  - kubectl (pinado) fala com o cluster k3d via kubeconfig-internal (compose);
+#  - docker CLI (pinado, só o binário estático) builda/pusha a imagem do PR
+#    (D4) via o socket do host que o compose já monta (docker-outside-of-docker).
+ARG KUBECTL_VERSION=v1.31.4
+ARG DOCKER_CLI_VERSION=27.4.1
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) karch=amd64; darch=x86_64 ;; arm64) karch=arm64; darch=aarch64 ;; *) echo "arch $arch nao suportada" && exit 1 ;; esac \
+    && curl -fsSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${karch}/kubectl" \
+    && chmod +x /usr/local/bin/kubectl \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${darch}/docker-${DOCKER_CLI_VERSION}.tgz" \
+       | tar -xz --strip-components=1 -C /usr/local/bin docker/docker \
+    && kubectl version --client --output=yaml >/dev/null && docker --version
+
 WORKDIR /app
 
 # Copia so o que este servico precisa para instalar (contratos compartilhados

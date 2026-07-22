@@ -75,7 +75,15 @@ def namespace_for(work_item_id: str) -> str:
 # Manifests do preview mínimo (nginx pinado servindo a página default)
 # ---------------------------------------------------------------------------
 def build_manifests(namespace: str, work_item_id: str, tenant_id: str,
-                    expires_at: datetime, ttl_seconds: int, cfg: PreviewConfig) -> dict[str, str]:
+                    expires_at: datetime, ttl_seconds: int, cfg: PreviewConfig,
+                    *, image: str | None = None, app_port: int | None = None) -> dict[str, str]:
+    """Plano 08 §D: `image` (D4 — imagem do PR; default placeholder do cfg) e
+    `app_port` (porta do app no container; Service/Ingress publicam 80 →
+    targetPort). Quando `cfg.external_host_template` está setado, gera também o
+    INGRESS (D3) com o hostname derivado do template — o link do PR passa a ser
+    clicável de fora (Traefik local / túnel / VPS, mesmo mecanismo)."""
+    image = image or cfg.preview_image
+    port = app_port or cfg.app_port
     labels = (
         f"    app.kubernetes.io/managed-by: dse-preview\n"
         f"    dse.fintex/work-item: \"{work_item_id}\"\n"
@@ -108,11 +116,11 @@ metadata:
     spec:
       containers:
         - name: web
-          image: {cfg.preview_image}
+          image: {image}
           ports:
-            - containerPort: 80
+            - containerPort: {port}
           readinessProbe:
-            httpGet: {{ path: /, port: 80 }}
+            httpGet: {{ path: /, port: {port} }}
             initialDelaySeconds: 1
             periodSeconds: 2
 """
@@ -127,9 +135,33 @@ metadata:
     app: preview
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: {port}
 """
-    return {"namespace.yaml": ns, "deployment.yaml": deploy, "service.yaml": svc}
+    manifests = {"namespace.yaml": ns, "deployment.yaml": deploy, "service.yaml": svc}
+
+    hostname = cfg.external_hostname_for(namespace)
+    if hostname:
+        manifests["ingress.yaml"] = f"""apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: preview
+  namespace: {namespace}
+  labels:
+{labels}spec:
+  ingressClassName: {cfg.ingress_class}
+  rules:
+    - host: {hostname}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: preview
+                port:
+                  number: 80
+"""
+    return manifests
 
 
 APPLICATIONSET_TEMPLATE = """apiVersion: argoproj.io/v1alpha1
@@ -179,11 +211,21 @@ def ensure_applicationset(cfg: PreviewConfig | None = None) -> None:
 
 
 def _wait_deployment_available(cfg: PreviewConfig, namespace: str, timeout_s: int) -> None:
-    # o namespace só passa a existir depois do sync do Argo CD — espera em duas
-    # etapas (namespace criado, depois deployment Available).
+    # o namespace só passa a existir depois do sync do Argo CD — espera em TRÊS
+    # etapas: namespace criado, deployment CRIADO, deployment Available.
+    # A etapa do meio é essencial (achado da prova D3/D4): `kubectl wait
+    # --for=condition=...` com um NOME específico falha NA HORA se o recurso
+    # ainda não existe — e o Argo aplica namespace→deployment com um gap de
+    # segundos no primeiro sync (flake de timing, não de lógica).
     _kubectl(
         cfg,
         ["wait", "--for=create", f"namespace/{namespace}", f"--timeout={timeout_s}s"],
+        timeout=timeout_s + 15,
+    )
+    _kubectl(
+        cfg,
+        ["wait", "-n", namespace, "--for=create", "deployment/preview",
+         f"--timeout={timeout_s}s"],
         timeout=timeout_s + 15,
     )
     _kubectl(
@@ -280,8 +322,17 @@ def trigger_preview_core(
     # (failure mode 9 — preview nunca bloqueia o PR para sempre).
     namespace = namespace_for(inp.work_item_id)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
+
+    # D4 — imagem REAL do PR quando habilitado (fail-safe: None => placeholder,
+    # motivo auditado; o build nunca degrada o preview).
+    from dse_validation.preview.pr_image import build_pr_image
+    pr_image, image_reason = build_pr_image(
+        work_item_id=inp.work_item_id, repo=inp.repo, head_sha=inp.head_sha, cfg=cfg,
+    )
+
     try:
-        manifests = build_manifests(namespace, inp.work_item_id, inp.tenant_id, expires_at, ttl, cfg)
+        manifests = build_manifests(namespace, inp.work_item_id, inp.tenant_id, expires_at, ttl, cfg,
+                                    image=pr_image)
         gitops.write_preview_dir(cfg.repo_dir, namespace, manifests)
         ensure_applicationset(cfg)
         _wait_deployment_available(cfg, namespace, cfg.sync_timeout_s)
@@ -311,7 +362,7 @@ def trigger_preview_core(
         work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
         pr_number=inp.pr_number, repo=inp.repo, status="created",
         namespace=namespace, url=url, ttl_seconds=ttl, expires_at=expires_at,
-        detail=f"{kind} files: {', '.join(ui_files[:10])}",
+        detail=f"{kind} files: {', '.join(ui_files[:10])} | image={image_reason}",
     )
     if audit_emit is not None:
         audit_emit(
@@ -319,6 +370,7 @@ def trigger_preview_core(
             work_item_id=inp.work_item_id,
             details={"pr_number": inp.pr_number, "namespace": namespace, "url": url,
                      "kind": kind, "ttl_seconds": ttl, "expires_at": expires_at.isoformat(),
+                     "image": pr_image or cfg.preview_image, "image_source": image_reason,
                      "files": ui_files[:20]},
         )
     return PreviewRef(

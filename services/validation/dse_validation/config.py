@@ -357,8 +357,27 @@ class PreviewConfig:
         self.preview_image = os.environ.get("DSE_PREVIEW_IMAGE", "nginx:1.27-alpine")
         # plano 08 §D (D3): host EXTERNO acessível pelo browser. Sem isto a URL
         # é o DNS interno do cluster (não clicável de fora). Ex.:
-        # "https://{namespace}.preview.dse.local". `{namespace}` é substituído.
+        #   dev local : "http://{namespace}.preview.localhost:8081" (Traefik do
+        #               k3d publicado em localhost:8081; *.localhost resolve
+        #               p/ 127.0.0.1 nos browsers modernos)
+        #   túnel     : "https://{namespace}.preview.SEUDOMINIO.com" (cloudflared
+        #               apontando para localhost:8081 — mesmo Ingress)
+        #   VPS depois: mesmo template, só muda o DNS. Ver infra/preview-exposure.md.
+        # `{namespace}` é substituído. Quando setado, build_manifests também
+        # gera o INGRESS com esse hostname (senão nenhum Ingress é criado).
         self.external_host_template = os.environ.get("DSE_PREVIEW_EXTERNAL_HOST", "")
+        self.ingress_class = os.environ.get("DSE_PREVIEW_INGRESS_CLASS", "traefik")
+        # plano 08 §D (D4): porta em que o APP do PR escuta dentro do container
+        # (o Service/Ingress publicam sempre 80 → targetPort=app_port).
+        self.app_port = int(os.environ.get("DSE_PREVIEW_APP_PORT", "80"))
+        # D4 — build da imagem REAL do PR: quando true e o workspace da tarefa
+        # tem Dockerfile, o preview builda/pusha a imagem do head do PR em vez
+        # do placeholder. push_ref = visto pelo daemon local (localhost:5510);
+        # pull_ref = visto pelos nodes do cluster (k3d-dse-registry:5510).
+        self.build_image = _env_bool("DSE_PREVIEW_BUILD_IMAGE", "false")
+        self.registry_push = os.environ.get("DSE_PREVIEW_REGISTRY_PUSH", "localhost:5510")
+        self.registry_pull = os.environ.get("DSE_PREVIEW_REGISTRY_PULL", "k3d-dse-registry:5510")
+        self.build_timeout_s = int(os.environ.get("DSE_PREVIEW_BUILD_TIMEOUT_S", "420"))
         self.sync_timeout_s = int(os.environ.get("DSE_PREVIEW_SYNC_TIMEOUT_S", "180"))
 
     def preview_url_for(self, namespace: str) -> str:
@@ -369,6 +388,15 @@ class PreviewConfig:
         if self.external_host_template:
             return self.external_host_template.replace("{namespace}", namespace)
         return f"http://preview.{namespace}.svc.cluster.local"
+
+    def external_hostname_for(self, namespace: str) -> str | None:
+        """Hostname puro (sem scheme/porta) para o campo `host` do Ingress —
+        derivado do mesmo template da URL (D3). None quando não configurado."""
+        if not self.external_host_template:
+            return None
+        url = self.external_host_template.replace("{namespace}", namespace)
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        return host.split(":", 1)[0] or None
 
 
 class L2Config:

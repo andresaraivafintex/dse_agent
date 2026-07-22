@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+test-results/
+.coverage
+coverage.xml
+htmlcov/
 *.egg-info/
 .venv/
 .venv-*/
@@ -14,3 +18,4 @@ build/
 *.log
 .mypy_cache/
 .ruff_cache/
+infra/k8s-local/kubeconfig-internal.yaml
