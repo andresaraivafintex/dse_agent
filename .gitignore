@@ -19,3 +19,4 @@ build/
 .mypy_cache/
 .ruff_cache/
 infra/k8s-local/kubeconfig-internal.yaml
+secrets.env
