@@ -9,7 +9,17 @@ services:
       DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_IDENTITY_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
-      DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-dev}
+      # Plano 08 §F (F5) — Worker Deployment Versioning (moderno, PINNED).
+      # build_id PINADO por deploy (não mais "dev") + nome do deployment. Pine
+      # DSE_WORKER_BUILD_ID ao SHA/tag da imagem em produção (ex.: git-abc123).
+      # DSE_WORKER_USE_VERSIONING default OFF: ligar exige o server com
+      # deployment versioning habilitado + o cutover via CLI
+      # (`temporal worker-deployment set-current-version`). Ver RUNBOOK.md
+      # §Worker-Versioning. Com ON, workflows em voo drenam na versão antiga
+      # (PINNED) e só os novos vão para a versão corrente.
+      DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-v1}
+      DSE_WORKER_DEPLOYMENT_NAME: ${DSE_WORKER_DEPLOYMENT_NAME:-dse-orchestrator}
+      DSE_WORKER_USE_VERSIONING: ${DSE_WORKER_USE_VERSIONING:-false}
       DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
       # Fase 3 (ativacao do alerta de history, ALERTING-RULES.md §3 com WS-F):
       # aponte DSE_OTEL_EXPORTER=otlp para enviar traces + a metrica

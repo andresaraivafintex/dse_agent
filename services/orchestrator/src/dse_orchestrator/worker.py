@@ -23,8 +23,9 @@ import threading
 from typing import Any
 
 from temporalio.client import Client
+from temporalio.common import VersioningBehavior, WorkerDeploymentVersion
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.worker import Worker
+from temporalio.worker import Worker, WorkerDeploymentConfig
 
 from dse_contracts.constants import TASK_QUEUE
 
@@ -130,7 +131,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--use-worker-versioning",
         action="store_true",
         default=os.environ.get("DSE_WORKER_USE_VERSIONING", "false").lower() == "true",
-        help="Ativa Worker Versioning classico (build_id compat set). Ver RUNBOOK.md.",
+        help="Ativa Worker Deployment Versioning (moderno, PINNED). Requer o server "
+             "com deployment versioning habilitado + cutover via CLI. Ver RUNBOOK.md.",
+    )
+    parser.add_argument(
+        "--deployment-name",
+        default=os.environ.get("DSE_WORKER_DEPLOYMENT_NAME", "dse-orchestrator"),
+        help="Nome do Worker Deployment (F5). O par (deployment, build_id) é a versão.",
     )
     parser.add_argument(
         "--fairness-mode",
@@ -153,6 +160,28 @@ def _build_fairness_interceptor(mode: str):
         return FairnessInterceptor(NativeFairnessController())
     controller = WorkerSideFairnessController(postgres_cap_provider())
     return FairnessInterceptor(controller)
+
+
+def build_deployment_config(deployment_name: str, build_id: str) -> WorkerDeploymentConfig:
+    """Plano 08 §F (F5) — Worker Versioning OPERACIONAL via a API MODERNA (Worker
+    Deployment Versioning), NÃO a version-set clássica (deprecada e desligada por
+    default nos servers atuais).
+
+    Este worker se anuncia como a versão `(deployment_name, build_id)` do
+    deployment. `default_versioning_behavior=PINNED`: cada workflow fica GRUDADO
+    na versão em que começou — é o que dá o drain-and-cutover seguro (workflows
+    em voo terminam na versão antiga; só os NOVOS vão para a versão corrente).
+
+    O cutover ("tornar esta versão a corrente") é um passo de OPERAÇÃO
+    deliberado — `temporal worker-deployment set-current-version` (CLI) ou o
+    console do Temporal — NUNCA automático no boot (evita cutover acidental a
+    cada restart). Ver RUNBOOK.md §Worker-Versioning. Build_id pinado ao SHA/tag
+    da imagem (compose)."""
+    return WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion(deployment_name=deployment_name, build_id=build_id),
+        use_worker_versioning=True,
+        default_versioning_behavior=VersioningBehavior.PINNED,
+    )
 
 
 async def run_worker(argv: list[str] | None = None) -> None:
@@ -181,10 +210,21 @@ async def run_worker(argv: list[str] | None = None) -> None:
         workflows=[WorkItemLifecycleWorkflow],
         activities=activities,
         interceptors=interceptors,
-        build_id=args.build_id,
     )
     if args.use_worker_versioning:
-        worker_kwargs["use_worker_versioning"] = True
+        # F5 (moderno): a versão vem do deployment_config; NÃO passar o build_id
+        # clássico junto (conflita com deployment versioning).
+        worker_kwargs["deployment_config"] = build_deployment_config(
+            args.deployment_name, args.build_id
+        )
+        logger.info(
+            "Worker Deployment Versioning ATIVO: deployment=%s version=%s (PINNED). "
+            "Cutover é passo de operação (temporal worker-deployment set-current-version).",
+            args.deployment_name, args.build_id,
+        )
+    else:
+        # sem versioning: mantém o build_id clássico só p/ rótulo/health.
+        worker_kwargs["build_id"] = args.build_id
 
     worker = Worker(**worker_kwargs)
 

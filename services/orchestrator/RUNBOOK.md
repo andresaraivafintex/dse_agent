@@ -54,44 +54,42 @@ gerenciar "Build ID sets" no servidor.
    (novos signals, novos ramos usando `workflow.patched()`) durante
    deploys— ver secao 3.
 
-### 2.2 Modo com Worker Versioning classico ativo
+### 2.2 Modo com Worker Deployment Versioning (moderno — plano 08 §F/F5)
+
+> **Atualizacao (plano 08 §F, F5):** trocamos a **version-set classica**
+> (`update-build-ids`, deprecada e DESLIGADA por default nos servers atuais —
+> `RPCError: Worker versioning v0.1 ... is disabled`) pelo **Worker Deployment
+> Versioning** moderno. O worker se anuncia como a versao `(deployment_name,
+> build_id)` com `default_versioning_behavior=PINNED` (`build_deployment_config`
+> em `worker.py`). PINNED = cada workflow fica GRUDADO na versao em que comecou.
 
 Ative com `DSE_WORKER_USE_VERSIONING=true` (ou `--use-worker-versioning`).
-Isso passa `use_worker_versioning=True` ao `Worker`, o que exige que o
-`build_id` deste worker esteja registrado como compativel na task queue
-**antes** dele comecar a pollar:
-
-```bash
-# Primeiro deploy (build A) — registra A como o build "default" da fila:
-temporal task-queue update-build-ids add-new-default \
-  --task-queue dse-core-task-queue \
-  --build-id build-A
-
-# Deploy seguinte (build B), compativel com A (sem mudanca quebrando
-# determinismo) — registra B como novo default, mantendo A disponivel para
-# execucoes antigas ainda em voo (elas NAO migram para B automaticamente
-# aqui; usam a versao registrada quando comecaram):
-temporal task-queue update-build-ids add-new-default \
-  --task-queue dse-core-task-queue \
-  --build-id build-B
-```
+Pine `DSE_WORKER_BUILD_ID` ao SHA/tag da imagem e `DSE_WORKER_DEPLOYMENT_NAME`
+(default `dse-orchestrator`). Pre-requisito de server: deployment versioning
+habilitado no namespace.
 
 **Drain-and-cutover com este modo:**
 
-1. Rode o `temporal task-queue update-build-ids add-new-default` do build
-   NOVO — isso NAO derruba o worker antigo; so faz **novas** execucoes
-   passarem a usar o build novo.
-2. Mantenha o worker ANTIGO no ar ate o Temporal UI mostrar zero execucoes
-   abertas atribuidas ao `build_id` antigo (`tmprl.server.buildIds` na busca
-   avancada, ou `temporal task-queue get-build-ids` para ver quais builds
-   ainda tem execucoes abertas).
-3. So entao pare o worker antigo (`SIGTERM`, mesmo procedimento do modo
-   simples).
+```bash
+# 1. Suba o worker do build NOVO (ex.: build_id=git-B) apontando p/ a MESMA
+#    task queue. Ele se registra como uma nova VERSAO do deployment, mas ainda
+#    NAO é a corrente — nenhum workflow novo vai p/ ele ainda.
 
-Este modo e mais seguro para deploys frequentes/times maiores, mas exige
-disciplina operacional adicional (o passo 1 e uma chamada de API/CLI
-explicita, nao acontece sozinho). Deixamos DESLIGADO por default na Fase 1
-por ser P7 (boring-first) — ativar quando o ritmo de deploy justificar.
+# 2. CUTOVER (passo deliberado de operacao — NUNCA automatico no boot):
+temporal worker-deployment set-current-version \
+  --deployment-name dse-orchestrator \
+  --build-id git-B
+#    A partir daqui, workflows NOVOS vao para git-B. Os EM VOO continuam em
+#    git-A (PINNED) ate terminarem — é o drain seguro.
+
+# 3. Aguarde zero execucoes abertas na versao antiga (Temporal UI → Deployments,
+#    ou `temporal worker-deployment describe --deployment-name dse-orchestrator`),
+#    entao pare o worker antigo (SIGTERM, graceful drain).
+```
+
+DESLIGADO por default (P7 boring-first + requer server habilitado): o passo 2
+é uma chamada de CLI explicita, nao acontece sozinho — evita cutover acidental
+a cada restart. Ative quando o ritmo de deploy justificar.
 
 ## 3. Mudancas de workflow seguras vs. inseguras
 
