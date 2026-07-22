@@ -1,31 +1,67 @@
-"""WSE-E1-T3 — compara o diff final contra o `PlanArtifact` (dse_contracts):
-arquivos tocados vs `expected_files`, tamanho do diff vs `diff_budget_lines`,
-e todo arquivo tocado vs `forbidden_paths`. Produz exatamente 2 `L1Finding`
-(`diff_budget`, `forbidden_paths`) — cada um citando o plano na mensagem
-quando falha (P8: evidência, não apenas um booleano opaco)."""
+"""Conformidade do patch contra plano e SHAs imutáveis.
+
+O diff é sempre ``base_sha...head_sha``. Nomes de branch são mutáveis e
+podem nem existir no clone do sandbox; aceitá-los aqui foi a causa da
+regressão em que ``main...HEAD`` prendia o WorkItem.
+"""
 from __future__ import annotations
 
-from dse_contracts import L1Finding, PlanArtifact
+import re
+
+from dse_contracts import GateStatus, L1Finding, PlanArtifact
 
 from dse_validation.sandbox_exec import SandboxExecutor
 
 
 class DiffSummary:
-    def __init__(self, files_changed: list[str], total_lines_changed: int):
+    def __init__(
+        self,
+        files_changed: list[str],
+        total_lines_changed: int,
+        *,
+        base_sha: str,
+        head_sha: str,
+    ):
         self.files_changed = files_changed
         self.total_lines_changed = total_lines_changed
+        self.base_sha = base_sha
+        self.head_sha = head_sha
 
 
-def compute_diff_summary(executor: SandboxExecutor, base_branch: str, timeout: int = 60) -> DiffSummary:
-    """`git diff --numstat <base_branch>...HEAD` dentro do sandbox — soma
+class DiffComputationError(RuntimeError):
+    pass
+
+
+_FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+
+
+def _verify_commit(executor: SandboxExecutor, sha: str, label: str, timeout: int) -> None:
+    if not _FULL_GIT_SHA_RE.fullmatch(sha):
+        raise DiffComputationError(
+            f"{label} deve ser um SHA Git completo de 40 ou 64 caracteres hexadecimais"
+        )
+    result = executor.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], timeout=timeout)
+    if not result.ok:
+        raise DiffComputationError(f"{label}={sha} não existe como commit no sandbox")
+
+
+def compute_diff_summary(
+    executor: SandboxExecutor,
+    base_sha: str,
+    head_sha: str,
+    timeout: int = 60,
+) -> DiffSummary:
+    """``git diff --numstat <base_sha>...<head_sha>`` dentro do sandbox — soma
     linhas adicionadas+removidas por arquivo (arquivos binários reportam
     "-" no numstat; contamos como arquivo tocado mas 0 linhas, para não
     quebrar em diffs com assets)."""
+    _verify_commit(executor, base_sha, "base_sha", timeout)
+    _verify_commit(executor, head_sha, "head_sha", timeout)
     result = executor.run(
-        ["git", "diff", "--numstat", f"{base_branch}...HEAD"], timeout=timeout
+        ["git", "diff", "--numstat", f"{base_sha}...{head_sha}"], timeout=timeout
     )
     if result.returncode != 0:
-        raise RuntimeError(
+        raise DiffComputationError(
             f"git diff --numstat falhou (exit={result.returncode}): {result.stderr.strip()}"
         )
     files: list[str] = []
@@ -43,7 +79,12 @@ def compute_diff_summary(executor: SandboxExecutor, base_branch: str, timeout: i
             total += int(added)
         if removed.isdigit():
             total += int(removed)
-    return DiffSummary(files_changed=files, total_lines_changed=total)
+    return DiffSummary(
+        files_changed=files,
+        total_lines_changed=total,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
 
 
 def _is_forbidden(path: str, forbidden_paths: list[str]) -> str | None:
@@ -54,11 +95,39 @@ def _is_forbidden(path: str, forbidden_paths: list[str]) -> str | None:
 
 
 def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
+    if not plan.expected_files and not plan.no_code_change:
+        return L1Finding(
+            check="diff_budget",
+            passed=False,
+            status=GateStatus.NOT_CONFIGURED,
+            detail=(
+                "PlanArtifact.expected_files está vazio para uma tarefa de código; "
+                "use no_code_change=true somente quando nenhum patch for esperado"
+            ),
+        )
+
+    if plan.no_code_change and diff.files_changed:
+        return L1Finding(
+            check="diff_budget",
+            passed=False,
+            status=GateStatus.FAIL,
+            detail=(
+                "PlanArtifact.no_code_change=true, mas o diff imutável "
+                f"{diff.base_sha[:12]}...{diff.head_sha[:12]} alterou {diff.files_changed}"
+            ),
+        )
+
     over_budget = diff.total_lines_changed > plan.diff_budget_lines
     expected = set(plan.expected_files)
-    unexpected_files = [f for f in diff.files_changed if expected and f not in expected]
-    # se o plano não declarou nenhum expected_files, não penalizamos (Fase 1:
-    # PlanArtifact mínimo preenchido pelo próprio Coder, pode vir vazio).
+    # Arquivos de TESTE não contam como fora-do-plano (achado do disparo real):
+    # o Tester escreve testes por design DEPOIS do plano — o Planner nunca os
+    # lista. Os forbidden_paths continuam valendo para eles (check separado);
+    # aqui só deixamos de reprovar o estágio legítimo do próprio sistema.
+    from dse_contracts.paths import is_test_path
+
+    unexpected_files = [
+        f for f in diff.files_changed if f not in expected and not is_test_path(f)
+    ]
     passed = not over_budget and not unexpected_files
     if passed:
         detail = (
@@ -101,7 +170,20 @@ def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
 
 
 def plan_compliance_findings(
-    executor: SandboxExecutor, plan: PlanArtifact, base_branch: str
+    executor: SandboxExecutor,
+    plan: PlanArtifact,
+    base_sha: str,
+    head_sha: str,
 ) -> list[L1Finding]:
-    diff = compute_diff_summary(executor, base_branch)
+    try:
+        diff = compute_diff_summary(executor, base_sha, head_sha)
+    except DiffComputationError as exc:
+        return [
+            L1Finding(
+                check="git_diff",
+                passed=False,
+                status=GateStatus.ERROR,
+                detail=str(exc),
+            )
+        ]
     return [diff_budget_finding(diff, plan), forbidden_paths_finding(diff, plan)]

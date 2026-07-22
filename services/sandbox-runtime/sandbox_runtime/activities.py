@@ -497,20 +497,38 @@ Com base na tarefa abaixo, produza um plano de implementação MÍNIMO e verific
 
 Responda APENAS com um objeto JSON válido (sem markdown, sem comentários), no formato:
 {{"steps": ["passo 1", "passo 2", ...],
-  "expected_files": ["caminho/relativo/provavel1", "caminho2", ...],
+  "expected_files": ["caminho/relativo/1", "caminho/2", ...],
   "test_plan": "como verificar a mudança"}}
 
 Regras:
-- "expected_files": os caminhos de arquivo que você espera CRIAR/EDITAR no repo
-  (relativos à raiz). Proponha os caminhos mais prováveis pela convenção do
-  ecossistema do repo; a lista guia o gate de completude, não precisa ser exata,
-  mas NUNCA pode ser vazia.
+- "expected_files": os arquivos que serão CRIADO/EDITADOS (relativos à raiz).
+  {files_rule}
+  O diff da implementação será validado CONTRA esta lista (arquivos de teste
+  são isentos) — inclua TODOS os arquivos de produção que podem mudar. NUNCA
+  vazia.
 - 2 a 6 steps, específicos e executáveis.
 - Não inclua nada além do JSON.
 
 ## Tarefa
 {context}
-"""
+{tree_section}"""
+
+
+def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
+    """Árvore REAL do repo no branch base (best-effort, via GitHub API do
+    control plane) — sem ela o Planner adivinha caminhos e o plan_compliance
+    reprova o diff real (achado do disparo real). Falha → lista vazia (o
+    prompt degrada para 'caminhos prováveis')."""
+    try:
+        from dse_validation.config import GitHubConfig
+        from dse_validation.github.client import build_github_client
+
+        client = build_github_client(GitHubConfig())
+        return client.get_tree_paths(repo, base_branch or "main")
+    except Exception as exc:  # noqa: BLE001 — árvore é contexto, não requisito
+        logger.warning("árvore do repo indisponível p/ o planner (%s: %s)",
+                       type(exc).__name__, str(exc)[:120])
+        return []
 
 
 def _model_plan_proposer(
@@ -530,7 +548,16 @@ def _model_plan_proposer(
         return None
 
     model = os.environ.get("DSE_PLANNER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
-    prompt = _PLAN_PROMPT.format(context=ctx.render()[:12000])
+    tree = _repo_tree_for_planner(inp.repo, inp.base_branch or "main")
+    if tree:
+        files_rule = "Use APENAS caminhos da árvore abaixo (ou novos coerentes com ela)."
+        tree_section = "\n## Árvore do repo (branch base)\n" + "\n".join(tree[:250])
+    else:
+        files_rule = "Proponha os caminhos mais prováveis pela convenção do ecossistema."
+        tree_section = ""
+    prompt = _PLAN_PROMPT.format(
+        context=ctx.render()[:10000], files_rule=files_rule, tree_section=tree_section[:8000]
+    )
     try:
         result = chat_completion(
             headers=headers,

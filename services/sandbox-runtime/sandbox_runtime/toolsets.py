@@ -29,20 +29,9 @@ from dataclasses import dataclass
 # Caminhos considerados "de teste" (TesterToolset só escreve aqui). Cobre os
 # layouts comuns: pytest (`tests/`, `test_*.py`, `*_test.py`, `conftest.py`),
 # jest/vitest (`*.test.ts`, `*.spec.ts`, `__tests__/`), go (`*_test.go`).
-_TEST_PATH_RES = [
-    re.compile(r"(^|/)tests?/"),
-    re.compile(r"(^|/)__tests__/"),
-    re.compile(r"(^|/)test_[^/]+\.py$"),
-    re.compile(r"_test\.py$"),
-    re.compile(r"(^|/)conftest\.py$"),
-    re.compile(r"\.(test|spec)\.[jt]sx?$"),
-    re.compile(r"_test\.go$"),
-]
-
-
-def is_test_path(path: str) -> bool:
-    p = path.replace("\\", "/")
-    return any(rx.search(p) for rx in _TEST_PATH_RES)
+# Promovido ao contrato compartilhado (o plan_compliance do L1 também usa —
+# ver dse_contracts.paths). Re-export mantém os imports existentes.
+from dse_contracts.paths import _TEST_PATH_RES, is_test_path  # noqa: F401
 
 
 def demo_dir_for(work_item_id: str) -> str:

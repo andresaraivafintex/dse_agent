@@ -131,6 +131,20 @@ class RealGitHubClient:
             "base_ref": (pr.get("base") or {}).get("ref"),
         }
 
+    def get_tree_paths(self, repo: str, ref: str, *, limit: int = 300) -> list[str]:
+        """Árvore de arquivos do repo em `ref` (achado do disparo real: o Planner
+        propõe expected_files ANTES do clone — sem a árvore ele adivinha caminhos
+        e o plan_compliance reprova o diff real). Só paths de blob, truncado."""
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/git/trees/{ref}",
+            headers=self._headers(),
+            params={"recursive": "1"},
+            timeout=20.0,
+        )
+        resp.raise_for_status()
+        tree = resp.json().get("tree", [])
+        return [t["path"] for t in tree if t.get("type") == "blob"][:limit]
+
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:
         resp = httpx.post(
             f"{self._cfg.api_base_url}/repos/{repo}/pulls",
