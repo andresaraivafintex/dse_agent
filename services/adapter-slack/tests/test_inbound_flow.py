@@ -223,3 +223,76 @@ def test_block_action_button_click_correlates_as_approval_signal():
     kinds = [r[0] for r in rows]
     assert kinds == ["task_request", "approval"]
     assert "button:approve_pr=approved" in rows[1][1]["content_snapshot"]
+
+
+def test_reject_button_carries_rejected_verdict_not_silent_approve():
+    """C1 (relatório 07) — regressão de SEGURANÇA: um clique em 'reject' precisa
+    virar marcador `approval_verdict=rejected` no payload do signal. Sem isso o
+    dispatcher default para 'approved' e a rejeição aprovaria o plano em
+    silêncio. Espelha o caminho já correto do Jira."""
+    created = _post_event(
+        {
+            "type": "app_mention",
+            "channel": "C_REJECT",
+            "ts": "9100.001",
+            "user": "U_REQUESTER",
+            "text": "risky migration plan",
+        }
+    )
+    work_item_id = created["work_item_id"]
+
+    data = _post_interaction(
+        {
+            "type": "block_actions",
+            "channel": {"id": "C_REJECT"},
+            "message": {"ts": "9100.500", "thread_ts": "9100.001"},
+            "user": {"id": "U_REQUESTER"},
+            "action_ts": "9100.600",
+            "actions": [{"action_id": "dse_plan_reject", "value": "reject:re_plan"}],
+        }
+    )
+    assert data["path"] == "signal"
+
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload FROM ingest_events WHERE work_item_id = %s AND kind='approval' ORDER BY id",
+            (work_item_id,),
+        )
+        payload = cur.fetchone()[0]
+    conn.close()
+
+    assert payload.get("approval_verdict") == "rejected"
+    assert payload.get("approval_route") == "re_plan"
+
+
+def test_approve_button_carries_approved_verdict():
+    created = _post_event(
+        {
+            "type": "app_mention",
+            "channel": "C_OK",
+            "ts": "9200.001",
+            "user": "U_REQUESTER",
+            "text": "safe change",
+        }
+    )
+    work_item_id = created["work_item_id"]
+    _post_interaction(
+        {
+            "type": "block_actions",
+            "channel": {"id": "C_OK"},
+            "message": {"ts": "9200.500", "thread_ts": "9200.001"},
+            "user": {"id": "U_REQUESTER"},
+            "action_ts": "9200.600",
+            "actions": [{"action_id": "dse_plan_approve", "value": "approve"}],
+        }
+    )
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload FROM ingest_events WHERE work_item_id = %s AND kind='approval' ORDER BY id",
+            (work_item_id,),
+        )
+        payload = cur.fetchone()[0]
+    conn.close()
+    assert payload.get("approval_verdict") == "approved"

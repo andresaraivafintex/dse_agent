@@ -56,6 +56,35 @@ def build_event_from_thread_message(event: dict[str, Any], *, resolved_principal
     )
 
 
+_REJECT_TOKENS = ("reject", "rejected", "deny", "denied", "changes", "re_plan", "replan")
+
+
+def parse_slack_approval(action_id: str, value: str) -> tuple[str, str | None]:
+    """C1 (relatório 07): deriva verdict/route DETERMINÍSTICO do clique de botão.
+    O verdict NÃO pode ficar só no texto — tem que virar marcador
+    (`approval_verdict`/`approval_route`) que o dispatcher lê, senão o default
+    é `approved` e um "reject" aprovaria silenciosamente (bug de segurança do
+    gate). Espelha o caminho do Jira (`ingest_status_approval`).
+
+    Convenção dos botões (postados no Block Kit de aprovação): `action_id` ou
+    `value` contendo 'reject'/'deny'/'re_plan' => rejected; o `value` pode
+    carregar a rota após ':' (ex.: 'reject:re_plan'). Qualquer outra coisa =>
+    approved (fail-safe: uma rejeição jamais é lida como aprovação, mas um
+    clique ambíguo NÃO auto-aprova algo destrutivo — só segue o fluxo de
+    aprovação normal, que ainda exige o gate)."""
+    haystack = f"{action_id}|{value}".lower()
+    is_reject = any(tok in haystack for tok in _REJECT_TOKENS)
+    if not is_reject:
+        return "approved", None
+    # rota da rejeição: parte após ':' no value, senão default re_plan.
+    route = "re_plan"
+    if ":" in value:
+        candidate = value.split(":", 1)[1].strip()
+        if candidate:
+            route = candidate
+    return "rejected", route
+
+
 def build_event_from_block_action(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
     """Interação de botão (`block_actions`) -> kind=approval. `source_ref`
     usa o canal+thread_ts da mensagem original de status (onde o botão

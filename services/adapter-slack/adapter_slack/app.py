@@ -40,6 +40,7 @@ from .events import (
     build_event_from_app_mention,
     build_event_from_block_action,
     build_event_from_thread_message,
+    parse_slack_approval,
 )
 
 logger = logging.getLogger("adapter_slack")
@@ -75,7 +76,8 @@ def _resolve_tenant_for(team_id: str | None) -> str:
         conn.close()
 
 
-def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str) -> dict:
+def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str,
+                               extra_payload: dict | None = None) -> dict:
     channel = conv_event.source_ref["channel"]
     sanitized = sanitize_content(conv_event.content_snapshot)
 
@@ -94,6 +96,7 @@ def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str) ->
                 channel=channel,
                 work_item_id=result.work_item_id,
                 sanitized_content=sanitized,
+                extra_payload=extra_payload,
                 conn=conn,
             )
             return {"ok": True, "path": "signal", "work_item_id": result.work_item_id}
@@ -195,7 +198,18 @@ async def slack_interactions(request: Request) -> dict:
     tenant_id = _resolve_tenant_for(team_id)
     conv_event = build_event_from_block_action(payload, resolved_principal=principal)
 
-    return _handle_conversation_event(conv_event, principal=principal, tenant_id=tenant_id)
+    # C1 (relatório 07): deriva o verdict/route do botão para marcadores
+    # DETERMINÍSTICOS — sem isto o dispatcher default para `approved` e um
+    # "reject" aprovaria o plano silenciosamente (bug de segurança do gate).
+    action = payload["actions"][0]
+    verdict, route = parse_slack_approval(action.get("action_id", ""), action.get("value", ""))
+    extra_payload: dict = {"approval_verdict": verdict}
+    if route:
+        extra_payload["approval_route"] = route
+
+    return _handle_conversation_event(
+        conv_event, principal=principal, tenant_id=tenant_id, extra_payload=extra_payload
+    )
 
 
 class StatusCommentRequest(BaseModel):
