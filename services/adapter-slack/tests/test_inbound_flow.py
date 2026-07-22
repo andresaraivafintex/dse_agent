@@ -296,3 +296,58 @@ def test_approve_button_carries_approved_verdict():
         payload = cur.fetchone()[0]
     conn.close()
     assert payload.get("approval_verdict") == "approved"
+
+
+def test_channel_binding_resolves_repo_at_admission():
+    """C2 (relatório 07) — prova do blocker resolvido: um @mention num canal
+    COM repo_binding nasce com repo/base_branch preenchidos (não NULL), então
+    o gate de completude passa em vez de escalar. É o que faltava para uma
+    tarefa de Slack executar ponta a ponta."""
+    import os
+    tenant = os.environ.get("DSE_TENANT_ID", "dev-tenant")
+    conn = psycopg2.connect(DSN.replace("dse_app:dse_app_dev_only", "dse:dse_dev_only"))
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO repo_bindings (tenant_id, platform, binding_type, binding_value, repo, base_branch) "
+            "VALUES (%s,'slack','channel','C_BOUND','andre2654/fintex-wallet','main') ON CONFLICT DO NOTHING",
+            (tenant,),
+        )
+    conn.commit(); conn.close()
+
+    created = _post_event(
+        {
+            "type": "app_mention",
+            "channel": "C_BOUND",
+            "ts": "9300.001",
+            "user": "U_REQUESTER",
+            "text": "@fintex-dse conserta o cálculo de saldo",
+        }
+    )
+    work_item_id = created["work_item_id"]
+
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute("SELECT repo, base_branch FROM work_items WHERE id = %s", (work_item_id,))
+        repo, base_branch = cur.fetchone()
+    conn.close()
+    assert repo == "andre2654/fintex-wallet"
+    assert base_branch == "main"
+
+
+def test_explicit_repo_in_text_overrides():
+    """Rung 1 da cascata: repo explícito no texto ganha (sem depender de binding)."""
+    created = _post_event(
+        {
+            "type": "app_mention",
+            "channel": "C_UNBOUND_XYZ",
+            "ts": "9400.001",
+            "user": "U_REQUESTER",
+            "text": "@fintex-dse repo=andre2654/outro-repo faz X",
+        }
+    )
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute("SELECT repo FROM work_items WHERE id = %s", (created["work_item_id"],))
+        repo = cur.fetchone()[0]
+    conn.close()
+    assert repo == "andre2654/outro-repo"
