@@ -44,6 +44,7 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_TEARDOWN_SANDBOX,
         ACTIVITY_TRIGGER_PREVIEW,
         ACTIVITY_UPDATE_BASE_BRANCH,
+        ACTIVITY_VERIFY_MERGE_STATE,
         CheckpointRef,
         CiStatusResult,
         CoderTurnResult,
@@ -51,6 +52,7 @@ with workflow.unsafe.imports_passed_through():
         L1Result,
         L2Verdict,
         GateStatus,
+        MergeVerification,
         PreviewRef,
         PrRef,
         SandboxHandle,
@@ -1811,6 +1813,44 @@ class WorkItemLifecycleWorkflow:
             return False, "head_sha_mismatch", merge
         return True, "ok", merge
 
+    async def _verify_merge_via_github_api(self, merge) -> tuple[bool, str]:
+        """Plano 08 §F (F1) — confirma o merge contra a API do GitHub (verdade),
+        não só o envelope. Retorna (ok_para_concluir, motivo).
+
+        Política:
+          - PR de fato merged (e head_sha bate) → (True, "api_verified").
+          - refutação DEFINITIVA (PR não existe / não está merged / sha diverge)
+            → (False, motivo): forte sinal de forja; NÃO conclui (P1).
+          - API indisponível (erro de rede/credencial) → (True, "api_unavailable"):
+            degrada para o envelope, que já passou por assinatura HMAC do webhook
+            + correlação (defesa em profundidade; não trava merge por outage).
+        Guard de replay: histories antigas não chamavam esta Activity."""
+        if not workflow.patched("merge-verify-github-api-v1"):
+            return True, "unpatched"
+        if not self._input.pr_number or not self._input.repo:
+            return True, "no_target"
+        try:
+            v: MergeVerification = await workflow.execute_activity(
+                ACTIVITY_VERIFY_MERGE_STATE,
+                {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
+                 "repo": self._input.repo, "pr_number": self._input.pr_number,
+                 "expected_head_sha": self._input.head_sha},
+                result_type=MergeVerification,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError as exc:
+            # Activity caiu inteira após retries: degrada para o envelope
+            # autenticado (não trava merge legítimo por indisponibilidade).
+            logger.warning("verify_merge_state indisponível; degradando p/ envelope: %s", exc)
+            return True, "api_unavailable_activity_error"
+        if v.verified:
+            return True, f"api_verified(merged_by={v.merged_by})"
+        # refutação definitiva vs indisponibilidade (fail-safe distinto)
+        if v.reason.startswith(("not_merged", "pr_not_found", "head_sha_mismatch")):
+            return False, v.reason
+        return True, f"api_unavailable:{v.reason}"
+
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
         """Loop `while True` (NAO `continue_as_new` por iteracao — ver
         comentario em `_run_implementation_phase` sobre a corrida de sinais):
@@ -1989,14 +2029,22 @@ class WorkItemLifecycleWorkflow:
                         break
                     valid, reason, merge = self._validate_merge_signal()
                     if valid:
-                        await self._audit(
-                            "merge_signal_verified",
-                            {"merged_by": merge.merged_by,
-                             "pr_number": merge.pr_number,
-                             "merge_sha": merge.merge_sha,
-                             "head_sha": input.head_sha},
-                        )
-                        break
+                        # Plano 08 §F (F1): o envelope (pr_number/repo/sha) não é
+                        # segredo — um webhook forjado com os campos certos
+                        # passaria o check acima. Confirma na API do GitHub que o
+                        # PR está REALMENTE merged antes de concluir (P1/P8).
+                        api_ok, api_reason = await self._verify_merge_via_github_api(merge)
+                        if api_ok:
+                            await self._audit(
+                                "merge_signal_verified",
+                                {"merged_by": merge.merged_by,
+                                 "pr_number": merge.pr_number,
+                                 "merge_sha": merge.merge_sha,
+                                 "head_sha": input.head_sha,
+                                 "api_verification": api_reason},
+                            )
+                            break
+                        reason = f"api_refuted:{api_reason}"
                     await self._audit(
                         "merge_signal_rejected",
                         {"reason": reason, "payload": dict(self._merge_payload or {})},

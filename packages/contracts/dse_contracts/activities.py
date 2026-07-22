@@ -32,6 +32,7 @@ ACTIVITY_REBUILD_SANDBOX = "rebuild_sandbox"
 ACTIVITY_TEARDOWN_SANDBOX = "teardown_sandbox"
 ACTIVITY_RUN_L1_PIPELINE = "run_l1_pipeline"
 ACTIVITY_FINALIZE_PR = "finalize_pr"
+ACTIVITY_VERIFY_MERGE_STATE = "verify_merge_state"  # plano 08 §F (F1)
 ACTIVITY_POST_TRACKING_COMMENT = "post_tracking_comment"
 ACTIVITY_CONSUME_CI_STATUS = "consume_ci_status"
 ACTIVITY_EMIT_AUDIT = "emit_audit_event"
@@ -318,6 +319,34 @@ class PrRef(BaseModel):
     compare_url: str | None = None
     base_sha: str | None = None
     head_sha: str | None = None
+
+
+class VerifyMergeInput(BaseModel):
+    """Plano 08 §F (F1) — pede a verificação do estado REAL do PR na fonte
+    (GitHub) para confirmar um signal de merge contra a verdade, não só contra o
+    envelope (que um webhook forjado poderia falsificar — pr_number/repo/sha não
+    são segredos)."""
+
+    work_item_id: str
+    tenant_id: str
+    repo: str
+    pr_number: int
+    expected_head_sha: str | None = None
+    expected_merged_by: str | None = None
+
+
+class MergeVerification(BaseModel):
+    """Resultado da verificação na API. `verified` só é True quando o PR existe,
+    está de fato `merged`, e (se fornecido) o head_sha esperado bate. Fail-safe:
+    qualquer dúvida => verified=False (o workflow NÃO conclui como done)."""
+
+    exists: bool = False
+    merged: bool = False
+    merged_by: str | None = None
+    merge_commit_sha: str | None = None
+    head_sha: str | None = None
+    verified: bool = False
+    reason: str = ""
 
 
 class L2Verdict(BaseModel):

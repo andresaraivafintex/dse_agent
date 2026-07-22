@@ -36,6 +36,8 @@ logger = logging.getLogger("dse_validation.github")
 class GitHubClient(Protocol):
     def get_open_pr_for_branch(self, repo: str, branch: str) -> dict | None: ...
 
+    def get_pull_request(self, repo: str, pr_number: int) -> dict | None: ...
+
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict: ...
 
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> str: ...
@@ -105,6 +107,29 @@ class RealGitHubClient:
             return None
         pr = items[0]
         return {"number": pr["number"], "html_url": pr["html_url"], "state": pr["state"]}
+
+    def get_pull_request(self, repo: str, pr_number: int) -> dict | None:
+        """Plano 08 §F (F1) — estado REAL do PR na fonte (GitHub), para verificar
+        um signal de merge contra a verdade e não só contra o envelope. Retorna
+        merged/merged_by/merge_commit_sha/head_sha; None se o PR não existe."""
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/pulls/{pr_number}",
+            headers=self._headers(),
+            timeout=15.0,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        pr = resp.json()
+        return {
+            "number": pr["number"],
+            "state": pr["state"],
+            "merged": bool(pr.get("merged")),
+            "merged_by": (pr.get("merged_by") or {}).get("login"),
+            "merge_commit_sha": pr.get("merge_commit_sha"),
+            "head_sha": (pr.get("head") or {}).get("sha"),
+            "base_ref": (pr.get("base") or {}).get("ref"),
+        }
 
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:
         resp = httpx.post(

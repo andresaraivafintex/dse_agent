@@ -20,12 +20,15 @@ from dse_contracts import (
     ACTIVITY_CONSUME_CI_STATUS,
     ACTIVITY_FINALIZE_PR,
     ACTIVITY_RUN_L1_PIPELINE,
+    ACTIVITY_VERIFY_MERGE_STATE,
     CiStatusResult,
     L1Result,
     L2Verdict,
+    MergeVerification,
     PlanArtifact,
     PrRef,
     SandboxHandle,
+    VerifyMergeInput,
 )
 from dse_contracts.activities import (
     ACTIVITY_PUBLISH_ARTIFACT,
@@ -277,6 +280,38 @@ def _finalize_pr(inp: FinalizePrInput) -> PrRef:
         strict_mode=strict,
         comment_writer=comment_writer,
         surface_ref=inp.surface_ref,
+    )
+
+
+def _verify_merge_state(inp: VerifyMergeInput, github_client=None) -> MergeVerification:
+    """Plano 08 §F (F1) — confirma na API do GitHub que o PR está REALMENTE
+    merged (e, se dado, com o head_sha esperado). Fail-safe: qualquer erro/dúvida
+    => verified=False (o workflow nunca conclui como done com base nisso). O
+    `github_client` é injetável para teste; em produção vem das env vars."""
+    client = github_client or build_github_client(GitHubConfig())
+    try:
+        pr = client.get_pull_request(inp.repo, inp.pr_number)
+    except Exception as exc:  # rede/credencial: fail-safe (não verificado)
+        return MergeVerification(verified=False, reason=f"api_error:{type(exc).__name__}")
+    if pr is None:
+        return MergeVerification(exists=False, verified=False, reason="pr_not_found")
+    merged = bool(pr.get("merged"))
+    head_sha = pr.get("head_sha")
+    merged_by = pr.get("merged_by")
+    if not merged:
+        return MergeVerification(
+            exists=True, merged=False, head_sha=head_sha, merged_by=merged_by,
+            verified=False, reason=f"not_merged(state={pr.get('state')})",
+        )
+    if inp.expected_head_sha and head_sha and inp.expected_head_sha != head_sha:
+        return MergeVerification(
+            exists=True, merged=True, head_sha=head_sha, merged_by=merged_by,
+            merge_commit_sha=pr.get("merge_commit_sha"),
+            verified=False, reason="head_sha_mismatch",
+        )
+    return MergeVerification(
+        exists=True, merged=True, head_sha=head_sha, merged_by=merged_by,
+        merge_commit_sha=pr.get("merge_commit_sha"), verified=True, reason="ok",
     )
 
 
@@ -543,6 +578,10 @@ if _HAS_TEMPORAL:
     async def finalize_pr(inp: FinalizePrInput) -> PrRef:
         return _finalize_pr(inp)
 
+    @activity.defn(name=ACTIVITY_VERIFY_MERGE_STATE)
+    async def verify_merge_state(inp: VerifyMergeInput) -> MergeVerification:
+        return _verify_merge_state(inp)
+
     @activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)
     async def consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
         return _consume_ci_status(inp)
@@ -605,6 +644,7 @@ if _HAS_TEMPORAL:
     ALL_ACTIVITIES = [
         run_l1_pipeline,
         finalize_pr,
+        verify_merge_state,
         consume_ci_status,
         wse_run_l2_review,
         wse_record_fix_loop,

@@ -69,6 +69,7 @@ from dse_contracts.activities import (
     ACTIVITY_TEARDOWN_SANDBOX,
     ACTIVITY_TRIGGER_PREVIEW,
     ACTIVITY_UPDATE_BASE_BRANCH,
+    ACTIVITY_VERIFY_MERGE_STATE,
     CheckpointRef,
     CheckpointSandboxInput,
     CiStatusResult,
@@ -79,6 +80,7 @@ from dse_contracts.activities import (
     L1Finding,
     L1Result,
     L2Verdict,
+    MergeVerification,
     PreviewRef,
     PrRef,
     ProvisionSandboxInput,
@@ -93,6 +95,7 @@ from dse_contracts.activities import (
     TriggerPreviewInput,
     UpdateBaseBranchInput,
     UpdateBaseBranchResult,
+    VerifyMergeInput,
     VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
@@ -169,6 +172,10 @@ class FakeControlPlane:
     # "auto" = paths-filter deterministico (espelho do FR-20 do WS-E);
     # "created"/"degraded" forcam o status; "raise" derruba a Activity inteira.
     preview_mode: str = "auto"
+    # §F F1 — verificação de merge via API do GitHub (fake): "verified" (default,
+    # PR de fato merged), "not_merged" (forjado → refuta), "unavailable" (API
+    # fora → degrada p/ envelope).
+    merge_verify_mode: str = "verified"
     demo_passed: bool = True
     demo_video_key: str | None = "evidence/demo.webm"
     demo_trace_key: str | None = "evidence/trace.zip"
@@ -329,6 +336,19 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             url=f"https://github.com/x/y/pull/{pr_number}",
         )
 
+    async def verify_merge_state(payload: dict) -> MergeVerification:
+        # §F F1 — espelha o contrato real; o modo dirige o veredito.
+        state.calls_log.append("verify_merge_state")
+        inp = VerifyMergeInput(**payload)  # decode REAL do contrato
+        if state.merge_verify_mode == "not_merged":
+            return MergeVerification(exists=True, merged=False, verified=False,
+                                     reason="not_merged(state=open)")
+        if state.merge_verify_mode == "unavailable":
+            return MergeVerification(verified=False, reason="api_error:Timeout")
+        return MergeVerification(exists=True, merged=True, merged_by="usr_test",
+                                 merge_commit_sha="deadbeef", head_sha=inp.expected_head_sha,
+                                 verified=True, reason="ok")
+
     # S3 (Fase 5): post_tracking_comment agora é uma Activity LOCAL REAL
     # (em LOCAL_ACTIVITIES) — não é mais fake aqui, senão colide (dois
     # @activity.defn com o mesmo nome no worker de teste). A real é
@@ -453,6 +473,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         activity.defn(name=ACTIVITY_TEARDOWN_SANDBOX)(teardown_sandbox),
         activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)(run_l1_pipeline),
         activity.defn(name=ACTIVITY_FINALIZE_PR)(finalize_pr),
+        activity.defn(name=ACTIVITY_VERIFY_MERGE_STATE)(verify_merge_state),
         # post_tracking_comment: real, vem de LOCAL_ACTIVITIES (S3) — não registrar aqui.
         activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)(consume_ci_status),
         activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)(trigger_preview),
