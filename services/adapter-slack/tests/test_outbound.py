@@ -111,3 +111,44 @@ def test_status_comment_ref_persisted_across_process_restart_simulation(tenant_i
     conn.close()
     assert row[0] == "slack"
     assert json.loads(row[1])["channel"] == "C_STATUS"
+
+
+def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
+    """Fase B (relatório 07): no status awaiting_plan_approval a mensagem sai
+    com Block Kit (Approve/Reject) — os action_id/value são os marcadores que
+    parse_slack_approval (C1) lê. Fecha o loop: sem postar os botões, o humano
+    não tinha como aprovar/rejeitar pelo Slack."""
+    fake_client = FakeSlackClient()
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    work_item_id = _make_work_item(tenant_id)
+
+    resp = client.post(
+        "/internal/status-comment",
+        json={
+            "work_item_id": work_item_id,
+            "channel": "C_APPROVE",
+            "body": "Plano pronto — aprovar?",
+            "actor": "system:orchestrator",
+            "status": "awaiting_plan_approval",
+        },
+    )
+    assert resp.status_code == 200
+    blocks = fake_client.post_calls[0]["blocks"]
+    assert blocks is not None
+    action_block = next(b for b in blocks if b["type"] == "actions")
+    action_ids = {e["action_id"] for e in action_block["elements"]}
+    assert action_ids == {"dse_plan_approve", "dse_plan_reject"}
+    values = {e["value"] for e in action_block["elements"]}
+    assert "reject:re_plan" in values  # o marcador de rejeição que o C1 parseia
+
+
+def test_non_approval_status_stays_plain_text(tenant_id, monkeypatch):
+    fake_client = FakeSlackClient()
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    work_item_id = _make_work_item(tenant_id)
+    client.post(
+        "/internal/status-comment",
+        json={"work_item_id": work_item_id, "channel": "C1", "body": "⚙️ implementando",
+              "actor": "system:orchestrator", "status": "implementing"},
+    )
+    assert fake_client.post_calls[0]["blocks"] is None  # sem botões fora da aprovação

@@ -42,6 +42,9 @@ logger = logging.getLogger("dse_orchestrator.local_activities")
 LOCAL_ACTIVITY_UPDATE_STATUS = "update_work_item_status"
 LOCAL_ACTIVITY_CHECK_CLARIFICATION = "check_clarification_completeness"
 LOCAL_ACTIVITY_LOAD_WORK_ITEM = "load_work_item"
+# Fase B (relatório 07) — reflete o status do WorkItem no board do Jira
+# (transição de coluna), via a fila serializada do adapter-jira.
+LOCAL_ACTIVITY_POST_STATUS_TRANSITION = "post_status_transition"
 # Fase 2 (WSB-E3-T2) — resolucao de aprovador (I/O: DB + CODEOWNERS) e
 # projecao duravel do gate (WSB migracao 0009).
 LOCAL_ACTIVITY_RESOLVE_APPROVER = "resolve_plan_approver"
@@ -617,6 +620,10 @@ async def post_tracking_comment(payload: dict[str, Any]) -> dict[str, Any]:
         body = template.format(detail=detail or "—", status=status)
 
     adapter_url, extra_fields = target
+    # Slack usa `status` para montar Block Kit no awaiting_plan_approval (Fase B);
+    # github/jira não têm o campo (não enviar — os models são estritos).
+    if source == "slack":
+        extra_fields = {**extra_fields, "status": status}
     import httpx
     try:
         with httpx.Client(timeout=httpx.Timeout(8.0, connect=2.0)) as client:
@@ -662,8 +669,92 @@ def _resolve_comment_target(source, repo, source_ref: dict[str, Any]):
     return None
 
 
+# Mapa status do DSE -> coluna do board do Jira (Fase B). Nomes de coluna
+# variam por projeto Jira, então é override-able por env
+# (DSE_JIRA_STATUS_MAP como JSON). Só os status com entrada geram transição;
+# vários status do DSE colapsam numa coluna (ex.: pr_open/ci_pending/
+# review_ready -> "In Review"), e o dedup por coluna evita mover o card à toa.
+_DEFAULT_JIRA_STATUS_MAP = {
+    "implementing": "In Progress",
+    "validating": "In Progress",
+    "pr_open": "In Review",
+    "ci_pending": "In Review",
+    "review_ready": "In Review",
+    "pr_ready": "In Review",
+    "merge_pending": "In Review",
+    "done": "Done",
+    "blocked": "Blocked",
+    "escalated": "Blocked",
+    "failed": "Blocked",
+}
+
+
+def _jira_status_map() -> dict[str, str]:
+    raw = os.environ.get("DSE_JIRA_STATUS_MAP")
+    if raw:
+        try:
+            return {**_DEFAULT_JIRA_STATUS_MAP, **json.loads(raw)}
+        except Exception:  # noqa: BLE001 — env malformado não derruba o fluxo
+            logging.getLogger("dse_orchestrator").warning("DSE_JIRA_STATUS_MAP inválido; usando default")
+    return _DEFAULT_JIRA_STATUS_MAP
+
+
+@activity.defn(name=LOCAL_ACTIVITY_POST_STATUS_TRANSITION)
+async def post_status_transition(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fase B (relatório 07): reflete o status do WorkItem no board do Jira,
+    movendo o card para a coluna mapeada — via a fila serializada/idempotente
+    do adapter-jira (`/internal/transition`). SÓ para origem `jira`; outras
+    fontes são no-op auditado. Best-effort; determinístico (P1: mapa fixo).
+
+    dedup_key = work_item_id:coluna -> a mesma coluna nunca é re-transicionada
+    (Jira rejeita transição no-op; e evita ruído no board)."""
+    work_item_id = payload["work_item_id"]
+    tenant_id = payload.get("tenant_id", "")
+    status = payload.get("status", "")
+
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT source, source_ref FROM work_items WHERE id = %s", (work_item_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return {"ok": False, "reason": "work_item_not_found"}
+    source, source_ref = row
+    source_ref = source_ref if isinstance(source_ref, dict) else {}
+    if source != "jira":
+        return {"ok": True, "skipped": f"source={source}_not_jira"}
+    ticket_key = source_ref.get("ticket_key")
+    if not ticket_key:
+        return {"ok": True, "skipped": "no_ticket_key"}
+    target_status = _jira_status_map().get(status)
+    if not target_status:
+        return {"ok": True, "skipped": f"status={status}_not_mapped"}
+
+    adapter_url = os.environ.get("DSE_ADAPTER_JIRA_URL", "http://adapter-jira:8804")
+    import httpx
+    try:
+        with httpx.Client(timeout=httpx.Timeout(8.0, connect=2.0)) as client:
+            resp = client.post(
+                f"{adapter_url}/internal/transition",
+                json={"work_item_id": work_item_id, "ticket_key": ticket_key,
+                      "target_status": target_status,
+                      "dedup_key": f"{work_item_id}:{target_status}",
+                      "actor": "system:orchestrator", "tenant_id": tenant_id},
+            )
+            resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001 — best-effort; nunca derruba o workflow
+        logging.getLogger("dse_orchestrator").warning(
+            "post_status_transition falhou para %s: %s", work_item_id, exc
+        )
+        return {"ok": False, "reason": "adapter_unavailable", "error": str(exc)[:200]}
+    return {"ok": True, "target_status": target_status}
+
+
 LOCAL_ACTIVITIES = [
     update_work_item_status,
+    post_status_transition,
     check_clarification_completeness,
     emit_audit_event,
     load_work_item,

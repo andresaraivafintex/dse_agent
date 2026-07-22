@@ -34,7 +34,7 @@ from ingest_gateway import (
 )
 from pydantic import BaseModel
 
-from .backend import SlackCommentBackend, build_real_slack_client
+from .backend import SlackCommentBackend, approval_blocks, build_real_slack_client
 from .comment_store import SURFACE, PgCommentStateStore
 from .config import get_slack_bot_token, get_slack_signing_secret, get_tenant_id
 from .events import (
@@ -227,19 +227,27 @@ class StatusCommentRequest(BaseModel):
     channel: str
     body: str
     actor: str  # principal resolvido de quem/o-que disparou a atualização (ex.: "system:orchestrator")
+    status: str | None = None  # Fase B: quando 'awaiting_plan_approval', monta os botões
 
 
 @app.post("/internal/status-comment")
 def upsert_status_comment(req: StatusCommentRequest) -> dict:
     """WSA-E3-T2: exatamente 1 mensagem de status por WorkItem, editada
     in-place — chamado pelo orchestrator (WS-B) a cada transição de estado
-    relevante. Usa `MutableCommentWriter` compartilhado (dse_contracts)."""
+    relevante. Usa `MutableCommentWriter` compartilhado (dse_contracts).
+
+    Fase B (relatório 07): no status `awaiting_plan_approval` a mensagem sai
+    com Block Kit (botões Approve/Reject) — a mesma mensagem mutável, só que
+    interativa. Os cliques voltam por /slack/interactions (verdict via C1)."""
     client = build_real_slack_client(get_slack_bot_token())
     backend = SlackCommentBackend(client)
     store = PgCommentStateStore()
     writer = mutable_comment.MutableCommentWriter(backend, store, SURFACE)
 
-    comment_ref = writer.upsert(req.work_item_id, {"channel": req.channel}, req.body)
+    surface_ref = {"channel": req.channel}
+    if req.status == "awaiting_plan_approval":
+        surface_ref["blocks"] = approval_blocks(req.body)
+    comment_ref = writer.upsert(req.work_item_id, surface_ref, req.body)
 
     audit_emit(
         actor=req.actor,

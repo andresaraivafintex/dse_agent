@@ -68,6 +68,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_EMIT_HISTORY_METRIC,
         LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
+        LOCAL_ACTIVITY_POST_STATUS_TRANSITION,
         LOCAL_ACTIVITY_RECORD_EVIDENCE,
         LOCAL_ACTIVITY_RECORD_GATE,
         LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
@@ -638,6 +639,20 @@ class WorkItemLifecycleWorkflow:
             )
         except ActivityError:
             logger.warning("post_status_comment best-effort falhou (status=%s)", status)
+        # Fase B: reflete tambem no BOARD (transição de coluna do Jira). No-op
+        # para github/slack. Guard novo (patch proprio) para replay-safety —
+        # histories entre a superficie de status e o board pulam so esta parte.
+        if workflow.patched("status-transition-board-v1"):
+            try:
+                await workflow.execute_activity(
+                    LOCAL_ACTIVITY_POST_STATUS_TRANSITION,
+                    {"work_item_id": self._input.work_item_id,
+                     "tenant_id": self._input.tenant_id, "status": status},
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=5),
+                )
+            except ActivityError:
+                logger.warning("post_status_transition best-effort falhou (status=%s)", status)
 
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
         detail = f"escalated: {reason}"
