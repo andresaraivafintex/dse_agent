@@ -114,6 +114,12 @@ _FAIL_CLOSED_MARKERS = (
     "virtual_key_expired",
     "key_expired",
     "kill_switch",
+    # achado do disparo real (2026-07-22): créditos do provider esgotados NÃO é
+    # falha transitória — o CLI mascarava como "error result: success" e a
+    # activity retentava para sempre. Classificada non-retryable na origem
+    # (sandbox_runtime) e reconhecida aqui -> falha limpa comentada na issue.
+    "provider_billing",
+    "credit balance",
 )
 
 

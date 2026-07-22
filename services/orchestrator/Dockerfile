@@ -4,9 +4,12 @@ FROM python:3.11-slim
 
 # S4 (Fase 5): git para clonar o repo alvo no control plane.
 # S5 (Fase 5): Node.js para o CLI do Claude Code que o claude-agent-sdk dispara
-# (o Coder real). curl/ca-certificates para o NodeSource. Node 20 LTS.
+# (o Coder real). curl/ca-certificates para o NodeSource.
+# Node 22 LTS (achado do disparo real 2026-07-22): repos-alvo usam
+# `node --test "glob"` — o glob NATIVO do test runner só existe no Node 21+;
+# no 20 o padrão quoted não expande e o runner não acha nenhum teste.
 RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 

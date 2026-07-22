@@ -406,13 +406,17 @@ async def _run_coder_turn_impl(
     max_turns = 8
     turns = 0
     while not done and turns < max_turns:
-        log = await run_sync_with_heartbeat(
-            agent.run_turn,
-            inp.instruction,
-            stage=inp.stage,
-            work_item_id=inp.work_item_id,
-            operation=f"substrate_turn_{turns + 1}",
-        )
+        try:
+            log = await run_sync_with_heartbeat(
+                agent.run_turn,
+                inp.instruction,
+                stage=inp.stage,
+                work_item_id=inp.work_item_id,
+                operation=f"substrate_turn_{turns + 1}",
+            )
+        except Exception as exc:  # noqa: BLE001 — classificação, não engolimento
+            _raise_if_permanent_provider_error(exc)
+            raise
         done = log.done
         turns += 1
 
@@ -538,6 +542,7 @@ def _model_plan_proposer(
             temperature=0,
         )
     except Exception as exc:  # noqa: BLE001 — recusa/erro => fixture (escala limpa)
+        _raise_if_permanent_provider_error(exc)  # billing/auth: mensagem certa na issue
         logger.warning("planner via modelo falhou (%s: %s) — fixture", type(exc).__name__, str(exc)[:200])
         return None
 
@@ -699,6 +704,31 @@ async def _run_planner_turn_impl(
 from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
 
 
+# Padrões de erro PERMANENTE do provider (achado do disparo real 2026-07-22):
+# créditos esgotados/key inválida não são transitórios — retentar é loop
+# infinito de attempts. Lançados non_retryable; o workflow os converte em
+# _FailClosed → falha limpa comentada na issue (P6).
+_PERMANENT_PROVIDER_MARKERS = (
+    "credit balance is too low",
+    "plans & billing",
+    "insufficient credits",
+    "authentication_error",
+    "invalid x-api-key",
+)
+
+
+def _raise_if_permanent_provider_error(exc: Exception) -> None:
+    blob = f"{type(exc).__name__}:{exc}".lower()
+    if any(m in blob for m in _PERMANENT_PROVIDER_MARKERS):
+        from temporalio.exceptions import ApplicationError
+
+        raise ApplicationError(
+            f"provider_billing_or_auth: {str(exc)[:200]}",
+            type="ProviderBillingError",
+            non_retryable=True,
+        ) from exc
+
+
 _TEST_AUTHOR_PROMPT = """Você é o Tester do Fintex DSE. Escreva teste(s) AUTOMATIZADO(s) que
 verifiquem a mudança descrita — idealmente reproduzindo o bug (falham sem o fix,
 passam com ele). Use o runner/convenções DO PRÓPRIO repo (visíveis no diff/contexto).
@@ -759,6 +789,7 @@ def _model_authored_test_script(
             timeout=180.0, max_tokens=4000, temperature=0,
         )
     except Exception as exc:  # noqa: BLE001
+        _raise_if_permanent_provider_error(exc)  # billing/auth: mensagem certa na issue
         logger.warning("tester via modelo falhou (%s: %s)", type(exc).__name__, str(exc)[:200])
         return None
 
