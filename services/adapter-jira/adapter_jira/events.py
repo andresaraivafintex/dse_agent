@@ -40,6 +40,12 @@ def issue_labels(issue: dict[str, Any]) -> list[str]:
     return list(issue.get("fields", {}).get("labels") or [])
 
 
+def issue_type(issue: dict[str, Any]) -> str | None:
+    """Nome do issue type do Jira (Bug/Story/Task/...) — plano 08 §A: alimenta
+    a classificação determinística de task_class na admissão."""
+    return (issue.get("fields", {}).get("issuetype") or {}).get("name")
+
+
 def first_component(issue: dict[str, Any]) -> str | None:
     """Nome do 1º Component do Jira (C2/relatório 07): Components mapeiam issues
     a subsistemas/serviços — o sinal de repo de granularidade mais fina do Jira.

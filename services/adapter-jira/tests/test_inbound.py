@@ -17,7 +17,8 @@ TENANT_ID = "test_tenant_jira_adapter"
 SITE = "https://acme.atlassian.net"
 
 
-def _issue(key: str, issue_id: str, *, labels=None, status="To Do", summary="Do the thing", desc="details"):
+def _issue(key: str, issue_id: str, *, labels=None, status="To Do", summary="Do the thing",
+           desc="details", issue_type="Task"):
     return {
         "id": issue_id,
         "key": key,
@@ -27,6 +28,7 @@ def _issue(key: str, issue_id: str, *, labels=None, status="To Do", summary="Do 
             "description": desc,
             "labels": labels or [],
             "status": {"name": status},
+            "issuetype": {"name": issue_type},
             "project": {"key": key.split("-")[0]},
             "reporter": {"accountId": "acc_reporter", "displayName": "Rita Reporter"},
         },
@@ -65,6 +67,25 @@ def test_issue_created_with_trigger_label_creates_task():
     conn.close()
     assert source == "jira"
     assert source_ref == {"ticket_key": "DSE-10"}
+
+
+def test_issue_type_bug_classifies_task_class(unique_suffix=None):
+    """Plano 08 §A (fechado na auditoria): issue type Bug do Jira → task_class
+    bug_fix na admissão (mapa determinístico _JIRA_TYPE_MAP)."""
+    data = _post(
+        {
+            "webhookEvent": "jira:issue_created",
+            "user": {"accountId": "acc_alice", "displayName": "Alice"},
+            "issue": _issue("DSE-77", "10077", labels=["dse"], issue_type="Bug"),
+        }
+    )
+    result = data["results"][0]
+    assert result["path"] == "new_task"
+    conn = psycopg2.connect(DSN)
+    with conn.cursor() as cur:
+        cur.execute("SELECT task_class FROM work_items WHERE id=%s", (result["work_item_id"],))
+        assert cur.fetchone()[0] == "bug_fix"
+    conn.close()
 
 
 def test_issue_created_without_label_is_ignored():

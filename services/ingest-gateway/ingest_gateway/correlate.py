@@ -80,7 +80,7 @@ def correlate(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, status FROM work_items
+            SELECT id, status, requester FROM work_items
             WHERE tenant_id = %s AND source_ref @> %s::jsonb
             ORDER BY created_at DESC
             LIMIT 1
@@ -92,7 +92,7 @@ def correlate(
     if row is None:
         return CorrelationResult("new_task", None)
 
-    matched_id, status = row
+    matched_id, status, wi_requester = row
 
     if status in _TERMINAL_STATUSES:
         # Regra documentada: WorkItem terminal não recebe sinal — vira
@@ -100,6 +100,27 @@ def correlate(
         return CorrelationResult("new_task", None, provenance_work_item_id=matched_id)
 
     if event.kind in _STEERING_GATED_KINDS:
+        # Plano 08 §F (F4, ajuste da auditoria): o REQUESTER da tarefa responder
+        # à clarificação da PRÓPRIA tarefa é o fluxo esperado (a pergunta foi
+        # feita a ele) — autorizado por construção, comparação determinística
+        # com a coluna requester (P1). Vale só para clarification_answer;
+        # steering/review_comment de qualquer um (inclusive o requester) seguem
+        # o gate estrito. Sem isto, o F4 bloquearia o fluxo real nos três
+        # canais (Jira/Slack tratam todo comentário como clarification_answer).
+        if (
+            event.kind is EventKind.clarification_answer
+            and wi_requester
+            and requester_principal == wi_requester
+        ):
+            audit_emit(
+                actor=requester_principal,
+                action="steering_authorized",
+                tenant_id=tenant_id,
+                work_item_id=matched_id,
+                details={"method": "task_requester", "kind": event.kind.value},
+                conn=conn,
+            )
+            return CorrelationResult("signal", matched_id)
         if not is_authorized_to_steer(tenant_id, requester_principal):
             audit_emit(
                 actor=requester_principal,

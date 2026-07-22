@@ -39,7 +39,13 @@ services:
     networks: [dse_net]
 
   model-gateway:
-    image: ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b236757f0f69b71392722
+    # F2 (auditoria): imagem DERIVADA da stock pinada (Dockerfile.proxy) — a
+    # stock não tem driver Postgres e o hook de budget ficaria inerte. O digest
+    # pinado vive no FROM do Dockerfile.proxy (upgrade segue explícito).
+    build:
+      context: ./services/model-gateway
+      dockerfile: Dockerfile.proxy
+    image: dse-model-gateway-proxy:local
     container_name: dse_model_gateway
     depends_on:
       - model-gateway-echo

@@ -20,6 +20,7 @@ from dse_audit import emit as audit_emit
 from ingest_gateway import (
     AdmissionBlocked,
     admit_work_item,
+    classify_task_class,
     correlate,
     get_connection,
     record_signal_event,
@@ -82,6 +83,12 @@ def ingest_task_trigger(
                 repo=repo,
                 base_branch=base_branch,
                 requester_principal=resolved_principal,
+                # Plano 08 §A: task_class determinística no intake — labels do
+                # ticket + issue type do Jira (Bug→bug_fix, Story→feature_small…).
+                task_class=classify_task_class(
+                    labels=events.issue_labels(issue),
+                    issue_type=events.issue_type(issue),
+                ),
                 sanitized_content=sanitized,
                 conn=conn,
             )

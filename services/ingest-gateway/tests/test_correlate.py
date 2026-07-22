@@ -169,24 +169,68 @@ def test_clarification_answer_by_unauthorized_is_rejected(tenant_id):
     check_conn.close()
 
 
-def test_clarification_answer_by_authorized_requester_is_signal(tenant_id):
-    """O requester legítimo (na allowlist) responde a clarificação → signal.
-    O gate F4 não quebra o fluxo esperado."""
+def test_clarification_answer_by_task_requester_is_signal_without_allowlist(tenant_id):
+    """Ajuste da auditoria (F4): o REQUESTER da tarefa responde à clarificação
+    da própria tarefa SEM precisar de allowlist — a pergunta foi feita a ele
+    (fluxo esperado nos 3 canais). Comparação determinística com a coluna
+    requester do work item."""
     ref = {"channel": "C1", "thread_ts": "444.444"}
+    wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
+    # _insert_work_item grava requester='usr_original_requester'
+
+    conn = get_connection()
+    event = _event(EventKind.clarification_answer, ref, principal="usr_original_requester")
+    result = correlate(conn, tenant_id=tenant_id, event=event,
+                       requester_principal="usr_original_requester")
+    conn.commit()
+
+    assert result.kind == "signal"
+    assert result.work_item_id == wi_id
+    # proveniência do grant (P8): method=task_requester
+    check = psycopg2.connect(DSN)
+    with check.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM audit_log WHERE tenant_id=%s AND action='steering_authorized' "
+            "AND work_item_id=%s AND details->>'method'='task_requester'",
+            (tenant_id, wi_id),
+        )
+        assert cur.fetchone() is not None
+    check.close()
+
+
+def test_clarification_answer_by_third_party_on_allowlist_is_signal(tenant_id):
+    """Terceiro NÃO-requester mas autorizado (allowlist) também pode responder."""
+    ref = {"channel": "C1", "thread_ts": "555.555"}
     wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
 
     allow_conn = psycopg2.connect(DSN)
     with allow_conn.cursor() as cur:
         cur.execute(
             "INSERT INTO tenant_steering_allowlist (tenant_id, principal_id) VALUES (%s, %s)",
-            (tenant_id, "usr_requester"),
+            (tenant_id, "usr_helper"),
         )
     allow_conn.commit()
     allow_conn.close()
 
     conn = get_connection()
-    event = _event(EventKind.clarification_answer, ref, principal="usr_requester")
-    result = correlate(conn, tenant_id=tenant_id, event=event, requester_principal="usr_requester")
+    event = _event(EventKind.clarification_answer, ref, principal="usr_helper")
+    result = correlate(conn, tenant_id=tenant_id, event=event, requester_principal="usr_helper")
 
     assert result.kind == "signal"
+    assert result.work_item_id == wi_id
+
+
+def test_steering_by_task_requester_still_requires_allowlist(tenant_id):
+    """O shortcut do requester vale SÓ para clarification_answer: steering do
+    próprio requester continua passando pelo gate estrito (deny-by-default)."""
+    ref = {"repo": "acme/widgets", "number": 46}
+    wi_id = _insert_work_item(tenant_id, ref, status="implementing")
+
+    conn = get_connection()
+    event = _event(EventKind.steering, ref, principal="usr_original_requester")
+    result = correlate(conn, tenant_id=tenant_id, event=event,
+                       requester_principal="usr_original_requester")
+    conn.commit()
+
+    assert result.kind == "unauthorized"
     assert result.work_item_id == wi_id

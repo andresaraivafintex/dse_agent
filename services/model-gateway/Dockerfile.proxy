@@ -1,0 +1,15 @@
+# Plano 08 §F (F2) — imagem derivada do LiteLLM proxy para o pre-call hook.
+#
+# Achado da auditoria (2026-07-22): a imagem stock do LiteLLM NÃO traz nenhum
+# driver Postgres importável (só o prisma client interno) — sem isto o
+# dse_budget_hook conecta ao control-plane e falha sempre → fail-safe permitiria
+# tudo (gate INERTE). Esta imagem deriva DA MESMA imagem pinada por digest
+# (upgrade continua sendo um ato explícito: trocar o digest aqui) e adiciona só
+# o driver, pinado. O hook em si continua montado pelo compose (dev) — em
+# produção, copie-o para a imagem (imutável).
+FROM ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b236757f0f69b71392722
+
+# a imagem (build via uv) não traz pip no venv /app/.venv — bootstrap com
+# ensurepip (presente) e instala só o driver, pinado.
+RUN python -m ensurepip --upgrade \
+    && python -m pip install --no-cache-dir psycopg2-binary==2.9.10
