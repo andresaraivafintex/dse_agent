@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -758,42 +759,86 @@ def _raise_if_permanent_provider_error(exc: Exception) -> None:
 
 _TEST_AUTHOR_PROMPT = """Você é o Tester do Fintex DSE. Escreva teste(s) AUTOMATIZADO(s) que
 verifiquem a mudança descrita — idealmente reproduzindo o bug (falham sem o fix,
-passam com ele). Use o runner/convenções DO PRÓPRIO repo (visíveis no diff/contexto).
+passam com ele).
 
 Responda APENAS com JSON válido (sem markdown):
 {{"files": [{{"path": "caminho/relativo/do/teste", "content": "conteúdo completo do arquivo"}}]}}
 
-Regras:
-- Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py, *_test.py…).
-- 1 arquivo (no máximo 2); CONCISO — só os casos essenciais (~40-80 linhas).
-  A resposta inteira precisa caber no limite de tokens: JSON cortado = falha.
+REGRAS CRÍTICAS:
+- Use EXATAMENTE o runner e o estilo do TESTE EXISTENTE mostrado abaixo (mesmos
+  imports, mesma estrutura). NÃO use jest/mocha/vitest/supertest ou QUALQUER
+  pacote que não esteja nas dependências do package.json mostrado — o repo pode
+  não ter nenhuma dependência (runner nativo).
+- Crie APENAS arquivo(s) NOVO(s) — NUNCA reescreva um teste existente.
+- Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py…).
+- 1 arquivo (no máximo 2); CONCISO (~40-80 linhas). JSON cortado = falha.
 - Não modifique código de produção — só testes.
-
+{error_feedback}
 ## Tarefa
 {instruction}
 
 ## Plano
 {plan}
 
+## package.json do repo (runner/dependências REAIS)
+{package_json}
+
+## Teste EXISTENTE do repo (IMITE este estilo/runner)
+{example_test}
+
 ## Mudança do Coder (diff)
 {diff}
 """
 
 
+def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
+    """Contexto determinístico para a autoria imitar o repo REAL (achado do
+    disparo real: o modelo escreveu Jest num repo node:test sem deps e ainda
+    sobrescreveu o teste original — nada rodava nunca). Retorna
+    (package_json, exemplo_de_teste, paths_de_teste_existentes)."""
+    from dse_contracts.paths import is_test_path
+
+    pkg = ""
+    try:
+        pkg = open(os.path.join(workspace_dir, "package.json")).read()[:1500]
+    except OSError:
+        pkg = "(sem package.json — provavelmente Python/pytest)"
+    existing: set[str] = set()
+    example = ""
+    for root, _dirs, files in os.walk(workspace_dir):
+        if "/.git" in root or "/node_modules" in root:
+            continue
+        for f in files:
+            rel = os.path.relpath(os.path.join(root, f), workspace_dir)
+            if is_test_path(rel):
+                existing.add(rel)
+                if not example:
+                    try:
+                        example = f"# {rel}\n" + open(os.path.join(root, f)).read()[:3000]
+                    except OSError:
+                        pass
+    return pkg, example or "(nenhum teste existente — use o runner padrão do ecossistema)", existing
+
+
 def _model_authored_test_script(
-    inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str
+    inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str,
+    *, error_feedback: str = "",
 ) -> list[dict[str, Any]] | None:
     """Autoria de testes pelo MODELO REAL (mesmo padrão do planner): 1 chamada
     stage=tester via gateway → arquivos de teste → script determinístico
-    [write_file..., run_tests]. Paths fora dos test paths são FILTRADOS (o
-    TesterToolset recusaria — aqui declinamos antes, P6). Qualquer falha →
-    None → tests_ran=False → o gate do WS-B para limpo."""
+    [write_file..., run_tests]. Guard-rails determinísticos (P1):
+      - contexto de IMITAÇÃO: package.json + um teste existente do repo (o
+        modelo copia o runner real, nunca inventa jest/supertest);
+      - paths fora de test paths OU de testes JÁ EXISTENTES são recusados
+        (sobrescrever teste do repo destruiria a suíte);
+      - `error_feedback` re-injeta o erro de infra da 1ª tentativa (1 retry).
+    Qualquer falha → None → tests_ran=False → o gate do WS-B para limpo."""
     try:
         from model_gateway_client.gateway_call import chat_completion
     except ImportError:
         logger.warning("model_gateway_client indisponível — tester sem autoria real")
         return None
-    from .toolsets import is_test_path
+    from dse_contracts.paths import is_test_path
 
     diff = ""
     try:
@@ -804,11 +849,17 @@ def _model_authored_test_script(
     except Exception:  # noqa: BLE001 — diff é contexto, não requisito
         pass
 
+    package_json, example_test, existing_tests = _tester_repo_context(workspace_dir)
     model = os.environ.get("DSE_TESTER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
     prompt = _TEST_AUTHOR_PROMPT.format(
         instruction=(inp.instruction or "")[:3000],
-        plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:2000],
+        plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:1500],
+        package_json=package_json,
+        example_test=example_test,
         diff=diff or "(diff indisponível)",
+        error_feedback=(
+            f"\n## ERRO DA TENTATIVA ANTERIOR (corrija!)\n{error_feedback}\n" if error_feedback else ""
+        ),
     )
     try:
         result = chat_completion(
@@ -836,14 +887,46 @@ def _model_authored_test_script(
     script: list[dict[str, Any]] = []
     for f in files[:3]:
         path, content = str(f.get("path") or ""), str(f.get("content") or "")
-        if path and content and is_test_path(path):
-            script.append({"tool": "write_file", "path": path, "content": content})
-        else:
+        if not (path and content and is_test_path(path)):
             logger.warning("path de teste recusado (fora de test paths): %r", path)
+            continue
+        if path in existing_tests:
+            logger.warning("path de teste recusado (JÁ EXISTE — nunca sobrescrever): %r", path)
+            continue
+        script.append({"tool": "write_file", "path": path, "content": content})
     if not script:
         return None
     script.append({"tool": "run_tests"})
     return script
+
+
+_TEST_INFRA_ERROR_MARKERS = (
+    "err_module_not_found", "cannot find package", "cannot find module",
+    "err_require_esm", "syntaxerror", "modulenotfounderror", "importerror",
+)
+
+
+def _authored_test_infra_error(workspace_dir: str, test_paths: list[str]) -> str | None:
+    """Roda SÓ os testes recém-autorados e detecta erro de INFRA (import/
+    sintaxe — teste que nunca executa), distinto de asserção falhando (que é
+    sinal legítimo de fix incompleto → fix cycle do Coder). Retorna o erro
+    para re-autoria, ou None se os testes executam."""
+    import subprocess as _sp
+
+    if not test_paths:
+        return None
+    if test_paths[0].endswith(".py"):
+        cmd = [sys.executable, "-m", "pytest", "-q", *test_paths]
+    else:
+        cmd = ["node", "--test", *test_paths]
+    try:
+        proc = _sp.run(cmd, cwd=workspace_dir, capture_output=True, text=True, timeout=180)
+    except Exception as exc:  # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
+    blob = (proc.stdout + proc.stderr).lower()
+    if any(m in blob for m in _TEST_INFRA_ERROR_MARKERS):
+        return (proc.stdout + proc.stderr)[-1500:]
+    return None
 
 
 @activity.defn(name=ACTIVITY_RUN_TESTER_TURN)
@@ -879,14 +962,60 @@ async def _run_tester_turn_impl(
     # Autoria REAL (mesmo seletor do planner, P1 por config): sem script
     # explícito (testes) e com substrato real, o MODELO escreve os testes.
     # Falha em qualquer ponto → script vazio → tests_ran=False → gate para.
+    #
+    # Validação de INFRA com 1 re-autoria (achado do disparo real: o modelo
+    # escreveu Jest num repo node:test — o teste nunca executava e o fix cycle
+    # re-rodava o CODER, que nem pode tocar testes → loop sem saída): escreve,
+    # roda SÓ os arquivos novos; erro de import/sintaxe → re-autora UMA vez com
+    # o erro no prompt; persiste → remove os arquivos e devolve tests_ran=False
+    # (o gate para limpo em vez de queimar turnos de Coder).
     if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
-        authoring_script = await run_sync_with_heartbeat(
-            lambda _c: _model_authored_test_script(inp, workspace_dir, headers, vk.virtual_key),
-            None,
-            stage=Stage.tester.value,
-            work_item_id=inp.work_item_id,
-            operation="tester_authoring",
-        )
+        error_feedback = ""
+        for attempt in (1, 2):
+            authoring_script = await run_sync_with_heartbeat(
+                lambda _c: _model_authored_test_script(
+                    inp, workspace_dir, headers, vk.virtual_key, error_feedback=error_feedback,
+                ),
+                None,
+                stage=Stage.tester.value,
+                work_item_id=inp.work_item_id,
+                operation=f"tester_authoring_{attempt}",
+            )
+            if not authoring_script:
+                break
+            new_paths = [s["path"] for s in authoring_script if s.get("tool") == "write_file"]
+            # escreve direto (mesmos paths que o toolset aceitaria — já filtrados)
+            for s in authoring_script:
+                if s.get("tool") == "write_file":
+                    dest = os.path.join(workspace_dir, s["path"])
+                    os.makedirs(os.path.dirname(dest) or workspace_dir, exist_ok=True)
+                    with open(dest, "w") as fh:
+                        fh.write(s["content"])
+            infra_err = _authored_test_infra_error(workspace_dir, new_paths)
+            if infra_err is None:
+                # arquivos válidos: o loop de steps abaixo só precisa registrar
+                # test_files + rodar a suíte (os writes já aconteceram).
+                authoring_script = (
+                    [{"tool": "write_file", "path": p, "content": open(os.path.join(workspace_dir, p)).read()} for p in new_paths]
+                    + [{"tool": "run_tests"}]
+                )
+                break
+            logger.warning("teste autorado com erro de INFRA (tentativa %d): %.200s", attempt, infra_err)
+            for p in new_paths:  # remove o lixo antes de re-autorar/desistir
+                try:
+                    os.remove(os.path.join(workspace_dir, p))
+                except OSError:
+                    pass
+            error_feedback = infra_err
+            authoring_script = None
+        if authoring_script is None and error_feedback:
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="tester_authoring_invalid",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"infra_error": error_feedback[:500]},
+            )
 
     # Fase 3 (WSC-E3-T4b): o toolset é escopado ao work item — além de test
     # paths, `demos/<work_item_id>/` é escrita permitida (convenção do teste
