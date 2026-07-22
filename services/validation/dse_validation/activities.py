@@ -92,14 +92,13 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # Modelos de input — Temporal Activities recebem 1 argumento pydantic único
 # (facilita versionamento futuro sem quebrar a assinatura posicional).
+#
+# RunL1PipelineInput: usa o CANÔNICO de dse_contracts (achado do disparo real
+# 2026-07-22: um shadow local ficou para trás sem work_item_id/base_sha —
+# AttributeError em produção enquanto os testes de contrato passavam no
+# canônico). Nunca redefina modelos de contrato localmente.
 # ---------------------------------------------------------------------------
-class RunL1PipelineInput(BaseModel):
-    sandbox: SandboxHandle
-    plan: PlanArtifact
-    tenant_id: str
-    base_branch: str
-    target_dir: str = "."
-    repo_dir: str = "/workspace/repo"
+from dse_contracts.activities import RunL1PipelineInput  # noqa: E402
 
 
 class FinalizePrInput(BaseModel):
