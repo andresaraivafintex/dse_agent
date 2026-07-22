@@ -264,17 +264,49 @@ class ScriptedAgentSession:
 
     def _run_tests(self, paths: list[str] | None) -> dict[str, Any]:
         """Executa os testes DE VERDADE dentro do workspace (WSC-E3-T4: os
-        testes escritos rodam no L1, não só são gerados). Usa pytest se
-        disponível; devolve rc + stdout resumido."""
-        cmd = [sys.executable, "-m", "pytest", "-q"]
-        if paths:
-            cmd += paths
-        proc = subprocess.run(cmd, cwd=self.workspace_dir, capture_output=True, text=True)
+        testes escritos rodam no L1, não só são gerados). Detecção
+        DETERMINÍSTICA do runner (P1): repo Node (package.json com script
+        `test`) → `npm test`; senão pytest. Devolve rc + stdout resumido."""
+        import json as _json
+        import os as _os
+
+        pkg = _os.path.join(self.workspace_dir, "package.json")
+        cmd: list[str]
+        env = {**_os.environ, "CI": "1"}
+        if _os.path.isfile(pkg):
+            try:
+                has_test = "test" in (_json.load(open(pkg)).get("scripts") or {})
+            except Exception:  # noqa: BLE001 — package.json inválido => pytest
+                has_test = False
+            if has_test:
+                # deps primeiro (clone fresh não tem node_modules); best-effort —
+                # se falhar, o npm test abaixo reporta o erro de verdade.
+                if not _os.path.isdir(_os.path.join(self.workspace_dir, "node_modules")):
+                    subprocess.run(
+                        ["npm", "install", "--no-audit", "--no-fund"],
+                        cwd=self.workspace_dir, capture_output=True, text=True, timeout=600,
+                    )
+                cmd = ["npm", "test", "--silent"]
+            else:
+                cmd = [sys.executable, "-m", "pytest", "-q"]
+        else:
+            cmd = [sys.executable, "-m", "pytest", "-q"]
+            if paths:
+                cmd += paths
+        try:
+            proc = subprocess.run(
+                cmd, cwd=self.workspace_dir, capture_output=True, text=True,
+                timeout=600, env=env,
+            )
+            rc, out, err = proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            rc, out, err = 124, (exc.stdout or ""), f"timeout 600s: {exc.cmd}"
         return {
-            "returncode": proc.returncode,
-            "passed": proc.returncode == 0,
-            "stdout_tail": proc.stdout[-4000:],
-            "stderr_tail": proc.stderr[-2000:],
+            "returncode": rc,
+            "passed": rc == 0,
+            "command": " ".join(cmd),
+            "stdout_tail": (out or "")[-4000:],
+            "stderr_tail": (err or "")[-2000:],
         }
 
 

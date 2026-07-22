@@ -699,6 +699,92 @@ async def _run_planner_turn_impl(
 from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
 
 
+_TEST_AUTHOR_PROMPT = """Você é o Tester do Fintex DSE. Escreva teste(s) AUTOMATIZADO(s) que
+verifiquem a mudança descrita — idealmente reproduzindo o bug (falham sem o fix,
+passam com ele). Use o runner/convenções DO PRÓPRIO repo (visíveis no diff/contexto).
+
+Responda APENAS com JSON válido (sem markdown):
+{{"files": [{{"path": "caminho/relativo/do/teste", "content": "conteúdo completo do arquivo"}}]}}
+
+Regras:
+- Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py, *_test.py…).
+- 1 a 3 arquivos; conteúdo completo e executável.
+- Não modifique código de produção — só testes.
+
+## Tarefa
+{instruction}
+
+## Plano
+{plan}
+
+## Mudança do Coder (diff)
+{diff}
+"""
+
+
+def _model_authored_test_script(
+    inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str
+) -> list[dict[str, Any]] | None:
+    """Autoria de testes pelo MODELO REAL (mesmo padrão do planner): 1 chamada
+    stage=tester via gateway → arquivos de teste → script determinístico
+    [write_file..., run_tests]. Paths fora dos test paths são FILTRADOS (o
+    TesterToolset recusaria — aqui declinamos antes, P6). Qualquer falha →
+    None → tests_ran=False → o gate do WS-B para limpo."""
+    try:
+        from model_gateway_client.gateway_call import chat_completion
+    except ImportError:
+        logger.warning("model_gateway_client indisponível — tester sem autoria real")
+        return None
+    from .toolsets import is_test_path
+
+    diff = ""
+    try:
+        import subprocess as _sp
+        proc = _sp.run(["git", "show", "--stat", "-p", "HEAD"],
+                       cwd=workspace_dir, capture_output=True, text=True, timeout=30)
+        diff = proc.stdout[-8000:]
+    except Exception:  # noqa: BLE001 — diff é contexto, não requisito
+        pass
+
+    model = os.environ.get("DSE_TESTER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
+    prompt = _TEST_AUTHOR_PROMPT.format(
+        instruction=(inp.instruction or "")[:3000],
+        plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:2000],
+        diff=diff or "(diff indisponível)",
+    )
+    try:
+        result = chat_completion(
+            headers=headers, virtual_key=virtual_key, model=model,
+            messages=[{"role": "user", "content": prompt}],
+            timeout=180.0, max_tokens=4000, temperature=0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tester via modelo falhou (%s: %s)", type(exc).__name__, str(exc)[:200])
+        return None
+
+    text = (result.content or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`\n")
+        text = text[4:] if text.startswith("json") else text
+    try:
+        files = json.loads(text.strip()).get("files") or []
+    except json.JSONDecodeError as exc:
+        logger.warning("autoria de teste não parseou (%s); resposta: %.200s", exc, text)
+        return None
+
+    script: list[dict[str, Any]] = []
+    for f in files[:3]:
+        path, content = str(f.get("path") or ""), str(f.get("content") or "")
+        if path and content and is_test_path(path):
+            script.append({"tool": "write_file", "path": path, "content": content})
+        else:
+            logger.warning("path de teste recusado (fora de test paths): %r", path)
+    if not script:
+        return None
+    script.append({"tool": "run_tests"})
+    return script
+
+
 @activity.defn(name=ACTIVITY_RUN_TESTER_TURN)
 async def run_tester_turn(inp: RunTesterTurnInput) -> TesterTurnResult:
     reject_local_agent_execution("tester")
@@ -728,6 +814,18 @@ async def _run_tester_turn_impl(
         data_class=inp.data_class,
     )
     vk = mint_virtual_key(headers)
+
+    # Autoria REAL (mesmo seletor do planner, P1 por config): sem script
+    # explícito (testes) e com substrato real, o MODELO escreve os testes.
+    # Falha em qualquer ponto → script vazio → tests_ran=False → gate para.
+    if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
+        authoring_script = await run_sync_with_heartbeat(
+            lambda _c: _model_authored_test_script(inp, workspace_dir, headers, vk.virtual_key),
+            None,
+            stage=Stage.tester.value,
+            work_item_id=inp.work_item_id,
+            operation="tester_authoring",
+        )
 
     # Fase 3 (WSC-E3-T4b): o toolset é escopado ao work item — além de test
     # paths, `demos/<work_item_id>/` é escrita permitida (convenção do teste
