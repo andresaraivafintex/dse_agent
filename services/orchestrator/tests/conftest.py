@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import uuid
 
@@ -33,6 +34,8 @@ def insert_work_item(
     requester: str = "usr_test",
     repo: str = "acme/repo",
     base_branch: str = "main",
+    source: str = "github",
+    source_ref: dict | None = None,
 ) -> None:
     conn = psycopg2.connect(DSN)
     try:
@@ -41,10 +44,11 @@ def insert_work_item(
                 """
                 INSERT INTO work_items
                     (id, tenant_id, source, source_ref, repo, base_branch, requester, idempotency_key)
-                VALUES (%s, %s, 'github', '{}'::jsonb, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                 ON CONFLICT (id) DO NOTHING
                 """,
-                (work_item_id, tenant_id, repo, base_branch, requester, f"idem-{work_item_id}"),
+                (work_item_id, tenant_id, source, json.dumps(source_ref or {}),
+                 repo, base_branch, requester, f"idem-{work_item_id}"),
             )
         conn.commit()
     finally:
