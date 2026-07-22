@@ -98,6 +98,27 @@ def install_pre_receive_guard(bare_repo_path: str, allowed_branch: str) -> None:
     hook_path.chmod(0o755)
 
 
+def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
+    """Plano 08 §F (F6) — escreve o marcador `.dse-task-branch` (usado por
+    resume/checkpoint para redescobrir o branch da tarefa) E o exclui de TODO
+    commit via `.git/info/exclude`. O marcador é infraestrutura do DSE — não
+    deve vazar para o PR do cliente. Como o `commit()` usa `--allow-empty`, o
+    commit inicial (workspace vazio) segue criando um HEAD válido mesmo com o
+    único arquivo excluído. Best-effort no exclude (se falhar, o marcador ainda
+    existe e o resume funciona; só o PR poderia carregá-lo)."""
+    ws = Path(workspace_dir)
+    exclude = ws / ".git" / "info" / "exclude"
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude.read_text() if exclude.exists() else ""
+        if ".dse-task-branch" not in existing.split():
+            prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
+            exclude.write_text(prefix + ".dse-task-branch\n")
+    except OSError:
+        pass  # best-effort — nunca derruba o clone/checkpoint por causa do exclude
+    (ws / ".dse-task-branch").write_text(branch)
+
+
 @dataclass
 class ScopedGitSession:
     """Única superfície de escrita em git disponível para a Activity

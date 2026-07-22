@@ -59,6 +59,17 @@ def test_match_on_active_work_item_returns_signal(tenant_id):
     ref = {"channel": "C1", "thread_ts": "111.111"}
     wi_id = _insert_work_item(tenant_id, ref, status="implementing")
 
+    # clarification_answer é steering-gated (§F F4): o requester legítimo está
+    # na allowlist; aqui autorizamos p/ o teste focar na correlação Path B.
+    allow_conn = psycopg2.connect(DSN)
+    with allow_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO tenant_steering_allowlist (tenant_id, principal_id) VALUES (%s, %s)",
+            (tenant_id, "usr_someone"),
+        )
+    allow_conn.commit()
+    allow_conn.close()
+
     conn = get_connection()
     event = _event(EventKind.clarification_answer, ref)
     result = correlate(conn, tenant_id=tenant_id, event=event, requester_principal="usr_someone")
@@ -134,15 +145,48 @@ def test_review_comment_is_steering_gated_too(tenant_id):
     assert result.kind == "unauthorized"
 
 
-def test_clarification_answer_bypasses_steering_gate(tenant_id):
-    """clarification_answer é resposta esperada do próprio fluxo — não passa
-    pelo allowlist gate mesmo vindo de um principal não listado."""
+def test_clarification_answer_by_unauthorized_is_rejected(tenant_id):
+    """Plano 08 §F (F4): clarification_answer AGORA é steering-gated. Numa issue
+    pública qualquer um comenta; um terceiro não-autorizado não deve dirigir a
+    tarefa. Vira `unauthorized` + audit, nunca signal."""
     ref = {"channel": "C1", "thread_ts": "333.333"}
     wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
 
     conn = get_connection()
     event = _event(EventKind.clarification_answer, ref, principal="usr_not_on_allowlist")
     result = correlate(conn, tenant_id=tenant_id, event=event, requester_principal="usr_not_on_allowlist")
+    conn.commit()
+
+    assert result.kind == "unauthorized"
+    assert result.work_item_id == wi_id
+    check_conn = psycopg2.connect(DSN)
+    with check_conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM audit_log WHERE tenant_id=%s AND action='steering_rejected_unauthorized' AND work_item_id=%s",
+            (tenant_id, wi_id),
+        )
+        assert cur.fetchone() is not None
+    check_conn.close()
+
+
+def test_clarification_answer_by_authorized_requester_is_signal(tenant_id):
+    """O requester legítimo (na allowlist) responde a clarificação → signal.
+    O gate F4 não quebra o fluxo esperado."""
+    ref = {"channel": "C1", "thread_ts": "444.444"}
+    wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
+
+    allow_conn = psycopg2.connect(DSN)
+    with allow_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO tenant_steering_allowlist (tenant_id, principal_id) VALUES (%s, %s)",
+            (tenant_id, "usr_requester"),
+        )
+    allow_conn.commit()
+    allow_conn.close()
+
+    conn = get_connection()
+    event = _event(EventKind.clarification_answer, ref, principal="usr_requester")
+    result = correlate(conn, tenant_id=tenant_id, event=event, requester_principal="usr_requester")
 
     assert result.kind == "signal"
     assert result.work_item_id == wi_id

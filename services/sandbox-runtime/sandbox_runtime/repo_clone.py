@@ -90,10 +90,10 @@ def clone_repo_into(
     # para o bare repo local (checkpoints). O token não persiste em lugar nenhum.
     _run(["git", "remote", "set-url", "origin", bare_repo_path], cwd=workspace_dir)
     _run(["git", "checkout", "-b", task_branch], cwd=workspace_dir)
-    from .scoped_git import ScopedGitSession  # reuso da sessão de escopo (git de escopo limitado)
+    from .scoped_git import ScopedGitSession, write_task_branch_marker  # git de escopo limitado
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=task_branch)
     session.ensure_identity()
-    (Path(workspace_dir) / ".dse-task-branch").write_text(task_branch)
+    write_task_branch_marker(workspace_dir, task_branch)  # F6: excluído do commit
     session.push()
     return True
 

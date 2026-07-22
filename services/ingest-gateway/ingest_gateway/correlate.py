@@ -40,9 +40,21 @@ CorrelationKind = Literal["new_task", "signal", "unauthorized"]
 _TERMINAL_STATUSES = {WorkItemStatus.done.value, WorkItemStatus.failed.value}
 
 # Kinds que representam "alguém injetando direção nova" numa tarefa ativa —
-# passam pelo gate de steering allowlist. `clarification_answer`/`approval`
-# são respostas esperadas do próprio fluxo e não passam por este gate.
-_STEERING_GATED_KINDS = {EventKind.steering, EventKind.review_comment}
+# passam pelo gate de steering allowlist (deny-by-default; ver steering.py).
+#
+# Plano 08 §F (F4): `clarification_answer` TAMBÉM é gateado. Numa issue pública
+# do GitHub (ou canal/ticket) QUALQUER um pode comentar; um terceiro não
+# autorizado respondendo a clarificação injetaria direção na tarefa sem passar
+# por autorização. O requester legítimo está na allowlist (semeada com
+# requester + CODEOWNERS — ver steering.py), então o fluxo esperado não quebra;
+# um estranho vira `steering_rejected_unauthorized` (auditado, não sinaliza).
+# `approval` de plano tem seu PRÓPRIO gate (resolução de approver, WSB-E3-T2) e
+# não é duplicado aqui.
+_STEERING_GATED_KINDS = {
+    EventKind.steering,
+    EventKind.review_comment,
+    EventKind.clarification_answer,
+}
 
 
 class CorrelationResult(NamedTuple):

@@ -22,7 +22,7 @@ from pathlib import Path
 
 from dse_contracts import CheckpointRef
 
-from .scoped_git import ScopedGitSession, install_pre_receive_guard
+from .scoped_git import ScopedGitSession, install_pre_receive_guard, write_task_branch_marker
 
 
 def provision_checkpoint_repo(bare_repo_path: str, branch: str) -> None:
@@ -40,7 +40,7 @@ def init_task_workspace(workspace_dir: str, bare_repo_path: str, branch: str, ba
     subprocess.run(["git", "checkout", "-b", branch], cwd=workspace_dir, check=True, capture_output=True, text=True)
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
     session.ensure_identity()
-    (Path(workspace_dir) / ".dse-task-branch").write_text(branch)
+    write_task_branch_marker(workspace_dir, branch)  # F6: excluído do commit/PR
     session.commit(f"chore(dse): inicializa workspace da tarefa no branch {branch}")
     subprocess.run(
         ["git", "remote", "add", "origin", bare_repo_path],
