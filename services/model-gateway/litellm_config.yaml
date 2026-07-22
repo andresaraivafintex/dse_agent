@@ -99,6 +99,18 @@ model_list:
       dse_tier: "poc-direct-api"
       dse_requires_infra: "anthropic_public_api"
 
+  # Modo econômico (pedido do operador, 2026-07-22): Haiku 4.5 (~3× mais
+  # barato: $1/$5 vs $3/$15 por MTok). É o DEFAULT atual do fluxo
+  # (DSE_CODER_MODEL no compose); o Sonnet segue registrado acima — voltar é
+  # trocar 1 env, nada mais.
+  - model_name: anthropic/claude-haiku
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+    model_info:
+      dse_tier: "poc-direct-api"
+      dse_requires_infra: "anthropic_public_api"
+
 # Fase 3 (WSD-E4-T1): failover intra-tier NATIVO do proxy (router do LiteLLM).
 # Declarativo, fora do código dos agentes (P1): se o deployment do primário
 # falhar (connection refused / 5xx / timeout), o router tenta o fallback DA

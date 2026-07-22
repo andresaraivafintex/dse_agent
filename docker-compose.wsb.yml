@@ -43,7 +43,10 @@ services:
       DSE_SANDBOX_STATE_DIR: /tmp/dse-sandboxes
       # PoC (2026-07-21): Coder aponta para o alias real da Anthropic no gateway
       # e minta a virtual key via /key/generate com a master key (control plane).
-      DSE_CODER_MODEL: ${DSE_CODER_MODEL:-anthropic/claude}
+      # Modo econômico (2026-07-22): Haiku 4.5 default (~3× mais barato). Para
+      # voltar ao Sonnet: DSE_CODER_MODEL=anthropic/claude ./dse.sh start.
+      # Planner/Tester herdam (DSE_PLANNER_MODEL/DSE_TESTER_MODEL sobrepõem).
+      DSE_CODER_MODEL: ${DSE_CODER_MODEL:-anthropic/claude-haiku}
       DSE_CODER_SUBSTRATE: ${DSE_CODER_SUBSTRATE:-fake}
       # S7 (Fase 5) — L1 configurado para o repo de PoC (fintex-wallet, JS):
       # os checks Python (lint/typecheck/build) são pulados (comando vazio);
