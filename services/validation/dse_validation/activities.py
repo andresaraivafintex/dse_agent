@@ -232,6 +232,10 @@ def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
     # passando base_branch — os testes chamam o CORE direto e nunca viram o
     # boundary (test_l1_wrapper_matches_core_signature agora trava isso).
     executor = executor_for_handle(inp.sandbox, repo_dir=inp.repo_dir)
+    # cfg=None → o core carrega o MANIFESTO CONFIÁVEL do repo
+    # (.dse/validation.json lido do base_sha imutável). Passar L1Config()
+    # default aqui reprovava TUDO (manifest NOT_CONFIGURED) — achado do
+    # disparo real; o L1 de verdade é o do manifesto commitado no repo alvo.
     return run_l1_pipeline_core(
         executor=executor,
         work_item_id=inp.work_item_id,
@@ -240,7 +244,6 @@ def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
         base_sha=inp.base_sha,
         head_sha=inp.head_sha,
         target_dir=inp.target_dir,
-        cfg=L1Config(),
     )
 
 
