@@ -738,7 +738,8 @@ Responda APENAS com JSON válido (sem markdown):
 
 Regras:
 - Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py, *_test.py…).
-- 1 a 3 arquivos; conteúdo completo e executável.
+- 1 arquivo (no máximo 2); CONCISO — só os casos essenciais (~40-80 linhas).
+  A resposta inteira precisa caber no limite de tokens: JSON cortado = falha.
 - Não modifique código de produção — só testes.
 
 ## Tarefa
@@ -786,7 +787,9 @@ def _model_authored_test_script(
         result = chat_completion(
             headers=headers, virtual_key=virtual_key, model=model,
             messages=[{"role": "user", "content": prompt}],
-            timeout=180.0, max_tokens=4000, temperature=0,
+            # 8000: achado do disparo real com Haiku — 4000 truncava o JSON no
+            # meio do content ("Unterminated string") e a autoria inteira caía.
+            timeout=180.0, max_tokens=8000, temperature=0,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_if_permanent_provider_error(exc)  # billing/auth: mensagem certa na issue
