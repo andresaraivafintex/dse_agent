@@ -23,6 +23,7 @@ from ingest_gateway import (
     correlate,
     get_connection,
     record_signal_event,
+    resolve_repo,
     sanitize_content,
 )
 
@@ -64,12 +65,22 @@ def ingest_task_trigger(
             )
             return {"ok": True, "path": "signal", "work_item_id": result.work_item_id}
 
+        # C2 (relatório 07): resolve o repo pela cascata — override explícito no
+        # texto → Component (mais fino) → Project → default do tenant. Sem
+        # resolução, repo=None e o gate de clarificação pergunta (nunca adivinha).
+        repo, base_branch = resolve_repo(
+            conn, tenant_id=tenant_id, platform="jira",
+            signals={"text": sanitized, "component": events.first_component(issue),
+                     "project": channel},
+        )
         try:
             work_item_id = admit_work_item(
                 ev,
                 tenant_id=tenant_id,
                 source="jira",
                 channel=channel,
+                repo=repo,
+                base_branch=base_branch,
                 requester_principal=resolved_principal,
                 sanitized_content=sanitized,
                 conn=conn,

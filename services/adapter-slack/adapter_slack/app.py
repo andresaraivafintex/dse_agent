@@ -28,6 +28,7 @@ from ingest_gateway import (
     get_connection,
     record_signal_event,
     resolve_tenant,
+    resolve_repo,
     sanitize_content,
     verify_slack_signature,
 )
@@ -101,13 +102,22 @@ def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str,
             )
             return {"ok": True, "path": "signal", "work_item_id": result.work_item_id}
 
-        # Path A: new_task
+        # Path A: new_task — C2 (relatório 07): resolve o repo pela cascata
+        # (override explícito no texto → binding do canal → default do tenant).
+        # Sem resolução, repo=None e o gate de clarificação pergunta (nunca
+        # adivinha). O texto usado é o SANITIZADO (nunca o cru).
+        repo, base_branch = resolve_repo(
+            conn, tenant_id=tenant_id, platform="slack",
+            signals={"text": sanitized, "channel": channel},
+        )
         try:
             work_item_id = admit_work_item(
                 conv_event,
                 tenant_id=tenant_id,
                 source="slack",
                 channel=channel,
+                repo=repo,
+                base_branch=base_branch,
                 requester_principal=principal,
                 sanitized_content=sanitized,
                 conn=conn,

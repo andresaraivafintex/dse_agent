@@ -40,6 +40,18 @@ def issue_labels(issue: dict[str, Any]) -> list[str]:
     return list(issue.get("fields", {}).get("labels") or [])
 
 
+def first_component(issue: dict[str, Any]) -> str | None:
+    """Nome do 1º Component do Jira (C2/relatório 07): Components mapeiam issues
+    a subsistemas/serviços — o sinal de repo de granularidade mais fina do Jira.
+    None se o ticket não tem component."""
+    comps = issue.get("fields", {}).get("components") or []
+    for c in comps:
+        name = (c or {}).get("name")
+        if name:
+            return name
+    return None
+
+
 def issue_status_name(issue: dict[str, Any]) -> str:
     return (issue.get("fields", {}).get("status") or {}).get("name", "")
 
