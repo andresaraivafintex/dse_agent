@@ -69,6 +69,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
         LOCAL_ACTIVITY_POST_STATUS_TRANSITION,
+        LOCAL_ACTIVITY_PREVIEW_ENABLED,
         LOCAL_ACTIVITY_RECORD_EVIDENCE,
         LOCAL_ACTIVITY_RECORD_GATE,
         LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
@@ -2185,6 +2186,22 @@ class WorkItemLifecycleWorkflow:
         # empilha um segundo refresh para o mesmo estado do branch).
         self._refresh_evidence_requested = False
 
+        # Plano 08 §D — gate deploys_preview (operator-set no painel Repos & ROI).
+        # Guard de replay: histories antigas nao chamavam esta local activity e
+        # devem replayar com preview_enabled=True (comportamento anterior).
+        preview_enabled = True
+        if workflow.patched("preview-gate-deploys-v1"):
+            try:
+                gate = await workflow.execute_activity(
+                    LOCAL_ACTIVITY_PREVIEW_ENABLED,
+                    {"tenant_id": input.tenant_id, "repo": input.repo},
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
+                )
+                preview_enabled = bool(gate.get("enabled", True))
+            except ActivityError:
+                logger.warning("preview_enabled_for_repo falhou; fail-open (preview nunca bloqueia)")
+
         try:
             preview: PreviewRef = await workflow.execute_activity(
                 ACTIVITY_TRIGGER_PREVIEW,
@@ -2194,6 +2211,7 @@ class WorkItemLifecycleWorkflow:
                     "repo": input.repo,
                     "pr_number": input.pr_number,
                     "files_changed": list(files_changed),
+                    "preview_enabled": preview_enabled,
                 },
                 result_type=PreviewRef,
                 start_to_close_timeout=timedelta(seconds=900),
@@ -2217,10 +2235,14 @@ class WorkItemLifecycleWorkflow:
              "namespace": preview.namespace, "reason": reason},
         )
 
-        if preview.status == "skipped_backend_only":
-            # FR-20: decisao por paths-filter puro (WS-E) — conta como sucesso.
-            await self._audit("evidence_skipped_backend_only", {"reason": reason})
-            await self._record_evidence(reason=reason, detail="backend_only")
+        if preview.status in ("skipped_backend_only", "skipped_disabled"):
+            # Decisao deterministica de nao-preview (paths-filter FR-20 ou gate
+            # deploys_preview §D) — conta como SUCESSO, nunca bloqueia.
+            await self._audit(
+                "evidence_skipped_backend_only",
+                {"reason": reason, "preview_status": preview.status},
+            )
+            await self._record_evidence(reason=reason, detail=preview.status)
             return
         if preview.status != "created":
             # "degraded" ou qualquer status desconhecido: degrada limpo (P6),
@@ -2232,6 +2254,13 @@ class WorkItemLifecycleWorkflow:
             )
             await self._record_evidence(reason=reason, detail=(preview.detail or "")[:300])
             return
+
+        # Plano 08 §D (D1) — o objetivo do usuario: o LINK do preview aparece no
+        # PR para o humano acessar e decidir. Postado assim que o preview existe
+        # (independe de demo/visual, que degradam sem bloquear). Best-effort e
+        # guardado por patch (histories antigas nao postavam) — nunca bloqueia.
+        if preview.url and workflow.patched("preview-link-in-pr-v1"):
+            await self._post_preview_link(preview.url, preview.kind)
 
         try:
             demo: DemoEvidenceResult = await workflow.execute_activity(
@@ -2298,6 +2327,30 @@ class WorkItemLifecycleWorkflow:
                      "error": str(exc.cause or exc)[:300]},
                 )
         await self._record_evidence(reason=reason, detail="ok")
+
+    async def _post_preview_link(self, url: str, kind: str) -> None:
+        """Plano 08 §D (D1) — posta/edita o comentário de tracking da superfície
+        de origem com o LINK clicável do preview. Reusa a MutableCommentWriter
+        (C3) via post_tracking_comment (body custom). Best-effort — jamais
+        bloqueia (o audit ledger é a verdade; o comentário é conveniência)."""
+        input = self._input
+        label = "front (UI)" if kind == "ui" else "serviço" if kind == "deployable" else "app"
+        body = (
+            f"🔗 **Preview ({label}) pronto** — acesse e decida:\n\n{url}\n\n"
+            "_Ambiente efêmero por PR (Argo CD, TTL). O merge continua sendo "
+            "decisão humana (P1)._"
+        )
+        try:
+            await workflow.execute_activity(
+                ACTIVITY_POST_TRACKING_COMMENT,
+                {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                 "status": "pr_ready", "body": body},
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
+            await self._audit("preview_link_posted", {"url": url, "kind": kind})
+        except ActivityError:
+            logger.warning("post_preview_link best-effort falhou (url=%s)", url)
 
     async def _record_evidence(self, *, reason: str, detail: str) -> None:
         """Projecao duravel do estado de evidencia (migracao 0014) — best-effort:

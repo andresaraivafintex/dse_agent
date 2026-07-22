@@ -58,6 +58,9 @@ LOCAL_ACTIVITY_EMIT_HISTORY_METRIC = "emit_history_metric"
 # (pilot gate "PR quality thresholds").
 LOCAL_ACTIVITY_RECORD_SKILL_EPISODE = "record_skill_episode"
 LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
+# Plano 08 §D — resolve o gate deploys_preview do repo (repo_bindings) para
+# decidir se o preview environment é aplicável (P1, determinístico, fail-safe).
+LOCAL_ACTIVITY_PREVIEW_ENABLED = "preview_enabled_for_repo"
 
 _DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
@@ -428,6 +431,45 @@ async def record_evidence_state(payload: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+@activity.defn(name=LOCAL_ACTIVITY_PREVIEW_ENABLED)
+async def preview_enabled_for_repo(payload: dict[str, Any]) -> dict[str, Any]:
+    """Plano 08 §D — o repo alvo "gera preview"? Gate determinístico (P1),
+    operator-set via `repo_bindings.deploys_preview` (painel Repos & ROI, §C).
+
+    Semântica (fail-safe, retrocompatível):
+      - algum binding do tenant com este `repo` marcado `deploys_preview=true`
+        → True (o operador declarou que este repo tem preview);
+      - o tenant NÃO tem NENHUM binding (single-repo/sem config) → True
+        (preserva o comportamento anterior — preview sempre, decidido só pelo
+        paths-filter);
+      - há bindings do tenant, mas nenhum marca este repo → False (opt-in: o
+        operador configurou previews e não incluiu este repo).
+    Sem Postgres/erro → True (fail-open p/ o preview, que nunca bloqueia o PR:
+    o paths-filter ainda pula docs/teste, e um preview a mais é inócuo)."""
+    tenant_id = payload.get("tenant_id", "")
+    repo = payload.get("repo") or ""
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning("preview_enabled_for_repo: sem Postgres (%s); assumindo enabled", exc)
+        return {"enabled": True, "reason": "no_db_fail_open"}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*), count(*) FILTER (WHERE repo = %s AND deploys_preview) "
+                "FROM repo_bindings WHERE tenant_id = %s",
+                (repo, tenant_id),
+            )
+            total, marked = cur.fetchone()
+        if marked and marked > 0:
+            return {"enabled": True, "reason": "binding_marked"}
+        if not total:
+            return {"enabled": True, "reason": "no_bindings_backward_compat"}
+        return {"enabled": False, "reason": "bindings_exist_repo_not_marked"}
+    finally:
+        conn.close()
+
+
 @activity.defn(name=LOCAL_ACTIVITY_EMIT_HISTORY_METRIC)
 async def emit_history_metric(payload: dict[str, Any]) -> None:
     """Fase 3 — ativacao do alerta de history (ALERTING-RULES.md §3, com WS-F).
@@ -765,4 +807,5 @@ LOCAL_ACTIVITIES = [
     record_skill_episode,
     emit_pr_quality_metric,
     post_tracking_comment,
+    preview_enabled_for_repo,
 ]

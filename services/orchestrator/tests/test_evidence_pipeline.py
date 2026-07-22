@@ -84,9 +84,9 @@ async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -125,13 +125,15 @@ async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
 
 
 @pytest.mark.asyncio
-async def test_backend_only_pr_skips_preview_deterministically(time_skipping_env):
-    """FR-20: PR backend-only -> skipped_backend_only (paths-filter puro, P1),
-    conta como sucesso, NAO roda demo/visual diff e nao bloqueia nada."""
+async def test_docs_only_pr_skips_preview_deterministically(time_skipping_env):
+    """FR-20 + §D: PR só de docs (nem UI nem serviço deployável) ->
+    skipped_backend_only (paths-filter puro, P1), conta como sucesso, NAO roda
+    demo/visual diff e nao bloqueia nada."""
     work_item_id = new_work_item_id("evidskip")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    state = FakeControlPlane(plan_risk_class="low")  # default: files=["app.py"]
+    state = FakeControlPlane(plan_risk_class="low",
+                             coder_files_changed=["docs/x.md", "README.md"])
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(time_skipping_env.client, task_queue=task_queue,
@@ -139,9 +141,9 @@ async def test_backend_only_pr_skips_preview_deterministically(time_skipping_env
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -152,6 +154,37 @@ async def test_backend_only_pr_skips_preview_deterministically(time_skipping_env
     assert "evidence_skipped_backend_only" in actions
     row = read_evidence_row(work_item_id)
     assert row is not None and row[0] == "skipped_backend_only"
+
+
+@pytest.mark.asyncio
+async def test_backend_service_pr_now_previews_and_posts_link(time_skipping_env):
+    """Plano 08 §D (D1+D2): um PR de serviço backend (.py) NÃO é mais pulado —
+    ganha preview (kind=deployable) e o LINK é postado (preview_link_posted no
+    ledger). Sem binding no tenant o gate deploys_preview é fail-open."""
+    work_item_id = new_work_item_id("evidback")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    state = FakeControlPlane(plan_risk_class="low",
+                             coder_files_changed=["wallet/service.py"])
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
+            id=work_item_id, task_queue=task_queue)
+        await _wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.done.value
+    assert state.demo_evidence_calls == 1  # backend agora roda o pipeline
+    actions = read_audit_actions(work_item_id)
+    assert "preview_triggered" in actions
+    assert "preview_link_posted" in actions  # D1 — link postado no PR
+    row = read_evidence_row(work_item_id)
+    assert row is not None and row[0] == "created"
 
 
 @pytest.mark.asyncio
@@ -171,9 +204,9 @@ async def test_degraded_preview_does_not_block_pr(time_skipping_env):
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
         # chega em pr_ready MESMO com preview degradado
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value  # nunca Failed por evidencia
@@ -202,9 +235,9 @@ async def test_preview_activity_crash_degrades_not_blocks(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value

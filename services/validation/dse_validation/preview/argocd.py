@@ -40,7 +40,7 @@ from dse_contracts.activities import PreviewRef, TriggerPreviewInput
 from dse_validation import db
 from dse_validation.config import PreviewConfig
 from dse_validation.preview import gitops
-from dse_validation.preview.paths_filter import is_ui_touching, matching_files
+from dse_validation.preview.paths_filter import is_ui_touching, matching_files, preview_decision
 
 try:
     from dse_audit import emit as audit_emit
@@ -207,26 +207,49 @@ def trigger_preview_core(
     cfg = cfg or PreviewConfig()
     ttl = ttl_seconds or cfg.default_ttl_seconds
 
-    # 1) FR-20 — paths-filter determinístico (P1). Backend-only NUNCA bloqueia.
-    if not is_ui_touching(inp.files_changed, inp.ui_path_globs):
+    # 0) Plano 08 §D — gate operator-set (repo_bindings.deploys_preview). Repo
+    # não marcado como "gera preview" pula LIMPO (nunca bloqueia). Distinto de
+    # backend-only: aqui o operador declarou que o repo não tem preview.
+    if not inp.preview_enabled:
+        db.upsert_preview(
+            work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
+            pr_number=inp.pr_number, repo=inp.repo, status="skipped_disabled",
+            detail="repo não marcado deploys_preview (plano 08 §D)", ttl_seconds=ttl,
+        )
+        if audit_emit is not None:
+            audit_emit(
+                actor=actor, action="preview_skipped_disabled",
+                tenant_id=inp.tenant_id, work_item_id=inp.work_item_id,
+                details={"pr_number": inp.pr_number, "repo": inp.repo},
+            )
+        return PreviewRef(
+            work_item_id=inp.work_item_id, pr_number=inp.pr_number,
+            status="skipped_disabled", detail="repo sem preview (deploys_preview=false)",
+        )
+
+    # 1) FR-20 + plano 08 §D — paths-filter determinístico (P1). Preview vale se
+    # a mudança toca UI (front) OU um serviço deployável (back). Só docs/teste
+    # → skipped_backend_only, que conta como SUCESSO e NUNCA bloqueia.
+    kind, matched = preview_decision(inp.files_changed, inp.ui_path_globs, inp.deployable_globs)
+    if kind == "none":
         db.upsert_preview(
             work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
             pr_number=inp.pr_number, repo=inp.repo, status="skipped_backend_only",
-            detail="nenhum arquivo casa ui_path_globs (FR-20)", ttl_seconds=ttl,
+            detail="nenhum arquivo casa ui/deployable globs (FR-20 + §D)", ttl_seconds=ttl,
         )
         if audit_emit is not None:
             audit_emit(
                 actor=actor, action="preview_skipped_backend_only",
                 tenant_id=inp.tenant_id, work_item_id=inp.work_item_id,
                 details={"pr_number": inp.pr_number, "files_changed": inp.files_changed,
-                         "ui_path_globs": inp.ui_path_globs},
+                         "ui_path_globs": inp.ui_path_globs, "deployable_globs": inp.deployable_globs},
             )
         return PreviewRef(
             work_item_id=inp.work_item_id, pr_number=inp.pr_number,
-            status="skipped_backend_only", detail="backend-only (paths-filter FR-20)",
+            status="skipped_backend_only", detail="sem mudança previewável (docs/teste)",
         )
 
-    ui_files = matching_files(inp.files_changed, inp.ui_path_globs)
+    ui_files = matched
 
     # 2) ADR-26 — cap de previews concorrentes por tenant (dia 1).
     cap = db.get_preview_cap(inp.tenant_id)
@@ -281,24 +304,26 @@ def trigger_preview_core(
             status="degraded", namespace=namespace, detail=detail[:900],
         )
 
-    url = f"http://preview.{namespace}.svc.cluster.local"
+    # plano 08 §D (D3): URL externa (browser-reachable) quando configurada;
+    # senão o DNS interno do cluster (link aparece no PR mesmo assim — D1).
+    url = cfg.preview_url_for(namespace)
     db.upsert_preview(
         work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
         pr_number=inp.pr_number, repo=inp.repo, status="created",
         namespace=namespace, url=url, ttl_seconds=ttl, expires_at=expires_at,
-        detail=f"ui files: {', '.join(ui_files[:10])}",
+        detail=f"{kind} files: {', '.join(ui_files[:10])}",
     )
     if audit_emit is not None:
         audit_emit(
             actor=actor, action="preview_created", tenant_id=inp.tenant_id,
             work_item_id=inp.work_item_id,
             details={"pr_number": inp.pr_number, "namespace": namespace, "url": url,
-                     "ttl_seconds": ttl, "expires_at": expires_at.isoformat(),
-                     "ui_files": ui_files[:20]},
+                     "kind": kind, "ttl_seconds": ttl, "expires_at": expires_at.isoformat(),
+                     "files": ui_files[:20]},
         )
     return PreviewRef(
         work_item_id=inp.work_item_id, pr_number=inp.pr_number,
-        status="created", namespace=namespace, url=url,
+        status="created", namespace=namespace, url=url, kind=kind,
     )
 
 

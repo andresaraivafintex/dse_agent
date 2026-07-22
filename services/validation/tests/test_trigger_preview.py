@@ -22,9 +22,18 @@ from dse_validation.preview.argocd import (
     trigger_preview_core,
     wait_namespace_gone,
 )
-from dse_validation.preview.paths_filter import file_matches_glob, is_ui_touching
+from dse_validation.preview.paths_filter import (
+    file_matches_glob,
+    is_ui_touching,
+    preview_decision,
+)
 
 DEFAULT_GLOBS = ["ui/**", "frontend/**", "**/*.css", "**/*.tsx", "**/*.jsx"]
+DEPLOYABLE_GLOBS = [
+    "**/Dockerfile", "Dockerfile", "**/*.py", "**/*.go", "**/*.rb",
+    "**/*.java", "**/*.ts", "**/*.js", "k8s/**", "deploy/**", "charts/**",
+    "**/requirements*.txt", "pyproject.toml", "go.mod", "package.json",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -49,16 +58,82 @@ def test_glob_semantics_documented():
     assert not file_matches_glob("api/x.py", "ui/**")
 
 
-def test_backend_only_pr_skips_and_counts_as_success(work_item_id, tenant_id):
+def test_docs_only_pr_skips_and_counts_as_success(work_item_id, tenant_id):
+    # Plano 08 §D: só docs (nem UI nem serviço deployável) → pula, conta como
+    # sucesso, NUNCA bloqueia. (Antes um .py backend também pulava; agora ele
+    # ganha preview — ver test_backend_service_change_now_previews.)
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
-            pr_number=11, files_changed=["api/handler.py", "docs/x.md"],
+            pr_number=11, files_changed=["docs/x.md", "README.md", "CHANGELOG.md"],
         )
     )
     assert ref.status == "skipped_backend_only"  # conta como sucesso, NUNCA bloqueia
     row = db.get_preview(work_item_id)
     assert row["status"] == "skipped_backend_only"
+
+
+# ---------------------------------------------------------------------------
+# Plano 08 §D — decisão de previewabilidade (ui | deployable | none)
+# ---------------------------------------------------------------------------
+def test_preview_decision_ui_has_precedence():
+    kind, hits = preview_decision(["frontend/app.tsx", "api/main.py"], DEFAULT_GLOBS, DEPLOYABLE_GLOBS)
+    assert kind == "ui" and "frontend/app.tsx" in hits
+
+
+def test_preview_decision_backend_service_is_deployable():
+    kind, hits = preview_decision(["wallet/service.py", "Dockerfile"], DEFAULT_GLOBS, DEPLOYABLE_GLOBS)
+    assert kind == "deployable" and hits
+
+
+def test_preview_decision_docs_only_is_none():
+    kind, hits = preview_decision(["docs/x.md", "README.md"], DEFAULT_GLOBS, DEPLOYABLE_GLOBS)
+    assert kind == "none" and hits == []
+
+
+def test_deploys_preview_gate_disabled_skips_without_touching_cluster(work_item_id, tenant_id):
+    # repo não marcado deploys_preview → skipped_disabled no passo 0 (antes de
+    # qualquer contato com o cluster). Prova: kube_context inválido, sem erro.
+    cfg = PreviewConfig()
+    cfg.kube_context = "context-invalido-prova-que-nao-toca-cluster"
+    ref = trigger_preview_core(
+        TriggerPreviewInput(
+            work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
+            pr_number=15, files_changed=["frontend/app.tsx"], preview_enabled=False,
+        ),
+        cfg=cfg,
+    )
+    assert ref.status == "skipped_disabled"
+    assert db.get_preview(work_item_id)["status"] == "skipped_disabled"
+
+
+def test_backend_service_change_now_previews_reaches_provision(work_item_id, tenant_id, tmp_path):
+    # D2: um PR de serviço backend (.py) NÃO é mais pulado como backend-only —
+    # ele passa o paths-filter e chega ao provisionamento (que degrada aqui, sem
+    # cluster; o ponto é que NÃO parou em skipped_backend_only).
+    cfg = PreviewConfig()
+    cfg.kube_context = "k3d-cluster-que-nao-existe"
+    cfg.repo_dir = str(tmp_path / "repo")
+    cfg.sync_timeout_s = 5
+    ref = trigger_preview_core(
+        TriggerPreviewInput(
+            work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/svc",
+            pr_number=16, files_changed=["wallet/service.py"],
+        ),
+        cfg=cfg,
+    )
+    assert ref.status == "degraded"  # chegou ao provisionamento (não pulou)
+    assert ref.status != "skipped_backend_only"
+
+
+def test_external_url_is_browser_reachable_when_configured():
+    cfg = PreviewConfig()
+    cfg.external_host_template = "https://{namespace}.preview.dse.local"
+    assert cfg.preview_url_for("preview-wi-1") == "https://preview-wi-1.preview.dse.local"
+    # sem template → DNS interno (link ainda aparece no PR — D1 — mas não clicável)
+    cfg2 = PreviewConfig()
+    cfg2.external_host_template = ""
+    assert cfg2.preview_url_for("preview-wi-1").endswith(".svc.cluster.local")
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ esperado enquanto os workstreams constroem em paralelo.
 """
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -72,12 +73,17 @@ class SandboxHandle(BaseModel):
     tenant_id: str
     branch: str
     container_id: str | None = None  # id do container Docker por trás do handle
+    # Aditivos: runtimes novos retornam os SHAs que delimitam a sessao. Os
+    # defaults preservam handles ja gravados em histories do Temporal.
+    base_sha: str | None = None
+    head_sha: str | None = None
 
 
 class CheckpointRef(BaseModel):
     work_item_id: str
     git_ref: str  # commit sha no branch da tarefa
     phase: str  # nome da fronteira de fase em que o checkpoint foi tirado
+    base_sha: str | None = None
 
 
 class CoderTurnResult(BaseModel):
@@ -87,21 +93,217 @@ class CoderTurnResult(BaseModel):
     cost_usd: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
+    base_sha: str | None = None
+    head_sha: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Inputs canonicos das fronteiras sandbox/validacao. Historicamente alguns
+# destes modelos viviam apenas no servico dono; isso permitia que os fakes do
+# workflow aceitassem dicts diferentes do wire real. Eles passam a morar no
+# pacote de contratos, com defaults aditivos para histories ja persistidos.
+# O servico dono pode resolver campos vazios server-side pelo work_item_id.
+# ---------------------------------------------------------------------------
+class ProvisionSandboxInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    branch: str | None = None
+    base_branch: str = "main"
+    repo: str | None = None
+    budget: dict[str, Any] = Field(default_factory=dict)
+    image: str | None = None
+    base_sha: str | None = None
+
+
+class CheckpointSandboxInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    sandbox_id: str | None = None
+    branch: str | None = None
+    phase: str = "manual"
+    base_sha: str | None = None
+
+
+class RebuildSandboxInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    checkpoint_ref: CheckpointRef
+    branch: str | None = None
+    budget: dict[str, Any] = Field(default_factory=dict)
+    image: str | None = None
+    base_sha: str | None = None
+
+
+class TeardownSandboxInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    stage: str = "coder"
+
+
+class RunCoderTurnInput(BaseModel):
+    work_item_id: str
+    tenant_id: str
+    instruction: str
+    sandbox_id: str | None = None
+    branch: str | None = None
+    stage: str = "coder"
+    task_class: str = "default"
+    data_class: str = "internal"
+    model_override: str | None = None
+    runtime_override: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
+
+
+class RunL1PipelineInput(BaseModel):
+    """Input tolerante ao payload antigo.
+
+    ``sandbox``/``plan`` eram ausentes em histories antigos; o owner resolve
+    essas lacunas server-side usando ``work_item_id``. Novos callers sempre
+    enviam base/head SHA e o L1 calcula o diff pelo SHA imutavel.
+    """
+
+    work_item_id: str = ""
+    sandbox_id: str | None = None
+    sandbox: SandboxHandle | None = None
+    plan: PlanArtifact | None = None
+    tenant_id: str = ""
+    base_branch: str = "main"
+    base_sha: str = ""
+    head_sha: str = ""
+    target_dir: str = "."
+    repo_dir: str = "/workspace/repo"
+
+    @model_validator(mode="after")
+    def _derive_work_item_id(self) -> "RunL1PipelineInput":
+        if not self.work_item_id and self.sandbox is not None:
+            self.work_item_id = self.sandbox.work_item_id
+        if not self.sandbox_id and self.sandbox is not None:
+            self.sandbox_id = self.sandbox.sandbox_id
+        if not self.base_sha and self.sandbox is not None and self.sandbox.base_sha:
+            self.base_sha = self.sandbox.base_sha
+        if not self.head_sha and self.sandbox is not None and self.sandbox.head_sha:
+            self.head_sha = self.sandbox.head_sha
+        return self
+
+
+class FinalizePrInput(BaseModel):
+    """Finalize aditivo; vazios sao resolvidos pelo owner a partir do SoR."""
+
+    work_item_id: str
+    tenant_id: str = ""
+    repo: str = ""
+    branch: str = ""
+    base_branch: str = "main"
+    base_sha: str = ""
+    head_sha: str = ""
+    summary: str = ""
+    risk_class: str = "low"
+    evidence_url: str = ""
+    issue_ref: dict[str, Any] | None = None
+    sandbox_id: str | None = None
+    sandbox: SandboxHandle | None = None
+    repo_dir: str = "/workspace/repo"
+    strict_mode: bool | None = None
+    surface_ref: dict[str, Any] | None = None
+
+
+class ConsumeCiStatusInput(BaseModel):
+    """Campos novos possuem default para auto-cura de payload historico."""
+
+    work_item_id: str
+    tenant_id: str = ""
+    repo: str = ""
+    pr_number: int
+    ref: str = ""
+    base_sha: str = ""
+    head_sha: str = ""
+    surface_ref: dict[str, Any] | None = None
+
+
+class PersistWorkItemStateInput(BaseModel):
+    """Projecao idempotente do workflow no Postgres.
+
+    Somente ``work_item_id`` e obrigatorio para que payloads antigos da
+    Activity continuem decodificando. Campos ausentes sao preservados pelo
+    servidor; plano/hash/expected_files sao derivados server-side.
+    """
+
+    work_item_id: str
+    status: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    plan: dict[str, Any] | None = None
+    risk_class: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
+    ci_status: str | None = None
+    last_error: str | None = None
+    clear_ci_status: bool = False
+    validation_attempts: dict[str, int] | None = None
 
 
 # ---------------------------------------------------------------------------
 # Dono: WS-E (services/validation)
 # ---------------------------------------------------------------------------
+class GateStatus(str, Enum):
+    """Resultado estruturado comum a L1/L2/L3.
+
+    Apenas PASS autoriza avancar. ``passed`` continua existindo nos modelos
+    para compatibilidade com produtores/consumidores antigos.
+    """
+
+    PASS = "PASS"
+    FAIL = "FAIL"
+    SKIPPED = "SKIPPED"
+    ERROR = "ERROR"
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+
+
 class L1Finding(BaseModel):
     check: str  # "lint" | "typecheck" | "test" | "build" | "sast" | "secret_scan" | "diff_budget" | "forbidden_paths"
-    passed: bool
+    passed: bool = False
+    status: GateStatus | None = None
     detail: str = ""
+
+    @model_validator(mode="after")
+    def _normalize_status(self) -> "L1Finding":
+        if self.status is None:
+            self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
+        elif self.passed != (self.status == GateStatus.PASS):
+            raise ValueError("passed deve ser true somente quando status=PASS")
+        return self
 
 
 class L1Result(BaseModel):
     work_item_id: str
-    passed: bool
+    passed: bool = False
+    status: GateStatus | None = None
     findings: list[L1Finding]
+    base_sha: str | None = None
+    head_sha: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_status(self) -> "L1Result":
+        if self.status is None:
+            if self.passed:
+                self.status = GateStatus.PASS
+            else:
+                statuses = {f.status for f in self.findings}
+                for candidate in (
+                    GateStatus.ERROR,
+                    GateStatus.NOT_CONFIGURED,
+                    GateStatus.FAIL,
+                    GateStatus.SKIPPED,
+                ):
+                    if candidate in statuses:
+                        self.status = candidate
+                        break
+                else:
+                    self.status = GateStatus.FAIL
+        elif self.passed != (self.status == GateStatus.PASS):
+            raise ValueError("passed deve ser true somente quando status=PASS")
+        return self
 
 
 class PrRef(BaseModel):
@@ -114,6 +316,8 @@ class PrRef(BaseModel):
     pr_number: int | None = None
     url: str
     compare_url: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
 
 
 class L2Verdict(BaseModel):
@@ -122,15 +326,27 @@ class L2Verdict(BaseModel):
     recebe APENAS plan artifact + diff final — nunca o histórico do Coder."""
 
     work_item_id: str
-    passed: bool
+    passed: bool = False
+    status: GateStatus | None = None
     objections: list[str] = []  # vazia quando passed; específicas (arquivo/linha) quando não
     cost_usd: float = 0.0
+    base_sha: str | None = None
+    head_sha: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_status(self) -> "L2Verdict":
+        if self.status is None:
+            self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
+        elif self.passed != (self.status == GateStatus.PASS):
+            raise ValueError("passed deve ser true somente quando status=PASS")
+        return self
 
 
 class CiStatusResult(BaseModel):
     work_item_id: str
     pr_number: int
     status: str  # "pending" | "green" | "red"
+    head_sha: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +373,7 @@ class RunPlannerTurnInput(BaseModel):
     repo: str = "app"
     branch: str | None = None
     base_branch: str | None = None
+    base_sha: str | None = None
     task_class: str = "default"
     data_class: str = "internal"
     diff_budget_lines: int = 400
@@ -185,6 +402,8 @@ class RunTesterTurnInput(BaseModel):
     sandbox_id: str | None = None
     repo: str = "app"
     branch: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
     task_class: str = "default"
     data_class: str = "internal"
     run_paths: list[str] = Field(default_factory=list)
@@ -208,9 +427,12 @@ class TesterTurnResult(BaseModel):
     tests_ran: bool
     tests_passed: bool
     returncode: int
+    status: GateStatus | None = None
     cost_usd: float = 0.0
     diff_summary: str = ""
     files_changed: list[str] = Field(default_factory=list)
+    base_sha: str | None = None
+    head_sha: str | None = None
 
     @model_validator(mode="after")
     def _mirror_test_files(self) -> "TesterTurnResult":
@@ -218,6 +440,13 @@ class TesterTurnResult(BaseModel):
             self.files_changed = list(self.test_files)
         if not self.diff_summary:
             self.diff_summary = f"tester: {len(self.test_files)} test file(s)"
+        if self.status is None:
+            if not self.tests_ran:
+                self.status = GateStatus.NOT_CONFIGURED
+            elif self.tests_passed and self.returncode == 0:
+                self.status = GateStatus.PASS
+            else:
+                self.status = GateStatus.FAIL
         return self
 
 
@@ -237,6 +466,8 @@ class RunL2ReviewInput(BaseModel):
     diff: str
     task_class: str = "default"
     data_class: str = "internal"
+    base_sha: str | None = None
+    head_sha: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -254,15 +485,26 @@ class RunDemoEvidenceInput(BaseModel):
     demo_dir: str = ""  # default derivado: demos/<work_item_id>/
     base_url: str | None = None  # URL do preview (TriggerPreview) quando houver; fixture local senão
     timeout_s: int = 120
+    head_sha: str | None = None
 
 
 class DemoEvidenceResult(BaseModel):
     work_item_id: str
     passed: bool
+    status: GateStatus | None = None
     video_artifact_key: str | None = None  # chave no artifact store (publicado via PublishArtifact)
     trace_artifact_key: str | None = None
     duration_s: float = 0.0
     detail: str = ""
+    head_sha: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_status(self) -> "DemoEvidenceResult":
+        if self.status is None:
+            self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
+        elif self.passed != (self.status == GateStatus.PASS):
+            raise ValueError("passed deve ser true somente quando status=PASS")
+        return self
 
 
 class PublishArtifactInput(BaseModel):
@@ -284,25 +526,44 @@ class ArtifactRef(BaseModel):
 
 
 class TriggerPreviewInput(BaseModel):
-    """Dispara (ou pula) o preview environment por PR. A decisão UI-touching é
-    DETERMINÍSTICA por paths-filter (FR-20) — nunca por modelo; PR backend-only
-    resulta em `skipped_backend_only`, que conta como sucesso e NUNCA bloqueia."""
+    """Dispara (ou pula) o preview environment por PR. A decisão é DETERMINÍSTICA
+    por paths-filter (FR-20) — nunca por modelo:
+
+    - `preview_enabled` (plano 08 §D) — gate operator-set (`repo_bindings.
+      deploys_preview`): repo não marcado como "gera preview" pula com
+      `skipped_disabled`. Default True mantém o comportamento anterior para
+      callers que não passam o gate (single-repo/sem config).
+    - `ui_path_globs` + `deployable_globs` — o preview vale se a mudança toca UI
+      (front) OU um serviço deployável (back). Mudança só de docs/teste →
+      `skipped_backend_only` (conta como sucesso, NUNCA bloqueia)."""
 
     work_item_id: str
     tenant_id: str
     repo: str
     pr_number: int
     files_changed: list[str] = Field(default_factory=list)
+    head_sha: str | None = None
+    preview_enabled: bool = True
     ui_path_globs: list[str] = Field(default_factory=lambda: ["ui/**", "frontend/**", "**/*.css", "**/*.tsx", "**/*.jsx"])
+    # plano 08 §D — serviço deployável (back): fonte/manifest/container que
+    # alteram o artefato servido no preview. Docs/teste-só não casam e pulam.
+    deployable_globs: list[str] = Field(default_factory=lambda: [
+        "**/Dockerfile", "Dockerfile", "**/*.py", "**/*.go", "**/*.rb",
+        "**/*.java", "**/*.ts", "**/*.js", "k8s/**", "deploy/**", "charts/**",
+        "**/requirements*.txt", "pyproject.toml", "go.mod", "package.json",
+    ])
 
 
 class PreviewRef(BaseModel):
     work_item_id: str
     pr_number: int
-    status: str  # "created" | "skipped_backend_only" | "degraded"
+    status: str  # "created" | "skipped_backend_only" | "skipped_disabled" | "degraded"
     namespace: str | None = None
     url: str | None = None
     detail: str = ""
+    # plano 08 §D — "ui" | "deployable" | "" — qual filtro disparou o preview
+    # (evidência no PR/console de por que este PR ganhou ou não um preview).
+    kind: str = ""
 
 
 class RunVisualDiffInput(BaseModel):

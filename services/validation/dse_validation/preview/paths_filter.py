@@ -36,3 +36,27 @@ def matching_files(files_changed: list[str], ui_path_globs: list[str]) -> list[s
         path for path in files_changed
         if any(file_matches_glob(path, glob) for glob in ui_path_globs)
     ]
+
+
+def preview_decision(
+    files_changed: list[str],
+    ui_path_globs: list[str],
+    deployable_globs: list[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Plano 08 §D — decisão determinística de previewabilidade (P1).
+
+    Retorna `(kind, matching)` onde kind ∈ {"ui", "deployable", "none"}:
+      - "ui"          → tocou front (UI globs)  — precedência (o preview visual
+                        é o caso mais informativo p/ o revisor humano);
+      - "deployable"  → tocou um serviço deployável (back) — Dockerfile/fonte/
+                        manifest;
+      - "none"        → só docs/teste/config não-deployável → pula o preview
+                        (conta como sucesso, NUNCA bloqueia — FR-20).
+    `matching` são os arquivos que dispararam a decisão (evidência, P8)."""
+    ui_hits = matching_files(files_changed, ui_path_globs)
+    if ui_hits:
+        return "ui", ui_hits
+    dep_hits = matching_files(files_changed, deployable_globs or [])
+    if dep_hits:
+        return "deployable", dep_hits
+    return "none", []

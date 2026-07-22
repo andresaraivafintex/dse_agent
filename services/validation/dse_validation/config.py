@@ -1,35 +1,242 @@
-"""Configuração via env var — nenhum segredo/credencial hardcoded.
+"""Configuração do serviço de validação.
 
-Fase 1 / modo local: quando `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY` não estão
-setados, `dse_validation.github.client.build_github_client()` retorna um
-`FakeGitHubClient` (fixture in-memory, ver github/client.py) em vez de falhar —
-isso permite testar toda a lógica de PR finalizer/CI-status/comment-backend
-sem uma GitHub App real registrada. Documentado explicitamente no README.
+Os comandos L1 são parte da política do repositório avaliado, não da
+configuração do worker. Por isso, em execução real eles são carregados de
+``.dse/validation.json`` no *base SHA* imutável. Variáveis ``DSE_L1_*_CMD``
+não são mais uma fonte de verdade: além de permitirem deriva entre workers,
+elas deixavam um comando vazio ser confundido com aprovação.
+
+Timeouts e limiares operacionais ainda podem vir do ambiente. Eles não
+escolhem que código executar e, portanto, não alteram a política confiável do
+repositório.
 """
 from __future__ import annotations
 
+import json
 import os
-import shlex
+import re
+from typing import TYPE_CHECKING, Any
+
+from dse_contracts import GateStatus
+
+if TYPE_CHECKING:
+    from dse_validation.sandbox_exec import SandboxExecutor
 
 
-def _env_cmd(name: str, default: str) -> list[str]:
-    raw = os.environ.get(name, default)
-    return shlex.split(raw)
+L1_MANIFEST_PATH = ".dse/validation.json"
+_FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
+_COMMAND_NAMES = ("lint", "typecheck", "test", "build")
+_MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_COMMAND_ARGS = 128
+_MAX_ARG_LENGTH = 4096
+
+
+class L1ManifestError(ValueError):
+    """Manifesto ausente ou inválido, com resultado de gate explícito."""
+
+    def __init__(self, status: GateStatus, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def _validate_command(name: str, raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise L1ManifestError(
+            GateStatus.ERROR,
+            f"commands.{name} deve ser um array JSON de argumentos, nunca uma string de shell",
+        )
+    if len(raw) > _MAX_COMMAND_ARGS:
+        raise L1ManifestError(
+            GateStatus.ERROR,
+            f"commands.{name} excede o limite de {_MAX_COMMAND_ARGS} argumentos",
+        )
+    command: list[str] = []
+    for index, arg in enumerate(raw):
+        if not isinstance(arg, str) or not arg or "\x00" in arg:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"commands.{name}[{index}] deve ser uma string não vazia e sem NUL",
+            )
+        if len(arg) > _MAX_ARG_LENGTH:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"commands.{name}[{index}] excede {_MAX_ARG_LENGTH} caracteres",
+            )
+        command.append(arg)
+    return command
 
 
 class L1Config:
-    """Comandos do pipeline L1 — configuráveis por env var porque o repo alvo
-    (o que o Coder está editando) pode não ser este monorepo Python. Produção
-    deve derivar isto do próprio repo (Makefile/package.json/pyproject) em vez
-    de env vars fixas; documentado como pendência no README."""
+    """Política L1 materializada a partir de uma fonte rastreável.
 
-    def __init__(self) -> None:
-        self.lint_cmd = _env_cmd("DSE_L1_LINT_CMD", "ruff check .")
-        self.typecheck_cmd = _env_cmd("DSE_L1_TYPECHECK_CMD", "mypy .")
-        self.test_cmd = _env_cmd("DSE_L1_TEST_CMD", "pytest -q")
-        self.build_cmd = _env_cmd("DSE_L1_BUILD_CMD", "python -m compileall -q .")
-        self.timeout_seconds = int(os.environ.get("DSE_L1_TIMEOUT_SECONDS", "300"))
-        self.sast_severity_gate = os.environ.get("DSE_L1_SAST_SEVERITY_GATE", "MEDIUM")
+    O construtor vazio é deliberadamente *fail-closed*: todos os comandos
+    ficam não configurados. Testes unitários que precisam de comandos explícitos
+    usam :meth:`for_test_repo`; o caminho de produção usa
+    :meth:`from_trusted_manifest`.
+    """
+
+    def __init__(
+        self,
+        *,
+        lint_cmd: list[str] | None = None,
+        typecheck_cmd: list[str] | None = None,
+        test_cmd: list[str] | None = None,
+        build_cmd: list[str] | None = None,
+        timeout_seconds: int | None = None,
+        sast_severity_gate: str | None = None,
+        source: str = "not-configured",
+        manifest_status: GateStatus = GateStatus.NOT_CONFIGURED,
+        manifest_detail: str = "manifesto L1 não carregado",
+    ) -> None:
+        self.lint_cmd = list(lint_cmd or [])
+        self.typecheck_cmd = list(typecheck_cmd or [])
+        self.test_cmd = list(test_cmd or [])
+        self.build_cmd = list(build_cmd or [])
+        self.timeout_seconds = timeout_seconds or int(
+            os.environ.get("DSE_L1_TIMEOUT_SECONDS", "300")
+        )
+        self.sast_severity_gate = (
+            sast_severity_gate or os.environ.get("DSE_L1_SAST_SEVERITY_GATE", "MEDIUM")
+        ).upper()
+        self.source = source
+        self.manifest_status = manifest_status
+        self.manifest_detail = manifest_detail
+
+    @classmethod
+    def for_test_repo(cls) -> "L1Config":
+        """Config explícita para fixtures locais; nunca chamada pelo worker."""
+
+        return cls(
+            lint_cmd=["ruff", "check", "."],
+            typecheck_cmd=["mypy", "."],
+            test_cmd=["pytest", "-q"],
+            build_cmd=["python", "-m", "compileall", "-q", "."],
+            source="explicit-test-config",
+            manifest_status=GateStatus.PASS,
+            manifest_detail="configuração explícita de teste",
+        )
+
+    @classmethod
+    def from_trusted_manifest(
+        cls,
+        executor: "SandboxExecutor",
+        base_sha: str,
+        *,
+        manifest_path: str = L1_MANIFEST_PATH,
+    ) -> "L1Config":
+        """Carrega a política do commit-base, nunca do checkout mutável.
+
+        A API recebe argumentos como array e os repassa sem shell. O caminho
+        do manifesto é constante no chamador de produção; o parâmetro existe
+        apenas para testes de contrato.
+        """
+
+        source = f"{base_sha}:{manifest_path}"
+        try:
+            if not _FULL_GIT_SHA_RE.fullmatch(base_sha):
+                raise L1ManifestError(
+                    GateStatus.ERROR,
+                    "base_sha deve ser um SHA Git completo de 40 ou 64 caracteres hexadecimais",
+                )
+
+            verify = executor.run(
+                ["git", "cat-file", "-e", f"{base_sha}^{{commit}}"], timeout=15
+            )
+            if not verify.ok:
+                raise L1ManifestError(
+                    GateStatus.ERROR,
+                    f"base_sha {base_sha} não existe como commit no sandbox",
+                )
+
+            rendered = executor.run(
+                ["git", "show", f"{base_sha}:{manifest_path}"], timeout=15
+            )
+            if not rendered.ok:
+                raise L1ManifestError(
+                    GateStatus.NOT_CONFIGURED,
+                    f"manifesto confiável ausente em {source}",
+                )
+            if len(rendered.stdout.encode("utf-8")) > _MAX_MANIFEST_BYTES:
+                raise L1ManifestError(
+                    GateStatus.ERROR,
+                    f"manifesto {source} excede {_MAX_MANIFEST_BYTES} bytes",
+                )
+            try:
+                payload = json.loads(rendered.stdout)
+            except json.JSONDecodeError as exc:
+                raise L1ManifestError(
+                    GateStatus.ERROR,
+                    f"manifesto {source} contém JSON inválido: {exc.msg}",
+                ) from exc
+            return cls._from_manifest_payload(payload, source=source)
+        except L1ManifestError as exc:
+            return cls(
+                source=source,
+                manifest_status=exc.status,
+                manifest_detail=exc.detail,
+            )
+
+    @classmethod
+    def _from_manifest_payload(cls, payload: Any, *, source: str) -> "L1Config":
+        if not isinstance(payload, dict):
+            raise L1ManifestError(GateStatus.ERROR, f"manifesto {source} deve ser um objeto JSON")
+        allowed = {"version", "commands", "timeout_seconds", "sast_severity_gate"}
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source} possui campos desconhecidos: {unknown}",
+            )
+        if payload.get("version") != 1:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source} exige version=1",
+            )
+        commands = payload.get("commands")
+        if not isinstance(commands, dict):
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source} exige objeto commands",
+            )
+        unknown_commands = sorted(set(commands) - set(_COMMAND_NAMES))
+        if unknown_commands:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source} possui comandos desconhecidos: {unknown_commands}",
+            )
+
+        timeout = payload.get(
+            "timeout_seconds", int(os.environ.get("DSE_L1_TIMEOUT_SECONDS", "300"))
+        )
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 3600:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source}: timeout_seconds deve estar entre 1 e 3600",
+            )
+        severity = payload.get(
+            "sast_severity_gate", os.environ.get("DSE_L1_SAST_SEVERITY_GATE", "MEDIUM")
+        )
+        if not isinstance(severity, str) or severity.upper() not in {"LOW", "MEDIUM", "HIGH"}:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifesto {source}: sast_severity_gate deve ser LOW, MEDIUM ou HIGH",
+            )
+
+        parsed = {name: _validate_command(name, commands.get(name)) for name in _COMMAND_NAMES}
+        return cls(
+            lint_cmd=parsed["lint"],
+            typecheck_cmd=parsed["typecheck"],
+            test_cmd=parsed["test"],
+            build_cmd=parsed["build"],
+            timeout_seconds=timeout,
+            sast_severity_gate=severity,
+            source=source,
+            manifest_status=GateStatus.PASS,
+            manifest_detail=f"manifesto confiável carregado de {source}",
+        )
 
 
 class GitHubConfig:
@@ -143,9 +350,25 @@ class PreviewConfig:
         # ADR-26: cap de previews concorrentes por tenant desde o dia 1.
         # Override por tenant na tabela wse_preview_caps; este é o default.
         self.default_max_concurrent = int(os.environ.get("DSE_PREVIEW_MAX_CONCURRENT", "3"))
-        # imagem do Deployment mínimo do preview (pinada, P7)
+        # imagem do Deployment do preview (pinada, P7). Plano 08 §D (D4): por
+        # padrão sobe um placeholder nginx (prova o fluxo); em piloto, aponte
+        # para a imagem REAL do PR (buildada/pushada no CI) via este env — o
+        # build-por-PR + registry acompanham o cluster (decisão de infra).
         self.preview_image = os.environ.get("DSE_PREVIEW_IMAGE", "nginx:1.27-alpine")
+        # plano 08 §D (D3): host EXTERNO acessível pelo browser. Sem isto a URL
+        # é o DNS interno do cluster (não clicável de fora). Ex.:
+        # "https://{namespace}.preview.dse.local". `{namespace}` é substituído.
+        self.external_host_template = os.environ.get("DSE_PREVIEW_EXTERNAL_HOST", "")
         self.sync_timeout_s = int(os.environ.get("DSE_PREVIEW_SYNC_TIMEOUT_S", "180"))
+
+    def preview_url_for(self, namespace: str) -> str:
+        """URL do preview. Externa (browser-reachable) quando
+        `external_host_template` está setado; senão o DNS interno do cluster
+        (útil só de dentro — o link ainda aparece no PR, D1, mas D3 o torna
+        clicável)."""
+        if self.external_host_template:
+            return self.external_host_template.replace("{namespace}", namespace)
+        return f"http://preview.{namespace}.svc.cluster.local"
 
 
 class L2Config:

@@ -70,42 +70,34 @@ from dse_contracts.activities import (
     ACTIVITY_TRIGGER_PREVIEW,
     ACTIVITY_UPDATE_BASE_BRANCH,
     CheckpointRef,
+    CheckpointSandboxInput,
     CiStatusResult,
+    ConsumeCiStatusInput,
     CoderTurnResult,
     DemoEvidenceResult,
+    FinalizePrInput,
     L1Finding,
     L1Result,
     L2Verdict,
     PreviewRef,
     PrRef,
+    ProvisionSandboxInput,
+    RebuildSandboxInput,
+    RunCoderTurnInput,
     RunDemoEvidenceInput,
+    RunL1PipelineInput,
     RunVisualDiffInput,
     SandboxHandle,
+    TeardownSandboxInput,
+    TesterTurnResult,
     TriggerPreviewInput,
     UpdateBaseBranchInput,
     UpdateBaseBranchResult,
     VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
-# S7 (Fase 5): os modelos de input de L1/finalize vivem no WS-E. As fakes os
-# decodificam (como trigger_preview/visual_diff ja faziam) para que uma
-# divergencia entre o call site do workflow e o contrato quebre AQUI, no teste,
-# e nao so no decode real da Activity em producao (licao do adendo 02).
-from dse_validation.activities import (
-    ConsumeCiStatusInput,
-    FinalizePrInput,
-    RunL1PipelineInput,
-)
-# Auditoria pós-S7: fecha a CLASSE inteira — toda fake de Activity do WS-C
-# decodifica com o modelo real (a auditoria achou 3 decode-fails escondidos por
-# fakes lenientes: consume_ci_status, teardown_sandbox x4, rebuild no retry).
-from sandbox_runtime.activities import (
-    CheckpointSandboxInput,
-    ProvisionSandboxInput,
-    RebuildSandboxInput,
-    RunCoderTurnInput,
-    TeardownSandboxInput,
-)
+# Todos os modelos de input agora vêm do contrato canônico. Assim esta suíte
+# detecta drift no wire sem depender de importar os serviços donos.
 from dse_contracts.activities import (
     RunL2ReviewInput,
     RunPlannerTurnInput,
@@ -148,6 +140,9 @@ class FakeControlPlane:
     plan_expected_files: list[str] = field(default_factory=lambda: ["app.py"])
     planner_cost_usd: float = 0.0
     tester_cost_usd: float = 0.0
+    tester_tests_ran: bool = True
+    tester_tests_passed: bool = True
+    tester_returncode: int = 0
     l2_cost_usd: float = 0.0
     coder_cost_usd: float = 0.01
     # L2: falha N vezes (objecoes) antes de aprovar
@@ -189,6 +184,9 @@ class FakeControlPlane:
     base_conflict: bool = False
     base_orphaned_threads: int = 0  # exit da Fase 4 exige 0 no merge-base real
     last_update_base_payload: dict | None = None
+    last_l1_payload: dict | None = None
+    last_finalize_payload: dict | None = None
+    last_ci_payload: dict | None = None
 
 
 def build_fake_activities(state: FakeControlPlane) -> list[Any]:
@@ -205,15 +203,17 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             risk_class=state.plan_risk_class,
         )
 
-    async def run_tester_turn(payload: dict) -> CoderTurnResult:
+    async def run_tester_turn(payload: dict) -> TesterTurnResult:
         state.tester_calls += 1
         state.calls_log.append("run_tester_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
         RunTesterTurnInput(**payload)  # decode REAL do contrato
-        return CoderTurnResult(
+        return TesterTurnResult(
             sandbox_id=payload["sandbox_id"],
-            diff_summary="fake tests",
-            files_changed=["test_app.py"],
+            test_files=["test_app.py"],
+            tests_ran=state.tester_tests_ran,
+            tests_passed=state.tester_tests_passed,
+            returncode=state.tester_returncode,
             cost_usd=state.tester_cost_usd,
         )
 
@@ -271,8 +271,10 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         if state.checkpoint_fail_times > 0:
             state.checkpoint_fail_times -= 1
             raise RuntimeError("simulated checkpoint failure")
+        git_ref = "base0001" if inp.phase == "base" else f"head{state.checkpoint_calls:04d}"
         return CheckpointRef(
-            work_item_id=inp.work_item_id, git_ref="deadbeef", phase=inp.phase
+            work_item_id=inp.work_item_id, git_ref=git_ref, phase=inp.phase,
+            base_sha="base0001",
         )
 
     async def rebuild_sandbox(payload: dict) -> SandboxHandle:
@@ -294,6 +296,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def run_l1_pipeline(payload: dict) -> L1Result:
         state.l1_calls += 1
         state.calls_log.append("run_l1_pipeline")
+        state.last_l1_payload = dict(payload)
         inp = RunL1PipelineInput(**payload)  # decode REAL do contrato (S7)
         wi = inp.sandbox.work_item_id
         if state.l1_fail_times > 0:
@@ -312,6 +315,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def finalize_pr(payload: dict) -> PrRef:
         state.finalize_calls += 1
         state.calls_log.append("finalize_pr")
+        state.last_finalize_payload = dict(payload)
         inp = FinalizePrInput(**payload)  # decode REAL (exige summary + sandbox)
         wi = inp.work_item_id
         pr_number = state.pr_by_wi.get(wi)
@@ -332,6 +336,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
 
     async def consume_ci_status(payload: dict) -> CiStatusResult:
         state.calls_log.append("consume_ci_status")
+        state.last_ci_payload = dict(payload)
         inp = ConsumeCiStatusInput(**payload)  # decode REAL (exige tenant/repo/ref)
         status = state.ci_sequence.pop(0) if state.ci_sequence else "green"
         return CiStatusResult(
@@ -343,13 +348,19 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     # payload com o MODEL REAL do contrato: se o call site do workflow deriva
     # do contrato, o teste quebra AQUI (nao no wire) — licao do adendo 02.
     # ------------------------------------------------------------------
-    def _ui_touching(files: list[str]) -> bool:
-        # espelho do paths-filter deterministico do WS-E (FR-20) para o fake:
-        # prefixos ui/ e frontend/ + extensoes de UI dos globs default.
+    def _preview_kind(files: list[str]) -> str:
+        # espelho do paths-filter deterministico do WS-E (FR-20 + plano 08 §D)
+        # para o fake — ui (front) tem precedencia; senao serviço deployável
+        # (back: fonte/Dockerfile/manifest); senao none (docs/config).
         for f in files:
             if f.startswith(("ui/", "frontend/")) or f.endswith((".css", ".tsx", ".jsx")):
-                return True
-        return False
+                return "ui"
+        for f in files:
+            if (f.endswith((".py", ".go", ".rb", ".java", ".ts", ".js", "Dockerfile"))
+                    or f.startswith(("k8s/", "deploy/", "charts/"))
+                    or f in ("pyproject.toml", "go.mod", "package.json")):
+                return "deployable"
+        return "none"
 
     async def trigger_preview(payload: dict) -> PreviewRef:
         state.trigger_preview_calls += 1
@@ -359,18 +370,25 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         if state.preview_mode == "raise":
             raise ApplicationError("argocd unreachable (fake)",
                                    type="PreviewProvisionError", non_retryable=True)
+        # Plano 08 §D — gate deploys_preview (operator-set). Repo desabilitado
+        # pula LIMPO (antes de qualquer provisionamento).
+        if not inp.preview_enabled:
+            return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
+                              status="skipped_disabled", detail="repo sem preview (fake)")
         if state.preview_mode == "degraded":
             return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
                               status="degraded", detail="argocd sync failed (fake)")
-        if state.preview_mode == "created" or _ui_touching(inp.files_changed):
+        kind = _preview_kind(inp.files_changed)
+        if state.preview_mode == "created" or kind != "none":
             return PreviewRef(
                 work_item_id=inp.work_item_id, pr_number=inp.pr_number, status="created",
                 namespace=f"preview-{inp.work_item_id}",
                 url=f"http://preview-{inp.work_item_id}.local",
+                kind=(kind if kind != "none" else "ui"),
             )
         return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
                           status="skipped_backend_only",
-                          detail="paths-filter: nenhum path de UI (FR-20)")
+                          detail="paths-filter: sem mudança previewável (§D)")
 
     async def run_demo_evidence(payload: dict) -> DemoEvidenceResult:
         state.demo_evidence_calls += 1
