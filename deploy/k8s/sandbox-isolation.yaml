@@ -1,0 +1,69 @@
+# Plano 08 §G — pré-requisitos cluster-side do runtime isolado de sandbox.
+# Aplicar UMA vez no cluster do piloto (`kubectl apply -f`). A prova viva do
+# isolamento (o Pod rodando sob gVisor/Kata) depende do RuntimeClass estar
+# instalado no cluster — decisão de infra do time de plataforma.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dse-sandboxes
+  labels:
+    dse.fintex/purpose: sandbox-isolation
+    # baseline Pod Security Admission "restricted": reforça, no admission, o
+    # mesmo endurecimento que o build_pod_manifest já pede (defesa em prof.).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# SA mínima: sem RBAC (nenhum RoleBinding) → o token (nem montado) não fala com
+# a API do cluster. automountServiceAccountToken=false também no Pod.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dse-sandbox-runner
+  namespace: dse-sandboxes
+automountServiceAccountToken: false
+---
+# RuntimeClass de isolamento forte (gVisor). O handler ('runsc') tem que estar
+# instalado nos nodes (containerd + runsc). Kata é a alternativa (handler
+# 'kata'); troque DSE_SANDBOX_RUNTIME_CLASS de acordo.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+---
+# NetworkPolicy default-deny de egress: o sandbox NÃO fala com nada por padrão.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dse-sandbox-default-deny-egress
+  namespace: dse-sandboxes
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: dse-sandbox
+  policyTypes: ["Egress"]
+  egress: []   # nada — o allow abaixo é o único caminho
+---
+# Único egress permitido: DNS + o egress-proxy (que aplica o allowlist real de
+# hosts). Assim todo tráfego de saída do agente passa pelo proxy auditável.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dse-sandbox-allow-egress-proxy
+  namespace: dse-sandboxes
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: dse-sandbox
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {app: egress-proxy}
+      ports:
+        - {protocol: TCP, port: 3128}
+    - ports:  # DNS
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
