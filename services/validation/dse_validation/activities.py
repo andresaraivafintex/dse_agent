@@ -228,13 +228,18 @@ class RecordReviewEpisodeInput(BaseModel):
 
 
 def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
+    # Boundary bug corrigido no disparo real (2026-07-22): o core mudou para
+    # base_sha/head_sha (sha-bound-validation-inputs-v1) e este wrapper seguia
+    # passando base_branch — os testes chamam o CORE direto e nunca viram o
+    # boundary (test_l1_wrapper_matches_core_signature agora trava isso).
     executor = executor_for_handle(inp.sandbox, repo_dir=inp.repo_dir)
     return run_l1_pipeline_core(
         executor=executor,
-        work_item_id=inp.sandbox.work_item_id,
+        work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
         plan=inp.plan,
-        base_branch=inp.base_branch,
+        base_sha=inp.base_sha,
+        head_sha=inp.head_sha,
         target_dir=inp.target_dir,
         cfg=L1Config(),
     )
