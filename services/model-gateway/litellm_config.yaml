@@ -129,3 +129,10 @@ litellm_settings:
   drop_params: true
   set_verbose: false
   request_timeout: 30
+  # Plano 08 §F (F2) — pre-call hook SERVER-SIDE de budget + kill-switch. Roda
+  # DENTRO do proxy (não-bypassável): toda chamada passa por
+  # DseBudgetKillSwitchHook.async_pre_call_hook, que lê X-Dse-Tenant-Id/
+  # X-Dse-Work-Item-Id e recusa (402 budget / 403 kill-switch) contra o Postgres
+  # do control-plane (DSE_DATABASE_URL). Espelha o enforce_call do client (defesa
+  # em profundidade). O módulo é montado em /app/dse_budget_hook.py (compose).
+  callbacks: ["dse_budget_hook.proxy_handler_instance"]

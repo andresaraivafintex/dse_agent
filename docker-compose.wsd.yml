@@ -64,8 +64,16 @@ services:
       DSE_AWS_REGION: ${DSE_AWS_REGION:-us-east-1}
       DSE_BEDROCK_PRIVATELINK_ENDPOINT: ${DSE_BEDROCK_PRIVATELINK_ENDPOINT:-https://vpce-PLACEHOLDER.bedrock-runtime.us-east-1.vpce.amazonaws.com}
       DSE_BEDROCK_IAM_ROLE_ARN: ${DSE_BEDROCK_IAM_ROLE_ARN:-arn:aws:iam::000000000000:role/dse-model-gateway-PLACEHOLDER}
+      # Plano 08 §F (F2): o pre-call hook lê o Postgres do CONTROL-PLANE (schema
+      # `dse`: kill-switch/budgets/ledger) — distinto do DATABASE_URL interno do
+      # proxy (`dse_litellm`). Só-leitura na prática (o hook só faz SELECT + um
+      # INSERT append-only em audit_log).
+      DSE_DATABASE_URL: ${DSE_DATABASE_URL:-postgresql://dse_app:dse_app_dev_only@dse_postgres:5432/dse}
     volumes:
       - ./services/model-gateway/litellm_config.yaml:/app/config.yaml:ro
+      # F2: monta o hook no CWD do proxy (/app está no PYTHONPATH → import
+      # dse_budget_hook resolve).
+      - ./services/model-gateway/dse_budget_hook.py:/app/dse_budget_hook.py:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     ports:
       - "4000:4000"

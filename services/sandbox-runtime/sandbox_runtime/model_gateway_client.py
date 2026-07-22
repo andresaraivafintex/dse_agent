@@ -23,8 +23,9 @@ from pydantic import BaseModel
 
 from dse_contracts import GatewayCallHeaders
 
+from .runtime_profile import model_gateway_fixture_allowed, validate_runtime_profile
+
 DEFAULT_GATEWAY_URL = os.environ.get("DSE_MODEL_GATEWAY_URL", "http://localhost:4000")
-_FIXTURE_ENV_VAR = "DSE_MODEL_GATEWAY_ALLOW_FIXTURE"
 # Master key do LiteLLM — usada SÓ aqui, no control plane (a Activity
 # run_coder_turn roda no orchestrator, confiável), para mintar a virtual key
 # escopada por tarefa via `/key/generate`. NUNCA entra no sandbox: o substrato
@@ -53,7 +54,11 @@ def mint_virtual_key(
     *,
     gateway_base_url: str | None = None,
     timeout_s: float = 2.0,
+    max_budget_usd: float | None = None,
 ) -> VirtualKeyResult:
+    # Em produção, recusa antes de qualquer I/O quando o deployment ainda
+    # permite fixture/in-process. A falha nunca se transforma em chave local.
+    validate_runtime_profile(require_real_gateway=True)
     base = gateway_base_url or DEFAULT_GATEWAY_URL
     try:
         # Via REAL (WS-D): a API nativa do LiteLLM `/key/generate`, autenticada
@@ -67,6 +72,11 @@ def mint_virtual_key(
                 json={
                     "models": [_CODER_MODEL],
                     "duration": "1h",
+                    # Plano 08 §F (F2): backstop DURO por-key no proxy. O
+                    # enforcement fino/dinâmico é o pre-call hook (lê o budget
+                    # vivo do control-plane); este cap é a rede de segurança
+                    # estática do LiteLLM, quando um cap é resolvido pelo caller.
+                    **({"max_budget": max_budget_usd} if max_budget_usd is not None else {}),
                     "metadata": {
                         "tenant_id": headers.tenant_id,
                         "work_item_id": headers.work_item_id,
@@ -83,7 +93,7 @@ def mint_virtual_key(
             fixture=False,
         )
     except Exception as exc:  # noqa: BLE001 - queremos cair pro fixture por qualquer falha de rede/HTTP
-        if os.environ.get(_FIXTURE_ENV_VAR, "1") != "1":
+        if not model_gateway_fixture_allowed():
             raise ModelGatewayUnavailable(
                 f"model-gateway em {base} indisponível e fixture desabilitado: {exc}"
             ) from exc
