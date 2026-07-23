@@ -1,11 +1,7 @@
 {{/*
-Defesa em profundidade: default-deny de egress a nível de rede para todo o
-namespace, com exceções explícitas para DNS, o Postgres/Temporal/Redis
-internos, e o egress-proxy (única rota de saída permitida para qualquer
-outro destino). Isto é ADICIONAL ao proxy de aplicação (WS-C) — mesmo que
-um pod tenha um bug que ignore HTTPS_PROXY, a NetworkPolicy ainda bloqueia a
-conexão direta a nível de kernel/CNI (requer um CNI que aplique
-NetworkPolicy, ex. Calico/Cilium — anotar isso no runbook de instalação).
+Contenção L3/L4. NetworkPolicy padrão não entende FQDN: só o egress-proxy
+recebe rota para CIDRs externos; a decisão por hostname continua no proxy.
+O CNI do cluster deve aplicar NetworkPolicy (Calico/Cilium etc.).
 */}}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -18,40 +14,207 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: ["Egress"]
-  egress:
-    # DNS
-    - to:
-        - namespaceSelector: {}
-      ports:
-        - protocol: UDP
-          port: 53
-        - protocol: TCP
-          port: 53
-    # Serviços internos do namespace (Postgres/Temporal/Redis/model-gateway/
-    # egress-proxy/vault) — comunicação interna permitida livremente.
-    - to:
-        - podSelector: {}
+  egress: []
 ---
+# Todos os pods podem falar apenas com o DNS do cluster para resolução.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "dse.fullname" . }}-egress-proxy-only-external
+  name: {{ include "dse.fullname" . }}-allow-cluster-dns
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "dse.labels" . | nindent 4 }}
 spec:
-  # Aplica-se especificamente aos componentes que executam código de agente
-  # (orchestrator/sandboxes) — apenas o egress-proxy pode iniciar conexões
-  # fora do cluster; todo o resto do tráfego externo destes pods é negado.
+  podSelector: {}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Workloads de aplicação só alcançam dependências internas enumeradas.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-application-internal-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
   podSelector:
-    matchLabels:
-      dse.egress-restricted: "true"
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - adapter-slack
+          - adapter-github
+          - ingest-gateway
+          - validation
+          - orchestrator
+          - model-gateway
   policyTypes: ["Egress"]
   egress:
     - to:
         - podSelector:
-            {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 12 }}
+            matchLabels:
+              app.kubernetes.io/name: postgres
       ports:
-        - protocol: TCP
-          port: {{ .Values.egressProxy.port }}
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: temporal
+      ports:
+        - { protocol: TCP, port: 7233 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - { protocol: TCP, port: 6379 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - { protocol: TCP, port: {{ .Values.modelGateway.port }} }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress-proxy
+      ports:
+        - { protocol: TCP, port: {{ .Values.egressProxy.port }} }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - { protocol: TCP, port: 8200 }
+---
+# Temporal self-hosted precisa somente do Postgres interno.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: temporal
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-temporal-ui-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: temporal-ui
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: temporal
+      ports:
+        - { protocol: TCP, port: 7233 }
+---
+# Sandboxes futuros nascem sob default-deny e recebem somente proxy/gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-sandbox-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      dse.sandbox: "true"
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress-proxy
+      ports:
+        - { protocol: TCP, port: {{ .Values.egressProxy.port }} }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: model-gateway
+      ports:
+        - { protocol: TCP, port: {{ .Values.modelGateway.port }} }
+---
+# Única exceção externa. Redes internas e metadata devem constar em `except`.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-egress-proxy-external
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: egress-proxy
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - { protocol: TCP, port: 8200 }
+    {{- range .Values.networkPolicy.egressProxyExternalCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+            {{- with .except }}
+            except:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      ports:
+        - { protocol: TCP, port: 443 }
+    {{- end }}
 {{- end }}

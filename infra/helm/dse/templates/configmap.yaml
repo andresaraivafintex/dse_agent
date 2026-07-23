@@ -1,3 +1,7 @@
+{{- $allowHosts := list -}}
+{{- range .Values.egressProxy.allowlist -}}
+  {{- $allowHosts = append $allowHosts (printf "%s:%d" .host (int .port)) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,6 +10,7 @@ metadata:
   labels:
     {{- include "dse.labels" . | nindent 4 }}
 data:
+  DSE_DEPLOYMENT_PROFILE: {{ ternary "dev" "production" (eq .Values.deploymentProfile "development") | quote }}
   DSE_TENANT_ID: {{ .Values.tenant.id | quote }}
   DSE_DATA_CLASS: {{ .Values.tenant.dataClass | quote }}
   DSE_DATABASE_HOST: {{ include "dse.fullname" . }}-postgres
@@ -13,12 +18,32 @@ data:
   DSE_DATABASE_NAME: {{ .Values.postgres.auth.database | quote }}
   DSE_TEMPORAL_HOST: {{ include "dse.fullname" . }}-temporal
   DSE_TEMPORAL_PORT: "7233"
+  DSE_TEMPORAL_ADDRESS: "{{ include "dse.fullname" . }}-temporal:7233"
   DSE_TEMPORAL_TASK_QUEUE: "dse-core-task-queue"
   DSE_REDIS_HOST: {{ include "dse.fullname" . }}-redis
   DSE_REDIS_PORT: "6379"
   VAULT_ADDR: {{ .Values.secrets.vaultAddr | quote }}
   DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
   DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
+  DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
+  DSE_MODEL_GATEWAY_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.modelGateway.allowFixture | quote }}
+  DSE_SANDBOX_INPROCESS: {{ ternary "1" "0" .Values.runtime.inProcess | quote }}
+  DSE_SANDBOX_LOCAL_FALLBACK_ALLOWED: {{ ternary "1" "0" .Values.runtime.localFallbackAllowed | quote }}
+  DSE_SANDBOX_RUNTIME_CLASS: {{ .Values.runtime.sandboxRuntimeClassName | quote }}
+  DSE_CODER_SUBSTRATE: {{ .Values.runtime.agentSubstrate | quote }}
+  DSE_WORKER_USE_VERSIONING: {{ ternary "true" "false" .Values.orchestrator.workerVersioning.enabled | quote }}
+  DSE_WORKER_BUILD_ID: {{ .Values.orchestrator.workerVersioning.buildId | quote }}
+  DSE_EGRESS_PORT: {{ .Values.egressProxy.port | quote }}
+  DSE_EGRESS_TENANT_ID: {{ .Values.tenant.id | quote }}
+  DSE_EGRESS_MODEL_GATEWAY_HOST: {{ include "dse.fullname" . }}-model-gateway
+  DSE_EGRESS_MODEL_GATEWAY_PORT: {{ .Values.modelGateway.port | quote }}
+  DSE_EGRESS_REPO_HOST: {{ .Values.egressProxy.repoHost | quote }}
+  DSE_EGRESS_CREDENTIAL_BROKER_ENABLED: {{ ternary "1" "0" .Values.egressProxy.credentialBroker.enabled | quote }}
+  DSE_EGRESS_CREDENTIAL_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.egressProxy.credentialBroker.allowFixture | quote }}
+  # Compatível com a implementação atual. O arquivo abaixo continua montado
+  # para a futura política estrita; o gate de piloto não o declara verificado.
+  DSE_EGRESS_ALLOW_HOSTS: {{ join "," $allowHosts | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://{{ include "dse.fullname" . }}-otel-collector:4317"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -34,5 +59,6 @@ data:
     hosts:
       {{- range .Values.egressProxy.allowlist }}
       - host: {{ .host | quote }}
+        port: {{ .port }}
         purpose: {{ .purpose | quote }}
       {{- end }}

@@ -18,10 +18,14 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "orchestrator" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      terminationGracePeriodSeconds: 120
       containers:
         - name: orchestrator
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag "digest" .Values.orchestrator.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.orchestrator.healthPort }}
               name: health
@@ -29,9 +33,22 @@ spec:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
-                name: {{ include "dse.fullname" . }}-postgres-credentials
+                name: {{ include "dse.postgresSecretName" . }}
+          env:
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
           resources:
             {{- toYaml .Values.orchestrator.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.orchestrator.healthPort }} }
+            failureThreshold: 60
+            periodSeconds: 2
           readinessProbe:
             httpGet: { path: /health, port: {{ .Values.orchestrator.healthPort }} }
             initialDelaySeconds: 10

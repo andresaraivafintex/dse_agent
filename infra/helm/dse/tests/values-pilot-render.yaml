@@ -1,0 +1,64 @@
+# TEST FIXTURE ONLY. Digests sintaticamente válidos para provar a renderização;
+# não correspondem a imagens publicadas e nunca devem ser usados em deploy.
+tenant:
+  id: pilot-test
+
+runtime:
+  sandboxRuntimeClassName: gvisor
+
+pilotReadiness:
+  sandboxIsolationVerified: true
+  modelGatewayFailClosedVerified: true
+  egressStrictPolicyVerified: true
+  auditLedgerMigrationsVerified: true
+  workerVersioningRegistrationVerified: true
+
+secrets:
+  vaultAddr: https://vault.internal
+  externalSecrets:
+    secretStoreRef: pilot-test-vault
+    remoteKey: dse/pilot-test/postgres
+
+orchestrator:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  workerVersioning:
+    buildId: git-0123456789abcdef
+
+postgres:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+temporal:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  ui:
+    image:
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+redis:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+egressProxy:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+modelGateway:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+adapters:
+  slack:
+    image:
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  github:
+    image:
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  ingestGateway:
+    image:
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+otelCollector:
+  image:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

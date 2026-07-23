@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Fintex DSE Helm values",
+  "type": "object",
+  "required": [
+    "deploymentProfile",
+    "tenant",
+    "pilotReadiness",
+    "runtime",
+    "serviceAccount",
+    "security",
+    "postgres",
+    "vault",
+    "secrets",
+    "egressProxy",
+    "modelGateway",
+    "orchestrator",
+    "auditLedger",
+    "networkPolicy"
+  ],
+  "properties": {
+    "deploymentProfile": {
+      "type": "string",
+      "enum": ["development", "pilot", "production"]
+    },
+    "tenant": {
+      "type": "object",
+      "required": ["id", "dataClass"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 63,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+        },
+        "dataClass": {
+          "type": "string",
+          "enum": ["internal", "confidential", "restricted"]
+        }
+      }
+    },
+    "pilotReadiness": {
+      "type": "object",
+      "required": [
+        "sandboxIsolationVerified",
+        "modelGatewayFailClosedVerified",
+        "egressStrictPolicyVerified",
+        "auditLedgerMigrationsVerified",
+        "workerVersioningRegistrationVerified"
+      ],
+      "properties": {
+        "sandboxIsolationVerified": { "type": "boolean" },
+        "modelGatewayFailClosedVerified": { "type": "boolean" },
+        "egressStrictPolicyVerified": { "type": "boolean" },
+        "auditLedgerMigrationsVerified": { "type": "boolean" },
+        "workerVersioningRegistrationVerified": { "type": "boolean" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["inProcess", "localFallbackAllowed", "agentSubstrate", "sandboxRuntimeClassName"],
+      "properties": {
+        "inProcess": { "type": "boolean" },
+        "localFallbackAllowed": { "type": "boolean" },
+        "agentSubstrate": { "type": "string", "minLength": 1 },
+        "sandboxRuntimeClassName": { "type": "string" }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "required": ["create", "automountServiceAccountToken"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "automountServiceAccountToken": { "type": "boolean" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "security": {
+      "type": "object",
+      "required": ["podSecurityContext", "appContainerSecurityContext", "statefulContainerSecurityContext"],
+      "properties": {
+        "podSecurityContext": { "type": "object" },
+        "appContainerSecurityContext": { "type": "object" },
+        "statefulContainerSecurityContext": { "type": "object" }
+      }
+    },
+    "postgres": {
+      "type": "object",
+      "required": ["enabled", "image", "auth"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "auth": {
+          "type": "object",
+          "required": ["existingSecret", "username", "password", "database"],
+          "properties": {
+            "existingSecret": { "type": "string" },
+            "username": { "type": "string" },
+            "password": { "type": "string" },
+            "database": { "type": "string" }
+          }
+        }
+      }
+    },
+    "vault": {
+      "type": "object",
+      "required": ["externallyManaged", "devMode", "devRootToken"],
+      "properties": {
+        "externallyManaged": { "type": "boolean" },
+        "devMode": { "type": "boolean" },
+        "devRootToken": { "type": "string" },
+        "image": { "$ref": "#/definitions/image" }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["vaultAddr", "externalSecrets"],
+      "properties": {
+        "vaultAddr": { "type": "string", "minLength": 1 },
+        "externalSecrets": {
+          "type": "object",
+          "required": ["enabled", "secretStoreRef", "secretStoreKind", "refreshInterval", "remoteKey"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretStoreRef": { "type": "string" },
+            "secretStoreKind": { "type": "string", "enum": ["SecretStore", "ClusterSecretStore"] },
+            "refreshInterval": { "type": "string" },
+            "remoteKey": { "type": "string" }
+          }
+        }
+      }
+    },
+    "egressProxy": {
+      "type": "object",
+      "required": ["enabled", "image", "replicas", "port", "repoHost", "credentialBroker", "allowlist", "resources"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "repoHost": { "type": "string", "minLength": 1 },
+        "credentialBroker": {
+          "type": "object",
+          "required": ["enabled", "allowFixture"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "allowFixture": { "type": "boolean" }
+          }
+        },
+        "allowlist": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["host", "port", "purpose"],
+            "properties": {
+              "host": { "type": "string", "minLength": 1 },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "purpose": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "modelGateway": {
+      "type": "object",
+      "required": ["enabled", "allowFixture", "image"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "allowFixture": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" }
+      }
+    },
+    "orchestrator": {
+      "type": "object",
+      "required": ["enabled", "image", "workerVersioning"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "$ref": "#/definitions/image" },
+        "workerVersioning": {
+          "type": "object",
+          "required": ["enabled", "buildId"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "buildId": { "type": "string" }
+          }
+        }
+      }
+    },
+    "auditLedger": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": ["enabled", "dns", "egressProxyExternalCidrs"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dns": { "type": "object" },
+        "egressProxyExternalCidrs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["cidr"],
+            "properties": {
+              "cidr": { "type": "string", "minLength": 3 },
+              "except": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "tag", "digest"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1 },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"
+        }
+      }
+    }
+  }
+}

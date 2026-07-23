@@ -25,19 +25,42 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "adapter-slack" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: adapter-slack
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.slack.image.repository "tag" .Values.adapters.slack.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.slack.image.repository "tag" .Values.adapters.slack.image.tag "digest" .Values.adapters.slack.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.adapters.slack.port }}
               name: http
           envFrom:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
           env:
             - name: VAULT_ADDR
               value: {{ .Values.secrets.vaultAddr | quote }}
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml .Values.adapters.slack.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.slack.port }} }
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.slack.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.slack.port }} }
+            periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service
@@ -76,19 +99,42 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "adapter-github" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: adapter-github
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.github.image.repository "tag" .Values.adapters.github.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.github.image.repository "tag" .Values.adapters.github.image.tag "digest" .Values.adapters.github.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.adapters.github.port }}
               name: http
           envFrom:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
           env:
             - name: VAULT_ADDR
               value: {{ .Values.secrets.vaultAddr | quote }}
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml .Values.adapters.github.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.github.port }} }
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.github.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.github.port }} }
+            periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service
@@ -127,10 +173,13 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "ingest-gateway" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: ingest-gateway
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.ingestGateway.image.repository "tag" .Values.adapters.ingestGateway.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.ingestGateway.image.repository "tag" .Values.adapters.ingestGateway.image.tag "digest" .Values.adapters.ingestGateway.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.adapters.ingestGateway.port }}
               name: http
@@ -138,7 +187,28 @@ spec:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
-                name: {{ include "dse.fullname" . }}-postgres-credentials
+                name: {{ include "dse.postgresSecretName" . }}
+          env:
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml .Values.adapters.ingestGateway.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.ingestGateway.port }} }
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.ingestGateway.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.ingestGateway.port }} }
+            periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service
@@ -177,10 +247,13 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "validation" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: validation
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.validation.image.repository "tag" .Values.validation.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.validation.image.repository "tag" .Values.validation.image.tag "digest" .Values.validation.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.validation.port }}
               name: http
@@ -188,7 +261,18 @@ spec:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
-                name: {{ include "dse.fullname" . }}-postgres-credentials
+                name: {{ include "dse.postgresSecretName" . }}
+          env:
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml .Values.validation.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service

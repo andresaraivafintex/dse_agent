@@ -18,16 +18,21 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.podDefaults" . | nindent 6 }}
       containers:
         - name: egress-proxy
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.egressProxy.image.repository "tag" .Values.egressProxy.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.egressProxy.image.repository "tag" .Values.egressProxy.image.tag "digest" .Values.egressProxy.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: {{ .Values.egressProxy.port }}
               name: proxy
           envFrom:
             - configMapRef:
                 name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
           env:
             - name: VAULT_ADDR
               value: {{ .Values.secrets.vaultAddr | quote }}
@@ -35,16 +40,26 @@ spec:
             - name: allowlist
               mountPath: /etc/dse/egress-proxy
               readOnly: true
+            {{- include "dse.appTmpMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.egressProxy.resources | nindent 12 }}
           readinessProbe:
-            httpGet: { path: /health, port: {{ .Values.egressProxy.port }} }
+            # O proxy atual não expõe HTTP /health. TCP comprova apenas que o
+            # listener está de pé; semântica de política é gate externo.
+            tcpSocket: { port: {{ .Values.egressProxy.port }} }
             initialDelaySeconds: 5
             periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: {{ .Values.egressProxy.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 20
       volumes:
         - name: allowlist
           configMap:
             name: {{ include "dse.fullname" . }}-egress-allowlist
+        - name: dse-runtime-tmp
+          emptyDir:
+            sizeLimit: {{ .Values.security.tmpSizeLimit }}
 ---
 apiVersion: v1
 kind: Service

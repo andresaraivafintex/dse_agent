@@ -8,12 +8,67 @@ tenant:
   id: "acme-dev"            # usado em labels, nomes de recurso e como tenant_id default
   dataClass: "internal"     # internal | confidential | restricted (mapeia para NFR de residência)
 
+# O chart base continua sendo seguro para desenvolvimento local. Os perfis
+# `pilot` e `production` ativam validações fail-closed em templates/_helpers.tpl:
+# não é possível renderizá-los mantendo fixtures, execução in-process,
+# credenciais default ou componentes obrigatórios desligados.
+deploymentProfile: development  # development | pilot | production
+
+# Gates que dependem de uma evidência externa ao Helm (teste de conformidade
+# da imagem/migrações). Permanecem false no repositório por intenção. Só o
+# pipeline de release, depois de verificar os digests imutáveis, deve promovê-
+# los. Isto impede que `helm template` seja confundido com prova de que o
+# runtime/ledger implementam controles que o chart não consegue inspecionar.
+pilotReadiness:
+  sandboxIsolationVerified: false
+  modelGatewayFailClosedVerified: false
+  egressStrictPolicyVerified: false
+  auditLedgerMigrationsVerified: false
+  workerVersioningRegistrationVerified: false
+
 global:
   namespace: dse
   imageRegistry: ""          # ex.: "123456789.dkr.ecr.us-east-1.amazonaws.com/" (com barra final) — vazio = Docker Hub/registro público
   imagePullPolicy: IfNotPresent
   imagePullSecrets: []       # nomes de Secret docker-registry, se o registry do cliente exigir
   labels: {}                 # labels extra aplicadas a todos os recursos (ex.: cost-center)
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+  annotations: {}
+
+# Defaults Pod Security Standards "restricted" para workloads da aplicação.
+# Imagens de infraestrutura que precisam escrever no rootfs usam o perfil
+# `statefulContainerSecurityContext`, mas ainda rodam sem privilege escalation
+# e sem capabilities Linux.
+security:
+  tmpSizeLimit: 256Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  appContainerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  statefulContainerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: ["ALL"]
+
+runtime:
+  # Único valor permitido nos perfis pilot/production. `false` faz o runtime
+  # atual falhar fechado em K8s (não há Docker socket montado); o provisionador
+  # Kubernetes real continua sendo um blocker externo e é coberto pelo gate
+  # pilotReadiness.sandboxIsolationVerified.
+  inProcess: true
+  localFallbackAllowed: true
+  agentSubstrate: fixture
+  sandboxRuntimeClassName: ""
 
 # ---------------------------------------------------------------------------
 # Postgres — control plane (work_items/audit_log/etc.) reside no VPC do
@@ -27,6 +82,7 @@ postgres:
   image:
     repository: postgres
     tag: "16-alpine"
+    digest: ""
   auth:
     # Dev/local apenas — produção DEVE usar existingSecret (populado via
     # ExternalSecret/Vault, nunca valores em texto plano neste values.yaml).
@@ -51,12 +107,17 @@ temporal:
   enabled: true
   image:
     repository: temporalio/auto-setup
-    tag: "1.24"
+    tag: "1.29"
+    digest: ""
   ui:
     enabled: true
     image:
       repository: temporalio/ui
       tag: "2.31.2"
+      digest: ""
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
   resources:
     requests: { cpu: "250m", memory: "512Mi" }
     limits: { cpu: "1", memory: "1Gi" }
@@ -66,6 +127,7 @@ redis:
   image:
     repository: redis
     tag: "7-alpine"
+    digest: ""
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
@@ -82,7 +144,11 @@ vault:
   image:
     repository: hashicorp/vault
     tag: "1.17"
+    digest: ""
   devRootToken: ""  # produção: nunca setar aqui — gerar e guardar fora do chart
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
 
 # ---------------------------------------------------------------------------
 # Secrets backend (WSF-E2-T3a) — como os demais serviços obtêm credenciais.
@@ -95,7 +161,9 @@ secrets:
   externalSecrets:
     enabled: false
     secretStoreRef: "dse-vault-backend"
+    secretStoreKind: ClusterSecretStore  # pilot/production exigem SecretStore namespaced
     refreshInterval: "1h"
+    remoteKey: ""  # vazio => dse/<tenant.id>/postgres
 
 # ---------------------------------------------------------------------------
 # Egress proxy (WS-C constrói, WS-F assina a política/aceite — WSF-E2).
@@ -107,14 +175,22 @@ egressProxy:
   image:
     repository: dse/egress-proxy
     tag: "0.1.0"
+    digest: ""
   replicas: 2
   port: 8806
+  repoHost: "github.com"
+  credentialBroker:
+    enabled: true
+    allowFixture: true
   allowlist:
     - host: "api.github.com"
+      port: 443
       purpose: "GitHub App API (PR finalizer, status comments)"
     - host: "slack.com"
+      port: 443
       purpose: "Slack Web API (mensagem de status)"
     - host: "*.amazonaws.com"
+      port: 443
       purpose: "Bedrock PrivateLink (model-gateway tier 1)"
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
@@ -129,6 +205,8 @@ modelGateway:
   image:
     repository: dse/model-gateway
     tag: "0.1.0"
+    digest: ""
+  allowFixture: true
   replicas: 1
   port: 4000
   resources:
@@ -144,8 +222,12 @@ orchestrator:
   image:
     repository: dse/orchestrator
     tag: "0.1.0"
+    digest: ""
   replicas: 2
   healthPort: 8900
+  workerVersioning:
+    enabled: false
+    buildId: "dev"
   resources:
     requests: { cpu: "250m", memory: "256Mi" }
     limits: { cpu: "1", memory: "512Mi" }
@@ -156,21 +238,39 @@ orchestrator:
 adapters:
   slack:
     enabled: true
-    image: { repository: dse/adapter-slack, tag: "0.1.0" }
+    image: { repository: dse/adapter-slack, tag: "0.1.0", digest: "" }
     port: 8801
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
   github:
     enabled: true
-    image: { repository: dse/adapter-github, tag: "0.1.0" }
+    image: { repository: dse/adapter-github, tag: "0.1.0", digest: "" }
     port: 8802
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
   ingestGateway:
     enabled: true
-    image: { repository: dse/ingest-gateway, tag: "0.1.0" }
+    image: { repository: dse/ingest-gateway, tag: "0.1.0", digest: "" }
     port: 8803
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
 
 validation:
   enabled: true
-  image: { repository: dse/validation, tag: "0.1.0" }
+  image: { repository: dse/validation, tag: "0.1.0", digest: "" }
   port: 8807
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+
+# O ledger é implementado pelo schema Postgres e pelo pacote dse_audit. Este
+# flag só controla se a instalação exige esse caminho; a prova de que as
+# migrations foram aplicadas é deliberadamente um gate separado acima.
+auditLedger:
+  enabled: true
 
 # ---------------------------------------------------------------------------
 # Model server SELF-HOSTED / air-gapped (Tier 2, WSD-E5-T2/T3) — DESLIGADO na
@@ -184,6 +284,7 @@ modelServer:
   image:
     repository: dse/model-server-airgapped
     tag: "0.1.0"
+    digest: ""
   replicas: 1
   port: 8000
   # GPU: em produção air-gapped, requests/limits de nvidia.com/gpu. Deixado
@@ -201,6 +302,7 @@ otelCollector:
   image:
     repository: otel/opentelemetry-collector-contrib
     tag: "0.105.0"
+    digest: ""
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
@@ -219,3 +321,12 @@ ingress:
 # nem depende do proxy estar corretamente configurado para valer).
 networkPolicy:
   enabled: true
+  dns:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+    podSelector:
+      k8s-app: kube-dns
+  # Só o egress-proxy recebe esta saída. Em pilot/production a lista não pode
+  # ficar vazia. O default sugerido no overlay bloqueia redes privadas e o
+  # metadata endpoint; a allowlist L7 do proxy continua sendo obrigatória.
+  egressProxyExternalCidrs: []

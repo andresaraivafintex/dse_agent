@@ -30,12 +30,16 @@ data:
           - key: dse.tenant_id
             value: {{ .Values.tenant.id | quote }}
             action: upsert
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
     exporters:
       debug:
         verbosity: detailed
       # Produção: substituir/adicionar exporter real (otlphttp para o
       # backend do cliente) — ver infra/ALERTING-RULES.md.
     service:
+      extensions: [health_check]
       pipelines:
         traces:
           receivers: [otlp]
@@ -65,25 +69,42 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "otel-collector" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.podDefaults" . | nindent 6 }}
       containers:
         - name: otel-collector
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.otelCollector.image.repository "tag" .Values.otelCollector.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.otelCollector.image.repository "tag" .Values.otelCollector.image.tag "digest" .Values.otelCollector.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           args: ["--config=/etc/otel/otel-collector-config.yaml"]
           ports:
             - containerPort: 4317
               name: otlp-grpc
             - containerPort: 4318
               name: otlp-http
+            - containerPort: 13133
+              name: health
           volumeMounts:
             - name: config
               mountPath: /etc/otel
+            {{- include "dse.appTmpMount" . | nindent 12 }}
           resources:
             {{- toYaml .Values.otelCollector.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 13133 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
       volumes:
         - name: config
           configMap:
             name: {{ include "dse.fullname" . }}-otel-collector-config
+        - name: dse-runtime-tmp
+          emptyDir:
+            sizeLimit: {{ .Values.security.tmpSizeLimit }}
 ---
 apiVersion: v1
 kind: Service

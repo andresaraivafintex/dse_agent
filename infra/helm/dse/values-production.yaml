@@ -1,0 +1,5 @@
+# Use sempre depois do baseline seguro de piloto:
+#   helm upgrade --install ... -f values-pilot.yaml -f values-production.yaml \
+#     -f values-<tenant>.yaml
+# As mesmas validações fail-closed são aplicadas; production não relaxa gates.
+deploymentProfile: production

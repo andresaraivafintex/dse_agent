@@ -1,0 +1,97 @@
+# Perfil propositalmente NÃO instalável enquanto os placeholders e gates de
+# evidência abaixo não forem substituídos pelo pipeline de release. Exemplo:
+#   helm template dse-pilot . -f values-pilot.yaml
+# deve falhar; isso é o comportamento fail-closed esperado.
+deploymentProfile: pilot
+
+tenant:
+  id: replace-with-tenant
+  dataClass: restricted
+
+global:
+  imagePullPolicy: IfNotPresent
+
+runtime:
+  inProcess: false
+  localFallbackAllowed: false
+  agentSubstrate: claude-agent
+  sandboxRuntimeClassName: replace-with-gvisor-or-kata-runtimeclass
+
+pilotReadiness:
+  # O pipeline só promove estes gates depois dos testes de conformidade sobre
+  # os mesmos digests informados nas imagens. Não os marque manualmente.
+  sandboxIsolationVerified: false
+  modelGatewayFailClosedVerified: false
+  egressStrictPolicyVerified: false
+  auditLedgerMigrationsVerified: false
+  workerVersioningRegistrationVerified: false
+
+vault:
+  externallyManaged: true
+  devMode: false
+  devRootToken: ""
+
+secrets:
+  vaultAddr: https://replace-with-vault.example
+  externalSecrets:
+    enabled: true
+    secretStoreRef: replace-with-namespaced-secret-store
+    secretStoreKind: SecretStore
+    refreshInterval: 15m
+    remoteKey: replace-with-vault-kv-path
+
+postgres:
+  auth:
+    existingSecret: ""
+    password: ""
+
+modelGateway:
+  enabled: true
+  allowFixture: false
+
+egressProxy:
+  enabled: true
+  repoHost: github.com
+  credentialBroker:
+    enabled: true
+    allowFixture: false
+  allowlist:
+    - host: api.github.com
+      port: 443
+      purpose: GitHub App API
+    - host: slack.com
+      port: 443
+      purpose: Slack Web API
+    - host: bedrock-runtime.us-east-1.amazonaws.com
+      port: 443
+      purpose: Bedrock regional endpoint aprovado
+
+auditLedger:
+  enabled: true
+
+orchestrator:
+  workerVersioning:
+    enabled: true
+    buildId: replace-with-image-git-sha
+
+# O Deployment `validation` atual não expõe um servidor HTTP standalone; as
+# activities são carregadas pelo worker. Não o fingimos como serviço Ready.
+validation:
+  enabled: false
+
+networkPolicy:
+  enabled: true
+  egressProxyExternalCidrs:
+    - cidr: 0.0.0.0/0
+      except:
+        - 10.0.0.0/8
+        - 100.64.0.0/10
+        - 127.0.0.0/8
+        - 169.254.0.0/16
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 224.0.0.0/4
+
+# Todos os componentes habilitados também exigem image.digest=sha256:<64 hex>.
+# Eles ficam vazios no values.yaml e, portanto, bloqueiam este overlay até o
+# pipeline injetar digests reais do registry aprovado.

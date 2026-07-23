@@ -1,4 +1,10 @@
-Fintex DSE ({{ .Values.tenant.id }}) instalado no namespace {{ .Values.global.namespace }}.
+Fintex DSE ({{ .Values.tenant.id }}) renderizado no namespace {{ .Values.global.namespace }}.
+Perfil: {{ .Values.deploymentProfile }}
+
+IMPORTANTE: Helm valida configuração, não a implementação dos controles.
+Nos perfis pilot/production os gates pilotReadiness só podem ser promovidos
+pelo pipeline após testes sobre os mesmos digests de imagem. O values-pilot
+do repositório permanece bloqueado por padrão.
 
 Componentes ativos:
 {{- if .Values.postgres.enabled }}
@@ -46,3 +52,9 @@ Próximos passos:
 3. Aplique a migração de schema (`scripts/migrate.py`) contra o Postgres
    deste namespace antes do primeiro uso.
 4. Revise infra/OSS-BOM.md para a lista de licenças dos componentes OSS.
+{{- if or (eq .Values.deploymentProfile "pilot") (eq .Values.deploymentProfile "production") }}
+5. Confirme no Temporal que build id {{ .Values.orchestrator.workerVersioning.buildId }}
+   está registrado antes de tornar o worker Ready.
+6. Execute tests/test_profiles.sh e os testes externos de CNI, sandbox,
+   gateway, egress e ledger; `helm template` isolado não libera o piloto.
+{{- end }}

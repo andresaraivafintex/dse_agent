@@ -18,10 +18,13 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "temporal" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: temporal
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.image.repository "tag" .Values.temporal.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.image.repository "tag" .Values.temporal.image.tag "digest" .Values.temporal.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.statefulContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: 7233
               name: frontend
@@ -33,12 +36,20 @@ spec:
             - name: POSTGRES_SEEDS
               value: {{ include "dse.fullname" . }}-postgres
             - name: DYNAMIC_CONFIG_FILE_PATH
-              value: "config/dynamicconfig/development-sql.yaml"
+              value: "config/dynamicconfig/docker.yaml"
           envFrom:
             - secretRef:
-                name: {{ include "dse.fullname" . }}-postgres-credentials
+                name: {{ include "dse.postgresSecretName" . }}
           resources:
             {{- toYaml .Values.temporal.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket: { port: 7233 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 7233 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service
@@ -75,16 +86,31 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.podDefaults" . | nindent 6 }}
       containers:
         - name: temporal-ui
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.ui.image.repository "tag" .Values.temporal.ui.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.ui.image.repository "tag" .Values.temporal.ui.image.tag "digest" .Values.temporal.ui.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: 8080
               name: http
           env:
             - name: TEMPORAL_ADDRESS
               value: "{{ include "dse.fullname" . }}-temporal:7233"
+          resources:
+            {{- toYaml .Values.temporal.ui.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          readinessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
 ---
 apiVersion: v1
 kind: Service

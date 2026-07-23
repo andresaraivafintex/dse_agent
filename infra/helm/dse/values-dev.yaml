@@ -1,0 +1,16 @@
+# Overlay explícito para desenvolvimento local. Mantém as conveniências do
+# values.yaml base e nunca deve ser usado como input de um release de piloto.
+deploymentProfile: development
+
+runtime:
+  inProcess: true
+  localFallbackAllowed: true
+  agentSubstrate: fixture
+
+modelGateway:
+  allowFixture: true
+
+orchestrator:
+  workerVersioning:
+    enabled: false
+    buildId: dev

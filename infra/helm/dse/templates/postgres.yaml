@@ -19,20 +19,19 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "postgres" "Release" .Release) | nindent 8 }}
     spec:
-      {{- with .Values.global.imagePullSecrets }}
-      imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      {{- include "dse.podDefaults" . | nindent 6 }}
       containers:
         - name: postgres
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.postgres.image.repository "tag" .Values.postgres.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.postgres.image.repository "tag" .Values.postgres.image.tag "digest" .Values.postgres.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.statefulContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: 5432
               name: postgres
           envFrom:
             - secretRef:
-                name: {{ include "dse.fullname" . }}-postgres-credentials
+                name: {{ include "dse.postgresSecretName" . }}
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "{{ .Values.postgres.auth.username }}"]

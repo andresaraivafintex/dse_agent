@@ -18,15 +18,28 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "redis" "Release" .Release) | nindent 8 }}
     spec:
+      {{- include "dse.podDefaults" . | nindent 6 }}
       containers:
         - name: redis
-          image: {{ include "dse.image" (dict "root" $ "repository" .Values.redis.image.repository "tag" .Values.redis.image.tag) }}
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.redis.image.repository "tag" .Values.redis.image.tag "digest" .Values.redis.image.digest) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.statefulContainerSecurityContext" . | nindent 12 }}
           ports:
             - containerPort: 6379
               name: redis
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
 ---
 apiVersion: v1
 kind: Service

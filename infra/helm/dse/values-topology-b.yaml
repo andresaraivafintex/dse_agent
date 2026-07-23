@@ -59,8 +59,10 @@ egressProxy:
   enabled: true
   allowlist:
     - host: "git.internal"
+      port: 443
       purpose: "git remote interno (GitHub Enterprise/GitLab on-prem espelhado no VPC)"
     - host: "registry.internal"
+      port: 443
       purpose: "espelho interno de pacotes (nada de pypi.org/npmjs.org público)"
   # NOTA: nenhuma entry de api.github.com/slack.com/*.amazonaws.com — em
   # air-gapped esses hosts são inalcançáveis por construção. Se o cliente
