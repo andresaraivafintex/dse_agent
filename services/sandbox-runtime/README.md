@@ -428,16 +428,19 @@ para `(tenant_id, skill_key, version)`, adiciona `pattern_key`/`provenance` e o
 
 ## O que falta para produção
 
-- **`OpenHandsSubstrate` com execução de ferramentas realmente dentro do
-  sandbox**: hoje usa `openhands.sdk.LocalWorkspace` (executa no processo
-  que roda o SDK, isto é, no worker do WS-B). Produção deveria trocar por
-  `openhands.sdk.RemoteWorkspace`, apontando para um `openhands-agent-server`
-  (também disponível como dependência transitiva do `openhands-sdk`, pacote
-  `openhands-agent-server`) rodando DENTRO do container provisionado por
-  `docker_driver.py` — só assim a execução de bash/edição de arquivo do
-  agente fica de fato dentro do sandbox isolado. Não implementado por não
-  ser exercitável sem o model-gateway do WS-D de pé com um provider real
-  configurado no LiteLLM.
+- **[Fase 1 do plano 09 — PARCIALMENTE FECHADO em dev]** O turno do Coder
+  agora executa DENTRO do sandbox quando `DSE_SANDBOX_INPROCESS=0` (e SEMPRE
+  em produção): `RemoteSubstrate` despacha o contrato tipado
+  `AgentTurnRequest` via `SandboxDriver.execute_stage` (`docker exec -i` →
+  `agent-runner`; imagem via `make agent-runner-image`). Prova viva em
+  `tests/test_isolated_turn_live.py` (edição chega só pelo bind mount;
+  escape negado pelo SO). O que AINDA falta: (a) substrato `openhands` no
+  runner (`RemoteWorkspace`/`openhands-agent-server` empacotado na imagem —
+  hoje devolve `unsupported_substrate` limpo); (b) bootstrap do workspace no
+  driver K8s (clone/checkpoint dentro do Pod — o `execute_stage` via
+  `kubectl exec` existe, mas o Pod nasce com emptyDir vazio); (c) a prova
+  viva sob gVisor/RuntimeClass no cluster —
+  `pilotReadiness.sandboxIsolationVerified` permanece `false` até ela.
 - **Imagem de sandbox** (`docker/Dockerfile.sandbox-base`): desde a Fase 3
   ela é BUILDADA e EXERCITADA de verdade (`dse-sandbox-base:wsc3`, 2.35GB —
   o teste de aceitação do `@demo` roda `npx playwright` via `docker exec`

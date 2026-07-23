@@ -143,7 +143,16 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
 
 def run_agent_turn(req: AgentTurnRequest) -> AgentTurnResult:
     if req.substrate == "fake":
-        return _run_fake(req)
+        try:
+            return _run_fake(req)
+        except OSError as exc:
+            # ex.: tentativa de escrever fora do /workspace num rootfs
+            # read-only — o SO nega e a negação vira resultado estruturado.
+            return AgentTurnResult(
+                done=False,
+                error=f"{type(exc).__name__}: {str(exc)[:300]}",
+                error_kind="substrate_error",
+            )
     if req.substrate == "claude-agent":
         return _run_claude_agent(req)
     if req.substrate == "openhands":
