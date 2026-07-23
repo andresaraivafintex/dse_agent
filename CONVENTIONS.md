@@ -50,6 +50,22 @@ review (Fase 2), previews Argo CD / evidência Playwright (Fase 3), skill regist
 algo em `packages/contracts` que não existe, adicione um campo/tipo novo sem remover ou renomear
 o que já existe — funções e classes públicas listadas neste documento são um contrato estável.
 
+## Higiene de commits — uma frente = um commit
+
+Regras nascidas do sprint de fatiamento (plano 09, 2026-07-23), quando ~2.900
+linhas de 6 frentes distintas se acumularam num único working tree:
+
+- **Uma frente de trabalho = um commit** (feature, correção operacional,
+  hardening de infra, i18n — cada uma separada). Revert e `git bisect` são
+  parte do desenho do sistema, não luxo.
+- **Arquivo que o CI referencia NUNCA fica untracked**: se `ci.yml`, o chart
+  Helm ou a matriz de testes apontam para um arquivo, ele entra no MESMO
+  commit que criou a referência (um clone limpo tem que passar no CI sempre).
+- **Fixture gerada/mutada por teste nunca é rastreada** — regenere via código
+  idempotente (padrão `ensure_repo` do preview gitops) e ignore o diretório.
+- Mudança cosmética (i18n, rename em massa) nunca no mesmo commit que mudança
+  de comportamento.
+
 ## Migrações — numeração reservada (evita colisão em paralelo)
 
 `migrations/0001_foundation.sql` já existe (work_items, ingest_events, audit_log particionado
