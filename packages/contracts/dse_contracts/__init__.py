@@ -10,6 +10,13 @@ from .work_item import (
 )
 from .plan_artifact import PlanArtifact
 from .gateway_contract import GatewayCallHeaders, GatewayErrorResponse, Stage
+from .agent_turn import (
+    AGENT_TURN_SCHEMA_VERSION,
+    KNOWN_SUBSTRATES,
+    AgentTurnGateway,
+    AgentTurnRequest,
+    AgentTurnResult,
+)
 from .mutable_comment import CommentBackend, MutableCommentWriter
 from .constants import (
     OTEL_ATTR_TASK_CLASS,
@@ -83,6 +90,11 @@ from .activities import (
 )
 
 __all__ = [
+    "AGENT_TURN_SCHEMA_VERSION",
+    "AgentTurnGateway",
+    "AgentTurnRequest",
+    "AgentTurnResult",
+    "KNOWN_SUBSTRATES",
     "TASK_QUEUE",
     "WORKFLOW_TYPE",
     "SIGNAL_CLARIFICATION_ANSWER",
