@@ -265,8 +265,10 @@ class ClaudeAgentSubstrate:
     Toolset (P1): `allowed_tools` restrito a leitura/edição de arquivo
     (`Read`/`Write`/`Edit`/`Glob`/`Grep`) — NENHUMA tool de git/PR/bash; o
     commit/push continua determinístico na Activity (`ScopedGitSession`),
-    idêntico ao substrato OpenHands. `setting_sources=[]` impede o CLI de
-    carregar settings/skills do usuário do host (sessão hermética).
+    idêntico ao substrato OpenHands. `setting_sources=["project"]` carrega
+    SÓ o `.claude/` do workspace (skills tickadas no console + commitadas no
+    repo alvo — ver skill_files.py); settings/skills do usuário do HOST
+    continuam fora (sessão hermética quanto ao host).
 
     NÃO exercitado por turno completo nesta suíte (mesma limitação declarada
     do OpenHands): `run_turn` dispara inferência real, que exige o
@@ -315,7 +317,11 @@ class ClaudeAgentSubstrate:
             cwd=workspace_dir,
             allowed_tools=list(self._allowed_tools),
             permission_mode="acceptEdits",
-            setting_sources=[],  # hermético: nada de settings/skills do host
+            # "project" = SÓ o workspace (cwd): carrega as skills tickadas no
+            # console e materializadas em .claude/skills/ + as commitadas no
+            # repo alvo. Continua hermético quanto ao HOST — "user" (settings/
+            # skills do usuário da máquina) segue fora da lista.
+            setting_sources=["project"],
             env={
                 # Gateway-only: o CLI empacotado respeita estas envs — nunca
                 # aponta para api.anthropic.com com credencial de provider.

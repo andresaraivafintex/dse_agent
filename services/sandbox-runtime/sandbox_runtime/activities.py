@@ -138,6 +138,32 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
         if not cloned:
             git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
 
+    # Skills tickadas para o repo (console → skill_registry.repo_scope, 0029)
+    # materializadas AQUI — depois do clone, workspace garantidamente git.
+    # Guidance é best-effort no provision (o Planner continua falhando limpo
+    # se o registry cair — a leitura mandatória é a dele); qualquer skip fica
+    # auditado (P8).
+    try:
+        from .skill_files import materialize_skills as _materialize
+        from .skill_registry import read_approved_skills as _read_skills
+        _mat = _materialize(workspace_dir, _read_skills(inp.tenant_id, repo=inp.repo))
+        if _mat:
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="skills_materialized",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"skills": _mat, "repo": inp.repo},
+            )
+    except Exception as exc:  # noqa: BLE001 — guidance não derruba o provision
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="skills_materialization_skipped",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={"reason": f"{type(exc).__name__}: {str(exc)[:200]}"},
+        )
+
     provisioned = docker_driver.provision_container(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,

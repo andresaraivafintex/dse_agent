@@ -102,6 +102,19 @@ tenant pedido — rascunhos (`draft`) e skills de outro tenant NUNCA vazam
 inclusive com dois tenants dinâmicos de mesma `skill_key`). SEM pipeline de
 promoção (isso é Fase 4) — só o registry + a leitura, como o escopo manda.
 
+**Skills por repositório + materialização no workspace** (migração 0029,
+integração com o console `dse_console_pane`): o console é o banco central de
+skills (formato SKILL.md, sync do repo `dse_skills`) e grava os *ticks por
+repo* em `skill_registry.repo_scope` (`NULL`=global, `["*"]`=todos,
+`["owner/name",…]`=esses, `[]`=nenhum). `read_approved_skills(..., repo=…)`
+aplica o filtro; o turno do **Planner** materializa as skills servidas em
+`.claude/skills/<key>/SKILL.md` do workspace (`skill_files.py`) — skills já
+COMMITADAS no repo alvo têm precedência e nada disso entra no diff
+(`.git/info/exclude`). O **Coder** as carrega nativamente
+(`ClaudeAgentSubstrate` com `setting_sources=["project"]` — hermético quanto
+ao host) e o **Tester** recebe a nota `workspace_skills_note` no prompt.
+Provado por `tests/test_skill_files.py` e `tests/test_skill_repo_scope.py`.
+
 ### WSC-E5 — Retrieval/index service (`retrieval.py`, ADR-24)
 
 `RetrievalService` sobre `retrieval_documents` (tenant-scoped) com três

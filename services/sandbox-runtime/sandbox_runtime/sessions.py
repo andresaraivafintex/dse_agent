@@ -160,7 +160,9 @@ def hydrate_planner_context(
     Planner é read-only — nada aqui muta o repo."""
     agents_md = _read_repo_file(workspace_dir, "AGENTS.md")
     codeowners = _read_repo_file(workspace_dir, "CODEOWNERS") or _read_repo_file(workspace_dir, ".github/CODEOWNERS")
-    skills = read_approved_skills(tenant_id, task_class=task_class, conn=skills_conn)
+    # Ticks por repo do console (repo_scope, migração 0029): o Planner só vê
+    # skills globais ou tickadas para ESTE repo.
+    skills = read_approved_skills(tenant_id, task_class=task_class, repo=repo or None, conn=skills_conn)
 
     hits: list[RetrievalHit] = []
     repo_map = ""

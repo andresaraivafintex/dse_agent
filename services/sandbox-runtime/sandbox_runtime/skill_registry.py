@@ -33,13 +33,22 @@ class Skill:
     body: str
     category: str
     applies_to: list[str] = field(default_factory=list)
+    # Ticks por repo vindos do console (migração 0029): None = global
+    # (skill nativa/legada), ["*"] = todos os repos, ["owner/name", ...] = só
+    # esses, [] = nenhum (não servida a run algum).
+    repo_scope: list[str] | None = None
+
+    def enabled_for_repo(self, repo: str) -> bool:
+        if self.repo_scope is None:
+            return True
+        return "*" in self.repo_scope or repo in self.repo_scope
 
     def as_context_block(self) -> str:
         """Renderização determinística da skill para o bundle do Planner.
         Skills SÃO confiáveis (curadas por humano) — ao contrário do conteúdo
         de retrieval — então entram como guidance, não como dado untrusted."""
-        applies = ", ".join(self.applies_to) if self.applies_to else "geral"
-        return f"### skill:{self.skill_key} [{self.category}; aplica-se a: {applies}]\n{self.title}\n{self.body}"
+        applies = ", ".join(self.applies_to) if self.applies_to else "general"
+        return f"### skill:{self.skill_key} [{self.category}; applies to: {applies}]\n{self.title}\n{self.body}"
 
 
 class SkillRegistryUnavailable(Exception):
@@ -54,11 +63,14 @@ def read_approved_skills(
     tenant_id: str,
     *,
     task_class: str | None = None,
+    repo: str | None = None,
     conn=None,
 ) -> list[Skill]:
     """Skills SERVIDAS do tenant (o Planner de produção). Se `task_class` for
     dado, filtra para as que se aplicam a esse task_class (ou marcadas
-    'default'); senão devolve todas as servidas do tenant.
+    'default'); senão devolve todas as servidas do tenant. Se `repo` for dado
+    (owner/name), filtra pelos ticks por repo do console (`repo_scope`,
+    migração 0029): NULL = global, "*" = todos, lista = membership.
 
     ISOLAMENTO (coordenado com a suíte do WS-F): a query tem `tenant_id = %s`
     hardcoded — não existe caminho que devolva skill de outro tenant, e não há
@@ -83,7 +95,7 @@ def read_approved_skills(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT tenant_id, skill_key, title, body, category, applies_to
+                SELECT tenant_id, skill_key, title, body, category, applies_to, repo_scope
                 FROM skill_registry
                 WHERE tenant_id = %s AND status IN ('approved', 'active')
                 ORDER BY category, skill_key
@@ -103,6 +115,7 @@ def read_approved_skills(
             body=r[3],
             category=r[4],
             applies_to=list(r[5] or []),
+            repo_scope=None if r[6] is None else list(r[6]),
         )
         for r in rows
     ]
@@ -112,4 +125,6 @@ def read_approved_skills(
             for s in skills
             if not s.applies_to or task_class in s.applies_to or "default" in s.applies_to
         ]
+    if repo is not None:
+        skills = [s for s in skills if s.enabled_for_repo(repo)]
     return skills
