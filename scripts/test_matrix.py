@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Run every Python test suite in an isolated pytest process.
+
+The repository intentionally contains one ``tests`` package per component.
+Collecting all of them in a single pytest process makes Python resolve the
+first ``tests.conftest`` for every component, which both breaks collection and
+can silently install the wrong fixtures.  This runner is the canonical entry
+point for local and CI test execution: each suite gets its own interpreter
+process and its own JUnit artifact.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import uuid
+from collections.abc import Iterable
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+SUITE_GROUPS: dict[str, tuple[str, ...]] = {
+    "tooling": ("tests",),
+    "contracts": ("packages/contracts",),
+    "packages": ("packages/dse_audit", "packages/dse_identity"),
+    "adapters": (
+        "services/adapter-github",
+        "services/adapter-jira",
+        "services/adapter-slack",
+        "services/adapter-teams",
+    ),
+    "control-plane": (
+        "services/ingest-gateway",
+        "services/orchestrator",
+    ),
+    "runtime": ("services/sandbox-runtime",),
+    "validation": ("services/validation",),
+    "security": ("services/egress-proxy", "services/model-gateway"),
+    "platform": ("services/platform",),
+}
+
+SUITE_COVERAGE_TARGETS: dict[str, str] = {
+    "tests": "scripts",
+    "packages/contracts": "packages/contracts/dse_contracts",
+    "packages/dse_audit": "packages/dse_audit/dse_audit",
+    "packages/dse_identity": "packages/dse_identity/dse_identity",
+    "services/adapter-github": "services/adapter-github/adapter_github",
+    "services/adapter-jira": "services/adapter-jira/adapter_jira",
+    "services/adapter-slack": "services/adapter-slack/adapter_slack",
+    "services/adapter-teams": "services/adapter-teams/adapter_teams",
+    "services/egress-proxy": "services/egress-proxy/egress_proxy",
+    "services/ingest-gateway": "services/ingest-gateway/ingest_gateway",
+    "services/model-gateway": "services/model-gateway/model_gateway_client",
+    "services/orchestrator": "services/orchestrator/src/dse_orchestrator",
+    "services/platform": "services/platform/dse_platform",
+    "services/sandbox-runtime": "services/sandbox-runtime/sandbox_runtime",
+    "services/validation": "services/validation/dse_validation",
+}
+
+
+def _registered_suites(groups: Iterable[str]) -> list[str]:
+    suites: list[str] = []
+    for group in groups:
+        for suite in SUITE_GROUPS[group]:
+            if suite not in suites:
+                suites.append(suite)
+    return suites
+
+
+def _discovered_suites() -> set[str]:
+    suites: set[str] = {"tests"} if any((ROOT / "tests").glob("test_*.py")) else set()
+    for parent in (ROOT / "packages", ROOT / "services"):
+        for tests_dir in parent.glob("*/tests"):
+            if any(tests_dir.glob("test_*.py")):
+                suites.add(str(tests_dir.parent.relative_to(ROOT)))
+    return suites
+
+
+def _validate_manifest() -> None:
+    registered = set(_registered_suites(SUITE_GROUPS))
+    discovered = _discovered_suites()
+    missing = sorted(discovered - registered)
+    stale = sorted(registered - discovered)
+    coverage_missing = sorted(registered - set(SUITE_COVERAGE_TARGETS))
+    coverage_stale = sorted(set(SUITE_COVERAGE_TARGETS) - registered)
+    if missing or stale or coverage_missing or coverage_stale:
+        details: list[str] = []
+        if missing:
+            details.append(f"unregistered suites: {', '.join(missing)}")
+        if stale:
+            details.append(f"missing suite directories: {', '.join(stale)}")
+        if coverage_missing:
+            details.append(f"coverage targets missing: {', '.join(coverage_missing)}")
+        if coverage_stale:
+            details.append(f"stale coverage targets: {', '.join(coverage_stale)}")
+        raise SystemExit("invalid test matrix: " + "; ".join(details))
+
+
+def _report_name(suite: str) -> str:
+    return suite.replace("/", "-") + ".xml"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--group",
+        action="append",
+        choices=("all", *SUITE_GROUPS),
+        help="group to run; may be repeated (default: all)",
+    )
+    parser.add_argument(
+        "--suite",
+        action="append",
+        choices=tuple(_registered_suites(SUITE_GROUPS)),
+        help="run an individual registered suite; may be repeated",
+    )
+    parser.add_argument(
+        "--reports-dir",
+        type=Path,
+        default=ROOT / "test-results",
+        help="directory for per-suite JUnit XML files",
+    )
+    parser.add_argument("--fail-fast", action="store_true")
+    parser.add_argument("--coverage", action="store_true", help="emit per-suite branch coverage XML")
+    parser.add_argument("--list", action="store_true", help="print the resolved suites and exit")
+    parser.add_argument(
+        "--pytest-arg",
+        action="append",
+        default=[],
+        help="additional argument passed verbatim to every pytest process",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    _validate_manifest()
+    if args.suite:
+        suites = list(dict.fromkeys(args.suite))
+    else:
+        selected_groups = args.group or ["all"]
+        if "all" in selected_groups:
+            selected_groups = list(SUITE_GROUPS)
+        suites = _registered_suites(selected_groups)
+
+    if args.list:
+        for suite in suites:
+            print(suite)
+        return 0
+
+    args.reports_dir.mkdir(parents=True, exist_ok=True)
+    test_run_id = os.environ.setdefault("DSE_TEST_RUN_ID", f"local-{uuid.uuid4().hex[:12]}")
+    print(f"DSE test run: {test_run_id}", flush=True)
+
+    failures: list[str] = []
+    for suite in suites:
+        report = args.reports_dir / _report_name(suite)
+        command = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            suite,
+            f"--junitxml={report}",
+        ]
+        if args.coverage:
+            coverage_report = report.with_suffix(".coverage.xml")
+            command.extend(
+                [
+                    f"--cov={SUITE_COVERAGE_TARGETS[suite]}",
+                    "--cov-branch",
+                    f"--cov-report=xml:{coverage_report}",
+                    "--cov-report=term-missing:skip-covered",
+                ]
+            )
+        command.extend(args.pytest_arg)
+        print(f"\n[{suite}] {' '.join(command)}", flush=True)
+        completed = subprocess.run(command, cwd=ROOT, env=os.environ.copy(), check=False)
+        if completed.returncode != 0:
+            failures.append(suite)
+            if args.fail_fast:
+                break
+
+    if failures:
+        print(f"\nFAILED suites ({len(failures)}): {', '.join(failures)}", file=sys.stderr)
+        return 1
+    print(f"\nPASS: {len(suites)} isolated suite(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

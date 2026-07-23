@@ -1,0 +1,23 @@
+# Direct inputs for the reproducible Python CI environment.
+# Regenerate with: pip-compile --resolver=backtracking --output-file=requirements-ci.lock requirements-ci.in
+
+-e ./packages/contracts
+-e ./packages/dse_audit
+-e ./packages/dse_identity
+-e ./services/adapter-github
+-e ./services/adapter-jira
+-e ./services/adapter-slack
+-e ./services/adapter-teams
+-e ./services/egress-proxy
+-e ./services/ingest-gateway
+-e ./services/model-gateway
+-e ./services/orchestrator[dev]
+-e ./services/platform[dev,temporal]
+-e ./services/sandbox-runtime
+-e ./services/validation[dev]
+
+mypy
+pip-audit
+pip-tools
+pytest-cov
+ruff

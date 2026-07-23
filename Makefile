@@ -4,7 +4,7 @@ COMPOSE_ARGS := $(foreach f,$(COMPOSE_FILES),-f $(f))
 PACKAGES := packages/contracts packages/dse_audit packages/dse_identity
 SERVICES := $(wildcard services/*)
 
-.PHONY: up down migrate test install lint logs ps
+.PHONY: up down migrate test test-direct test-contracts test-list install lint logs ps
 
 up:
 	docker compose $(COMPOSE_ARGS) up -d
@@ -33,7 +33,19 @@ install:
 	done
 
 test:
-	pytest -q packages services
+	python3 scripts/with_test_database.py -- python3 scripts/test_matrix.py
+
+test-direct:
+	python3 scripts/test_matrix.py
+
+test-contracts:
+	python3 scripts/test_matrix.py --group contracts
+
+test-list:
+	python3 scripts/test_matrix.py --list
 
 lint:
-	python3 -m py_compile $$(find packages services -name '*.py')
+	python3 -m py_compile $$(find packages services -name '*.py' \
+		-not -path '*/node_modules/*' -not -path '*/.venv*/*' \
+		-not -path '*/preview_repo/*')
+	ruff check packages services scripts/test_matrix.py
