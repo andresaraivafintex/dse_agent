@@ -182,8 +182,17 @@ class KubernetesSandboxDriver:
     def supports_isolated_stage_execution(self) -> bool:
         return True
 
+    @property
+    def workspace_is_host_visible(self) -> bool:
+        return False  # workspace vive no volume do Pod — git/higiene via ops
+
     def sandbox_id_for(self, work_item_id: str) -> str:
         return pod_name_for(work_item_id)
+
+    def execute_op(
+        self, sandbox_id: str, op: str, payload: dict[str, Any], *, timeout_seconds: float = 180.0
+    ) -> dict[str, Any]:
+        return self._exec_op(sandbox_id, op, payload, timeout=int(timeout_seconds))
 
     def _kubectl(self, args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
         if shutil.which(self._cfg.kubectl) is None:

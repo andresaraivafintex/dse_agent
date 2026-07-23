@@ -89,6 +89,14 @@ class SandboxDriver(Protocol):
     def supports_isolated_stage_execution(self) -> bool:
         ...
 
+    @property
+    def workspace_is_host_visible(self) -> bool:
+        """True quando o worker enxerga o workspace pelo filesystem (bind
+        mount do Docker) e pode operar git/higiene localmente; False quando o
+        workspace vive só dentro do sandbox (volume do Pod) e o pós-turno
+        precisa rodar via `execute_op` (post_turn)."""
+        ...
+
     def sandbox_id_for(self, work_item_id: str) -> str:
         """Identidade estável do sandbox deste work item no runtime alvo
         (nome do container no Docker, nome do Pod no K8s)."""
@@ -98,6 +106,13 @@ class SandboxDriver(Protocol):
         ...
 
     def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
+        ...
+
+    def execute_op(
+        self, sandbox_id: str, op: str, payload: dict[str, Any], *, timeout_seconds: float = 180.0
+    ) -> dict[str, Any]:
+        """Roda uma op de lifecycle do runner (bootstrap/checkpoint/post_turn)
+        DENTRO do sandbox e devolve o JSON do resultado."""
         ...
 
     def checkpoint(self, request: SandboxCheckpointRequest) -> CheckpointRef:
@@ -125,6 +140,10 @@ class DockerSandboxDriver:
     def supports_isolated_stage_execution(self) -> bool:
         return True
 
+    @property
+    def workspace_is_host_visible(self) -> bool:
+        return True  # bind mount: o worker opera git/higiene pelo host
+
     def sandbox_id_for(self, work_item_id: str) -> str:
         return docker_driver.container_name_for(work_item_id)
 
@@ -140,28 +159,27 @@ class DockerSandboxDriver:
             user=request.user,
         )
 
-    def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
+    def _exec_runner(
+        self, sandbox_id: str, runner_args: list[str], payload: dict[str, Any], timeout_seconds: float
+    ) -> dict[str, Any]:
         docker_bin = shutil.which("docker")
         if docker_bin is None:
             raise IsolatedStageExecutionUnavailable(
                 "docker CLI não encontrado — execução isolada indisponível; "
                 "execução local é proibida como fallback (invariante 2)"
             )
-        started = time.time()
-        payload = json.dumps({"stage": request.stage.value, "input": request.input_payload})
         try:
             proc = subprocess.run(
-                [docker_bin, "exec", "-i", request.sandbox_id,
-                 "python", "-m", "agent_runner", "--stage", request.stage.value],
-                input=payload,
+                [docker_bin, "exec", "-i", sandbox_id, "python", "-m", "agent_runner", *runner_args],
+                input=json.dumps({"input": payload}),
                 capture_output=True,
                 text=True,
-                timeout=request.timeout_seconds,
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
             raise IsolatedStageExecutionUnavailable(
-                f"agent-runner excedeu {request.timeout_seconds:.0f}s no exec "
-                f"(stage={request.stage.value!r}, sandbox={request.sandbox_id})"
+                f"agent-runner excedeu {timeout_seconds:.0f}s no exec "
+                f"(args={runner_args}, sandbox={sandbox_id})"
             ) from exc
         except FileNotFoundError as exc:  # docker sumiu entre o which e o exec
             raise IsolatedStageExecutionUnavailable(
@@ -170,23 +188,37 @@ class DockerSandboxDriver:
         if proc.returncode != 0:
             raise IsolatedStageExecutionUnavailable(
                 f"docker exec agent_runner falhou (exit={proc.returncode}, "
-                f"sandbox={request.sandbox_id}): {proc.stderr.strip()[:400]} "
+                f"sandbox={sandbox_id}): {proc.stderr.strip()[:400]} "
                 "— sem fallback local"
             )
         try:
             # última linha JSON: o runner escreve exatamente um resultado
-            out = json.loads((proc.stdout or "").strip().splitlines()[-1])
+            return json.loads((proc.stdout or "").strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError) as exc:
             raise IsolatedStageExecutionUnavailable(
-                f"agent-runner devolveu stdout não-JSON (sandbox={request.sandbox_id}): "
+                f"agent-runner devolveu stdout não-JSON (sandbox={sandbox_id}): "
                 f"{(proc.stdout or '')[:200]!r}"
             ) from exc
+
+    def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
+        started = time.time()
+        out = self._exec_runner(
+            request.sandbox_id,
+            ["--stage", request.stage.value],
+            request.input_payload,
+            request.timeout_seconds,
+        )
         return StageExecutionResult(
             stage=request.stage,
             output_payload=out,
-            exit_code=proc.returncode,
+            exit_code=0,
             duration_seconds=time.time() - started,
         )
+
+    def execute_op(
+        self, sandbox_id: str, op: str, payload: dict[str, Any], *, timeout_seconds: float = 180.0
+    ) -> dict[str, Any]:
+        return self._exec_runner(sandbox_id, ["--op", op], payload, timeout_seconds)
 
     def checkpoint(self, request: SandboxCheckpointRequest) -> CheckpointRef:
         return git_checkpoint.checkpoint(

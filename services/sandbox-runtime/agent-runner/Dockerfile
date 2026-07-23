@@ -40,9 +40,10 @@ RUN if [ "$INSTALL_OPENHANDS" = "1" ]; then \
 
 # código do runner (o módulo agent_runner + o sandbox_runtime compartilhado)
 COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
-# fonte única de verdade do git escopado: vendora o módulo do worker na
-# imagem (gitops.py importa com fallback para esta cópia)
+# fonte única de verdade do git escopado e da higiene pós-turno: vendora os
+# módulos do worker na imagem (gitops/postturn importam com fallback p/ cópia)
 COPY services/sandbox-runtime/sandbox_runtime/scoped_git.py /app/agent_runner/_scoped_git.py
+COPY services/sandbox-runtime/sandbox_runtime/workspace_hygiene.py /app/agent_runner/_workspace_hygiene.py
 
 USER 10001:10001
 # /workspace e /tmp vêm de emptyDir graváveis (o rootfs é read-only no Pod)

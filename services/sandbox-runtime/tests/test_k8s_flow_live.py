@@ -157,6 +157,47 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     ).stdout.strip()
     assert ls == ref.git_ref
 
+    # pós-turno completo in-pod (--op post_turn): outro turno suja o workspace
+    # com lixo + edição de teste; o post_turn poda, reverte e commita/pusha
+    from dse_contracts import PostTurnRequest, PostTurnResult
+
+    k8s_driver.execute_stage(
+        StageExecutionRequest(
+            sandbox_id=pod,
+            work_item_id=work_item_id,
+            tenant_id="tenant-k8s",
+            stage=Stage.coder,
+            input_payload=AgentTurnRequest(
+                work_item_id=work_item_id, tenant_id="tenant-k8s", stage="coder",
+                substrate="fake", instruction="segundo turno",
+                fake_script=[{"write_files": {
+                    "src/feature.py": "F = 2\n",
+                    "BUG_FIX_REPORT.md": "lixo\n",
+                    "tests/test_smuggled.py": "def test_x(): pass\n",
+                }, "done": True}],
+                gateway={"base_url": "http://model-gateway.dse.svc:4000", "virtual_key": "vk-k8s"},
+            ).model_dump(),
+            timeout_seconds=120,
+        )
+    )
+    post = PostTurnResult.model_validate(
+        k8s_driver.execute_op(
+            pod, "post_turn",
+            PostTurnRequest(
+                work_item_id=work_item_id,
+                branch=f"dse/{work_item_id}",
+                turn_start_sha=ref.git_ref,
+                commit_message=f"coder({work_item_id}): segundo turno",
+                expected_files=["src/feature.py"],
+            ).model_dump(),
+        )
+    )
+    assert not post.failed
+    assert post.files_changed == ["src/feature.py"]
+    assert post.pruned == ["BUG_FIX_REPORT.md"]
+    assert post.reverted_tests == ["tests/test_smuggled.py"]
+    assert post.sha != ref.git_ref
+
 
 def test_pod_manifest_flags_weak_isolation_without_runtime_class(work_item_id, tmp_path):
     from sandbox_runtime.k8s_driver import build_pod_manifest

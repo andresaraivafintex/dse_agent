@@ -18,6 +18,8 @@ from .agent_turn import (
     AgentTurnResult,
     CheckpointOpRequest,
     CheckpointOpResult,
+    PostTurnRequest,
+    PostTurnResult,
     WorkspaceBootstrapRequest,
     WorkspaceBootstrapResult,
 )
@@ -101,6 +103,8 @@ __all__ = [
     "CheckpointOpRequest",
     "CheckpointOpResult",
     "KNOWN_SUBSTRATES",
+    "PostTurnRequest",
+    "PostTurnResult",
     "WorkspaceBootstrapRequest",
     "WorkspaceBootstrapResult",
     "TASK_QUEUE",

@@ -73,6 +73,7 @@ from .sessions import (
     classify_risk_class,
     hydrate_planner_context,
 )
+from . import workspace_hygiene
 from .substrate import SUBSTRATE_ENV_VAR, AgentSubstrate, substrate_from_env
 from .toolsets import PlannerToolset, TesterToolset
 
@@ -388,116 +389,11 @@ def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder
     )
 
 
-def _prune_disposable_artifacts(
-    workspace_dir: str, expected_files: list[str], work_item_id: str
-) -> tuple[list[str], list[str]]:
-    """Camada 2 (determinística, P1) do anti-relatório-espontâneo: apaga
-    arquivos NOVOS (untracked) que são LIXO óbvio do CLI (log/scratch/backup e
-    relatórios como BUG_FIX_REPORT.md), ANTES do commit.
-
-    Reconciliado com a política nova (2026-07-22): como `expected_files` virou
-    advisory no L1 (ver a memória l1-expected-files-advisory), NÃO apagamos mais
-    "tudo que está fora do plano" — só o descartável (`is_disposable_artifact`).
-    Um arquivo-fonte NOVO e legítimo que o fix precisou criar SOBREVIVE, mesmo
-    fora de `expected_files`. Nunca toca: o que o plano pediu, testes, ou o demo
-    do work item; e só olha untracked (`??`) — um arquivo EXISTENTE modificado
-    fora do plano fica e é o L1/orçamento que julga.
-
-    Best-effort (o L1 é o gate duro): falha de git → não apaga nada. Retorna
-    `(pruned, kept_out_of_plan)`; `kept_out_of_plan` é o que a política antiga
-    teria apagado e agora preserva — emitido no audit para o operador ver a
-    reconciliação em ação.
-    """
-    from dse_contracts.paths import is_disposable_artifact, is_test_path
-
-    import subprocess as _sp
-
-    try:
-        # `-uall`: lista CADA arquivo untracked individualmente. Sem ele, o git
-        # colapsa um diretório inteiramente novo num único `?? src/` — e um
-        # arquivo-fonte dentro de um diretório NOVO nunca seria visto no nível
-        # de arquivo (o prune inline antigo silenciava esse caso no OSError de
-        # remover um diretório). .gitignore continua respeitado (não lista
-        # node_modules etc.).
-        porcelain = _sp.run(
-            ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-    except Exception:  # noqa: BLE001 — prune é best-effort; o L1 é o gate duro
-        logger.warning("prune pós-coder falhou (git status); o L1 segue como gate")
-        return [], []
-
-    expected = set(expected_files)
-    pruned: list[str] = []
-    kept_out_of_plan: list[str] = []
-    for line in porcelain.splitlines():
-        if not line.startswith("??"):
-            continue
-        rel = line[3:].strip().strip('"')
-        # Nunca poda o que o plano pediu, testes, ou o demo do work item.
-        if rel in expected or is_test_path(rel) or rel.startswith(f"demos/{work_item_id}"):
-            continue
-        if not is_disposable_artifact(rel):
-            kept_out_of_plan.append(rel)  # fonte nova legítima fora do plano — FICA
-            continue
-        try:
-            os.remove(os.path.join(workspace_dir, rel))
-            pruned.append(rel)
-        except OSError:
-            pass
-    return pruned, kept_out_of_plan
-
-
-def _revert_coder_test_edits(workspace_dir: str, turn_start_sha: str) -> list[str]:
-    """O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
-    (achado do disparo real na issue #1: o Coder editou o seed compartilhado do
-    `before()` em test/api.test.js, movendo uma transação de julho→junho, e
-    quebrou um teste IRMÃO pré-existente que fixava a ordenação por data. O fix
-    de código estava certo; o loop era 100% esse conflito teste-vs-teste, que
-    consertar summary.js não resolve).
-
-    Reverte QUALQUER mudança do Coder em test paths ao estado do INÍCIO do turno
-    (`turn_start_sha`): edição/remoção de teste existente → `git checkout <sha>`;
-    teste NOVO (untracked) → remove. Aplicado todo turno, nenhum commit do Coder
-    carrega mudança de teste — o Tester (etapa seguinte) autora os testes limpo.
-    Best-effort: falha de git → não reverte (o L1/Tester ainda são os gates).
-    Retorna os paths revertidos."""
-    from dse_contracts.paths import is_test_path
-
-    import subprocess as _sp
-
-    try:
-        porcelain = _sp.run(
-            ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-    except Exception:  # noqa: BLE001 — best-effort
-        logger.warning("revert de testes do coder falhou (git status)")
-        return []
-
-    reverted: list[str] = []
-    for line in porcelain.splitlines():
-        if len(line) < 4:
-            continue
-        status, rel = line[:2], line[3:].strip().strip('"')
-        if "->" in rel:  # rename: "old -> new" — pega o destino
-            rel = rel.split("->")[-1].strip()
-        if not is_test_path(rel):
-            continue
-        try:
-            if status.strip() == "??":
-                os.remove(os.path.join(workspace_dir, rel))
-                reverted.append(rel)
-            else:
-                proc = _sp.run(
-                    ["git", "checkout", turn_start_sha, "--", rel], cwd=workspace_dir,
-                    capture_output=True, text=True, timeout=30,
-                )
-                if proc.returncode == 0:
-                    reverted.append(rel)
-        except OSError:
-            continue
-    return reverted
+# Higiene pós-turno extraída para workspace_hygiene.py (Fase 1, plano 09):
+# mesma lógica roda no worker (Docker) e DENTRO do runner (K8s, --op
+# post_turn) — fonte única de verdade; os aliases preservam call sites/testes.
+_prune_disposable_artifacts = workspace_hygiene.prune_disposable_artifacts
+_revert_coder_test_edits = workspace_hygiene.revert_test_edits
 
 
 @activity.defn(name=ACTIVITY_RUN_CODER_TURN)
@@ -574,8 +470,16 @@ async def _run_coder_turn_impl(
     # setting_sources=["project"]; a nota cobre os demais substratos.
     inp.instruction += workspace_skills_note(workspace_dir)
 
-    base_sha_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
-    base_sha = base_sha_session.current_sha()
+    pod_git = isinstance(agent, RemoteSubstrate) and not getattr(
+        agent.driver, "workspace_is_host_visible", True
+    )
+    if pod_git:
+        # Runtime K8s: o workspace vive no volume do Pod — o sha do início
+        # do turno vem de um checkpoint no-op DENTRO do sandbox.
+        base_sha = agent.checkpoint_sha(branch=branch, phase="turn-start")
+    else:
+        base_sha_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
+        base_sha = base_sha_session.current_sha()
 
     done = False
     max_turns = 8
@@ -597,70 +501,97 @@ async def _run_coder_turn_impl(
 
     artifacts = agent.collect_artifacts()
 
-    # Camada 2 (determinística, P1): apaga arquivos NOVOS (untracked) que são
-    # LIXO óbvio do CLI (relatório espontâneo/log/scratch) antes do commit — NÃO
-    # mais "tudo fora do plano" (expected_files virou advisory no L1; um arquivo-
-    # fonte novo legítimo fora do plano SOBREVIVE). Arquivos EXISTENTES
-    # modificados fora do plano ficam — é o L1/orçamento que os julga.
-    if inp.expected_files:
-        pruned, kept_out_of_plan = _prune_disposable_artifacts(
-            workspace_dir, inp.expected_files, inp.work_item_id
+    if pod_git:
+        # Runtime K8s: TODO o pós-turno determinístico roda DENTRO do Pod
+        # (--op post_turn — mesma sequência/fonte de verdade do bloco abaixo,
+        # via workspace_hygiene + scoped_git vendorados no runner). Os audits
+        # (P8) continuam aqui no worker, com as listas retornadas.
+        post = agent.run_post_turn(
+            branch=branch,
+            expected_files=list(inp.expected_files or []),
+            turn_start_sha=base_sha,
+            commit_message=f"coder({inp.work_item_id}): {inp.instruction[:72]}",
         )
-        if pruned:
+        for action, items in (
+            ("coder_out_of_plan_files_pruned", post.pruned),
+            ("coder_out_of_plan_files_kept", post.kept_out_of_plan),
+            ("lockfile_churn_restored", post.restored_lockfiles),
+            ("coder_test_edits_reverted", post.reverted_tests),
+        ):
+            if items:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action=action,
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"paths": items[:20]},
+                )
+        files_changed = list(post.files_changed)
+    else:
+        # Camada 2 (determinística, P1): apaga arquivos NOVOS (untracked) que são
+        # LIXO óbvio do CLI (relatório espontâneo/log/scratch) antes do commit — NÃO
+        # mais "tudo fora do plano" (expected_files virou advisory no L1; um arquivo-
+        # fonte novo legítimo fora do plano SOBREVIVE). Arquivos EXISTENTES
+        # modificados fora do plano ficam — é o L1/orçamento que os julga.
+        if inp.expected_files:
+            pruned, kept_out_of_plan = _prune_disposable_artifacts(
+                workspace_dir, inp.expected_files, inp.work_item_id
+            )
+            if pruned:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="coder_out_of_plan_files_pruned",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"pruned": pruned[:20]},
+                )
+            if kept_out_of_plan:
+                # Observabilidade da reconciliação (2026-07-22): sob a política antiga
+                # estes NOVOS fora do plano seriam apagados; agora ficam (expected_files
+                # é advisory) e quem julga é o L1 (orçamento de linhas + forbidden_paths).
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="coder_out_of_plan_files_kept",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"kept_out_of_plan": kept_out_of_plan[:20]},
+                )
+
+        _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="coder")
+
+        # O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
+        # (achado do disparo real na issue #1: o Coder editou o seed compartilhado
+        # de test/api.test.js e quebrou um teste IRMÃO pré-existente → o fix cycle
+        # nunca converge, porque consertar summary.js não conserta o teste). Reverte
+        # QUALQUER mudança do Coder em test paths ao estado do início do turno.
+        reverted_tests = _revert_coder_test_edits(workspace_dir, base_sha)
+        if reverted_tests:
             audit_emit(
                 actor="system:sandbox-runtime",
-                action="coder_out_of_plan_files_pruned",
+                action="coder_test_edits_reverted",
                 tenant_id=inp.tenant_id,
                 work_item_id=inp.work_item_id,
-                details={"pruned": pruned[:20]},
+                details={"reverted": reverted_tests[:20], "reason": "testes são da etapa Tester"},
             )
-        if kept_out_of_plan:
-            # Observabilidade da reconciliação (2026-07-22): sob a política antiga
-            # estes NOVOS fora do plano seriam apagados; agora ficam (expected_files
-            # é advisory) e quem julga é o L1 (orçamento de linhas + forbidden_paths).
+
+        # Commit/push determinístico — o substrato nunca tem acesso a git.
+        git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
+        git_session.ensure_identity()
+        if git_session.has_changes():
+            git_session.commit(f"coder({inp.work_item_id}): {inp.instruction[:72]}")
+        try:
+            git_session.push()
+        except GitScopeViolation:
             audit_emit(
                 actor="system:sandbox-runtime",
-                action="coder_out_of_plan_files_kept",
+                action="coder_push_rejected",
                 tenant_id=inp.tenant_id,
                 work_item_id=inp.work_item_id,
-                details={"kept_out_of_plan": kept_out_of_plan[:20]},
+                details={"branch": branch},
             )
+            raise
 
-    _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="coder")
-
-    # O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
-    # (achado do disparo real na issue #1: o Coder editou o seed compartilhado
-    # de test/api.test.js e quebrou um teste IRMÃO pré-existente → o fix cycle
-    # nunca converge, porque consertar summary.js não conserta o teste). Reverte
-    # QUALQUER mudança do Coder em test paths ao estado do início do turno.
-    reverted_tests = _revert_coder_test_edits(workspace_dir, base_sha)
-    if reverted_tests:
-        audit_emit(
-            actor="system:sandbox-runtime",
-            action="coder_test_edits_reverted",
-            tenant_id=inp.tenant_id,
-            work_item_id=inp.work_item_id,
-            details={"reverted": reverted_tests[:20], "reason": "testes são da etapa Tester"},
-        )
-
-    # Commit/push determinístico — o substrato nunca tem acesso a git.
-    git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
-    git_session.ensure_identity()
-    if git_session.has_changes():
-        git_session.commit(f"coder({inp.work_item_id}): {inp.instruction[:72]}")
-    try:
-        git_session.push()
-    except GitScopeViolation:
-        audit_emit(
-            actor="system:sandbox-runtime",
-            action="coder_push_rejected",
-            tenant_id=inp.tenant_id,
-            work_item_id=inp.work_item_id,
-            details={"branch": branch},
-        )
-        raise
-
-    files_changed = git_session.files_changed_against(base_sha) if base_sha != git_session.current_sha() else []
+        files_changed = git_session.files_changed_against(base_sha) if base_sha != git_session.current_sha() else []
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -1171,49 +1102,7 @@ def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
     return new_path
 
 
-def _restore_lockfile_churn(workspace_dir: str) -> list[str]:
-    """Desfaz churn mecânico de lockfile ANTES do commit determinístico (2º
-    disparo real: npm reescreveu 16 linhas de package-lock.json ao rodar os
-    testes e o diff_budget reprovou a tarefa como mudança fora do plano).
-    Regra: lockfile mudou mas o manifesto par (package.json…) NÃO mudou →
-    restaura (modificado) ou remove (novo, untracked). Com o manifesto no
-    diff a mudança é declarável e fica. Retorna os paths tratados."""
-    import subprocess as _sp
-
-    from dse_contracts.paths import lockfile_manifest_for
-
-    try:
-        porcelain = _sp.run(
-            ["git", "status", "--porcelain"], cwd=workspace_dir,
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-    except Exception:  # noqa: BLE001 — best-effort; o L1 tem a mesma isenção
-        return []
-    status_by_path: dict[str, str] = {}
-    for line in porcelain.splitlines():
-        if len(line) > 3:
-            status_by_path[line[3:].strip().strip('"')] = line[:2]
-    restored: list[str] = []
-    for rel, st in sorted(status_by_path.items()):
-        manifest = lockfile_manifest_for(rel)
-        if manifest is None or manifest in status_by_path:
-            continue
-        try:
-            if st == "??":
-                os.remove(os.path.join(workspace_dir, rel))
-                restored.append(rel)
-            else:
-                proc = _sp.run(
-                    ["git", "checkout", "--", rel], cwd=workspace_dir,
-                    capture_output=True, text=True, timeout=30,
-                )
-                if proc.returncode == 0:
-                    restored.append(rel)
-        except OSError:
-            continue
-    return restored
-
-
+_restore_lockfile_churn = workspace_hygiene.restore_lockfile_churn
 def _restore_lockfile_churn_audited(
     workspace_dir: str, tenant_id: str, work_item_id: str, *, stage: str
 ) -> None:

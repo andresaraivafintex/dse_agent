@@ -22,7 +22,9 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent_runner")
     parser.add_argument("--stage", default="coder")
-    parser.add_argument("--op", default="turn", choices=("turn", "bootstrap", "checkpoint"))
+    parser.add_argument(
+        "--op", default="turn", choices=("turn", "bootstrap", "checkpoint", "post_turn")
+    )
     args = parser.parse_args(argv)
 
     raw = sys.stdin.read() or "{}"
@@ -48,6 +50,22 @@ def main(argv: list[str] | None = None) -> int:
             ).model_dump_json())
             return 0
         print(bootstrap_workspace(request).model_dump_json())
+        return 0
+
+    if args.op == "post_turn":
+        from dse_contracts import PostTurnRequest, PostTurnResult
+
+        from .postturn import run_post_turn
+
+        try:
+            request = PostTurnRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001
+            print(PostTurnResult(
+                error=f"payload não obedece PostTurnRequest: {str(exc)[:500]}",
+                error_kind="invalid_payload",
+            ).model_dump_json())
+            return 0
+        print(run_post_turn(request).model_dump_json())
         return 0
 
     if args.op == "checkpoint":

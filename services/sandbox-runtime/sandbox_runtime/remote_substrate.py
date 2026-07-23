@@ -21,8 +21,12 @@ from dse_contracts import (
     AgentTurnGateway,
     AgentTurnRequest,
     AgentTurnResult,
+    CheckpointOpRequest,
+    CheckpointOpResult,
     CoderTurnResult,
     GatewayCallHeaders,
+    PostTurnRequest,
+    PostTurnResult,
     Stage,
 )
 
@@ -139,6 +143,53 @@ class RemoteSubstrate:
         )
         self._turns.append(log)
         return log
+
+    @property
+    def driver(self) -> SandboxDriver:
+        return self._driver
+
+    def checkpoint_sha(self, *, branch: str, phase: str) -> str:
+        """SHA atual do branch DENTRO do sandbox (checkpoint no-op quando não
+        há mudanças) — substitui o `ScopedGitSession.current_sha()` do host
+        nos runtimes onde o workspace não é visível ao worker."""
+        if self._headers is None:
+            raise RuntimeError("create_session precisa ser chamado antes")
+        out = self._driver.execute_op(
+            self.sandbox_id,
+            "checkpoint",
+            CheckpointOpRequest(
+                work_item_id=self._headers.work_item_id,
+                branch=branch,
+                phase=phase,
+            ).model_dump(),
+        )
+        result = CheckpointOpResult.model_validate(out)
+        if result.failed:
+            raise RemoteTurnError(result.error_kind or "gitops_error", result.error or "")
+        return result.sha
+
+    def run_post_turn(
+        self, *, branch: str, expected_files: list[str], turn_start_sha: str, commit_message: str
+    ) -> PostTurnResult:
+        """Pós-turno determinístico (prune/lockfile/revert/commit/push)
+        executado DENTRO do sandbox — mesma sequência do worker no Docker."""
+        if self._headers is None:
+            raise RuntimeError("create_session precisa ser chamado antes")
+        out = self._driver.execute_op(
+            self.sandbox_id,
+            "post_turn",
+            PostTurnRequest(
+                work_item_id=self._headers.work_item_id,
+                branch=branch,
+                turn_start_sha=turn_start_sha,
+                commit_message=commit_message,
+                expected_files=expected_files,
+            ).model_dump(),
+        )
+        result = PostTurnResult.model_validate(out)
+        if result.failed:
+            raise RemoteTurnError(result.error_kind or "gitops_error", result.error or "")
+        return result
 
     def collect_artifacts(self) -> CoderTurnResult:
         return CoderTurnResult(

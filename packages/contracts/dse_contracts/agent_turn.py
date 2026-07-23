@@ -111,6 +111,38 @@ class CheckpointOpResult(BaseModel, extra="forbid"):
         return self.error_kind is not None
 
 
+class PostTurnRequest(BaseModel, extra="forbid"):
+    """Op `--op post_turn`: a higiene determinística + commit/push do turno do
+    Coder executada DENTRO do sandbox (runtime K8s, onde o worker não enxerga
+    o workspace). Mesma sequência do worker no runtime Docker: prune de
+    descartáveis → restore de lockfile churn → revert de edições de teste →
+    commit/push escopado. O LLM nunca participa (P1)."""
+
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    work_item_id: str
+    branch: str
+    turn_start_sha: str
+    commit_message: str
+    expected_files: list[str] = Field(default_factory=list)
+    workspace_dir: str = "/workspace"
+
+
+class PostTurnResult(BaseModel, extra="forbid"):
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    sha: str = ""
+    files_changed: list[str] = Field(default_factory=list)
+    pruned: list[str] = Field(default_factory=list)
+    kept_out_of_plan: list[str] = Field(default_factory=list)
+    restored_lockfiles: list[str] = Field(default_factory=list)
+    reverted_tests: list[str] = Field(default_factory=list)
+    error: str | None = None
+    error_kind: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error_kind is not None
+
+
 class AgentTurnResult(BaseModel, extra="forbid"):
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     done: bool
