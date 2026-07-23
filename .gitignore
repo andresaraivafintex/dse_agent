@@ -20,3 +20,5 @@ build/
 .ruff_cache/
 infra/k8s-local/kubeconfig-internal.yaml
 secrets.env
+.tunnel/
+services/validation/preview_repo/
