@@ -42,18 +42,18 @@ async def test_changes_requested_cycles_back_to_coder_same_pr(time_skipping_env)
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         first_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
 
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
         await asyncio.sleep(0.2)  # deixa o ciclo de fix rodar
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
         second_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
         assert second_pr_number == first_pr_number  # MESMO PR, nunca recria
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -87,9 +87,9 @@ async def test_ci_red_triggers_fix_before_waking_human(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -119,7 +119,7 @@ async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
 
         # Confirma (via query/audit, NAO via handle.result() com timeout —
@@ -138,9 +138,9 @@ async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
         assert "merged_by_human" not in actions_before
         assert "done" not in actions_before
         state = await handle.query(WorkItemLifecycleWorkflow.get_state)
-        assert state["status"] == "pr_ready"
+        assert state["status"] == "merge_pending"
 
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value

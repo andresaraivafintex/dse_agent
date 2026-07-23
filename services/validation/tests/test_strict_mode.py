@@ -66,7 +66,7 @@ def test_strict_mode_posts_compare_link_in_tracking_comment(sandbox, work_item_i
     assert len(github._comments) == 1
     body = next(iter(github._comments.values()))
     assert ref.compare_url in body
-    assert "modo estrito" in body
+    assert "strict mode" in body
 
 
 def test_strict_mode_idempotent_rerun_same_compare_no_pr(sandbox, work_item_id, tenant_id):

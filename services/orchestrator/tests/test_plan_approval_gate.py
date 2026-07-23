@@ -81,9 +81,9 @@ async def test_low_risk_auto_approves_without_gate(time_skipping_env):
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -124,10 +124,10 @@ async def test_high_risk_parks_and_requires_named_approval(time_skipping_env):
         # aprovacao por humano nomeado -> segue
         await handle.signal("plan_approval",
                             {"verdict": "approved", "actor": "usr_alice"})
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         assert state.coder_turn_calls == 1
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -194,9 +194,9 @@ async def test_migrations_path_forces_high_even_when_planner_says_low(time_skipp
         gate = read_gate_row(work_item_id)
         assert gate[6] == "high"  # risk_class efetivo, apesar do Planner dizer low
         await handle.signal("plan_approval", {"verdict": "approved", "actor": "usr_dba"})
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
     assert result.status == WorkItemStatus.done.value
 
@@ -270,9 +270,9 @@ async def test_rejection_re_plan_reruns_planner_then_gate(time_skipping_env):
         assert state.coder_turn_calls == 0  # nunca implementou sem passar pelo gate
         # agora aprova
         await handle.signal("plan_approval", {"verdict": "approved", "actor": "usr_alice"})
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value

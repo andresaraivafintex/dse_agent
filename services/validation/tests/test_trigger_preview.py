@@ -161,6 +161,28 @@ def test_no_ingress_without_external_host():
     assert "ingress.yaml" not in _manifests(cfg)
 
 
+def test_label_values_respect_k8s_63_char_limit():
+    """Disparo real (issue #2 → PR #10): work_item_id `wi_`+64 hex = 67 chars
+    virava valor de label e o k8s REJEITAVA o namespace (label value ≤ 63) —
+    o preview degradava sem URL. O id completo vai na annotation; a label é
+    truncada."""
+    import re
+    from datetime import datetime, timedelta, timezone
+    from dse_validation.preview.argocd import build_manifests
+
+    wi = "wi_" + "a" * 64  # 67 chars, como o id real
+    cfg = PreviewConfig()
+    exp = datetime.now(timezone.utc) + timedelta(seconds=600)
+    m = build_manifests("preview-wi-x", wi, "tenant_dev", exp, 600, cfg)
+
+    label_re = re.compile(r'dse\.fintex/work-item:\s+"([^"]*)"')
+    for name, manifest in m.items():
+        for val in label_re.findall(manifest):
+            assert len(val) <= 63, f"label em {name} tem {len(val)} chars (>63)"
+    # o id COMPLETO tem que estar preservado na annotation do namespace
+    assert f'dse.fintex/work-item-id: "{wi}"' in m["namespace.yaml"]
+
+
 def test_pr_image_and_app_port_flow_into_deployment():
     cfg = PreviewConfig()
     cfg.app_port = 3000
@@ -175,42 +197,196 @@ def test_build_pr_image_fail_safe_reasons(tmp_path, monkeypatch):
     cfg = PreviewConfig()
     # flag desligada → placeholder
     cfg.build_image = False
-    ref, reason = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
-    assert ref is None and reason == "build_disabled"
+    ref, reason, port = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
+    assert ref is None and reason == "build_disabled" and port is None
     # ligada mas sem workspace → placeholder com motivo
     cfg.build_image = True
     monkeypatch.setenv("DSE_SANDBOX_STATE_DIR", str(tmp_path))
-    ref, reason = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
+    ref, reason, port = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
     assert ref is None and reason.startswith("workspace_not_found")
-    # workspace sem Dockerfile → placeholder com motivo
+    # workspace sem Dockerfile E sem package.json → placeholder (não é Node)
     ws = tmp_path / "wi-nodf" / "workspace"; ws.mkdir(parents=True)
-    ref, reason = build_pr_image(work_item_id="wi-nodf", repo="a/b", head_sha="s", cfg=cfg)
-    assert ref is None and reason == "no_dockerfile_in_workspace"
+    ref, reason, port = build_pr_image(work_item_id="wi-nodf", repo="a/b", head_sha="s", cfg=cfg)
+    assert ref is None and reason == "no_dockerfile_and_not_node" and port is None
+
+
+def test_synthesize_node_dockerfile_for_app_without_dockerfile(tmp_path):
+    """Decisão do operador (2026-07-22): app Node sem Dockerfile → o DSE
+    sintetiza um Dockerfile padrão (não toca no repo) e detecta a porta 3000."""
+    import json as _json
+    from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
+
+    ws = tmp_path / "ws"; ws.mkdir()
+    (ws / "package.json").write_text(_json.dumps({
+        "type": "module", "main": "server.js",
+        "scripts": {"start": "node server.js"}, "dependencies": {},
+    }))
+    path = _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT)
+    assert path is not None
+    content = open(path).read()
+    assert "FROM node:22-alpine" in content
+    assert f"ENV PORT={_DEFAULT_NODE_PORT}" in content
+    assert f"EXPOSE {_DEFAULT_NODE_PORT}" in content
+    assert 'CMD ["npm", "start"]' in content
+    # arquivo TEMPORÁRIO — fora do workspace (não polui o git da tarefa)
+    assert str(ws) not in path
+    import os as _os
+    _os.remove(path)
+
+
+def test_synthesize_falls_back_to_node_main_without_start_script(tmp_path):
+    import json as _json
+    from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
+
+    ws = tmp_path / "ws"; ws.mkdir()
+    (ws / "package.json").write_text(_json.dumps({"main": "app.js", "scripts": {}}))
+    path = _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT)
+    assert path is not None
+    assert 'CMD ["node", "app.js"]' in open(path).read()
+    import os as _os
+    _os.remove(path)
+
+
+def test_synthesize_returns_none_when_not_node(tmp_path):
+    from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
+    ws = tmp_path / "ws"; ws.mkdir()  # sem package.json
+    assert _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT) is None
+
+
+# ---------------------------------------------------------------------------
+# D1 — link do preview NA DESCRIÇÃO do PR (não como comentário, nem só na issue)
+# ---------------------------------------------------------------------------
+_PR_BODY_BASE = (
+    "### Fintex DSE — automatically generated PR\n\n"
+    "- **WorkItem**: `wi_x`\n"
+    "- **Risk class**: `medium`\n"
+    "- **Summary**: corrige o bug\n"
+    "- **Test evidence (L1)**: (no evidence link)\n\n"
+    "Closes #2\n"
+)
+
+
+class _FakePrBodyClient:
+    def __init__(self, body):
+        self.body = body
+    def get_pull_request(self, repo, n):
+        return {"number": n, "state": "open", "body": self.body}
+    def update_pull_request(self, repo, n, *, body):
+        self.body = body
+
+
+def test_preview_link_written_into_pr_body_after_evidence(monkeypatch):
+    """Pedido do operador (2026-07-22): o link do preview na DESCRIÇÃO do PR,
+    como `- **Preview**: <url>`, logo após a bala de evidência L1."""
+    import dse_validation.preview.argocd as arg
+    import dse_validation.github.client as gc
+
+    fake = _FakePrBodyClient(_PR_BODY_BASE)
+    monkeypatch.setattr(gc, "build_github_client", lambda cfg=None: fake)
+    inp = TriggerPreviewInput(
+        work_item_id="wi_x", tenant_id="t", repo="a/b", pr_number=11,
+        files_changed=["src/store.js"],
+    )
+    url = "http://preview-x.preview.localhost:8081"
+    arg._put_preview_link_in_pr_body(inp, url, "deployable", actor="system:test")
+    body = fake.body
+    assert f"- **Preview**: {url}" in body
+    # posicionado logo após a evidência L1
+    ev = body.index("- **Test evidence (L1)**:")
+    pv = body.index("- **Preview**:")
+    assert ev < pv
+
+
+def test_preview_link_in_body_is_idempotent(monkeypatch):
+    """Re-disparo (fix cycle) REESCREVE a mesma linha — não duplica."""
+    import dse_validation.preview.argocd as arg
+    import dse_validation.github.client as gc
+
+    fake = _FakePrBodyClient(_PR_BODY_BASE)
+    monkeypatch.setattr(gc, "build_github_client", lambda cfg=None: fake)
+    inp = TriggerPreviewInput(
+        work_item_id="wi_x", tenant_id="t", repo="a/b", pr_number=11,
+        files_changed=["src/store.js"],
+    )
+    arg._put_preview_link_in_pr_body(inp, "http://old.localhost", "deployable", actor="t")
+    arg._put_preview_link_in_pr_body(inp, "http://new.localhost", "deployable", actor="t")
+    assert fake.body.count("- **Preview**:") == 1  # uma linha só
+    assert "http://new.localhost" in fake.body and "http://old.localhost" not in fake.body
+
+
+def test_preview_link_body_noop_without_pr_number(monkeypatch):
+    import dse_validation.preview.argocd as arg
+    import dse_validation.github.client as gc
+    fake = _FakePrBodyClient(_PR_BODY_BASE)
+    monkeypatch.setattr(gc, "build_github_client", lambda cfg=None: fake)
+    inp = TriggerPreviewInput(
+        work_item_id="wi_x", tenant_id="t", repo="a/b", pr_number=0,
+        files_changed=["src/store.js"],
+    )
+    arg._put_preview_link_in_pr_body(inp, "http://x", "deployable", actor="t")
+    assert fake.body == _PR_BODY_BASE  # pr_number=0 → não toca no corpo
 
 
 # ---------------------------------------------------------------------------
 # 1b. caps de concorrência por tenant (ADR-26, dia 1)
 # ---------------------------------------------------------------------------
-def test_concurrency_cap_counts_and_degrades(work_item_id, tenant_id):
+def test_concurrency_cap_evicts_oldest_lru(work_item_id, tenant_id, tmp_path):
+    """Cap cheio => eviction LRU: o preview mais ANTIGO cede o slot para o PR
+    novo (decisão operador 2026-07-23). O gate do cap deixa de degradar quando
+    há o que evictar — aqui o fluxo passa do cap e degrada só DEPOIS, no
+    provisionamento (kube_context inexistente), provando a liberação da vaga."""
     db.set_preview_cap(tenant_id, 2)
-    # duas linhas "created" ativas do MESMO tenant (contagem real no Postgres)
+    # duas linhas "created" ativas do MESMO tenant (contagem real no Postgres);
+    # -0 é a mais antiga (created_at menor) — a candidata à eviction.
     for i in range(2):
         db.upsert_preview(
             work_item_id=f"{work_item_id}-{i}", tenant_id=tenant_id, pr_number=i,
             repo="acme/app", status="created", namespace=f"preview-x-{i}",
         )
     assert db.count_active_previews(tenant_id) == 2
+    cfg = PreviewConfig()
+    cfg.repo_dir = str(tmp_path / "preview-repo")  # gitops real em repo temporário
+    cfg.kube_context = "k3d-cluster-que-nao-existe"
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
             pr_number=12, files_changed=["frontend/app.tsx"],
+        ),
+        cfg=cfg,
+    )
+    # o mais antigo foi reaped (slot liberado); o mais novo continua ativo
+    assert db.get_preview(f"{work_item_id}-0")["status"] == "reaped"
+    assert db.get_preview(f"{work_item_id}-1")["status"] == "created"
+    # e o fluxo PASSOU do gate do cap (degraded aqui vem do cluster inexistente)
+    assert ref.status == "degraded"
+    assert "cap" not in ref.detail
+
+
+def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, tmp_path, monkeypatch):
+    """Se a remoção GitOps falhar, a eviction é best-effort e o gate degrada
+    como antes (failure mode 9 — preview nunca bloqueia o PR)."""
+    db.set_preview_cap(tenant_id, 1)
+    db.upsert_preview(
+        work_item_id=f"{work_item_id}-old", tenant_id=tenant_id, pr_number=1,
+        repo="acme/app", status="created", namespace="preview-x-old",
+    )
+    from dse_validation.preview import gitops as gitops_mod
+
+    def _boom(repo_dir, name):
+        raise RuntimeError("git indisponível")
+
+    # argocd resolve `gitops.remove_preview_dir` na chamada — patch no módulo basta.
+    monkeypatch.setattr(gitops_mod, "remove_preview_dir", _boom)
+    ref = trigger_preview_core(
+        TriggerPreviewInput(
+            work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
+            pr_number=14, files_changed=["frontend/app.tsx"],
         )
     )
     assert ref.status == "degraded"
     assert "cap" in ref.detail
-    # um preview reaped LIBERA a vaga
-    db.mark_preview_reaped(f"{work_item_id}-0")
-    assert db.count_active_previews(tenant_id) == 1
+    # o antigo continua ativo — nada foi marcado reaped sem remoção real
+    assert db.get_preview(f"{work_item_id}-old")["status"] == "created"
 
 
 def test_cap_zero_blocks_immediately_without_touching_cluster(work_item_id, tenant_id):

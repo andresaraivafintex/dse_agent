@@ -89,14 +89,14 @@ def should_refresh_evidence(
 # ---------------------------------------------------------------------------
 # Render do bloco de evidência + tracking comment consolidado
 # ---------------------------------------------------------------------------
-_EVIDENCE_HEADER = "### Fintex DSE — evidência da tarefa"
+_EVIDENCE_HEADER = "### Fintex DSE — task evidence"
 
 _KIND_LABEL = {
-    "demo_video": "🎬 Vídeo @demo",
-    "playwright_trace": "🧭 Trace Playwright",
+    "demo_video": "🎬 @demo video",
+    "playwright_trace": "🧭 Playwright trace",
     "visual_diff": "🎨 Visual diff",
-    "visual_baseline": "🖼️ Baseline visual",
-    "test_report": "📄 Relatório de teste",
+    "visual_baseline": "🖼️ Visual baseline",
+    "test_report": "📄 Test report",
 }
 
 
@@ -110,7 +110,7 @@ def render_evidence_section(work_item_id: str, *, accessor: str = "system:valida
     artifacts = db.list_artifacts(work_item_id)
     for row in artifacts:
         if row["quarantined_at"] is not None:
-            lines.append(f"- {_KIND_LABEL.get(row['kind'], row['kind'])}: **em quarentena** (acesso revogado)")
+            lines.append(f"- {_KIND_LABEL.get(row['kind'], row['kind'])}: **quarantined** (access revoked)")
             continue
         try:
             url = resolve_artifact_url(
@@ -120,22 +120,22 @@ def render_evidence_section(work_item_id: str, *, accessor: str = "system:valida
             expires = row["expires_at"].isoformat() if row["expires_at"] else "?"
             lines.append(
                 f"- {_KIND_LABEL.get(row['kind'], row['kind'])}: [{row['store_key']}]({url}) "
-                f"(expira {expires})"
+                f"(expires {expires})"
             )
         except PermissionError as exc:
-            lines.append(f"- {_KIND_LABEL.get(row['kind'], row['kind'])}: indisponível ({exc})")
+            lines.append(f"- {_KIND_LABEL.get(row['kind'], row['kind'])}: unavailable ({exc})")
 
     preview = db.get_preview(work_item_id)
     if preview is not None:
         if preview["status"] == "created":
             lines.append(f"- 🌐 Preview: {preview['url']} (namespace `{preview['namespace']}`, "
-                         f"expira {preview['expires_at'].isoformat() if preview['expires_at'] else '?'})")
+                         f"expires {preview['expires_at'].isoformat() if preview['expires_at'] else '?'})")
         elif preview["status"] == "skipped_backend_only":
-            lines.append("- 🌐 Preview: dispensado (PR backend-only, FR-20)")
+            lines.append("- 🌐 Preview: skipped (backend-only PR, FR-20)")
         elif preview["status"] == "degraded":
-            lines.append(f"- 🌐 Preview: degradado — {preview['detail'][:200]} (não bloqueia o PR)")
+            lines.append(f"- 🌐 Preview: degraded — {preview['detail'][:200]} (does not block the PR)")
         elif preview["status"] == "reaped":
-            lines.append("- 🌐 Preview: expirado (TTL)")
+            lines.append("- 🌐 Preview: expired (TTL)")
 
     ci = db.get_ci_status(work_item_id)
     if ci is not None:
@@ -143,7 +143,7 @@ def render_evidence_section(work_item_id: str, *, accessor: str = "system:valida
         lines.append(f"- {emoji} CI (L3): **{ci['status']}** (PR #{ci['pr_number']})")
 
     if len(lines) == 2:
-        lines.append("_(nenhuma evidência publicada ainda)_")
+        lines.append("_(no evidence published yet)_")
     return "\n".join(lines)
 
 

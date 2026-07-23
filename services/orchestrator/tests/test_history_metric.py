@@ -79,9 +79,9 @@ async def test_full_lifecycle_emits_history_metric_with_work_item_attrs(time_ski
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value

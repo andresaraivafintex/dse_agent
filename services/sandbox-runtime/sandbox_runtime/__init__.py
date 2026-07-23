@@ -15,6 +15,30 @@ O que este pacote garante ativamente para não quebrar o import de terceiros:
     dentro de funções/métodos, chamada explicitamente.
 """
 
+from .driver import (
+    DEFAULT_SANDBOX_DRIVER,
+    DockerSandboxDriver,
+    SandboxDriver,
+    StageExecutionRequest,
+    StageExecutionResult,
+)
+from .runtime_profile import (
+    RuntimeProfile,
+    RuntimeProfileViolation,
+    validate_runtime_startup,
+)
 from .substrate import AgentSubstrate, FakeSubstrate, TurnLog
 
-__all__ = ["AgentSubstrate", "FakeSubstrate", "TurnLog"]
+__all__ = [
+    "AgentSubstrate",
+    "DEFAULT_SANDBOX_DRIVER",
+    "DockerSandboxDriver",
+    "FakeSubstrate",
+    "RuntimeProfile",
+    "RuntimeProfileViolation",
+    "SandboxDriver",
+    "StageExecutionRequest",
+    "StageExecutionResult",
+    "TurnLog",
+    "validate_runtime_startup",
+]

@@ -122,13 +122,15 @@ class ModelL2ReviewSession:
             tenant_id=inp.tenant_id, work_item_id=inp.work_item_id,
             stage=Stage.reviewer, task_class="default", data_class="internal",
         )
-        vk = mint_virtual_key(inp.tenant_id, inp.work_item_id, Stage.reviewer)
+        # mint_virtual_key -> str (a key crua); pego pelo shadow-run — o .key
+        # de IssuedVirtualKey só existe no retorno rico interno.
+        vk_key = mint_virtual_key(inp.tenant_id, inp.work_item_id, Stage.reviewer)
         model = _os.environ.get("DSE_L2_MODEL") or _os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
         prompt = _L2_PROMPT.format(
             plan=inp.plan.model_dump_json()[:4000], diff=(inp.diff or "(diff vazio)")[:20000]
         )
         result = chat_completion(
-            headers=headers, virtual_key=vk.key, model=model,
+            headers=headers, virtual_key=vk_key, model=model,
             messages=[{"role": "user", "content": prompt}],
             timeout=120.0, max_tokens=1500, temperature=0,
         )
@@ -136,7 +138,9 @@ class ModelL2ReviewSession:
         if text.startswith("```"):
             text = text.strip("`\n")
             text = text[4:] if text.startswith("json") else text
-        verdict = _json.loads(text.strip())
+        # raw_decode: o modelo às vezes continua escrevendo APÓS o JSON
+        # (pego pelo shadow-run — "Extra data") — usa o 1º objeto e ignora o resto.
+        verdict, _ = _json.JSONDecoder().raw_decode(text.strip())
         return L2Verdict(
             work_item_id=inp.work_item_id,
             passed=bool(verdict.get("passed")),

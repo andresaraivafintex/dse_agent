@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -84,10 +85,17 @@ def build_manifests(namespace: str, work_item_id: str, tenant_id: str,
     clicável de fora (Traefik local / túnel / VPS, mesmo mecanismo)."""
     image = image or cfg.preview_image
     port = app_port or cfg.app_port
+    # Label VALUE do k8s tem teto de 63 chars (achado do disparo real: o
+    # work_item_id é `wi_`+64 hex = 67 chars → o namespace era REJEITADO pelo
+    # Argo, o sync falhava e o namespace nunca nascia → preview degradado sem
+    # URL). O id COMPLETO vai na annotation (sem limite de tamanho); a label
+    # carrega a versão truncada, que basta para seleção/rótulo.
+    wi_label = work_item_id[:63]
+    tenant_label = tenant_id[:63]
     labels = (
         f"    app.kubernetes.io/managed-by: dse-preview\n"
-        f"    dse.fintex/work-item: \"{work_item_id}\"\n"
-        f"    dse.fintex/tenant: \"{tenant_id}\"\n"
+        f"    dse.fintex/work-item: \"{wi_label}\"\n"
+        f"    dse.fintex/tenant: \"{tenant_label}\"\n"
     )
     ns = f"""apiVersion: v1
 kind: Namespace
@@ -95,6 +103,7 @@ metadata:
   name: {namespace}
   labels:
 {labels}  annotations:
+    dse.fintex/work-item-id: "{work_item_id}"
     dse.fintex/expires-at: "{expires_at.isoformat()}"
     janitor/ttl: "{ttl_seconds}s"  # upgrade path kube-janitor (ver docstring)
 """
@@ -210,6 +219,64 @@ def ensure_applicationset(cfg: PreviewConfig | None = None) -> None:
     _kubectl(cfg, ["apply", "-f", "-"], input_text=manifest)
 
 
+_PREVIEW_BODY_MARKER = "<!-- dse:preview -->"
+# Linha `- **Preview**: <url>` no corpo do PR, terminada pelo marcador (invisível
+# no markdown renderizado) que permite RE-escrever a linha em vez de duplicar.
+_PREVIEW_LINE_RE = re.compile(r"^- \*\*Preview\*\*:.*" + re.escape(_PREVIEW_BODY_MARKER) + r"$", re.M)
+# ponto de inserção: logo após a bala de evidência L1 do template do PR.
+_EVIDENCE_BULLET_PREFIX = "- **Test evidence (L1)**:"
+
+
+def _preview_body_with_link(body: str, url: str) -> str:
+    """Corpo do PR com a linha `- **Preview**: <url>` inserida/atualizada
+    (idempotente via marcador). Insere após a bala de evidência L1; se o
+    template mudar, acrescenta ao final."""
+    line = f"- **Preview**: {url} {_PREVIEW_BODY_MARKER}"
+    if _PREVIEW_LINE_RE.search(body):
+        return _PREVIEW_LINE_RE.sub(line, body)
+    lines = body.splitlines()
+    out: list[str] = []
+    inserted = False
+    for ln in lines:
+        out.append(ln)
+        if not inserted and ln.startswith(_EVIDENCE_BULLET_PREFIX):
+            out.append(line)
+            inserted = True
+    if not inserted:
+        out.append(line)
+    return "\n".join(out)
+
+
+def _put_preview_link_in_pr_body(
+    inp: TriggerPreviewInput, url: str | None, kind: str, *, actor: str
+) -> None:
+    """Escreve o link do preview na DESCRIÇÃO do PR (não como comentário) —
+    `- **Preview**: <url>`. Idempotente: re-disparo (fix cycle) reescreve a
+    mesma linha. Best-effort — qualquer falha só vira warning; o preview já
+    está 'created'."""
+    if not url or not inp.pr_number or not inp.repo:
+        return
+    try:
+        from dse_validation.github.client import GitHubConfig, build_github_client
+
+        client = build_github_client(GitHubConfig())
+        pr = client.get_pull_request(inp.repo, int(inp.pr_number))
+        if pr is None:
+            return
+        new_body = _preview_body_with_link(pr.get("body") or "", url)
+        if new_body == (pr.get("body") or ""):
+            return  # nada mudou (já estava com a mesma URL)
+        client.update_pull_request(inp.repo, int(inp.pr_number), body=new_body)
+        if audit_emit is not None:
+            audit_emit(
+                actor=actor, action="preview_link_in_pr_body", tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"pr_number": inp.pr_number, "url": url},
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; o preview já está criado
+        logger.warning("escrever preview no corpo do PR falhou (%s): %.200s", inp.work_item_id, exc)
+
+
 def _wait_deployment_available(cfg: PreviewConfig, namespace: str, timeout_s: int) -> None:
     # o namespace só passa a existir depois do sync do Argo CD — espera em TRÊS
     # etapas: namespace criado, deployment CRIADO, deployment Available.
@@ -300,6 +367,27 @@ def trigger_preview_core(
     existing = db.get_preview(inp.work_item_id)
     active = db.count_active_previews(inp.tenant_id)
     already_active = existing is not None and existing["status"] == "created" and existing["reaped_at"] is None
+    if not already_active and active >= cap and cap > 0:
+        # Eviction LRU (decisão operador 2026-07-23): cap cheio => o preview
+        # mais ANTIGO cede o slot para o PR novo (recência vence; o cap segue
+        # sendo o teto duro de simultâneos). cap == 0 continua significando
+        # "tenant sem previews" — nada a evictar. Falha na remoção NÃO derruba
+        # o fluxo aqui: cai no degraded logo abaixo (failure mode 9).
+        try:
+            for row in db.list_oldest_active_previews(inp.tenant_id, limit=active - cap + 1):
+                old_ns = row["namespace"] or namespace_for(row["work_item_id"])
+                gitops.remove_preview_dir(cfg.repo_dir, old_ns)
+                db.mark_preview_reaped(row["work_item_id"])
+                if audit_emit is not None:
+                    audit_emit(
+                        actor=actor, action="preview_evicted_lru", tenant_id=inp.tenant_id,
+                        work_item_id=row["work_item_id"],
+                        details={"namespace": old_ns, "evicted_for": inp.work_item_id,
+                                 "pr_number": inp.pr_number, "cap": cap},
+                    )
+        except Exception as exc:  # noqa: BLE001 — eviction é best-effort; degraded decide abaixo
+            logger.warning("eviction LRU de preview falhou (%s: %s)", type(exc).__name__, exc)
+        active = db.count_active_previews(inp.tenant_id)
     if not already_active and active >= cap:
         detail = f"cap de previews concorrentes do tenant atingido ({active}/{cap}, ADR-26)"
         db.upsert_preview(
@@ -326,13 +414,16 @@ def trigger_preview_core(
     # D4 — imagem REAL do PR quando habilitado (fail-safe: None => placeholder,
     # motivo auditado; o build nunca degrada o preview).
     from dse_validation.preview.pr_image import build_pr_image
-    pr_image, image_reason = build_pr_image(
+    pr_image, image_reason, detected_port = build_pr_image(
         work_item_id=inp.work_item_id, repo=inp.repo, head_sha=inp.head_sha, cfg=cfg,
     )
+    # Porta detectada na síntese (app Node) vence o default do cfg — senão o
+    # readiness/Service apontariam para a porta errada e o preview degradaria.
+    app_port = detected_port or cfg.app_port
 
     try:
         manifests = build_manifests(namespace, inp.work_item_id, inp.tenant_id, expires_at, ttl, cfg,
-                                    image=pr_image)
+                                    image=pr_image, app_port=app_port)
         gitops.write_preview_dir(cfg.repo_dir, namespace, manifests)
         ensure_applicationset(cfg)
         _wait_deployment_available(cfg, namespace, cfg.sync_timeout_s)
@@ -364,6 +455,11 @@ def trigger_preview_core(
         namespace=namespace, url=url, ttl_seconds=ttl, expires_at=expires_at,
         detail=f"{kind} files: {', '.join(ui_files[:10])} | image={image_reason}",
     )
+    # D1 (achado do disparo real: o link só ia para o comentário de status na
+    # ISSUE de origem; o revisor humano abre o PR e não o via). Escreve o link
+    # na DESCRIÇÃO do PR (`- **Preview**: <url>`). Best-effort: nunca derruba o
+    # preview (o audit/ledger é a verdade).
+    _put_preview_link_in_pr_body(inp, url, kind, actor=actor)
     if audit_emit is not None:
         audit_emit(
             actor=actor, action="preview_created", tenant_id=inp.tenant_id,

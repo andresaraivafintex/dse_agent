@@ -154,6 +154,12 @@ class RunCoderTurnInput(BaseModel):
     runtime_override: str | None = None
     base_sha: str | None = None
     head_sha: str | None = None
+    # Âncora do plano (achado do disparo real: o CLI cria arquivos espontâneos
+    # — BUG_FIX_REPORT.md). Advisory desde 2026-07-22 (ver plan_compliance do
+    # L1): NÃO é gate de igualdade do diff. Após o turn, o prune determinístico
+    # apaga só arquivos NOVOS DESCARTÁVEIS (relatório/log/scratch) — fonte nova
+    # legítima fora desta lista SOBREVIVE (P1; ver _prune_disposable_artifacts).
+    expected_files: list[str] = Field(default_factory=list)
 
 
 class RunL1PipelineInput(BaseModel):

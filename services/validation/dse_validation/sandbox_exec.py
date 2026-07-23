@@ -118,7 +118,18 @@ def executor_for_handle(sandbox_handle, repo_dir: str = "/workspace/repo") -> Sa
     # workspace local, via subprocesso. PRODUÇÃO (agente DENTRO do container)
     # mantém o DockerExec — este ramo é gated por env e é OFF por default, então
     # não muda o comportamento de produção nem dos testes do WS-C/WS-E.
-    if os.environ.get("DSE_SANDBOX_INPROCESS") == "1":
+    deployment_profile = os.environ.get("DSE_DEPLOYMENT_PROFILE", "dev").strip().lower()
+    inprocess = os.environ.get("DSE_SANDBOX_INPROCESS", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if deployment_profile in {"pilot", "prod", "production"} and inprocess:
+        raise RuntimeError(
+            "perfil production recusa DSE_SANDBOX_INPROCESS: L1 deve executar "
+            "no sandbox isolado"
+        )
+    if inprocess:
         wi = getattr(sandbox_handle, "work_item_id", None)
         if not wi:
             raise RuntimeError("DSE_SANDBOX_INPROCESS=1 exige SandboxHandle com work_item_id")

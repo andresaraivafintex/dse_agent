@@ -60,10 +60,10 @@ async def test_pause_blocks_next_activity_but_not_current(time_skipping_env):
         # e SO ENTAO ficar parado — nunca chega em pr_ready enquanto pausado.
         await asyncio.sleep(0.3)
         status_while_paused = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        assert status_while_paused != WorkItemStatus.pr_ready.value
+        assert status_while_paused != WorkItemStatus.review_ready.value
 
         await handle.signal("resume", "ok pode seguir")
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
     actions = read_audit_actions(work_item_id)
     assert "pause" not in actions  # sinais de operador nao emitem audit por si (log interno via query)
@@ -129,7 +129,7 @@ async def test_reassign_model_is_forwarded_to_next_coder_turn(time_skipping_env)
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
         await handle.signal("reassign_model", "claude-opus-4")
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
     # `reassign_model` nao gera uma linha de audit propria (nao e uma
     # transicao de estado de negocio); a prova funcional de que o sinal foi

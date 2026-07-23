@@ -25,34 +25,34 @@ try:
 except ImportError:  # pragma: no cover
     audit_emit = None
 
-STRICT_COMMENT_TEMPLATE = """### Fintex DSE — branch pronto para revisão (modo estrito)
+STRICT_COMMENT_TEMPLATE = """### Fintex DSE — branch ready for review (strict mode)
 
-Os gates automáticos passaram (L1 + L2). Neste repositório o **PR é aberto por um
-humano** — nenhum agente abre o PR (P1/modo estrito, WSE-E3-T8).
+The automated gates passed (L1 + L2). In this repository the **PR is opened by a
+human** — no agent opens the PR (P1/strict mode, WSE-E3-T8).
 
 - **WorkItem**: `{work_item_id}`
-- **Branch**: `{branch}` (já empurrado)
-- **Abrir o PR (1 clique)**: {compare_url}
+- **Branch**: `{branch}` (already pushed)
+- **Open the PR (1 click)**: {compare_url}
 
-Ao abrir o PR a partir deste link, o Fintex DSE correlaciona e adota o PR
-automaticamente (mesmo WorkItem) — o restante do fluxo (CI/status, merge humano)
-segue igual.
+When the PR is opened from this link, Fintex DSE correlates and adopts it
+automatically (same WorkItem) — the rest of the flow (CI/status, human merge)
+stays the same.
 """
 
 PR_TITLE_TEMPLATE = "[DSE {work_item_id}] {summary}"
-PR_BODY_TEMPLATE = """### Fintex DSE — PR gerado automaticamente
+PR_BODY_TEMPLATE = """### Fintex DSE — automatically generated PR
 
 - **WorkItem**: `{work_item_id}`
 - **Risk class**: `{risk_class}`
-- **Resumo**: {summary}
-- **Evidência de teste (L1)**: {evidence_url}
+- **Summary**: {summary}
+- **Test evidence (L1)**: {evidence_url}
 
 {issue_link}
 
 ---
-Este PR foi aberto por um agente autônomo (Fintex DSE). Nenhuma sessão de
-agente aprova ou faz merge do próprio trabalho (P3) — revisão humana é
-obrigatória antes do merge.
+This PR was opened by an autonomous agent (Fintex DSE). No agent session
+approves or merges its own work (P3) — human review is mandatory before
+merge.
 """
 
 
@@ -206,8 +206,8 @@ def finalize_pr_core(
         work_item_id=work_item_id,
         risk_class=risk_class,
         summary=summary,
-        evidence_url=evidence_url or "(sem link de evidência)",
-        issue_link=issue_link or "(sem issue de origem vinculada)",
+        evidence_url=evidence_url or "(no evidence link)",
+        issue_link=issue_link or "(no linked source issue)",
     )
     pr = github_client.create_pr(repo, head=branch, base=base_branch, title=title, body=body)
 

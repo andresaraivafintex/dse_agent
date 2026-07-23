@@ -128,13 +128,16 @@ class WorkItemLifecycleInput:
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
     activity_start_to_close_seconds: float = 3600.0
-    # Remediação (spec §6): o substrato agora emite heartbeat periódico durante
-    # turnos longos (sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat),
-    # então o timeout volta a ser curto — morte do worker é detectada em ~1 min,
-    # não em 10-30 min. O paliativo de 1800s (quando o substrato bloqueava sem
-    # heartbeat) fica só na história. start_to_close (1h) segue como teto duro do
-    # turno inteiro; config.from_env pode sobrescrever por env.
-    activity_heartbeat_seconds: float = 60.0
+    # Remediação (spec §6): o substrato emite heartbeat periódico durante
+    # turnos longos (sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat).
+    # 2026-07-23 (disparos reais wi_d05c/wi_257d/wi_150d): com 60s, turnos de
+    # coder/tester com chamadas de modelo entravam em LOOP INFINITO de retry —
+    # o server cancelava por heartbeat timeout ATIVIDADE JÁ TRABALHANDO (e o
+    # retry re-pagava o modelo). 600s dá folga real; start_to_close (1h) segue
+    # como teto duro do turno. NOTA: este default É o valor operativo no caminho
+    # do dispatcher (start_workflow com string → _coerce_input usa o default do
+    # modelo; apply_to_input/env só vale para quem passa o input completo).
+    activity_heartbeat_seconds: float = 600.0
     activity_schedule_to_close_seconds: float = 7200.0
     # Retries de Activities de negocio devem terminar. O schedule-to-close
     # continua sendo o teto temporal, e este cap limita tentativas/custo.

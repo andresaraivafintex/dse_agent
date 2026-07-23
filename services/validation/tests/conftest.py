@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import uuid
 from pathlib import Path
@@ -29,6 +30,24 @@ def git_repo(tmp_path: Path) -> Path:
     (repo_dir / "test_app.py").write_text(
         "from app import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
     )
+    manifest_dir = repo_dir / ".dse"
+    manifest_dir.mkdir()
+    (manifest_dir / "validation.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "commands": {
+                    "lint": ["ruff", "check", "."],
+                    "typecheck": ["mypy", "."],
+                    "test": ["pytest", "-q"],
+                    "build": ["python", "-m", "compileall", "-q", "."],
+                },
+                "timeout_seconds": 300,
+                "sast_severity_gate": "MEDIUM",
+            }
+        )
+        + "\n"
+    )
     _git(repo_dir, "add", "-A")
     _git(repo_dir, "commit", "-q", "-m", "initial commit")
     return repo_dir
@@ -53,6 +72,16 @@ def feature_branch(git_repo: Path):
 @pytest.fixture
 def sandbox(git_repo: Path) -> LocalFakeSandbox:
     return LocalFakeSandbox(git_repo)
+
+
+@pytest.fixture
+def git_sha(git_repo: Path):
+    """Resolve SHAs no instante da chamada, depois de eventuais commits."""
+
+    def resolve(ref: str = "HEAD") -> str:
+        return _git(git_repo, "rev-parse", ref).stdout.strip()
+
+    return resolve
 
 
 @pytest.fixture

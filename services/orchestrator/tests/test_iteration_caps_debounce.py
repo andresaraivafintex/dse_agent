@@ -86,7 +86,7 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
         # sem continue_as_new entre elas, sinais nao se perdem) e manda os 6
         # comentarios ANTES de o loop de review consumi-los: chegam como um
         # unico lote pendente.
-        await _wait_for_status(handle, {"implementing", "validating", "pr_ready"})
+        await _wait_for_status(handle, {"implementing", "validating", "review_ready"})
         for i in range(6):
             await handle.signal("review_comment",
                                 {"verdict": "changes_requested", "comment": f"ajuste {i}"})
@@ -100,10 +100,10 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
                 break
             await time_skipping_env.sleep(2)
         assert state.finalize_calls >= 2, "fix cycle do lote nunca re-finalizou o PR"
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -137,9 +137,9 @@ async def test_review_comments_alone_never_refresh_evidence(time_skipping_env):
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, evidence_debounce_seconds=60.0),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -163,7 +163,7 @@ async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skippi
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         # espera a evidencia INICIAL rodar (o status pr_ready e gravado antes
         # do pipeline; um refresh enviado antes do pipeline iniciar seria
         # legitimamente absorvido por ele — semantica do debounce)
@@ -175,7 +175,7 @@ async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skippi
                           msg="refresh humano nunca disparou o pipeline")
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
@@ -201,13 +201,13 @@ async def test_review_round_cap_escalates_never_loops_forever(time_skipping_env)
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, review_round_cap=1, coder_retry_cap=99),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
         # round 1: dentro do cap — fix normal
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r1"})
         await _wait_until(lambda: state.finalize_calls >= 2,
                           msg="primeiro fix cycle nunca completou")
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
         # round 2: estoura o cap -> escalated
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r2"})
@@ -237,7 +237,7 @@ async def test_evidence_refresh_cap_declines_cleanly_without_blocking(time_skipp
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, evidence_refresh_cap=1),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
         await _wait_until(lambda: state.trigger_preview_calls >= 1,
                           msg="evidencia inicial nunca rodou")
 
@@ -253,7 +253,7 @@ async def test_evidence_refresh_cap_declines_cleanly_without_blocking(time_skipp
             msg="declinio do cap nunca foi auditado")
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value  # nunca bloqueia (P6)

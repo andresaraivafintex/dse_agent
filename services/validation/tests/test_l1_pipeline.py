@@ -5,15 +5,28 @@ from __future__ import annotations
 
 import psycopg2
 
-from dse_contracts import PlanArtifact
+from dse_contracts import GateStatus, PlanArtifact
 
 from dse_validation.l1.pipeline import run_l1_pipeline_core
 
 
-def test_l1_pipeline_all_green_on_clean_repo(sandbox, work_item_id, tenant_id):
-    plan = PlanArtifact(work_item_id=work_item_id, expected_files=[], diff_budget_lines=400)
+def test_l1_pipeline_all_green_on_clean_repo(
+    sandbox, work_item_id, tenant_id, git_sha
+):
+    plan = PlanArtifact(
+        work_item_id=work_item_id,
+        expected_files=[],
+        no_code_change=True,
+        diff_budget_lines=400,
+    )
+    sha = git_sha()
     result = run_l1_pipeline_core(
-        executor=sandbox, work_item_id=work_item_id, tenant_id=tenant_id, plan=plan, base_branch="main"
+        executor=sandbox,
+        work_item_id=work_item_id,
+        tenant_id=tenant_id,
+        plan=plan,
+        base_sha=sha,
+        head_sha=sha,
     )
     assert result.passed is True
     checks = {f.check for f in result.findings}
@@ -21,11 +34,19 @@ def test_l1_pipeline_all_green_on_clean_repo(sandbox, work_item_id, tenant_id):
     assert all(f.passed for f in result.findings)
 
 
-def test_l1_pipeline_fails_clean_when_one_check_fails(sandbox, git_repo, feature_branch, work_item_id, tenant_id):
+def test_l1_pipeline_fails_clean_when_one_check_fails(
+    sandbox, git_repo, feature_branch, work_item_id, tenant_id, git_sha
+):
+    base_sha = git_sha()
     feature_branch("test_broken.py", "def test_broken():\n    assert False\n")
     plan = PlanArtifact(work_item_id=work_item_id, expected_files=["test_broken.py"], diff_budget_lines=400)
     result = run_l1_pipeline_core(
-        executor=sandbox, work_item_id=work_item_id, tenant_id=tenant_id, plan=plan, base_branch="main"
+        executor=sandbox,
+        work_item_id=work_item_id,
+        tenant_id=tenant_id,
+        plan=plan,
+        base_sha=base_sha,
+        head_sha=git_sha(),
     )
     assert result.passed is False
     test_finding = next(f for f in result.findings if f.check == "test")
@@ -34,10 +55,23 @@ def test_l1_pipeline_fails_clean_when_one_check_fails(sandbox, git_repo, feature
     assert len(result.findings) == 8
 
 
-def test_l1_pipeline_persists_validation_run_and_audit_row(sandbox, work_item_id, tenant_id):
-    plan = PlanArtifact(work_item_id=work_item_id, expected_files=[], diff_budget_lines=400)
+def test_l1_pipeline_persists_validation_run_and_audit_row(
+    sandbox, work_item_id, tenant_id, git_sha
+):
+    plan = PlanArtifact(
+        work_item_id=work_item_id,
+        expected_files=[],
+        no_code_change=True,
+        diff_budget_lines=400,
+    )
+    sha = git_sha()
     result = run_l1_pipeline_core(
-        executor=sandbox, work_item_id=work_item_id, tenant_id=tenant_id, plan=plan, base_branch="main"
+        executor=sandbox,
+        work_item_id=work_item_id,
+        tenant_id=tenant_id,
+        plan=plan,
+        base_sha=sha,
+        head_sha=sha,
     )
 
     conn = psycopg2.connect("postgresql://dse_app:dse_app_dev_only@localhost:5432/dse")
@@ -59,3 +93,33 @@ def test_l1_pipeline_persists_validation_run_and_audit_row(sandbox, work_item_id
         assert audit_row is not None, "P8: toda decisão consequente deve gerar linha em audit_log"
     finally:
         conn.close()
+
+
+def test_l1_pipeline_missing_trusted_manifest_is_not_green(
+    sandbox, git_repo, work_item_id, tenant_id, git_sha
+):
+    (git_repo / ".dse" / "validation.json").unlink()
+    # O manifesto era confiável no commit anterior. Um novo base SHA sem ele
+    # representa um repositório que ainda não configurou o L1.
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "remove validation manifest"],
+        cwd=git_repo,
+        check=True,
+    )
+    sha = git_sha()
+    result = run_l1_pipeline_core(
+        executor=sandbox,
+        work_item_id=work_item_id,
+        tenant_id=tenant_id,
+        plan=PlanArtifact(work_item_id=work_item_id, no_code_change=True),
+        base_sha=sha,
+        head_sha=sha,
+        persist=False,
+    )
+
+    assert result.passed is False
+    assert result.status == GateStatus.NOT_CONFIGURED
+    assert any(f.check == "l1_manifest" for f in result.findings)

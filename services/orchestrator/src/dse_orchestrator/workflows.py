@@ -1211,6 +1211,9 @@ class WorkItemLifecycleWorkflow:
                     "branch": input.branch,
                     "model_override": self._model_override,
                     "runtime_override": self._runtime_override,
+                    # âncora do plano: arquivos novos fora dela são podados
+                    # pós-turn (o CLI cria relatórios espontâneos — achado real)
+                    "expected_files": list((input.plan_json or {}).get("expected_files", [])),
                 },
                 CoderTurnResult,
             )
@@ -2126,6 +2129,7 @@ class WorkItemLifecycleWorkflow:
                 "instruction": fix_instruction,
                 "model_override": self._model_override,
                 "runtime_override": self._runtime_override,
+                "expected_files": list((input.plan_json or {}).get("expected_files", [])),
             },
             CoderTurnResult,
         )

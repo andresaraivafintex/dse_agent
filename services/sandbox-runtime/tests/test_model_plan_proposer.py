@@ -89,10 +89,60 @@ def test_tree_paths_flow_into_prompt(monkeypatch):
                         lambda repo, br: ["server.js", "src/store.js", "package.json"])
     p = _model_plan_proposer(_Ctx(), _inp(), headers=None, virtual_key="vk")
     assert p is not None and p["expected_files"] == ["src/store.js"]
-    assert "Árvore do repo" in captured["prompt"]
+    assert "Repo tree" in captured["prompt"]
     assert "src/store.js" in captured["prompt"]
 
 
 def test_fixture_still_yields_empty_files():
     p = _default_plan_proposer(_Ctx(), _inp())
     assert p["expected_files"] == []  # e o gate do WS-B escala — deliberado
+
+
+def test_instruction_da_issue_entra_no_prompt(monkeypatch):
+    """3º disparo real: o PlannerContext não carrega a instrução (render() só
+    tem AGENTS.md/skills/repo map — todos vazios no tenant) e o modelo, sem
+    nunca ver a issue, planejou uma FEATURE genérica de wallet em vez do bug
+    de DELETE. A instrução agora entra direto na seção '## Tarefa'."""
+    captured = {}
+
+    def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return SimpleNamespace(
+            content=json.dumps({"steps": ["s"], "expected_files": ["a.js"], "test_plan": "t"}),
+            model="anthropic/claude", cost_usd=0.01, tokens_in=1, tokens_out=1, raw={},
+        )
+
+    import model_gateway_client.gateway_call as gc
+    import sandbox_runtime.activities as acts
+    monkeypatch.setattr(gc, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(acts, "_repo_tree_for_planner", lambda repo, br: [])
+
+    inp = _inp()
+    inp.instruction = "Excluir uma transação apaga outra transação — DELETE /api/transactions/:id"
+    p = _model_plan_proposer(_Ctx(), inp, headers=None, virtual_key="vk")
+    assert p is not None
+    prompt = captured["prompt"]
+    assert "Excluir uma transação apaga outra transação" in prompt
+    # a tarefa vem ANTES do contexto adicional (é o alvo, não nota de rodapé)
+    assert prompt.index("Excluir uma transação") < prompt.index("Additional context")
+
+
+def test_instrucao_ausente_vira_marcador_explicito(monkeypatch):
+    captured = {}
+
+    def fake_chat_completion(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return SimpleNamespace(
+            content=json.dumps({"steps": ["s"], "expected_files": ["a.js"], "test_plan": "t"}),
+            model="anthropic/claude", cost_usd=0.01, tokens_in=1, tokens_out=1, raw={},
+        )
+
+    import model_gateway_client.gateway_call as gc
+    import sandbox_runtime.activities as acts
+    monkeypatch.setattr(gc, "chat_completion", fake_chat_completion)
+    monkeypatch.setattr(acts, "_repo_tree_for_planner", lambda repo, br: [])
+
+    inp = _inp()
+    inp.instruction = ""
+    _model_plan_proposer(_Ctx(), inp, headers=None, virtual_key="vk")
+    assert "(instruction missing)" in captured["prompt"]

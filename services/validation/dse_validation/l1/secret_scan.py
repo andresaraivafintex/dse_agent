@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 
-from dse_contracts import L1Finding
+from dse_contracts import GateStatus, L1Finding
 
 from dse_validation.sandbox_exec import SandboxExecutor
 
@@ -92,18 +92,27 @@ print(json.dumps({"findings": findings}))
 def secret_scan_check(executor: SandboxExecutor, target_dir: str = ".", timeout: int = 60) -> L1Finding:
     result = executor.run(["python3", "-c", _SCANNER_SCRIPT, target_dir], timeout=timeout)
     if result.returncode == 127:
-        return L1Finding(check="secret_scan", passed=False, detail=f"python3 não encontrado no sandbox: {result.stderr.strip()}")
+        return L1Finding(
+            check="secret_scan",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"python3 não encontrado no sandbox: {result.stderr.strip()}",
+        )
     if result.returncode != 0:
         return L1Finding(
             check="secret_scan",
             passed=False,
+            status=GateStatus.ERROR,
             detail=f"scanner de segredos falhou (exit={result.returncode}): {result.stderr[:2000]}",
         )
     try:
         payload = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else {"findings": []}
     except (json.JSONDecodeError, IndexError):
         return L1Finding(
-            check="secret_scan", passed=False, detail=f"saída inesperada do scanner: {result.stdout[:2000]}"
+            check="secret_scan",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"saída inesperada do scanner: {result.stdout[:2000]}",
         )
 
     findings = payload.get("findings", [])

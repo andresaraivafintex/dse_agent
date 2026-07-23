@@ -53,13 +53,13 @@ def test_finalize_input_accepts_exact_workflow_payload():
         "summary": "DSE: corrige exclusão de transação",
         # back-link da issue ("Closes #N") + evidência L1 no corpo do PR.
         "issue_ref": {"issue_number": 2},
-        "evidence_url": "L1 verde (test ✓, secret_scan ✓)",
+        "evidence_url": "L1 green (test ✓, secret_scan ✓)",
     }
     inp = FinalizePrInput(**payload)
     assert inp.summary.startswith("DSE:")
     assert inp.sandbox.container_id == "abc123"
     assert inp.issue_ref == {"issue_number": 2}
-    assert "L1 verde" in inp.evidence_url
+    assert "L1 green" in inp.evidence_url
 
 
 def test_finalize_input_tolerates_absent_issue_and_evidence():

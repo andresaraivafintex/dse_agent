@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class WorkItemStatus(str, Enum):
@@ -25,6 +25,14 @@ class WorkItemStatus(str, Enum):
     awaiting_plan_approval = "awaiting_plan_approval"
     implementing = "implementing"
     validating = "validating"
+    # Estados finos do caminho PR/CI/review. ``pr_ready`` permanece abaixo
+    # como alias historico no wire: histories antigos do Temporal e clientes
+    # que ja o persistiram continuam decodificando, mas execucoes novas usam
+    # pr_open -> ci_pending -> review_ready -> merge_pending.
+    pr_open = "pr_open"
+    ci_pending = "ci_pending"
+    review_ready = "review_ready"
+    merge_pending = "merge_pending"
     pr_ready = "pr_ready"
     review_feedback = "review_feedback"
     done = "done"
@@ -48,6 +56,10 @@ _PUBLIC_STATUS_MAP: dict[WorkItemStatus, PublicStatus] = {
     WorkItemStatus.awaiting_plan_approval: "blocked",
     WorkItemStatus.implementing: "running",
     WorkItemStatus.validating: "running",
+    WorkItemStatus.pr_open: "running",
+    WorkItemStatus.ci_pending: "running",
+    WorkItemStatus.review_ready: "running",
+    WorkItemStatus.merge_pending: "blocked",
     WorkItemStatus.pr_ready: "running",
     WorkItemStatus.review_feedback: "running",
     WorkItemStatus.done: "done",
@@ -71,12 +83,20 @@ class WorkItem(BaseModel):
     source_ref: dict[str, Any]
     repo: str | None = None
     base_branch: str | None = None
+    base_sha: str | None = None
+    head_sha: str | None = None
     requester: str  # principal resolvido
     data_class: str = "internal"
     status: WorkItemStatus = WorkItemStatus.new
     risk_class: str | None = None
     plan: dict[str, Any] | None = None
+    plan_hash: str | None = None
+    expected_files: list[str] = Field(default_factory=list)
     pr_number: int | None = None
+    pr_url: str | None = None
+    ci_status: str | None = None
+    state_version: int = 0
+    last_error: str | None = None
     budget: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str
     created_at: datetime | None = None
@@ -112,3 +132,34 @@ class DseTaskStatus(BaseModel):
             pr_number=wi.pr_number,
             updated_at=wi.updated_at,
         )
+
+
+class MergedByHumanSignal(BaseModel):
+    """Envelope minimo aceito pelo workflow para concluir um merge.
+
+    O adapter ja valida assinatura e correlaciona tenant/repo/PR; o workflow
+    ainda exige identidade humana resolvida e o mesmo PR que ele acompanha.
+    Campos adicionais permitem uma verificacao mais forte sem quebrar o
+    payload atual nem histories antigos.
+    """
+
+    merged_by: str
+    pr_number: int
+    repo: str | None = None
+    head_sha: str | None = None
+    merge_sha: str | None = None
+
+    @field_validator("merged_by")
+    @classmethod
+    def _human_actor_required(cls, value: str) -> str:
+        actor = value.strip()
+        if not actor or actor.startswith("system:"):
+            raise ValueError("merged_by deve ser um principal humano resolvido")
+        return actor
+
+    @field_validator("pr_number")
+    @classmethod
+    def _positive_pr(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("pr_number deve ser positivo")
+        return value

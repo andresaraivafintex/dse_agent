@@ -46,14 +46,14 @@ async def test_clarification_completes_after_answer(time_skipping_env):
             "clarification_answer",
             {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "deve fazer X"},
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
     actions = read_audit_actions(work_item_id)
     assert "clarification_requested" in actions
     assert "clarification_answer_received" in actions
     assert "clarification_complete" in actions
     row = read_work_item(work_item_id)
-    assert row[0] in ("pr_ready", "done")
+    assert row[0] in ("review_ready", "done")
 
 
 @pytest.mark.asyncio
@@ -93,10 +93,10 @@ async def test_clarification_reminder_then_answer(time_skipping_env):
             "clarification_answer",
             {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "ok agora"},
         )
-        await _wait_for_status(handle, {"pr_ready"})
+        await _wait_for_status(handle, {"review_ready"})
 
     row = read_work_item(work_item_id)
-    assert row[0] in ("pr_ready", "done")
+    assert row[0] in ("review_ready", "done")
 
 
 @pytest.mark.asyncio

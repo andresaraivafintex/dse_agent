@@ -17,14 +17,22 @@ from pydantic import ValidationError
 
 from dse_contracts import (
     CoderTurnResult,
+    ConsumeCiStatusInput,
+    FinalizePrInput,
+    GateStatus,
     L2Verdict,
+    L1Finding,
+    L1Result,
+    MergedByHumanSignal,
+    PersistWorkItemStateInput,
     PlanArtifact,
     RunDemoEvidenceInput,
+    RunL1PipelineInput,
     RunL2ReviewInput,
     RunPlannerTurnInput,
     RunTesterTurnInput,
     RunVisualDiffInput,
-    TesterTurnResult,
+    TesterTurnResult as _TesterTurnResult,
     TriggerPreviewInput,
 )
 
@@ -72,7 +80,7 @@ def test_tester_input_accepts_exact_wsb_payload():
 def test_tester_result_decodes_as_coder_turn_result():
     # O workflow declara CoderTurnResult como tipo de retorno do Tester — o
     # superset TesterTurnResult tem que decodificar limpo nesse tipo.
-    tr = TesterTurnResult(
+    tr = _TesterTurnResult(
         sandbox_id="s", test_files=["tests/test_x.py"], tests_ran=True,
         tests_passed=True, returncode=0, cost_usd=0.02,
     )
@@ -221,3 +229,54 @@ def test_promote_skill_requires_approver_for_approved_active():
 def test_eval_skill_candidate_shape():
     inp = EvalSkillCandidateInput(tenant_id="t", skill_key="s", candidate_version=3)
     assert inp.candidate_version == 3
+
+
+def test_gate_status_is_additive_and_only_pass_is_true():
+    legacy = L1Finding(check="lint", passed=True)
+    assert legacy.status == GateStatus.PASS
+
+    missing = L1Finding(check="build", status=GateStatus.NOT_CONFIGURED)
+    assert missing.passed is False
+    result = L1Result(work_item_id="wi_x", passed=False, findings=[missing])
+    assert result.status == GateStatus.NOT_CONFIGURED
+
+    with pytest.raises(ValidationError):
+        L1Finding(check="test", passed=True, status=GateStatus.SKIPPED)
+
+
+def test_historical_activity_payloads_decode_with_server_side_gaps():
+    # Shapes observados em histories antigos: campos novos nao podem impedir
+    # o decode; o owner resolve sandbox/plano/repo/ref pelo work_item_id.
+    old_l1 = RunL1PipelineInput(work_item_id="wi_x", sandbox_id="sbx-old")
+    assert old_l1.base_sha == "" and old_l1.head_sha == ""
+    assert old_l1.sandbox is None and old_l1.plan is None
+
+    old_finalize = FinalizePrInput(work_item_id="wi_x", sandbox_id="sbx-old")
+    assert old_finalize.repo == "" and old_finalize.summary == ""
+
+    old_ci = ConsumeCiStatusInput(work_item_id="wi_x", pr_number=7)
+    assert old_ci.tenant_id == "" and old_ci.repo == "" and old_ci.ref == ""
+
+    old_state = PersistWorkItemStateInput(
+        work_item_id="wi_x", status="validating", pr_number=7
+    )
+    assert old_state.base_sha is None and old_state.plan is None
+
+
+def test_sha_boundaries_roundtrip_in_contracts():
+    inp = RunL1PipelineInput(
+        work_item_id="wi_x", tenant_id="t", base_sha="base123", head_sha="head456"
+    )
+    assert (inp.base_sha, inp.head_sha) == ("base123", "head456")
+    verdict = L2Verdict(
+        work_item_id="wi_x", passed=True, base_sha=inp.base_sha, head_sha=inp.head_sha
+    )
+    assert verdict.status == GateStatus.PASS and verdict.head_sha == "head456"
+
+
+def test_merge_signal_requires_human_and_positive_pr():
+    assert MergedByHumanSignal(merged_by="usr_alice", pr_number=42).pr_number == 42
+    with pytest.raises(ValidationError):
+        MergedByHumanSignal(merged_by="", pr_number=42)
+    with pytest.raises(ValidationError):
+        MergedByHumanSignal(merged_by="system:orchestrator", pr_number=42)

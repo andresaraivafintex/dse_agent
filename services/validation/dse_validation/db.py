@@ -539,6 +539,28 @@ def count_active_previews(tenant_id: str) -> int:
         conn.close()
 
 
+def list_oldest_active_previews(tenant_id: str, limit: int = 1) -> list[dict[str, Any]]:
+    """Previews ativos do tenant do MAIS ANTIGO para o mais novo — a fila da
+    eviction LRU do cap (decisão operador 2026-07-23): cap cheio => o mais
+    antigo cede o slot para o PR novo."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT work_item_id, tenant_id, namespace FROM wse_previews
+                 WHERE tenant_id = %s AND status = 'created' AND reaped_at IS NULL
+                 ORDER BY created_at ASC
+                 LIMIT %s
+                """,
+                (tenant_id, limit),
+            )
+            rows = cur.fetchall()
+        return [{"work_item_id": r[0], "tenant_id": r[1], "namespace": r[2]} for r in rows]
+    finally:
+        conn.close()
+
+
 def get_preview_cap(tenant_id: str) -> int | None:
     conn = get_connection()
     try:

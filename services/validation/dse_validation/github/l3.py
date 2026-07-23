@@ -40,16 +40,16 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("dse_validation.github.l3")
 
-CI_COMMENT_TEMPLATE = """### Fintex DSE — CI (L3) do PR #{pr_number}
+CI_COMMENT_TEMPLATE = """### Fintex DSE — CI (L3) for PR #{pr_number}
 
-**Status agregado**: {emoji} `{status}` — atualizado em {updated_at}
+**Aggregate status**: {emoji} `{status}` — updated at {updated_at}
 
-| check | status | conclusão |
+| check | status | conclusion |
 |---|---|---|
 {rows}
 
-_Reflexo automático do Fintex DSE (WSE-E4-T9b). Nenhum agente aprova ou faz
-merge do próprio trabalho (P3) — merge é sempre humano._
+_Automated reflection by Fintex DSE (WSE-E4-T9b). No agent approves or merges
+its own work (P3) — merging is always done by a human._
 """
 
 _EMOJI = {"green": "🟢", "red": "🔴", "pending": "🟡"}
@@ -67,7 +67,7 @@ def render_ci_comment(work_item_id: str, pr_number: int, status: str, check_runs
     rows = "\n".join(
         f"| {r.get('name', '?')} | {r.get('status', '?')} | {r.get('conclusion') or '—'} |"
         for r in check_runs
-    ) or "| _(nenhum check-run ainda)_ | | |"
+    ) or "| _(no check runs yet)_ | | |"
     return CI_COMMENT_TEMPLATE.format(
         pr_number=pr_number,
         emoji=_EMOJI.get(status, "⚪"),

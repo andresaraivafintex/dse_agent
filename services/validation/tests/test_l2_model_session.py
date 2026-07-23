@@ -22,7 +22,7 @@ def _patch(monkeypatch, content):
     import model_gateway_client.virtual_keys as vkm
     monkeypatch.setattr(gc, "chat_completion", lambda **kw: SimpleNamespace(
         content=content, model="m", cost_usd=0.03, tokens_in=1, tokens_out=1, raw={}))
-    monkeypatch.setattr(vkm, "mint_virtual_key", lambda *a, **kw: SimpleNamespace(key="vk"))
+    monkeypatch.setattr(vkm, "mint_virtual_key", lambda *a, **kw: "vk")
 
 
 def test_pass_verdict(monkeypatch):

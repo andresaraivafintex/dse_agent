@@ -88,7 +88,7 @@ def test_presigned_url_expires_and_is_denied(garage_ready, small_file, work_item
     assert resp.status_code in (400, 401, 403), f"URL expirada deveria ser negada, veio {resp.status_code}"
     assert b"linha de evidencia" not in resp.content
     # e a resolução por política também recusa (P6 — falha limpa)
-    with pytest.raises(PermissionError, match="expirado"):
+    with pytest.raises(PermissionError, match="expired"):
         garage.resolve_artifact_url(
             work_item_id=work_item_id, store_key=ref.store_key, accessor="user:tester"
         )
@@ -185,7 +185,7 @@ def test_quarantine_invalidates_access_before_ttl(garage_ready, small_file, work
     resp = httpx.get(old_url)
     assert resp.status_code in (403, 404), f"acesso deveria estar invalidado, veio {resp.status_code}"
     # 2) resolução por política recusa explicitamente (P6)
-    with pytest.raises(PermissionError, match="quarentena"):
+    with pytest.raises(PermissionError, match="quarantine"):
         garage.resolve_artifact_url(
             work_item_id=work_item_id, store_key=ref.store_key, accessor="user:andre"
         )

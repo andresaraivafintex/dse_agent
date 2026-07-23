@@ -95,17 +95,9 @@ def _is_forbidden(path: str, forbidden_paths: list[str]) -> str | None:
 
 
 def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
-    if not plan.expected_files and not plan.no_code_change:
-        return L1Finding(
-            check="diff_budget",
-            passed=False,
-            status=GateStatus.NOT_CONFIGURED,
-            detail=(
-                "PlanArtifact.expected_files está vazio para uma tarefa de código; "
-                "use no_code_change=true somente quando nenhum patch for esperado"
-            ),
-        )
-
+    # no_code_change: o plano declara que NÃO há mudança de código, mas o diff
+    # imutável mudou arquivos — inconsistência real, reprova. (Isto NÃO é
+    # expected_files; é sobre existir OU NÃO diff.)
     if plan.no_code_change and diff.files_changed:
         return L1Finding(
             check="diff_budget",
@@ -117,36 +109,39 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
             ),
         )
 
+    # DECISÃO DO OPERADOR (2026-07-22, 3º disparo real): expected_files NÃO
+    # reprova mais o diff. O Planner prevê os arquivos a partir do TEXTO da
+    # issue, ANTES de ler o código; num bug-fix o defeito quase sempre mora
+    # numa camada diferente da que o sintoma sugere (a issue falava de
+    # DELETE /api/transactions → server.js; o bug estava em src/store.js — o
+    # Coder acertou o arquivo e o gate reprovava a correção CERTA).
+    #
+    # Gates de segurança que PERMANECEM (não dependem de previsão do Planner):
+    #   - orçamento de linhas (aqui): anti-sprawl real;
+    #   - forbidden_paths: check duro SEPARADO (migrations/, workflows/…);
+    #   - sandbox escopado ao repo; plano vazio barrado no workflow
+    #     (patch reject-empty-expected-files-v1), antes do L1.
+    # expected_files segue usado para CLASSIFICAR RISCO no workflow — só deixou
+    # de ser gate de igualdade do diff.
     over_budget = diff.total_lines_changed > plan.diff_budget_lines
-    expected = set(plan.expected_files)
-    # Arquivos de TESTE não contam como fora-do-plano (achado do disparo real):
-    # o Tester escreve testes por design DEPOIS do plano — o Planner nunca os
-    # lista. Os forbidden_paths continuam valendo para eles (check separado);
-    # aqui só deixamos de reprovar o estágio legítimo do próprio sistema.
-    from dse_contracts.paths import is_test_path
-
-    unexpected_files = [
-        f for f in diff.files_changed if f not in expected and not is_test_path(f)
-    ]
-    passed = not over_budget and not unexpected_files
-    if passed:
-        detail = (
-            f"diff dentro do orçamento: {diff.total_lines_changed}/{plan.diff_budget_lines} linhas, "
-            f"{len(diff.files_changed)} arquivo(s), todos declarados no plano"
+    if not over_budget:
+        return L1Finding(
+            check="diff_budget",
+            passed=True,
+            detail=(
+                f"diff dentro do orçamento: {diff.total_lines_changed}/{plan.diff_budget_lines} "
+                f"linhas, {len(diff.files_changed)} arquivo(s) "
+                "(expected_files é advisory; forbidden_paths valida os caminhos)"
+            ),
         )
-        return L1Finding(check="diff_budget", passed=True, detail=detail)
-
-    reasons = []
-    if over_budget:
-        reasons.append(
-            f"diff de {diff.total_lines_changed} linhas excede diff_budget_lines={plan.diff_budget_lines} do PlanArtifact"
-        )
-    if unexpected_files:
-        reasons.append(
-            "arquivo(s) tocado(s) fora de PlanArtifact.expected_files="
-            f"{sorted(expected)}: {unexpected_files}"
-        )
-    return L1Finding(check="diff_budget", passed=False, detail="; ".join(reasons))
+    return L1Finding(
+        check="diff_budget",
+        passed=False,
+        detail=(
+            f"diff de {diff.total_lines_changed} linhas excede "
+            f"diff_budget_lines={plan.diff_budget_lines} do PlanArtifact"
+        ),
+    )
 
 
 def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:

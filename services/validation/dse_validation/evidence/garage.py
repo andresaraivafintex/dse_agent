@@ -293,14 +293,14 @@ def resolve_artifact_url(
     cfg = cfg or GarageConfig()
     row = db.get_artifact(work_item_id, store_key)
     if row is None:
-        raise LookupError(f"artefato não publicado: {work_item_id}/{store_key}")
+        raise LookupError(f"artifact not published: {work_item_id}/{store_key}")
     if row["quarantined_at"] is not None:
         raise PermissionError(
-            f"artefato em quarentena (work item quarantinado): {work_item_id}/{store_key}"
+            f"artifact quarantined (work item under quarantine): {work_item_id}/{store_key}"
         )
     now = datetime.now(timezone.utc)
     if row["expires_at"] is not None and now >= row["expires_at"]:
-        raise PermissionError(f"artefato expirado por política: {work_item_id}/{store_key}")
+        raise PermissionError(f"artifact expired by policy: {work_item_id}/{store_key}")
 
     remaining = int((row["expires_at"] - now).total_seconds()) if row["expires_at"] else 3600
     ttl = min(ttl_seconds or remaining, max(1, remaining))

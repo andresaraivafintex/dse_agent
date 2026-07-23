@@ -1,0 +1,95 @@
+"""Contrato de migração do lifecycle atual para um SandboxDriver único."""
+from __future__ import annotations
+
+import pytest
+
+from dse_contracts import Stage
+from sandbox_runtime import docker_driver
+from sandbox_runtime.driver import (
+    DockerSandboxDriver,
+    IsolatedStageExecutionUnavailable,
+    SandboxDriver,
+    SandboxProvisionRequest,
+    StageExecutionRequest,
+)
+
+
+def _provision_request() -> SandboxProvisionRequest:
+    return SandboxProvisionRequest(
+        work_item_id="wi-driver",
+        tenant_id="tenant-driver",
+        branch="dse/wi-driver",
+        workspace_path="/state/wi-driver/workspace",
+        checkpoint_path="/state/wi-driver/checkpoint.git",
+        budget={"resource_class": "small"},
+        image="sandbox:test",
+        user="10001:10001",
+    )
+
+
+def test_docker_adapter_conforms_to_sandbox_driver_protocol():
+    assert isinstance(DockerSandboxDriver(), SandboxDriver)
+
+
+def test_docker_adapter_preserves_existing_provision_api(monkeypatch):
+    captured = {}
+    expected = object()
+
+    def fake_provision_container(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(docker_driver, "provision_container", fake_provision_container)
+    result = DockerSandboxDriver().provision(_provision_request())
+
+    assert result is expected
+    assert captured == {
+        "work_item_id": "wi-driver",
+        "tenant_id": "tenant-driver",
+        "branch": "dse/wi-driver",
+        "workspace_host_path": "/state/wi-driver/workspace",
+        "checkpoint_bare_repo_path": "/state/wi-driver/checkpoint.git",
+        "budget": {"resource_class": "small"},
+        "image": "sandbox:test",
+        "user": "10001:10001",
+    }
+
+
+def test_execute_stage_fails_closed_instead_of_using_worker_fallback():
+    driver = DockerSandboxDriver()
+    request = StageExecutionRequest(
+        sandbox_id="container-123",
+        work_item_id="wi-driver",
+        tenant_id="tenant-driver",
+        stage=Stage.coder,
+        input_payload={"instruction": "não deve rodar localmente"},
+        timeout_seconds=60,
+    )
+
+    assert driver.supports_isolated_stage_execution is False
+    with pytest.raises(IsolatedStageExecutionUnavailable, match="execução local é proibida"):
+        driver.execute_stage(request)
+
+
+def test_stage_contract_contains_no_host_path_or_privileged_credential_fields():
+    field_names = set(StageExecutionRequest.__dataclass_fields__)
+    forbidden = {
+        "workspace_host_path",
+        "docker_socket",
+        "github_private_key",
+        "litellm_master_key",
+        "provider_api_key",
+    }
+    assert not field_names & forbidden
+
+
+def test_existing_module_level_driver_api_remains_available():
+    """O novo adapter é aditivo; callers antigos não quebram neste sprint."""
+    for name in (
+        "provision_container",
+        "find_existing_container",
+        "teardown_container",
+        "kill_container",
+    ):
+        assert callable(getattr(docker_driver, name))
+

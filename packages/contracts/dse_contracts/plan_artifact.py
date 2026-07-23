@@ -13,6 +13,10 @@ class PlanArtifact(BaseModel):
     work_item_id: str
     steps: list[str] = Field(default_factory=list)
     expected_files: list[str] = Field(default_factory=list)  # blast radius declarado
+    # Escape hatch explicito para tarefas que deliberadamente nao produzem
+    # patch. Um plano vazio sem esta marca e invalido no workflow; manter o
+    # default False torna payloads historicos aditivos e seguros.
+    no_code_change: bool = False
     diff_budget_lines: int = 400  # default conservador; access bundle pode ajustar (Fase 2)
     test_plan: str = ""
     risk_class: str = "low"  # Fase 1: informativo apenas — gate de aprovação é Fase 2

@@ -148,5 +148,5 @@ def test_quarantined_artifact_link_is_revoked_in_comment(work_item_id, tenant_id
     )
     assert out["published"] is True
     body = next(iter(client._comments.values()))
-    assert "quarentena" in body
+    assert "quarantined" in body
     assert "http://localhost:3900" not in body  # nenhum link presigned vazou

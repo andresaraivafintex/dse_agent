@@ -16,6 +16,8 @@ testes de lógica pura não dependem do decorator `@activity.defn`).
 """
 from __future__ import annotations
 
+import asyncio
+
 from dse_contracts import (
     ACTIVITY_CONSUME_CI_STATUS,
     ACTIVITY_FINALIZE_PR,
@@ -575,78 +577,85 @@ def _publish_evidence(inp: PublishEvidenceInput) -> dict:
     )
 
 
+# REGRA (achado do disparo real 2026-07-23, wi_150d): todo wrapper abaixo é
+# `async def` num worker de UM event loop compartilhado com as activities do
+# sandbox-runtime. Impl síncrono chamado DIRETO no loop (L1 = npm/subprocess,
+# L2 = chat_completion, visual diff = Playwright…) bloqueia o loop por minutos
+# e os heartbeats de TODAS as activities param → o server cancela coder/tester
+# em pleno trabalho e o retry re-paga o modelo. Por isso: SEMPRE
+# `await asyncio.to_thread(_impl, inp)` — nunca `_impl(inp)` direto.
 if _HAS_TEMPORAL:
 
     @activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)
     async def run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
-        return _run_l1_pipeline(inp)
+        return await asyncio.to_thread(_run_l1_pipeline, inp)
 
     @activity.defn(name=ACTIVITY_FINALIZE_PR)
     async def finalize_pr(inp: FinalizePrInput) -> PrRef:
-        return _finalize_pr(inp)
+        return await asyncio.to_thread(_finalize_pr, inp)
 
     @activity.defn(name=ACTIVITY_VERIFY_MERGE_STATE)
     async def verify_merge_state(inp: VerifyMergeInput) -> MergeVerification:
-        return _verify_merge_state(inp)
+        return await asyncio.to_thread(_verify_merge_state, inp)
 
     @activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)
     async def consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
-        return _consume_ci_status(inp)
+        return await asyncio.to_thread(_consume_ci_status, inp)
 
     @activity.defn(name=WSE_ACTIVITY_RUN_L2_REVIEW)
     async def wse_run_l2_review(inp: RunL2ReviewInput) -> L2Verdict:
-        return _run_l2_review(inp)
+        return await asyncio.to_thread(_run_l2_review, inp)
 
     @activity.defn(name=WSE_ACTIVITY_RECORD_FIX_LOOP)
     async def wse_record_fix_loop(inp: RecordFixLoopInput) -> dict:
-        return _record_fix_loop(inp)
+        return await asyncio.to_thread(_record_fix_loop, inp)
 
     @activity.defn(name=WSE_ACTIVITY_ADOPT_PR)
     async def wse_adopt_pr(inp: AdoptPrInput) -> PrRef | None:
-        return _adopt_pr(inp)
+        return await asyncio.to_thread(_adopt_pr, inp)
 
     # --- Fase 3: Activities de evidência do CONTRATO (dono: WS-E) ---
     @activity.defn(name=ACTIVITY_PUBLISH_ARTIFACT)
     async def publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
-        return _publish_artifact(inp)
+        return await asyncio.to_thread(_publish_artifact, inp)
 
     @activity.defn(name=ACTIVITY_RUN_DEMO_EVIDENCE)
     async def run_demo_evidence(inp: RunDemoEvidenceInput) -> DemoEvidenceResult:
-        return _run_demo_evidence(inp)
+        return await asyncio.to_thread(_run_demo_evidence, inp)
 
     @activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)
     async def trigger_preview(inp: TriggerPreviewInput) -> PreviewRef:
-        return _trigger_preview(inp)
+        return await asyncio.to_thread(_trigger_preview, inp)
 
     @activity.defn(name=ACTIVITY_RUN_VISUAL_DIFF)
     async def run_visual_diff(inp: RunVisualDiffInput) -> VisualDiffResult:
-        return _run_visual_diff(inp)
+        return await asyncio.to_thread(_run_visual_diff, inp)
 
     # --- Fase 3: auxiliares (não-contratuais, prefixo wse_) ---
     @activity.defn(name=WSE_ACTIVITY_QUARANTINE_ARTIFACTS)
     async def wse_quarantine_artifacts(inp: QuarantineArtifactsInput) -> list[str]:
-        return _quarantine_artifacts(inp)
+        return await asyncio.to_thread(_quarantine_artifacts, inp)
 
     @activity.defn(name=WSE_ACTIVITY_REAP_PREVIEWS)
     async def wse_reap_previews() -> list[str]:
-        return _reap_previews()
+        return await asyncio.to_thread(_reap_previews)
 
     @activity.defn(name=WSE_ACTIVITY_SHOULD_REFRESH_EVIDENCE)
     async def wse_should_refresh_evidence(inp: ShouldRefreshEvidenceInput) -> dict:
-        return _should_refresh_evidence(inp)
+        return await asyncio.to_thread(_should_refresh_evidence, inp)
 
     @activity.defn(name=WSE_ACTIVITY_PUBLISH_EVIDENCE)
     async def wse_publish_evidence(inp: PublishEvidenceInput) -> dict:
-        return _publish_evidence(inp)
+        return await asyncio.to_thread(_publish_evidence, inp)
 
     # --- Fase 4: merge-base (contrato) + episódio de review-feedback (aux) ---
     @activity.defn(name=ACTIVITY_UPDATE_BASE_BRANCH)
     async def update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
-        return _update_base_branch(inp)
+        return await asyncio.to_thread(_update_base_branch, inp)
 
     @activity.defn(name=WSE_ACTIVITY_RECORD_REVIEW_EPISODE)
     async def wse_record_review_episode(inp: RecordReviewEpisodeInput) -> dict | None:
-        return _record_review_episode(inp)
+        return await asyncio.to_thread(_record_review_episode, inp)
 
     ALL_ACTIVITIES = [
         run_l1_pipeline,

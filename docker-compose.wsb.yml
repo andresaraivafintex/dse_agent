@@ -21,6 +21,13 @@ services:
       DSE_WORKER_DEPLOYMENT_NAME: ${DSE_WORKER_DEPLOYMENT_NAME:-dse-orchestrator}
       DSE_WORKER_USE_VERSIONING: ${DSE_WORKER_USE_VERSIONING:-false}
       DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
+      # Heartbeat de activity: 60s derrubava coder/tester em loop infinito de
+      # retry quando a máquina satura (CLI do Coder + npm + >1 work item — o
+      # event loop do worker single-process passa >60s sem bater heartbeat e o
+      # server cancela ATIVIDADE JÁ CONCLUÍDA; achado do disparo Slack
+      # 2026-07-22, wi_d05c/wi_257d, 11+7 attempts). 600s dá folga; o
+      # start_to_close de 1h continua sendo o teto real.
+      DSE_ACTIVITY_HEARTBEAT_SECONDS: ${DSE_ACTIVITY_HEARTBEAT_SECONDS:-600}
       # Fase 3 (ativacao do alerta de history, ALERTING-RULES.md §3 com WS-F):
       # aponte DSE_OTEL_EXPORTER=otlp para enviar traces + a metrica
       # dse.workflow.history_length ao otel-collector do WS-F (porta 4317).

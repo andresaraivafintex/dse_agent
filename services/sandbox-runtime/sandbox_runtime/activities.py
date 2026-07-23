@@ -63,6 +63,7 @@ from .runtime_profile import (
     validate_runtime_startup,
 )
 from .scoped_git import GitScopeViolation, ScopedGitSession
+from .skill_files import materialize_skills, workspace_skills_note
 from .sessions import (
     FreshReviewerSession,
     PlannerContext,
@@ -358,15 +359,10 @@ async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
 # ---------------------------------------------------------------------------
 # run_coder_turn
 # ---------------------------------------------------------------------------
-class RunCoderTurnInput(BaseModel):
-    work_item_id: str
-    tenant_id: str
-    instruction: str
-    branch: str | None = None
-    stage: str = "coder"
-    task_class: str = "default"
-    data_class: str = "internal"
-    checkpoint_phase: str = "coder_turn"
+# Contrato CANÔNICO (anti-shadow — mesmo achado do L1: o model local
+# descartava silenciosamente campos que o workflow envia, ex.: model_override
+# e o novo expected_files). Nunca redefina modelos de contrato localmente.
+from dse_contracts.activities import RunCoderTurnInput  # noqa: E402
 
 
 def _build_substrate(script: list[dict[str, Any]] | None) -> AgentSubstrate:
@@ -377,6 +373,118 @@ def _build_substrate(script: list[dict[str, Any]] | None) -> AgentSubstrate:
     WS-B continua chamando `run_coder_turn` por nome, e esta factory resolve
     o adapter atrás da mesma interface `AgentSubstrate`."""
     return substrate_from_env(script=script)
+
+
+def _prune_disposable_artifacts(
+    workspace_dir: str, expected_files: list[str], work_item_id: str
+) -> tuple[list[str], list[str]]:
+    """Camada 2 (determinística, P1) do anti-relatório-espontâneo: apaga
+    arquivos NOVOS (untracked) que são LIXO óbvio do CLI (log/scratch/backup e
+    relatórios como BUG_FIX_REPORT.md), ANTES do commit.
+
+    Reconciliado com a política nova (2026-07-22): como `expected_files` virou
+    advisory no L1 (ver a memória l1-expected-files-advisory), NÃO apagamos mais
+    "tudo que está fora do plano" — só o descartável (`is_disposable_artifact`).
+    Um arquivo-fonte NOVO e legítimo que o fix precisou criar SOBREVIVE, mesmo
+    fora de `expected_files`. Nunca toca: o que o plano pediu, testes, ou o demo
+    do work item; e só olha untracked (`??`) — um arquivo EXISTENTE modificado
+    fora do plano fica e é o L1/orçamento que julga.
+
+    Best-effort (o L1 é o gate duro): falha de git → não apaga nada. Retorna
+    `(pruned, kept_out_of_plan)`; `kept_out_of_plan` é o que a política antiga
+    teria apagado e agora preserva — emitido no audit para o operador ver a
+    reconciliação em ação.
+    """
+    from dse_contracts.paths import is_disposable_artifact, is_test_path
+
+    import subprocess as _sp
+
+    try:
+        # `-uall`: lista CADA arquivo untracked individualmente. Sem ele, o git
+        # colapsa um diretório inteiramente novo num único `?? src/` — e um
+        # arquivo-fonte dentro de um diretório NOVO nunca seria visto no nível
+        # de arquivo (o prune inline antigo silenciava esse caso no OSError de
+        # remover um diretório). .gitignore continua respeitado (não lista
+        # node_modules etc.).
+        porcelain = _sp.run(
+            ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except Exception:  # noqa: BLE001 — prune é best-effort; o L1 é o gate duro
+        logger.warning("prune pós-coder falhou (git status); o L1 segue como gate")
+        return [], []
+
+    expected = set(expected_files)
+    pruned: list[str] = []
+    kept_out_of_plan: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.startswith("??"):
+            continue
+        rel = line[3:].strip().strip('"')
+        # Nunca poda o que o plano pediu, testes, ou o demo do work item.
+        if rel in expected or is_test_path(rel) or rel.startswith(f"demos/{work_item_id}"):
+            continue
+        if not is_disposable_artifact(rel):
+            kept_out_of_plan.append(rel)  # fonte nova legítima fora do plano — FICA
+            continue
+        try:
+            os.remove(os.path.join(workspace_dir, rel))
+            pruned.append(rel)
+        except OSError:
+            pass
+    return pruned, kept_out_of_plan
+
+
+def _revert_coder_test_edits(workspace_dir: str, turn_start_sha: str) -> list[str]:
+    """O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
+    (achado do disparo real na issue #1: o Coder editou o seed compartilhado do
+    `before()` em test/api.test.js, movendo uma transação de julho→junho, e
+    quebrou um teste IRMÃO pré-existente que fixava a ordenação por data. O fix
+    de código estava certo; o loop era 100% esse conflito teste-vs-teste, que
+    consertar summary.js não resolve).
+
+    Reverte QUALQUER mudança do Coder em test paths ao estado do INÍCIO do turno
+    (`turn_start_sha`): edição/remoção de teste existente → `git checkout <sha>`;
+    teste NOVO (untracked) → remove. Aplicado todo turno, nenhum commit do Coder
+    carrega mudança de teste — o Tester (etapa seguinte) autora os testes limpo.
+    Best-effort: falha de git → não reverte (o L1/Tester ainda são os gates).
+    Retorna os paths revertidos."""
+    from dse_contracts.paths import is_test_path
+
+    import subprocess as _sp
+
+    try:
+        porcelain = _sp.run(
+            ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.warning("revert de testes do coder falhou (git status)")
+        return []
+
+    reverted: list[str] = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        status, rel = line[:2], line[3:].strip().strip('"')
+        if "->" in rel:  # rename: "old -> new" — pega o destino
+            rel = rel.split("->")[-1].strip()
+        if not is_test_path(rel):
+            continue
+        try:
+            if status.strip() == "??":
+                os.remove(os.path.join(workspace_dir, rel))
+                reverted.append(rel)
+            else:
+                proc = _sp.run(
+                    ["git", "checkout", turn_start_sha, "--", rel], cwd=workspace_dir,
+                    capture_output=True, text=True, timeout=30,
+                )
+                if proc.returncode == 0:
+                    reverted.append(rel)
+        except OSError:
+            continue
+    return reverted
 
 
 @activity.defn(name=ACTIVITY_RUN_CODER_TURN)
@@ -426,6 +534,27 @@ async def _run_coder_turn_impl(
         gateway_base_url=vk.gateway_base_url,
     )
 
+    # Âncora do plano na instrução (achado do disparo real: o CLI cria
+    # relatórios espontâneos — BUG_FIX_REPORT.md). Camada 1: instrução
+    # explícita; camada 2 (determinística): prune pós-turn SÓ de artefatos
+    # descartáveis (relatório/log/scratch), nunca de fonte nova legítima —
+    # ver _prune_disposable_artifacts.
+    if inp.expected_files:
+        inp.instruction += (
+            "\n\n## Plan constraints (mandatory)\n"
+            f"- Modify ONLY production code in these files: {', '.join(inp.expected_files)}.\n"
+            "- Do NOT create or edit TEST files (tests/, *.test.js, test_*.py…). "
+            "Writing tests is a SEPARATE stage (the Tester) — any test change you "
+            "make is reverted before the commit.\n"
+            "- Do NOT create documentation/report files (README, *_REPORT.md, "
+            "CHANGELOG…) — the change and the tests speak for themselves."
+        )
+
+    # Skills do repo (ticks do console materializados no turno do Planner +
+    # skills commitadas no repo alvo): o ClaudeAgentSubstrate as carrega via
+    # setting_sources=["project"]; a nota cobre os demais substratos.
+    inp.instruction += workspace_skills_note(workspace_dir)
+
     base_sha_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
     base_sha = base_sha_session.current_sha()
 
@@ -448,6 +577,52 @@ async def _run_coder_turn_impl(
         turns += 1
 
     artifacts = agent.collect_artifacts()
+
+    # Camada 2 (determinística, P1): apaga arquivos NOVOS (untracked) que são
+    # LIXO óbvio do CLI (relatório espontâneo/log/scratch) antes do commit — NÃO
+    # mais "tudo fora do plano" (expected_files virou advisory no L1; um arquivo-
+    # fonte novo legítimo fora do plano SOBREVIVE). Arquivos EXISTENTES
+    # modificados fora do plano ficam — é o L1/orçamento que os julga.
+    if inp.expected_files:
+        pruned, kept_out_of_plan = _prune_disposable_artifacts(
+            workspace_dir, inp.expected_files, inp.work_item_id
+        )
+        if pruned:
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="coder_out_of_plan_files_pruned",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"pruned": pruned[:20]},
+            )
+        if kept_out_of_plan:
+            # Observabilidade da reconciliação (2026-07-22): sob a política antiga
+            # estes NOVOS fora do plano seriam apagados; agora ficam (expected_files
+            # é advisory) e quem julga é o L1 (orçamento de linhas + forbidden_paths).
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="coder_out_of_plan_files_kept",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"kept_out_of_plan": kept_out_of_plan[:20]},
+            )
+
+    _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="coder")
+
+    # O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
+    # (achado do disparo real na issue #1: o Coder editou o seed compartilhado
+    # de test/api.test.js e quebrou um teste IRMÃO pré-existente → o fix cycle
+    # nunca converge, porque consertar summary.js não conserta o teste). Reverte
+    # QUALQUER mudança do Coder em test paths ao estado do início do turno.
+    reverted_tests = _revert_coder_test_edits(workspace_dir, base_sha)
+    if reverted_tests:
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="coder_test_edits_reverted",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={"reverted": reverted_tests[:20], "reason": "testes são da etapa Tester"},
+        )
 
     # Commit/push determinístico — o substrato nunca tem acesso a git.
     git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
@@ -513,30 +688,35 @@ def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> d
     plano deste fixture ESCALA no gate — comportamento deliberado: sem modelo
     real, o DSE não finge planejar."""
     return {
-        "steps": [f"Analisar e implementar: {inp.instruction[:120]}"],
+        "steps": [f"Analyze and implement: {inp.instruction[:120]}"],
         "expected_files": [],
-        "test_plan": "Adicionar/rodar testes cobrindo o comportamento novo (Tester turn).",
+        "test_plan": "Add/run tests covering the new behavior (Tester turn).",
     }
 
 
-_PLAN_PROMPT = """Você é o Planner do Fintex DSE (engenheiro de software autônomo).
-Com base na tarefa abaixo, produza um plano de implementação MÍNIMO e verificável.
+_PLAN_PROMPT = """You are the Planner of Fintex DSE (an autonomous software engineer).
+Based on the task below, produce a MINIMAL, verifiable implementation plan.
 
-Responda APENAS com um objeto JSON válido (sem markdown, sem comentários), no formato:
-{{"steps": ["passo 1", "passo 2", ...],
-  "expected_files": ["caminho/relativo/1", "caminho/2", ...],
-  "test_plan": "como verificar a mudança"}}
+Respond ONLY with a valid JSON object (no markdown, no comments), in the format:
+{{"steps": ["step 1", "step 2", ...],
+  "expected_files": ["relative/path/1", "path/2", ...],
+  "test_plan": "how to verify the change"}}
 
-Regras:
-- "expected_files": os arquivos que serão CRIADO/EDITADOS (relativos à raiz).
+Rules:
+- "expected_files": the files that will be CREATED/EDITED (relative to the root).
   {files_rule}
-  O diff da implementação será validado CONTRA esta lista (arquivos de teste
-  são isentos) — inclua TODOS os arquivos de produção que podem mudar. NUNCA
-  vazia.
-- 2 a 6 steps, específicos e executáveis.
-- Não inclua nada além do JSON.
+  The implementation diff will be validated AGAINST this list (test files
+  are exempt) — include ALL production files that may change. NEVER
+  empty.
+- 2 to 6 steps, specific and executable.
+- The plan must solve EXACTLY the task in the "Task" section — nothing beyond it
+  (no extra feature/refactor, however useful it may seem).
+- Do not include anything besides the JSON.
 
-## Tarefa
+## Task
+{instruction}
+
+## Additional context (skills/AGENTS.md/retrieval — may be empty)
 {context}
 {tree_section}"""
 
@@ -577,13 +757,20 @@ def _model_plan_proposer(
     model = os.environ.get("DSE_PLANNER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
     tree = _repo_tree_for_planner(inp.repo, inp.base_branch or "main")
     if tree:
-        files_rule = "Use APENAS caminhos da árvore abaixo (ou novos coerentes com ela)."
-        tree_section = "\n## Árvore do repo (branch base)\n" + "\n".join(tree[:250])
+        files_rule = "Use ONLY paths from the tree below (or new ones consistent with it)."
+        tree_section = "\n## Repo tree (base branch)\n" + "\n".join(tree[:250])
     else:
-        files_rule = "Proponha os caminhos mais prováveis pela convenção do ecossistema."
+        files_rule = "Propose the most likely paths per the ecosystem's conventions."
         tree_section = ""
+    # A INSTRUÇÃO entra direto no prompt (3º disparo real: PlannerContext não
+    # carrega a instrução — render() só tem AGENTS.md/skills/repo map, todos
+    # vazios neste tenant — e o modelo, sem nunca VER a issue, planejou uma
+    # feature genérica de wallet em vez do bug de DELETE).
     prompt = _PLAN_PROMPT.format(
-        context=ctx.render()[:10000], files_rule=files_rule, tree_section=tree_section[:8000]
+        instruction=(inp.instruction or "").strip()[:6000] or "(instruction missing)",
+        context=ctx.render()[:8000],
+        files_rule=files_rule,
+        tree_section=tree_section[:8000],
     )
     try:
         result = chat_completion(
@@ -605,7 +792,7 @@ def _model_plan_proposer(
         text = text.strip("`\n")
         text = text[4:] if text.startswith("json") else text
     try:
-        proposal = json.loads(text.strip())
+        proposal, _ = json.JSONDecoder().raw_decode(text.strip())
         steps = [str(s) for s in proposal.get("steps", []) if str(s).strip()]
         files = [str(f) for f in proposal.get("expected_files", []) if str(f).strip()]
         if not steps or not files:
@@ -613,7 +800,7 @@ def _model_plan_proposer(
         return {
             "steps": steps[:10],
             "expected_files": files[:30],
-            "test_plan": str(proposal.get("test_plan") or "Cobrir a mudança com testes (Tester turn)."),
+            "test_plan": str(proposal.get("test_plan") or "Cover the change with tests (Tester turn)."),
         }
     except (json.JSONDecodeError, ValueError) as exc:
         logger.warning("plano do modelo não parseou (%s) — fixture; resposta: %.200s", exc, text)
@@ -671,6 +858,13 @@ async def _run_planner_turn_impl(
         retrieval=retrieval,
         skills_conn=skills_conn,
     )
+
+    # Skills em arquivo (`.claude/skills/`) são materializadas pelo
+    # provision_sandbox (após o clone — o Planner pode rodar ANTES do
+    # provision e o workspace ainda não existir aqui). Este re-materialize é
+    # no-op nesse caso (guard de `.git` no skill_files) e atualiza o workspace
+    # quando o registry mudou entre retries.
+    skills_materialized = materialize_skills(workspace_dir, ctx.skills)
 
     # Sessão read-only: qualquer step de escrita no exploration_script FALHA
     # aqui (toolset planner), o que é o teste de conformidade.
@@ -742,6 +936,7 @@ async def _run_planner_turn_impl(
             "risk_class": plan.risk_class,
             "diff_budget_lines": plan.diff_budget_lines,
             "skills_hydrated": [s.skill_key for s in ctx.skills],
+            "skills_materialized": skills_materialized,
             "retrieval_hits": [f"{h.repo}/{h.path}" for h in ctx.retrieval_hits],
             "virtual_key_fixture": vk.fixture,
         },
@@ -783,38 +978,38 @@ def _raise_if_permanent_provider_error(exc: Exception) -> None:
         ) from exc
 
 
-_TEST_AUTHOR_PROMPT = """Você é o Tester do Fintex DSE. Escreva teste(s) AUTOMATIZADO(s) que
-verifiquem a mudança descrita — idealmente reproduzindo o bug (falham sem o fix,
-passam com ele).
+_TEST_AUTHOR_PROMPT = """You are the Tester of Fintex DSE. Write AUTOMATED test(s) that
+verify the described change — ideally reproducing the bug (they fail without the fix,
+pass with it).
 
-Responda APENAS com JSON válido (sem markdown):
-{{"files": [{{"path": "caminho/relativo/do/teste", "content": "conteúdo completo do arquivo"}}]}}
+Respond ONLY with valid JSON (no markdown):
+{{"files": [{{"path": "relative/path/of/the/test", "content": "full file content"}}]}}
 
-REGRAS CRÍTICAS:
-- Use EXATAMENTE o runner e o estilo do TESTE EXISTENTE mostrado abaixo (mesmos
-  imports, mesma estrutura). NÃO use jest/mocha/vitest/supertest ou QUALQUER
-  pacote que não esteja nas dependências do package.json mostrado — o repo pode
-  não ter nenhuma dependência (runner nativo).
-- Crie APENAS arquivo(s) NOVO(s) — NUNCA reescreva um teste existente.
-  PATHS PROIBIDOS (já existem): {existing_tests}
-  Use um nome novo, ex.: test/<assunto>-dse.test.js
-- Os paths DEVEM ser caminhos de teste (tests/, __tests__/, *.test.js|ts, test_*.py…).
-- 1 arquivo (no máximo 2); CONCISO (~40-80 linhas). JSON cortado = falha.
-- Não modifique código de produção — só testes.
+CRITICAL RULES:
+- Use EXACTLY the runner and style of the EXISTING TEST shown below (same
+  imports, same structure). Do NOT use jest/mocha/vitest/supertest or ANY
+  package that is not in the dependencies of the package.json shown — the repo
+  may have no dependencies at all (native runner).
+- Create ONLY NEW file(s) — NEVER rewrite an existing test.
+  FORBIDDEN PATHS (already exist): {existing_tests}
+  Use a new name, e.g.: test/<subject>-dse.test.js
+- Paths MUST be test paths (tests/, __tests__/, *.test.js|ts, test_*.py…).
+- 1 file (2 at most); CONCISE (~40-80 lines). Truncated JSON = failure.
+- Do not modify production code — tests only.
 {error_feedback}
-## Tarefa
+## Task
 {instruction}
 
-## Plano
+## Plan
 {plan}
 
-## package.json do repo (runner/dependências REAIS)
+## Repo package.json (REAL runner/dependencies)
 {package_json}
 
-## Teste EXISTENTE do repo (IMITE este estilo/runner)
+## EXISTING test from the repo (IMITATE this style/runner)
 {example_test}
 
-## Mudança do Coder (diff)
+## Coder's change (diff)
 {diff}
 """
 
@@ -830,7 +1025,7 @@ def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
     try:
         pkg = open(os.path.join(workspace_dir, "package.json")).read()[:1500]
     except OSError:
-        pkg = "(sem package.json — provavelmente Python/pytest)"
+        pkg = "(no package.json — likely Python/pytest)"
     existing: set[str] = set()
     example = ""
     for root, _dirs, files in os.walk(workspace_dir):
@@ -845,7 +1040,7 @@ def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
                         example = f"# {rel}\n" + open(os.path.join(root, f)).read()[:3000]
                     except OSError:
                         pass
-    return pkg, example or "(nenhum teste existente — use o runner padrão do ecossistema)", existing
+    return pkg, example or "(no existing tests — use the ecosystem's default runner)", existing
 
 
 def _model_authored_test_script(
@@ -884,12 +1079,15 @@ def _model_authored_test_script(
         plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:1500],
         package_json=package_json,
         example_test=example_test,
-        existing_tests=", ".join(sorted(existing_tests)) or "(nenhum)",
-        diff=diff or "(diff indisponível)",
+        existing_tests=", ".join(sorted(existing_tests)) or "(none)",
+        diff=diff or "(diff unavailable)",
         error_feedback=(
-            f"\n## ERRO DA TENTATIVA ANTERIOR (corrija!)\n{error_feedback}\n" if error_feedback else ""
+            f"\n## ERROR FROM THE PREVIOUS ATTEMPT (fix it!)\n{error_feedback}\n" if error_feedback else ""
         ),
     )
+    # Skills do repo (materializadas pelo Planner + commitadas no repo alvo):
+    # o Tester também deve seguir a guidance (estilo de teste, padrões do tenant).
+    prompt += workspace_skills_note(workspace_dir)[:2000]
     try:
         result = chat_completion(
             headers=headers, virtual_key=virtual_key, model=model,
@@ -908,7 +1106,8 @@ def _model_authored_test_script(
         text = text.strip("`\n")
         text = text[4:] if text.startswith("json") else text
     try:
-        files = json.loads(text.strip()).get("files") or []
+        parsed, _ = json.JSONDecoder().raw_decode(text.strip())
+        files = parsed.get("files") or []
     except json.JSONDecodeError as exc:
         logger.warning("autoria de teste não parseou (%s); resposta: %.200s", exc, text)
         return None
@@ -952,6 +1151,104 @@ def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
         if n > 5:
             break
     return new_path
+
+
+def _restore_lockfile_churn(workspace_dir: str) -> list[str]:
+    """Desfaz churn mecânico de lockfile ANTES do commit determinístico (2º
+    disparo real: npm reescreveu 16 linhas de package-lock.json ao rodar os
+    testes e o diff_budget reprovou a tarefa como mudança fora do plano).
+    Regra: lockfile mudou mas o manifesto par (package.json…) NÃO mudou →
+    restaura (modificado) ou remove (novo, untracked). Com o manifesto no
+    diff a mudança é declarável e fica. Retorna os paths tratados."""
+    import subprocess as _sp
+
+    from dse_contracts.paths import lockfile_manifest_for
+
+    try:
+        porcelain = _sp.run(
+            ["git", "status", "--porcelain"], cwd=workspace_dir,
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except Exception:  # noqa: BLE001 — best-effort; o L1 tem a mesma isenção
+        return []
+    status_by_path: dict[str, str] = {}
+    for line in porcelain.splitlines():
+        if len(line) > 3:
+            status_by_path[line[3:].strip().strip('"')] = line[:2]
+    restored: list[str] = []
+    for rel, st in sorted(status_by_path.items()):
+        manifest = lockfile_manifest_for(rel)
+        if manifest is None or manifest in status_by_path:
+            continue
+        try:
+            if st == "??":
+                os.remove(os.path.join(workspace_dir, rel))
+                restored.append(rel)
+            else:
+                proc = _sp.run(
+                    ["git", "checkout", "--", rel], cwd=workspace_dir,
+                    capture_output=True, text=True, timeout=30,
+                )
+                if proc.returncode == 0:
+                    restored.append(rel)
+        except OSError:
+            continue
+    return restored
+
+
+def _restore_lockfile_churn_audited(
+    workspace_dir: str, tenant_id: str, work_item_id: str, *, stage: str
+) -> None:
+    restored = _restore_lockfile_churn(workspace_dir)
+    if restored:
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="lockfile_churn_restored",
+            tenant_id=tenant_id,
+            work_item_id=work_item_id,
+            details={"stage": stage, "restored": restored[:10]},
+        )
+
+
+def _tester_authored_files_in_history(workspace_dir: str) -> list[str]:
+    """Test files de commits `tester(...)` anteriores ainda presentes no
+    workspace. Se existem, o turno RE-RODA esses testes em vez de autorar
+    novos (2º disparo real: cada ciclo de fix autorava MAIS um teste — o
+    diff só crescia, o alvo mudava a cada volta e o loop nunca convergia).
+    O fix cycle só funciona com alvo fixo."""
+    import subprocess as _sp
+
+    from dse_contracts.paths import is_test_path as _is_test
+
+    try:
+        log = _sp.run(
+            ["git", "log", "--format=%H %s"], cwd=workspace_dir,
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except Exception:  # noqa: BLE001 — sem histórico legível, autora normalmente
+        return []
+    files: list[str] = []
+    for line in log.splitlines():
+        sha, _, subject = line.partition(" ")
+        if not subject.startswith("tester("):
+            continue
+        try:
+            names = _sp.run(
+                ["git", "show", "--name-only", "--format=", sha], cwd=workspace_dir,
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+        except Exception:  # noqa: BLE001
+            continue
+        for rel in names.splitlines():
+            rel = rel.strip()
+            if (
+                rel
+                and _is_test(rel)
+                and rel not in files
+                and os.path.exists(os.path.join(workspace_dir, rel))
+            ):
+                files.append(rel)
+    return files
 
 
 _TEST_INFRA_ERROR_MARKERS = (
@@ -1023,6 +1320,20 @@ async def _run_tester_turn_impl(
     # roda SÓ os arquivos novos; erro de import/sintaxe → re-autora UMA vez com
     # o erro no prompt; persiste → remove os arquivos e devolve tests_ran=False
     # (o gate para limpo em vez de queimar turnos de Coder).
+    if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
+        # Idempotência do Tester (2º disparo real): testes já autorados em
+        # ciclo anterior são RE-RODADOS, nunca re-autorados — o fix cycle
+        # precisa de alvo fixo para o Coder convergir.
+        reused = _tester_authored_files_in_history(workspace_dir)
+        if reused:
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="tester_reused_authored_tests",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"test_files": reused[:10]},
+            )
+            authoring_script = [{"tool": "run_tests"}]
     if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
         error_feedback = ""
         for attempt in (1, 2):
@@ -1101,6 +1412,8 @@ async def _run_tester_turn_impl(
             tests_ran = True
             tests_passed = bool(res.detail.get("passed"))
             returncode = int(res.detail.get("returncode", -1))
+
+    _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="tester")
 
     # Commit/push determinístico dos test files (só test paths foram escritos —
     # o toolset garantiu). Escapes de git ficam no código, nunca no LLM.

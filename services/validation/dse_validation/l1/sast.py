@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from dse_contracts import L1Finding
+from dse_contracts import GateStatus, L1Finding
 
 from dse_validation.sandbox_exec import SandboxExecutor
 
@@ -22,7 +22,12 @@ def sast_check(
     result = executor.run(["bandit", "-r", target_dir, "-f", "json", "-q"], timeout=timeout)
 
     if result.returncode == 127:
-        return L1Finding(check="sast", passed=False, detail=f"bandit não encontrado: {result.stderr.strip()}")
+        return L1Finding(
+            check="sast",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"bandit não encontrado: {result.stderr.strip()}",
+        )
 
     # bandit sai com returncode 1 quando encontra issues (não é erro de execução).
     try:
@@ -31,6 +36,7 @@ def sast_check(
         return L1Finding(
             check="sast",
             passed=False,
+            status=GateStatus.ERROR,
             detail=f"bandit não produziu JSON válido (exit={result.returncode}): {result.stderr[:2000]}",
         )
 

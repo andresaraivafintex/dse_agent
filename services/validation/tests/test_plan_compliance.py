@@ -3,9 +3,14 @@ diff_budget_lines, forbidden_paths. `git diff --numstat` real contra o repo
 git de verdade da fixture `git_repo` (nada mockado)."""
 from __future__ import annotations
 
-from dse_contracts import PlanArtifact
+import subprocess
+
+import pytest
+
+from dse_contracts import GateStatus, PlanArtifact
 
 from dse_validation.l1.plan_compliance import (
+    DiffComputationError,
     compute_diff_summary,
     diff_budget_finding,
     forbidden_paths_finding,
@@ -13,63 +18,165 @@ from dse_validation.l1.plan_compliance import (
 )
 
 
-def test_diff_within_budget_and_expected_files_passes(sandbox, feature_branch):
+def test_diff_within_budget_and_expected_files_passes(sandbox, feature_branch, git_sha):
     feature_branch("app.py", "def add(a, b):\n    return a + b  # small tweak\n")
     plan = PlanArtifact(
         work_item_id="wi1", expected_files=["app.py"], diff_budget_lines=50, forbidden_paths=[]
     )
-    diff = compute_diff_summary(sandbox, "main")
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
     finding = diff_budget_finding(diff, plan)
     assert finding.check == "diff_budget"
     assert finding.passed is True
 
 
-def test_diff_over_budget_fails_and_cites_plan(sandbox, feature_branch, git_repo):
+def test_diff_over_budget_fails_and_cites_plan(sandbox, feature_branch, git_repo, git_sha):
     big_content = "\n".join(f"line_{i} = {i}" for i in range(500))
     feature_branch("app.py", big_content)
     plan = PlanArtifact(
         work_item_id="wi2", expected_files=["app.py"], diff_budget_lines=10, forbidden_paths=[]
     )
-    diff = compute_diff_summary(sandbox, "main")
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
     finding = diff_budget_finding(diff, plan)
     assert finding.passed is False
     assert "diff_budget_lines=10" in finding.detail
 
 
-def test_diff_touching_unexpected_file_fails(sandbox, feature_branch):
+def test_diff_touching_unexpected_file_now_passes(sandbox, feature_branch, git_sha):
+    """DECISÃO DO OPERADOR (3º disparo real): arquivo fora de expected_files
+    NÃO reprova mais — o Planner prevê o arquivo a partir do texto da issue e
+    num bug-fix o defeito mora noutra camada; o Coder (único que lê o código)
+    acerta. Anti-sprawl fica por conta do orçamento de linhas + forbidden_paths."""
     feature_branch("unexpected_module.py", "x = 1\n")
     plan = PlanArtifact(
         work_item_id="wi3", expected_files=["app.py"], diff_budget_lines=400, forbidden_paths=[]
     )
-    diff = compute_diff_summary(sandbox, "main")
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
     finding = diff_budget_finding(diff, plan)
-    assert finding.passed is False
-    assert "expected_files" in finding.detail
-    assert "unexpected_module.py" in finding.detail
+    assert finding.passed is True, finding.detail
 
 
-def test_diff_touching_forbidden_path_fails(sandbox, feature_branch):
+def test_diff_touching_forbidden_path_fails(sandbox, feature_branch, git_sha):
     feature_branch("migrations/0099_evil.sql", "DROP TABLE audit_log;\n")
-    plan = PlanArtifact(work_item_id="wi4", expected_files=[], diff_budget_lines=400)
-    diff = compute_diff_summary(sandbox, "main")
+    plan = PlanArtifact(
+        work_item_id="wi4",
+        expected_files=["migrations/0099_evil.sql"],
+        diff_budget_lines=400,
+    )
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
     finding = forbidden_paths_finding(diff, plan)
     assert finding.check == "forbidden_paths"
     assert finding.passed is False
     assert "migrations/" in finding.detail
 
 
-def test_diff_not_touching_forbidden_path_passes(sandbox, feature_branch):
+def test_diff_not_touching_forbidden_path_passes(sandbox, feature_branch, git_sha):
     feature_branch("app.py", "def add(a, b):\n    return a + b  # tweak\n")
     plan = PlanArtifact(work_item_id="wi5", expected_files=["app.py"], diff_budget_lines=400)
-    diff = compute_diff_summary(sandbox, "main")
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
     finding = forbidden_paths_finding(diff, plan)
     assert finding.passed is True
 
 
-def test_plan_compliance_findings_returns_exactly_two_findings(sandbox, feature_branch):
+def test_plan_compliance_findings_returns_exactly_two_findings(
+    sandbox, feature_branch, git_sha
+):
     feature_branch("app.py", "def add(a, b):\n    return a + b  # tweak2\n")
     plan = PlanArtifact(work_item_id="wi6", expected_files=["app.py"], diff_budget_lines=400)
-    findings = plan_compliance_findings(sandbox, plan, "main")
+    findings = plan_compliance_findings(sandbox, plan, git_sha("main"), git_sha())
     checks = {f.check for f in findings}
     assert checks == {"diff_budget", "forbidden_paths"}
     assert all(f.passed for f in findings)
+
+
+def test_diff_uses_immutable_sha_when_local_main_is_absent(
+    sandbox, feature_branch, git_repo, git_sha
+):
+    base_sha = git_sha("main")
+    feature_branch("app.py", "def add(a, b):\n    return a + b + 0\n")
+    head_sha = git_sha()
+    subprocess.run(
+        ["git", "branch", "-D", "main"],
+        cwd=git_repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    diff = compute_diff_summary(sandbox, base_sha, head_sha)
+
+    assert diff.files_changed == ["app.py"]
+
+
+def test_symbolic_git_ref_is_rejected(sandbox, git_sha):
+    with pytest.raises(DiffComputationError, match="SHA Git completo"):
+        compute_diff_summary(sandbox, "main", git_sha())
+
+
+def test_empty_expected_files_passes_when_within_budget(sandbox, git_sha):
+    """expected_files vazio não é mais NOT_CONFIGURED no gate — plano vazio é
+    barrado no WORKFLOW (patch reject-empty-expected-files-v1), antes do L1.
+    Aqui o diff é vazio (0 linhas) → passa por orçamento."""
+    plan = PlanArtifact(work_item_id="wi-empty", expected_files=[])
+    diff = compute_diff_summary(sandbox, git_sha(), git_sha())
+    assert diff_budget_finding(diff, plan).passed is True
+
+
+def test_no_code_change_explicitly_allows_empty_plan_on_empty_diff(sandbox, git_sha):
+    plan = PlanArtifact(work_item_id="wi-doc", expected_files=[], no_code_change=True)
+    diff = compute_diff_summary(sandbox, git_sha(), git_sha())
+
+    assert diff_budget_finding(diff, plan).passed is True
+
+
+def test_no_code_change_but_diff_present_fails(sandbox, feature_branch, git_sha):
+    """Inconsistência real: plano diz que não há mudança, mas o diff mudou."""
+    feature_branch("app.py", "x = 1\n")
+    plan = PlanArtifact(work_item_id="wi-nc", expected_files=[], no_code_change=True)
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    finding = diff_budget_finding(diff, plan)
+    assert finding.passed is False
+    assert finding.status == GateStatus.FAIL
+
+
+def _mk_diff(files: list[str], lines: int = 20) -> "DiffSummary":
+    from dse_validation.l1.plan_compliance import DiffSummary
+
+    return DiffSummary(
+        files_changed=files, total_lines_changed=lines,
+        base_sha="a" * 40, head_sha="b" * 40,
+    )
+
+
+def test_unexpected_source_file_passes_under_new_policy():
+    """3º disparo real: o Coder corrigiu src/store.js enquanto o plano previa
+    server.js (o Planner adivinha o arquivo pelo TEXTO da issue, antes de ler o
+    código). Sob a nova política isso PASSA — expected_files é advisory."""
+    plan = PlanArtifact(
+        work_item_id="wi_real", expected_files=["server.js", "test/api.test.js"],
+        diff_budget_lines=400, forbidden_paths=[],
+    )
+    diff = _mk_diff(["src/store.js", "test/api.test.js"], lines=285)
+    assert diff_budget_finding(diff, plan).passed is True
+
+
+def test_over_budget_still_fails_regardless_of_files():
+    """O orçamento de linhas continua sendo gate DURO (anti-sprawl real)."""
+    plan = PlanArtifact(
+        work_item_id="wi_big", expected_files=["src/store.js"],
+        diff_budget_lines=100, forbidden_paths=[],
+    )
+    diff = _mk_diff(["src/store.js"], lines=500)
+    finding = diff_budget_finding(diff, plan)
+    assert finding.passed is False
+    assert "diff_budget_lines=100" in finding.detail
+
+
+def test_lockfile_churn_passes_like_any_other_file():
+    """Churn de lockfile já é restaurado em RUNTIME antes do commit; se algum
+    escapar, o gate não reprova por arquivo (só por orçamento/forbidden)."""
+    plan = PlanArtifact(
+        work_item_id="wi_lock", expected_files=["src/store.js"],
+        diff_budget_lines=400, forbidden_paths=[],
+    )
+    diff = _mk_diff(["src/store.js", "package-lock.json", "test/delete.test.js"])
+    assert diff_budget_finding(diff, plan).passed is True

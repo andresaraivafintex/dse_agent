@@ -24,6 +24,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from dse_contracts import CoderTurnResult, GatewayCallHeaders
 
+from .runtime_profile import validate_runtime_profile
+
 
 @dataclass
 class TurnLog:
@@ -337,21 +339,34 @@ class ClaudeAgentSubstrate:
         self._tokens_out = 0
 
     async def _run_turn_async(self, instruction: str) -> TurnLog:
+        import asyncio as _asyncio
+
         import claude_agent_sdk as sdk
 
+        # Timeout DURO por turn (achado do disparo real 2026-07-22: o CLI
+        # pendurou 45+ min sem progresso — heartbeat da Activity continua
+        # batendo enquanto a thread trava, então heartbeat ≠ progresso; o
+        # start_to_close de 1h só mataria a activity inteira). TimeoutError
+        # vira retry normal do Temporal.
+        turn_timeout = float(os.environ.get("DSE_CODER_TURN_TIMEOUT_S", "900"))
+
         log = TurnLog(instruction=instruction, done=True)
-        async for message in sdk.query(prompt=instruction, options=self._options):
-            if isinstance(message, sdk.AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, sdk.TextBlock):
-                        log.thoughts.append(block.text)
-                    elif isinstance(block, sdk.ToolUseBlock):
-                        log.tool_calls.append(block.name)
-            elif isinstance(message, sdk.ResultMessage):
-                self._cost_usd += float(message.total_cost_usd or 0.0)
-                usage = message.usage or {}
-                self._tokens_in += int(usage.get("input_tokens", 0) or 0)
-                self._tokens_out += int(usage.get("output_tokens", 0) or 0)
+
+        async def _consume() -> None:
+            async for message in sdk.query(prompt=instruction, options=self._options):
+                if isinstance(message, sdk.AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, sdk.TextBlock):
+                            log.thoughts.append(block.text)
+                        elif isinstance(block, sdk.ToolUseBlock):
+                            log.tool_calls.append(block.name)
+                elif isinstance(message, sdk.ResultMessage):
+                    self._cost_usd += float(message.total_cost_usd or 0.0)
+                    usage = message.usage or {}
+                    self._tokens_in += int(usage.get("input_tokens", 0) or 0)
+                    self._tokens_out += int(usage.get("output_tokens", 0) or 0)
+
+        await _asyncio.wait_for(_consume(), timeout=turn_timeout)
         return log
 
     def run_turn(self, instruction: str) -> TurnLog:
@@ -402,6 +417,9 @@ def substrate_from_env(
     `openhands` ou `claude-agent`. Nome desconhecido é falha LIMPA (P6),
     nunca fallback silencioso para outro substrato."""
     chosen = (name or os.environ.get(SUBSTRATE_ENV_VAR, "fake")).strip().lower()
+    # Construção direta do fake continua suportada em dev/test, mas jamais
+    # pode ser selecionada pelo deployment de produção.
+    validate_runtime_profile(require_real_substrate=True, substrate_name=chosen)
     if chosen == "fake":
         return FakeSubstrate(script or [])
     if chosen == "openhands":

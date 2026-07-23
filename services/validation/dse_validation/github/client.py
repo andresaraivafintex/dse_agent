@@ -40,6 +40,8 @@ class GitHubClient(Protocol):
 
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict: ...
 
+    def update_pull_request(self, repo: str, pr_number: int, *, body: str) -> None: ...
+
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> str: ...
 
     def edit_issue_comment(self, repo: str, comment_id: str, body: str) -> None: ...
@@ -129,6 +131,7 @@ class RealGitHubClient:
             "merge_commit_sha": pr.get("merge_commit_sha"),
             "head_sha": (pr.get("head") or {}).get("sha"),
             "base_ref": (pr.get("base") or {}).get("ref"),
+            "body": pr.get("body") or "",
         }
 
     def get_tree_paths(self, repo: str, ref: str, *, limit: int = 300) -> list[str]:
@@ -156,6 +159,17 @@ class RealGitHubClient:
         pr = resp.json()
         return {"number": pr["number"], "html_url": pr["html_url"], "state": pr["state"]}
 
+    def update_pull_request(self, repo: str, pr_number: int, *, body: str) -> None:
+        """Edita o CORPO do PR (D1: o link do preview vai na descrição, não como
+        comentário). `PATCH /repos/{repo}/pulls/{n}`."""
+        resp = httpx.patch(
+            f"{self._cfg.api_base_url}/repos/{repo}/pulls/{pr_number}",
+            headers=self._headers(),
+            json={"body": body},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> str:
         resp = httpx.post(
             f"{self._cfg.api_base_url}/repos/{repo}/issues/{issue_number}/comments",
@@ -174,6 +188,18 @@ class RealGitHubClient:
             timeout=15.0,
         )
         resp.raise_for_status()
+
+    def list_issue_comments(self, repo: str, issue_number: int) -> list[dict]:
+        """Comentários de uma issue/PR (PR é issue no GitHub) — usado para
+        idempotência do link de preview (edita em vez de duplicar)."""
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/issues/{issue_number}/comments",
+            headers=self._headers(),
+            params={"per_page": 100},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        return [{"id": str(c["id"]), "body": c.get("body") or ""} for c in resp.json()]
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]:
         resp = httpx.get(
@@ -258,6 +284,18 @@ class FakeGitHubClient:
         self._prs[(repo, head)] = pr
         self._pr_by_number[(repo, number)] = pr
         return dict(pr)
+
+    def update_pull_request(self, repo: str, pr_number: int, *, body: str) -> None:
+        pr = self._pr_by_number.get((repo, pr_number))
+        if pr is None:
+            raise KeyError(f"PR {pr_number} não existe no FakeGitHubClient")
+        pr["body"] = body
+
+    def get_pull_request(self, repo: str, pr_number: int) -> dict | None:
+        pr = self._pr_by_number.get((repo, pr_number))
+        if pr is None:
+            return None
+        return {"number": pr["number"], "state": pr["state"], "body": pr.get("body") or ""}
 
     def post_issue_comment(self, repo: str, issue_number: int, body: str) -> str:
         comment_id = str(next(self._comment_id_seq))

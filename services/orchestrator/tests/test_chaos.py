@@ -127,10 +127,10 @@ async def test_worker_crash_mid_activity_recovers_without_loss_or_duplication(tm
 
             # --- 5. o workflow deve retomar sozinho (Temporal reenvia a
             # Activity travada apos o heartbeat_timeout) e progredir ate pr_ready ---
-            await _wait_for_status(client, work_item_id, {"pr_ready"}, attempts=600)
+            await _wait_for_status(client, work_item_id, {"review_ready"}, attempts=600)
 
             await handle.signal("review_comment", {"verdict": "approved"})
-            await handle.signal("merged_by_human", {})
+            await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
             result = await handle.result()
         finally:
             normal_proc.send_signal(signal.SIGTERM)
@@ -293,9 +293,9 @@ async def test_gateway_oscillation_transient_recovers_and_completes(time_skippin
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status_local(handle, {"pr_ready"})  # recuperou apesar da oscilacao
+        await _wait_for_status_local(handle, {"review_ready"})  # recuperou apesar da oscilacao
         await handle.signal("review_comment", {"verdict": "approved"})
-        await handle.signal("merged_by_human", {})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
