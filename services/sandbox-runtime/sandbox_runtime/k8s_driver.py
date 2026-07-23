@@ -166,6 +166,9 @@ class KubernetesSandboxDriver:
     def supports_isolated_stage_execution(self) -> bool:
         return True
 
+    def sandbox_id_for(self, work_item_id: str) -> str:
+        return pod_name_for(work_item_id)
+
     def _kubectl(self, args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
         if shutil.which(self._cfg.kubectl) is None:
             raise IsolatedStageExecutionUnavailable(

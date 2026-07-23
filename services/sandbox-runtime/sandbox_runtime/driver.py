@@ -2,12 +2,17 @@
 
 O adapter Docker existente continua sendo a implementação do lifecycle local
 sem alteração nas funções públicas de ``docker_driver``/``git_checkpoint``.
-``execute_stage`` é deliberadamente fail-closed: o agent-runner isolado ainda
-não foi conectado e este contrato nunca degrada para ``agent.run_turn()`` no
-worker. Um futuro driver Kubernetes deve implementar a mesma interface.
+``execute_stage`` entrega o payload tipado ao agent-runner DENTRO do sandbox
+(`docker exec -i` aqui; `kubectl exec -i` no driver K8s) e é fail-closed em
+qualquer indisponibilidade — este contrato nunca degrada para
+``agent.run_turn()`` no worker (invariante 2 da spec).
 """
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -84,6 +89,11 @@ class SandboxDriver(Protocol):
     def supports_isolated_stage_execution(self) -> bool:
         ...
 
+    def sandbox_id_for(self, work_item_id: str) -> str:
+        """Identidade estável do sandbox deste work item no runtime alvo
+        (nome do container no Docker, nome do Pod no K8s)."""
+        ...
+
     def provision(self, request: SandboxProvisionRequest) -> docker_driver.ProvisionedSandbox:
         ...
 
@@ -103,14 +113,20 @@ class SandboxDriver(Protocol):
 class DockerSandboxDriver:
     """Adapter compatível sobre o lifecycle Docker atual.
 
-    Ele prepara a migração sem afirmar uma garantia inexistente: enquanto a
-    imagem agent-runner/exec isolado não estiver implementada, ``execute_stage``
-    falha explicitamente e a propriedade de capacidade permanece ``False``.
+    ``execute_stage`` (Fase 1, plano 09) roda o agent-runner DENTRO do
+    container do sandbox via ``docker exec -i`` — simétrico ao ``kubectl
+    exec -i`` do driver K8s. Exige a imagem do sandbox com o módulo
+    ``agent_runner`` instalado (``make agent-runner-image``); qualquer
+    indisponibilidade (docker ausente, container morto, runner ausente na
+    imagem) é falha limpa — NUNCA fallback para execução no worker.
     """
 
     @property
     def supports_isolated_stage_execution(self) -> bool:
-        return False
+        return True
+
+    def sandbox_id_for(self, work_item_id: str) -> str:
+        return docker_driver.container_name_for(work_item_id)
 
     def provision(self, request: SandboxProvisionRequest) -> docker_driver.ProvisionedSandbox:
         return docker_driver.provision_container(
@@ -125,9 +141,51 @@ class DockerSandboxDriver:
         )
 
     def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
-        raise IsolatedStageExecutionUnavailable(
-            "DockerSandboxDriver ainda não possui agent-runner isolado para "
-            f"stage={request.stage.value!r}; execução local é proibida como fallback"
+        docker_bin = shutil.which("docker")
+        if docker_bin is None:
+            raise IsolatedStageExecutionUnavailable(
+                "docker CLI não encontrado — execução isolada indisponível; "
+                "execução local é proibida como fallback (invariante 2)"
+            )
+        started = time.time()
+        payload = json.dumps({"stage": request.stage.value, "input": request.input_payload})
+        try:
+            proc = subprocess.run(
+                [docker_bin, "exec", "-i", request.sandbox_id,
+                 "python", "-m", "agent_runner", "--stage", request.stage.value],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=request.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise IsolatedStageExecutionUnavailable(
+                f"agent-runner excedeu {request.timeout_seconds:.0f}s no exec "
+                f"(stage={request.stage.value!r}, sandbox={request.sandbox_id})"
+            ) from exc
+        except FileNotFoundError as exc:  # docker sumiu entre o which e o exec
+            raise IsolatedStageExecutionUnavailable(
+                "docker CLI indisponível no exec — sem fallback local"
+            ) from exc
+        if proc.returncode != 0:
+            raise IsolatedStageExecutionUnavailable(
+                f"docker exec agent_runner falhou (exit={proc.returncode}, "
+                f"sandbox={request.sandbox_id}): {proc.stderr.strip()[:400]} "
+                "— sem fallback local"
+            )
+        try:
+            # última linha JSON: o runner escreve exatamente um resultado
+            out = json.loads((proc.stdout or "").strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as exc:
+            raise IsolatedStageExecutionUnavailable(
+                f"agent-runner devolveu stdout não-JSON (sandbox={request.sandbox_id}): "
+                f"{(proc.stdout or '')[:200]!r}"
+            ) from exc
+        return StageExecutionResult(
+            stage=request.stage,
+            output_payload=out,
+            exit_code=proc.returncode,
+            duration_seconds=time.time() - started,
         )
 
     def checkpoint(self, request: SandboxCheckpointRequest) -> CheckpointRef:

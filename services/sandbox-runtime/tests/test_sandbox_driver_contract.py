@@ -55,19 +55,23 @@ def test_docker_adapter_preserves_existing_provision_api(monkeypatch):
     }
 
 
-def test_execute_stage_fails_closed_instead_of_using_worker_fallback():
+def test_execute_stage_is_isolated_and_fails_closed_when_unavailable():
+    """Fase 1 (plano 09): execute_stage roda o agent-runner via docker exec.
+    Indisponibilidade (docker ausente, container inexistente, runner fora da
+    imagem) é falha LIMPA — nunca degrada para execução no worker."""
     driver = DockerSandboxDriver()
     request = StageExecutionRequest(
-        sandbox_id="container-123",
+        sandbox_id="dse-sandbox-inexistente-xyz",
         work_item_id="wi-driver",
         tenant_id="tenant-driver",
         stage=Stage.coder,
         input_payload={"instruction": "não deve rodar localmente"},
-        timeout_seconds=60,
+        timeout_seconds=30,
     )
 
-    assert driver.supports_isolated_stage_execution is False
-    with pytest.raises(IsolatedStageExecutionUnavailable, match="execução local é proibida"):
+    assert driver.supports_isolated_stage_execution is True
+    assert driver.sandbox_id_for("wi-driver") == "dse-sandbox-wi-driver"
+    with pytest.raises(IsolatedStageExecutionUnavailable, match="fallback"):
         driver.execute_stage(request)
 
 

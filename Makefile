@@ -49,3 +49,9 @@ lint:
 		-not -path '*/node_modules/*' -not -path '*/.venv*/*' \
 		-not -path '*/preview_repo/*')
 	ruff check packages services scripts/test_matrix.py
+
+# Imagem do sandbox com o agent-runner (Fase 1 — turno isolado). Com ela
+# construída, DSE_SANDBOX_IMAGE=dse/agent-runner:local DSE_SANDBOX_INPROCESS=0
+# roda o turno do Coder DENTRO do container (e os testes live de exec ligam).
+agent-runner-image:
+	docker build -f services/sandbox-runtime/agent-runner/Dockerfile -t dse/agent-runner:local .

@@ -52,12 +52,14 @@ from dse_contracts import (
 
 from . import docker_driver, git_checkpoint, leases_store, metrics
 from .activity_heartbeat import run_sync_with_heartbeat
-from .driver import DEFAULT_SANDBOX_DRIVER
+from .driver import DEFAULT_SANDBOX_DRIVER, select_sandbox_driver
 from .model_gateway_client import mint_virtual_key
+from .remote_substrate import RemoteSubstrate
 from .retrieval import RetrievalService
 from .runtime_profile import (
     RuntimeProfile,
     reject_local_agent_execution,
+    sandbox_inprocess_enabled,
     validate_runtime_profile,
     validate_runtime_startup,
 )
@@ -364,14 +366,26 @@ async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
 from dse_contracts.activities import RunCoderTurnInput  # noqa: E402
 
 
-def _build_substrate(script: list[dict[str, Any]] | None) -> AgentSubstrate:
+def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder") -> AgentSubstrate:
     """Fábrica de substrato. Fase 3 (WSC-E3-T6): a escolha é CONFIG POR
     DEPLOYMENT — `DSE_CODER_SUBSTRATE` em {fake|openhands|claude-agent},
     default `fake` (nenhuma dependência de gateway/SDK precisa estar de pé
     para os testes). Trocar de substrato nunca muda código de workflow: o
     WS-B continua chamando `run_coder_turn` por nome, e esta factory resolve
-    o adapter atrás da mesma interface `AgentSubstrate`."""
-    return substrate_from_env(script=script)
+    o adapter atrás da mesma interface `AgentSubstrate`.
+
+    Fase 1 (plano 09): com `DSE_SANDBOX_INPROCESS=0` (e SEMPRE em produção)
+    o substrato vira `RemoteSubstrate` — mesmo nome de substrato, mas o SDK
+    executa DENTRO do sandbox via `SandboxDriver.execute_stage`; o worker só
+    despacha o contrato tipado (invariante 2 da spec)."""
+    if sandbox_inprocess_enabled():
+        return substrate_from_env(script=script)
+    return RemoteSubstrate(
+        driver=select_sandbox_driver(),
+        substrate_name=os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower(),
+        stage=stage,
+        fake_script=script,
+    )
 
 
 def _prune_disposable_artifacts(
@@ -494,7 +508,13 @@ async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
     injeção de dependência para teste (`substrate`/`script`) vivem em
     `_run_coder_turn_impl`, chamada tanto por aqui (produção, sem overrides)
     quanto diretamente pelos testes (com `FakeSubstrate` roteirizado)."""
-    reject_local_agent_execution("coder")
+    if sandbox_inprocess_enabled():
+        # Caminho legado in-process: proibido em produção (fail-closed).
+        reject_local_agent_execution("coder")
+    else:
+        # Caminho isolado (Fase 1): o SDK roda no agent-runner dentro do
+        # sandbox; aqui só validamos substrato/gateway reais por perfil.
+        validate_runtime_profile(require_real_substrate=True, require_real_gateway=True)
     return await _run_coder_turn_impl(inp)
 
 
@@ -524,7 +544,7 @@ async def _run_coder_turn_impl(
     )
     vk = mint_virtual_key(headers)
 
-    agent = substrate if substrate is not None else _build_substrate(script)
+    agent = substrate if substrate is not None else _build_substrate(script, stage=inp.stage)
     agent.create_session(
         work_item_id=inp.work_item_id,
         workspace_dir=workspace_dir,

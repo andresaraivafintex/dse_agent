@@ -99,33 +99,47 @@ def test_safe_static_production_configuration_passes_preflight(monkeypatch):
     assert validate_runtime_startup() is RuntimeProfile.production
 
 
-def test_worker_activity_registration_refuses_boot_until_execute_stage_is_isolated():
-    env = os.environ.copy()
-    env.update(
-        {
-            PROFILE_ENV_VAR: "production",
-            SANDBOX_INPROCESS_ENV_VAR: "0",
-            SUBSTRATE_ENV_VAR: "claude-agent",
-            MODEL_GATEWAY_FIXTURE_ENV_VAR: "0",
-        }
-    )
+def test_worker_boot_in_production_requires_isolated_execution_semantics():
+    """Fase 1 (plano 09): com o driver suportando execute_stage isolado
+    (docker exec/kubectl exec → agent-runner), o boot em produção com config
+    segura é PERMITIDO — e continua recusado se alguém religar o in-process."""
+    base = {
+        PROFILE_ENV_VAR: "production",
+        SUBSTRATE_ENV_VAR: "claude-agent",
+        MODEL_GATEWAY_FIXTURE_ENV_VAR: "0",
+    }
+
+    env_ok = os.environ.copy()
+    env_ok.update(base | {SANDBOX_INPROCESS_ENV_VAR: "0"})
     result = subprocess.run(
         [sys.executable, "-c", "import sandbox_runtime.activities"],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        env=env_ok, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    env_inprocess = os.environ.copy()
+    env_inprocess.update(base | {SANDBOX_INPROCESS_ENV_VAR: "1"})
+    result = subprocess.run(
+        [sys.executable, "-c", "import sandbox_runtime.activities"],
+        env=env_inprocess, capture_output=True, text=True, check=False,
     )
     assert result.returncode != 0
-    assert "execute_stage isolado ainda não está disponível" in result.stderr
+    assert "execução fora do sandbox" in result.stderr
 
 
-def test_current_local_coder_activity_is_blocked_even_with_safe_static_config(monkeypatch):
-    """Até execute_stage apontar para o agent-runner, não há flag que torne
-    o caminho local atual aceitável em produção."""
+def test_production_coder_is_isolated_never_inprocess(monkeypatch):
+    """Fase 1 (plano 09): em produção o turno do Coder SÓ existe isolado —
+    a fábrica devolve RemoteSubstrate (o SDK nunca roda no worker) e religar
+    o in-process por flag continua recusado."""
+    from sandbox_runtime.activities import _build_substrate
+    from sandbox_runtime.remote_substrate import RemoteSubstrate
+
     _production(monkeypatch)
+    assert isinstance(_build_substrate(None, stage="coder"), RemoteSubstrate)
+
+    monkeypatch.setenv(SANDBOX_INPROCESS_ENV_VAR, "1")
     inp = RunCoderTurnInput(work_item_id="wi-prod", tenant_id="tenant-prod", instruction="edite")
-    with pytest.raises(RuntimeProfileViolation, match="fallback local proibido"):
+    with pytest.raises(RuntimeProfileViolation, match="execução fora do sandbox"):
         asyncio.run(run_coder_turn(inp))
 
 

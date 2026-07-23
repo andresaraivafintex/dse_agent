@@ -70,6 +70,20 @@ def model_gateway_fixture_allowed() -> bool:
     return _flag(MODEL_GATEWAY_FIXTURE_ENV_VAR, default=True)
 
 
+def sandbox_inprocess_enabled() -> bool:
+    """Modo do turno de agente (Fase 1, plano 09).
+
+    dev/test: default True (compatibilidade — o in-process continua sendo o
+    caminho dos testes sem docker); `DSE_SANDBOX_INPROCESS=0` liga o modo
+    isolado (RemoteSubstrate → agent-runner dentro do sandbox).
+    production: SEMPRE False — o turno só existe isolado; setar a flag para
+    true em produção já é violação em `validate_runtime_profile`.
+    """
+    if current_runtime_profile() is RuntimeProfile.production:
+        return False
+    return _flag(SANDBOX_INPROCESS_ENV_VAR, default=True)
+
+
 def validate_runtime_profile(
     *,
     require_real_substrate: bool = False,

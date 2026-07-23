@@ -36,4 +36,8 @@ COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
 USER 10001:10001
 # /workspace e /tmp vêm de emptyDir graváveis (o rootfs é read-only no Pod)
 ENV HOME=/tmp PYTHONUNBUFFERED=1
-ENTRYPOINT ["python", "-m", "agent_runner"]
+# O container fica VIVO e ocioso; cada turno chega por exec
+# (`docker exec -i` / `kubectl exec -i` → python -m agent_runner). ENTRYPOINT
+# de runner aqui seria bug: o processo leria stdin EOF no boot e sairia antes
+# de qualquer exec (pod restartPolicy=Never morreria "Completed").
+CMD ["sleep", "infinity"]

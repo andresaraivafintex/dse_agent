@@ -116,6 +116,13 @@ def _container_name(work_item_id: str) -> str:
     return f"dse-sandbox-{safe}"
 
 
+def container_name_for(work_item_id: str) -> str:
+    """Nome público e estável do container do sandbox deste work item —
+    usado pelo `SandboxDriver.sandbox_id_for` (alvo do `docker exec` do
+    agent-runner). Mesma derivação da criação (idempotência por nome+label)."""
+    return _container_name(work_item_id)
+
+
 def find_existing_container(work_item_id: str, client: docker.DockerClient | None = None) -> Container | None:
     """Idempotência de provisionamento (WSC-E1-T3): procura por label antes de
     criar. Considera qualquer estado (running/exited) — reaproveita."""
