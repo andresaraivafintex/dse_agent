@@ -1,15 +1,16 @@
-"""Plano 08 §G — entrypoint do agent-runner isolado.
+"""Entrypoint do agent-runner isolado (plano 08 §G + plano 09 Fase 1).
 
-Roda UM estágio do agente dentro do Pod endurecido. Lê o payload do estágio do
-stdin (JSON `{"stage": ..., "input": {...}}`), executa o substrato do agente
-(edições de arquivo no /workspace; NUNCA decide fluxo — P1), e escreve o
-resultado no stdout (JSON) para o KubernetesSandboxDriver coletar via
-`kubectl exec`.
+Roda UM turno de agente dentro do container/pod endurecido. Lê do stdin o
+envelope `{"stage": ..., "input": <AgentTurnRequest>}` (formato que os drivers
+enviam via `docker exec -i` / `kubectl exec -i`; o request cru sem envelope
+também é aceito), valida com o contrato REAL do dse_contracts (spec §5 — nada
+de dict solto), executa o substrato via `executor.run_agent_turn` e escreve um
+`AgentTurnResult` JSON no stdout.
 
-Nesta entrega o corpo do estágio é um stub explícito: o CÓDIGO do driver + a
-imagem + o Pod spec endurecido são o que o §G promete agora; conectar o
-substrato real (mesmo `_build_substrate` do worker) roda quando a imagem é
-publicada no registry do cluster. Fail-clean: estágio desconhecido → exit!=0.
+Disciplina de saída: se conseguimos produzir um resultado ESTRUTURADO (mesmo
+de erro — error_kind preenchido), exit 0 e o worker decide pelo payload.
+Exit != 0 fica reservado para falha catastrófica (payload indecodificável),
+que o driver traduz em falha limpa da Activity — nunca fallback local.
 """
 from __future__ import annotations
 
@@ -21,26 +22,35 @@ import sys
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent_runner")
     parser.add_argument("--stage", required=True)
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
 
     raw = sys.stdin.read() or "{}"
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        print(json.dumps({"error": "invalid_payload"}))
+        print(json.dumps({"error": "invalid_payload", "detail": "stdin não é JSON"}))
         return 2
 
-    stage = args.stage
-    # placeholder determinístico: eco do estágio + eco do input. A ligação com o
-    # substrato real (agente escrevendo código no /workspace) acompanha a
-    # publicação da imagem no cluster (prova viva — decisão de infra).
-    result = {
-        "stage": stage,
-        "runner": "agent-runner",
-        "received_keys": sorted((payload.get("input") or {}).keys()),
-        "note": "isolated-stage-stub (§G): substrato real liga com o cluster",
-    }
-    print(json.dumps(result))
+    from dse_contracts import AgentTurnRequest
+
+    body = payload.get("input", payload) if isinstance(payload, dict) else payload
+    try:
+        request = AgentTurnRequest.model_validate(body)
+    except Exception as exc:  # noqa: BLE001 — ValidationError vira resultado estruturado
+        from dse_contracts import AgentTurnResult
+
+        result = AgentTurnResult(
+            done=False,
+            error=f"payload não obedece AgentTurnRequest: {str(exc)[:500]}",
+            error_kind="invalid_payload",
+        )
+        print(result.model_dump_json())
+        return 0
+
+    from .executor import run_agent_turn
+
+    result = run_agent_turn(request)
+    print(result.model_dump_json())
     return 0
 
 

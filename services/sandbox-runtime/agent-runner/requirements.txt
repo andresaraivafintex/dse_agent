@@ -1,2 +1,5 @@
-anthropic>=0.40
+# Runtime do agente DENTRO do sandbox. Pinar em produção (release por digest).
+# claude-agent-sdk: substrato primário (o wheel embute o CLI — sem node global).
+claude-agent-sdk>=0.2
+pydantic>=2
 httpx>=0.27

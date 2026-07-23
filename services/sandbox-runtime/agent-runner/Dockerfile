@@ -25,6 +25,11 @@ RUN apt-get update \
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# contrato tipado da fronteira worker→runner (AgentTurnRequest/Result): o
+# runner valida com o modelo REAL (spec §5), nunca com dict solto.
+COPY packages/contracts /app/packages/contracts
+RUN pip install --no-cache-dir /app/packages/contracts
+
 # código do runner (o módulo agent_runner + o sandbox_runtime compartilhado)
 COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
 
