@@ -462,14 +462,14 @@ class WorkItemLifecycleWorkflow:
         if (input.task_content or "").strip():
             parts.append(input.task_content.strip())
         if (input.acceptance_criteria or "").strip():
-            parts.append(f"Critério de aceite: {input.acceptance_criteria.strip()}")
+            parts.append(f"Acceptance criteria: {input.acceptance_criteria.strip()}")
         for note in input.clarification_notes:
             if note and note.strip():
-                parts.append(f"Esclarecimento: {note.strip()}")
+                parts.append(f"Clarification: {note.strip()}")
         if include_objections:
             for obj in getattr(input, "l2_objections", []) or []:
                 if obj and str(obj).strip():
-                    parts.append(f"Objeção do review a corrigir: {str(obj).strip()}")
+                    parts.append(f"Review objection to fix: {str(obj).strip()}")
         return "\n\n".join(parts) or "Implementar a tarefa solicitada."
 
     def _pr_summary(self) -> str:
@@ -483,7 +483,7 @@ class WorkItemLifecycleWorkflow:
         title = ""
         if (input.task_content or "").strip():
             title = input.task_content.strip().splitlines()[0].strip()
-        return plan_summary or title or f"DSE: alteração automatizada ({input.work_item_id})"
+        return plan_summary or title or f"DSE: automated change ({input.work_item_id})"
 
     @staticmethod
     def _l1_evidence(l1_result) -> str:
@@ -495,7 +495,7 @@ class WorkItemLifecycleWorkflow:
         if l1_result is None or not getattr(l1_result, "findings", None):
             return ""
         checks = ", ".join(f"{f.check} ✓" for f in l1_result.findings if f.passed)
-        return f"L1 verde ({checks})" if checks else ""
+        return f"L1 green ({checks})" if checks else ""
 
     async def _boundary_gate(self) -> None:
         """Checado antes de CADA Activity de negocio (nao antes de bookkeeping
@@ -1040,11 +1040,11 @@ class WorkItemLifecycleWorkflow:
             # (issue do GitHub), enumerando os campos faltantes — antes disto o
             # humano nunca via o que era pedido. Best-effort (nunca derruba o
             # workflow); a Activity auto-resolve repo/issue_number pelo work_item.
-            _field_pt = {"acceptance_criteria": "critério de aceite / comportamento esperado",
-                         "repo": "repositório", "base_branch": "branch base"}
-            question = "Faltam estas informações para eu começar: " + ", ".join(
-                _field_pt.get(m, m) for m in completeness["missing"]
-            ) + ". Responda nesta thread que eu retomo automaticamente."
+            _field_labels = {"acceptance_criteria": "acceptance criteria / expected behavior",
+                             "repo": "repository", "base_branch": "base branch"}
+            question = "I need the following information before I can start: " + ", ".join(
+                _field_labels.get(m, m) for m in completeness["missing"]
+            ) + ". Reply in this thread and I will resume automatically."
             try:
                 await workflow.execute_activity(
                     ACTIVITY_POST_TRACKING_COMMENT,
@@ -1334,8 +1334,8 @@ class WorkItemLifecycleWorkflow:
                     )
                     if manifest_bad is not None:
                         raise _EscalateNow(
-                            "l1_manifest_not_configured: o repo alvo precisa do "
-                            f".dse/validation.json no branch base ({manifest_bad.detail[:160]})"
+                            "l1_manifest_not_configured: the target repo needs "
+                            f".dse/validation.json on the base branch ({manifest_bad.detail[:160]})"
                         )
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
@@ -1808,7 +1808,7 @@ class WorkItemLifecycleWorkflow:
             # reportou >0, algo violou a garantia — nao seguimos adivinhando (P6).
             raise _EscalateNow(
                 f"base_branch_orphaned_threads:{result.orphaned_threads} "
-                f"(strategy={result.strategy}) — viola invariante de zero orfas"
+                f"(strategy={result.strategy}) — violates the zero-orphaned-threads invariant"
             )
 
     async def _emit_pr_quality_metric(self, outcome: str) -> None:
@@ -2431,11 +2431,11 @@ class WorkItemLifecycleWorkflow:
         (C3) via post_tracking_comment (body custom). Best-effort — jamais
         bloqueia (o audit ledger é a verdade; o comentário é conveniência)."""
         input = self._input
-        label = "front (UI)" if kind == "ui" else "serviço" if kind == "deployable" else "app"
+        label = "frontend (UI)" if kind == "ui" else "service" if kind == "deployable" else "app"
         body = (
-            f"🔗 **Preview ({label}) pronto** — acesse e decida:\n\n{url}\n\n"
-            "_Ambiente efêmero por PR (Argo CD, TTL). O merge continua sendo "
-            "decisão humana (P1)._"
+            f"🔗 **Preview ({label}) ready** — open it and decide:\n\n{url}\n\n"
+            "_Ephemeral per-PR environment (Argo CD, TTL). Merging remains a "
+            "human decision (P1)._"
         )
         try:
             await workflow.execute_activity(

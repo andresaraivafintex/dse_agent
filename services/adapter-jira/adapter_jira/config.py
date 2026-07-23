@@ -59,13 +59,13 @@ def get_trigger_label() -> str:
 def get_plan_approved_status() -> str:
     """Nome da coluna/status cuja TRANSIÇÃO é lida como aprovação de plano
     (UC5, WSA-E5-T1). Ex.: 'Plano aprovado'."""
-    return os.environ.get("JIRA_PLAN_APPROVED_STATUS", "Plano aprovado")
+    return os.environ.get("JIRA_PLAN_APPROVED_STATUS", "Plan approved")
 
 
 def get_plan_rejected_status() -> str:
     """Nome da coluna/status cuja transição é lida como REJEIÇÃO de plano
     (opcional). Ex.: 'Plano rejeitado'."""
-    return os.environ.get("JIRA_PLAN_REJECTED_STATUS", "Plano rejeitado")
+    return os.environ.get("JIRA_PLAN_REJECTED_STATUS", "Plan rejected")
 
 
 def get_poll_projects() -> list[str]:

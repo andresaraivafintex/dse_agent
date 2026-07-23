@@ -114,19 +114,19 @@ class PlannerContext:
     repo_map: str = ""
 
     def render(self) -> str:
-        parts: list[str] = [f"# Contexto do Planner — work_item {self.work_item_id} (tenant {self.tenant_id})"]
+        parts: list[str] = [f"# Planner context — work_item {self.work_item_id} (tenant {self.tenant_id})"]
         if self.agents_md:
-            parts.append("## AGENTS.md (confiável)\n" + self.agents_md)
+            parts.append("## AGENTS.md (trusted)\n" + self.agents_md)
         if self.codeowners:
-            parts.append("## CODEOWNERS (confiável)\n" + self.codeowners)
+            parts.append("## CODEOWNERS (trusted)\n" + self.codeowners)
         if self.skills:
-            parts.append("## Skills aprovadas do tenant (confiável)\n" + "\n\n".join(s.as_context_block() for s in self.skills))
+            parts.append("## Approved tenant skills (trusted)\n" + "\n\n".join(s.as_context_block() for s in self.skills))
         if self.repo_map:
             parts.append("## Repo map\n" + self.repo_map)
         # Não confiável por último, claramente demarcado.
         untrusted_blocks: list[str] = []
         if self.tickets:
-            untrusted_blocks.append("Tickets relacionados:\n" + "\n---\n".join(self.tickets))
+            untrusted_blocks.append("Related tickets:\n" + "\n---\n".join(self.tickets))
         if self.retrieval_hits:
             untrusted_blocks.append(render_untrusted_context(self.retrieval_hits))
         if untrusted_blocks:
@@ -331,15 +331,15 @@ class ReviewerContext:
 
     def render(self) -> str:
         return (
-            f"# Revisão L2 — work_item {self.work_item_id}\n\n"
-            f"## Plano a que o diff deve aderir\n"
+            f"# L2 review — work_item {self.work_item_id}\n\n"
+            f"## Plan the diff must adhere to\n"
             f"steps: {self.plan.steps}\n"
             f"expected_files (blast radius declarado): {self.plan.expected_files}\n"
             f"diff_budget_lines: {self.plan.diff_budget_lines}\n"
             f"test_plan: {self.plan.test_plan}\n"
             f"risk_class: {self.plan.risk_class}\n"
             f"forbidden_paths: {self.plan.forbidden_paths}\n\n"
-            f"## Diff final a revisar\n{self.diff}"
+            f"## Final diff to review\n{self.diff}"
         )
 
 

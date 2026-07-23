@@ -599,23 +599,23 @@ async def emit_audit_event(payload: dict[str, Any]) -> None:
 # produza um comentário. Hoje GitHub; Slack/Jira reusam o mesmo vocabulário de
 # status via seus próprios adapters de saída.
 _STATUS_BODIES = {
-    "needs_clarification": "🔎 O DSE precisa de esclarecimento antes de começar:\n\n{detail}",
-    "awaiting_plan_approval": "📋 Plano pronto — aguardando aprovação humana (risco: {detail}).",
-    "implementing": "⚙️ O DSE está implementando a mudança em um sandbox isolado.",
-    "validating": "🧪 Implementação pronta — rodando validação (L1/L2) no sandbox.",
-    "pr_ready": "✅ PR aberto com a mudança e evidência — pronto para revisão humana.",
-    "pr_updated": "🔁 PR atualizado com o fix do review — pronto para nova revisão.",
-    "done": "🎉 Merge feito por humano. Tarefa concluída.",
-    "failed": "❌ A tarefa falhou e parou: {detail}",
+    "needs_clarification": "🔎 The DSE needs clarification before it can start:\n\n{detail}",
+    "awaiting_plan_approval": "📋 Plan ready — awaiting human approval (risk: {detail}).",
+    "implementing": "⚙️ The DSE is implementing the change in an isolated sandbox.",
+    "validating": "🧪 Implementation ready — running validation (L1/L2) in the sandbox.",
+    "pr_ready": "✅ PR opened with the change and evidence — ready for human review.",
+    "pr_updated": "🔁 PR updated with the review fix — ready for another review.",
+    "done": "🎉 Merged by a human. Task completed.",
+    "failed": "❌ The task failed and stopped: {detail}",
     "escalated": (
-        "⚠️ O DSE escalou esta tarefa para revisão humana e parou.\n\n"
-        "**Motivo:** {detail}\n\n"
-        "Revise a descrição / critérios de aceite e re-aplique a label `dse` "
-        "para tentar novamente."
+        "⚠️ The DSE escalated this task for human review and stopped.\n\n"
+        "**Reason:** {detail}\n\n"
+        "Review the description / acceptance criteria and re-apply the `dse` "
+        "label to try again."
     ),
     "blocked": (
-        "🚧 Bloqueado aguardando intervenção humana.\n\n**Motivo:** {detail}\n\n"
-        "(ex.: nenhum aprovador resolvível — ajuste CODEOWNERS / access bundle.)"
+        "🚧 Blocked awaiting human intervention.\n\n**Reason:** {detail}\n\n"
+        "(e.g. no resolvable approver — adjust CODEOWNERS / access bundle.)"
     ),
 }
 
@@ -658,7 +658,7 @@ async def post_tracking_comment(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": True, "skipped": f"source={source}_no_target"}
 
     if not body:
-        template = _STATUS_BODIES.get(status, "Status do DSE: {status}")
+        template = _STATUS_BODIES.get(status, "DSE status: {status}")
         body = template.format(detail=detail or "—", status=status)
 
     adapter_url, extra_fields = target
