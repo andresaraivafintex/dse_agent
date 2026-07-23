@@ -16,6 +16,10 @@ from .agent_turn import (
     AgentTurnGateway,
     AgentTurnRequest,
     AgentTurnResult,
+    CheckpointOpRequest,
+    CheckpointOpResult,
+    WorkspaceBootstrapRequest,
+    WorkspaceBootstrapResult,
 )
 from .mutable_comment import CommentBackend, MutableCommentWriter
 from .constants import (
@@ -94,7 +98,11 @@ __all__ = [
     "AgentTurnGateway",
     "AgentTurnRequest",
     "AgentTurnResult",
+    "CheckpointOpRequest",
+    "CheckpointOpResult",
     "KNOWN_SUBSTRATES",
+    "WorkspaceBootstrapRequest",
+    "WorkspaceBootstrapResult",
     "TASK_QUEUE",
     "WORKFLOW_TYPE",
     "SIGNAL_CLARIFICATION_ANSWER",

@@ -30,8 +30,19 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY packages/contracts /app/packages/contracts
 RUN pip install --no-cache-dir /app/packages/contracts
 
+# substrato openhands é OPT-IN (a imagem default fica enxuta p/ VPS 2vCPU):
+# docker build --build-arg INSTALL_OPENHANDS=1 ...
+ARG INSTALL_OPENHANDS=0
+COPY services/sandbox-runtime/agent-runner/requirements-openhands.txt /app/requirements-openhands.txt
+RUN if [ "$INSTALL_OPENHANDS" = "1" ]; then \
+      pip install --no-cache-dir -r /app/requirements-openhands.txt; \
+    fi
+
 # código do runner (o módulo agent_runner + o sandbox_runtime compartilhado)
 COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
+# fonte única de verdade do git escopado: vendora o módulo do worker na
+# imagem (gitops.py importa com fallback para esta cópia)
+COPY services/sandbox-runtime/sandbox_runtime/scoped_git.py /app/agent_runner/_scoped_git.py
 
 USER 10001:10001
 # /workspace e /tmp vêm de emptyDir graváveis (o rootfs é read-only no Pod)

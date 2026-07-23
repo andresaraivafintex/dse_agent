@@ -141,6 +141,70 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
     )
 
 
+def _run_openhands(req: AgentTurnRequest) -> AgentTurnResult:
+    """OpenHands DENTRO do sandbox: aqui `LocalWorkspace` é o desenho CERTO —
+    o SDK inteiro (e a execução de ferramentas dele) já está confinado ao
+    container/pod; era rodá-lo no worker que quebrava o modelo de ameaça.
+    Wiring gateway-only idêntico ao do worker (base_url + virtual key +
+    headers do contrato). Instalação é opt-in da imagem
+    (requirements-openhands.txt / build-arg INSTALL_OPENHANDS=1)."""
+    try:
+        import openhands.sdk as sdk
+    except ImportError:
+        return AgentTurnResult(
+            done=False,
+            error=(
+                "openhands-sdk não está instalado nesta imagem do agent-runner "
+                "(build com INSTALL_OPENHANDS=1)"
+            ),
+            error_kind="substrate_error",
+        )
+
+    def _consume() -> AgentTurnResult:
+        llm = sdk.LLM(
+            model=req.model,
+            base_url=req.gateway.base_url,
+            api_key=req.gateway.virtual_key,
+            extra_headers=dict(req.gateway.headers),
+        )
+        agent = sdk.Agent(llm=llm)
+        conversation = sdk.Conversation(
+            agent=agent,
+            workspace=sdk.LocalWorkspace(working_dir=req.workspace_dir),
+        )
+        conversation.send_message(req.instruction)
+        conversation.run()
+        stats = getattr(conversation, "conversation_stats", None)
+        return AgentTurnResult(
+            done=True,
+            cost_usd=float(getattr(stats, "total_cost_usd", 0.0) or 0.0),
+            tokens_in=int(getattr(stats, "total_tokens_in", 0) or 0),
+            tokens_out=int(getattr(stats, "total_tokens_out", 0) or 0),
+        )
+
+    # Timeout duro por turno (mesma disciplina do claude-agent): o run é
+    # síncrono, então roda numa thread vigiada — estouro vira resultado
+    # estruturado e o processo efêmero do exec morre logo em seguida.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_consume)
+        try:
+            return future.result(timeout=req.timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            return AgentTurnResult(
+                done=False,
+                error=f"turno openhands excedeu {req.timeout_seconds:.0f}s",
+                error_kind="timeout",
+            )
+        except Exception as exc:  # noqa: BLE001 — P6
+            return AgentTurnResult(
+                done=False,
+                error=f"{type(exc).__name__}: {str(exc)[:500]}",
+                error_kind="substrate_error",
+            )
+
+
 def run_agent_turn(req: AgentTurnRequest) -> AgentTurnResult:
     if req.substrate == "fake":
         try:
@@ -156,14 +220,7 @@ def run_agent_turn(req: AgentTurnRequest) -> AgentTurnResult:
     if req.substrate == "claude-agent":
         return _run_claude_agent(req)
     if req.substrate == "openhands":
-        return AgentTurnResult(
-            done=False,
-            error=(
-                "openhands ainda não roda no agent-runner (v1) — exige o "
-                "openhands-agent-server empacotado nesta imagem"
-            ),
-            error_kind="unsupported_substrate",
-        )
+        return _run_openhands(req)
     return AgentTurnResult(
         done=False,
         error=f"substrato desconhecido: {req.substrate!r}",

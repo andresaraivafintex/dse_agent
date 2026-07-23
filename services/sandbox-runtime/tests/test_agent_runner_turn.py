@@ -51,10 +51,69 @@ def test_fake_substrate_writes_files_inside_workspace(tmp_path):
     assert result.thoughts == ["implementa handler"]
 
 
-def test_openhands_is_clean_unsupported_error_not_fallback(tmp_path):
+def test_openhands_missing_sdk_is_structured_error_not_fallback(tmp_path, monkeypatch):
+    # força ImportError mesmo se o venv tiver o SDK (sys.modules[name] = None)
+    monkeypatch.setitem(sys.modules, "openhands", None)
+    monkeypatch.setitem(sys.modules, "openhands.sdk", None)
     result = run_agent_turn(_req(tmp_path, substrate="openhands"))
-    assert result.failed and result.error_kind == "unsupported_substrate"
+    assert result.failed and result.error_kind == "substrate_error"
+    assert "INSTALL_OPENHANDS" in (result.error or "")
     assert not result.done
+
+
+def test_openhands_wiring_is_gateway_only(tmp_path, monkeypatch):
+    """Stub do openhands.sdk: prova que o LLM aponta para o gateway com a
+    virtual key + headers do contrato e o workspace é o do request — dentro
+    do sandbox, LocalWorkspace é o desenho certo."""
+    import types
+
+    seen: dict = {}
+
+    class _LLM:
+        def __init__(self, **kw):
+            seen["llm"] = kw
+
+    class _Agent:
+        def __init__(self, llm):
+            seen["agent_llm"] = llm
+
+    class _LocalWorkspace:
+        def __init__(self, working_dir):
+            seen["working_dir"] = working_dir
+
+    class _Conversation:
+        conversation_stats = types.SimpleNamespace(
+            total_cost_usd=0.25, total_tokens_in=11, total_tokens_out=7
+        )
+
+        def __init__(self, agent, workspace):
+            pass
+
+        def send_message(self, msg):
+            seen["message"] = msg
+
+        def run(self):
+            seen["ran"] = True
+
+    sdk = types.ModuleType("openhands.sdk")
+    sdk.LLM, sdk.Agent, sdk.Conversation, sdk.LocalWorkspace = _LLM, _Agent, _Conversation, _LocalWorkspace
+    pkg = types.ModuleType("openhands")
+    pkg.sdk = sdk
+    monkeypatch.setitem(sys.modules, "openhands", pkg)
+    monkeypatch.setitem(sys.modules, "openhands.sdk", sdk)
+
+    req = _req(
+        tmp_path, substrate="openhands", model="gateway/coder-default",
+        gateway={"base_url": "http://model-gateway:4000", "virtual_key": "vk-oh",
+                 "headers": {"X-Dse-Stage": "coder"}},
+    )
+    result = run_agent_turn(req)
+    assert not result.failed and result.done and seen["ran"]
+    assert seen["llm"]["base_url"] == "http://model-gateway:4000"
+    assert seen["llm"]["api_key"] == "vk-oh"
+    assert seen["llm"]["extra_headers"] == {"X-Dse-Stage": "coder"}
+    assert seen["working_dir"] == str(tmp_path)
+    assert result.cost_usd == 0.25 and result.tokens_in == 11 and result.tokens_out == 7
 
 
 def test_unknown_substrate_is_clean_error(tmp_path):

@@ -21,8 +21,9 @@ import sys
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent_runner")
-    parser.add_argument("--stage", required=True)
-    parser.parse_args(argv)
+    parser.add_argument("--stage", default="coder")
+    parser.add_argument("--op", default="turn", choices=("turn", "bootstrap", "checkpoint"))
+    args = parser.parse_args(argv)
 
     raw = sys.stdin.read() or "{}"
     try:
@@ -31,9 +32,42 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "invalid_payload", "detail": "stdin não é JSON"}))
         return 2
 
+    body = payload.get("input", payload) if isinstance(payload, dict) else payload
+
+    if args.op == "bootstrap":
+        from dse_contracts import WorkspaceBootstrapRequest, WorkspaceBootstrapResult
+
+        from .gitops import bootstrap_workspace
+
+        try:
+            request = WorkspaceBootstrapRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001
+            print(WorkspaceBootstrapResult(
+                error=f"payload não obedece WorkspaceBootstrapRequest: {str(exc)[:500]}",
+                error_kind="invalid_payload",
+            ).model_dump_json())
+            return 0
+        print(bootstrap_workspace(request).model_dump_json())
+        return 0
+
+    if args.op == "checkpoint":
+        from dse_contracts import CheckpointOpRequest, CheckpointOpResult
+
+        from .gitops import checkpoint_workspace
+
+        try:
+            request = CheckpointOpRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001
+            print(CheckpointOpResult(
+                error=f"payload não obedece CheckpointOpRequest: {str(exc)[:500]}",
+                error_kind="invalid_payload",
+            ).model_dump_json())
+            return 0
+        print(checkpoint_workspace(request).model_dump_json())
+        return 0
+
     from dse_contracts import AgentTurnRequest
 
-    body = payload.get("input", payload) if isinstance(payload, dict) else payload
     try:
         request = AgentTurnRequest.model_validate(body)
     except Exception as exc:  # noqa: BLE001 — ValidationError vira resultado estruturado

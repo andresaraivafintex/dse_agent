@@ -60,6 +60,57 @@ class AgentTurnRequest(BaseModel, extra="forbid"):
     fake_script: list[dict] | None = None
 
 
+class WorkspaceBootstrapRequest(BaseModel, extra="forbid"):
+    """Op de lifecycle executada DENTRO do sandbox (runner `--op bootstrap`):
+    materializa o workspace git da tarefa no runtime alvo. No Docker o
+    checkpoint é o bind mount `/checkpoint.git`; no K8s, o volume do Pod.
+    O hook pre-receive de escopo (branch único, sem force-push) é instalado
+    no bare repo ANTES do primeiro push — o enforcement mora no remoto."""
+
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    work_item_id: str
+    branch: str
+    base_branch: str = "main"
+    workspace_dir: str = "/workspace"
+    checkpoint_path: str = "/checkpoint.git"
+    provision_checkpoint: bool = True
+
+
+class WorkspaceBootstrapResult(BaseModel, extra="forbid"):
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    sha: str = ""
+    created: bool = False  # False = workspace/branch já existia (idempotente)
+    error: str | None = None
+    error_kind: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error_kind is not None
+
+
+class CheckpointOpRequest(BaseModel, extra="forbid"):
+    """Op `--op checkpoint`: commit (se houver mudanças) + push do branch da
+    tarefa para o checkpoint — refspec fixo, jamais force."""
+
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    work_item_id: str
+    branch: str
+    phase: str
+    workspace_dir: str = "/workspace"
+
+
+class CheckpointOpResult(BaseModel, extra="forbid"):
+    schema_version: int = AGENT_TURN_SCHEMA_VERSION
+    sha: str = ""
+    phase: str = ""
+    error: str | None = None
+    error_kind: str | None = None
+
+    @property
+    def failed(self) -> bool:
+        return self.error_kind is not None
+
+
 class AgentTurnResult(BaseModel, extra="forbid"):
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     done: bool
