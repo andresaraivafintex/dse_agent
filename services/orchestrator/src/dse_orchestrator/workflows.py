@@ -663,6 +663,26 @@ class WorkItemLifecycleWorkflow:
             except ActivityError:
                 logger.warning("post_status_transition best-effort falhou (status=%s)", status)
 
+    async def _post_board_transition(self, status: str) -> None:
+        """Move o card do Jira para a coluna mapeada, SEM re-postar o comentario
+        de status. Existe porque `_post_status_comment` so era chamado em
+        `implementing` e nos estados de erro — o card ia para In Progress mas
+        NUNCA para In Review (PR aberto) nem Done (merge). Achado BD-39
+        (2026-07-23). Best-effort, no-op para github/slack (a Activity resolve
+        origem), guard de patch proprio para replay-safety de workflows em voo."""
+        if not workflow.patched("board-transition-pr-and-done-v1"):
+            return
+        try:
+            await workflow.execute_activity(
+                LOCAL_ACTIVITY_POST_STATUS_TRANSITION,
+                {"work_item_id": self._input.work_item_id,
+                 "tenant_id": self._input.tenant_id, "status": status},
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
+        except ActivityError:
+            logger.warning("post_board_transition best-effort falhou (status=%s)", status)
+
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
         detail = f"escalated: {reason}"
         self._input.terminal_detail = detail
@@ -1436,6 +1456,9 @@ class WorkItemLifecycleWorkflow:
         )
         await self._set_status(pr_open_status, audit_action="pr_finalized",
                                 details={"pr_number": pr_ref.pr_number, "url": pr_ref.url})
+        # PR aberto -> coluna de review no board (In Review). Sem isto o card
+        # ficava preso em In Progress mesmo com o PR pronto (achado BD-39).
+        await self._post_board_transition(pr_open_status.value)
 
         # Fase 3 — pipeline de evidencia INICIAL (depois de finalize_pr):
         # trigger_preview (paths-filter deterministico com o files_changed do
@@ -2092,6 +2115,8 @@ class WorkItemLifecycleWorkflow:
                     details={"merged_by": (self._merge_payload or {}).get("merged_by"),
                              "pr_number": input.pr_number},
                 )
+                # Merge humano -> coluna Done no board (fecha o ciclo do card).
+                await self._post_board_transition(WorkItemStatus.done.value)
                 # Fase 4 — metrica de qualidade de PR na fronteira de merge
                 # (pilot gate). Best-effort, apos o Done ja estar persistido.
                 await self._emit_pr_quality_metric("merged")

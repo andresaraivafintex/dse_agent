@@ -120,14 +120,34 @@ class RealJiraClient:
             # Jira JQL usa 'updated >= "yyyy-MM-dd HH:mm"' — o caller formata.
             jql += f' AND updated >= "{since_iso}"'
         jql += " ORDER BY updated ASC"
-        resp = self._http.post(
-            f"{self._base}/rest/api/3/search",
-            headers=self._headers(),
-            json={"jql": jql, "fields": ["summary", "description", "labels", "status", "project"], "maxResults": 100},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json().get("issues", [])
+        # Endpoint novo /search/jql: o antigo /rest/api/3/search foi REMOVIDO
+        # pela Atlassian (410 Gone, 2025). Paginação por nextPageToken (não mais
+        # startAt/total); itera até isLast para não perder issues além da página.
+        # `reporter` é OBRIGATÓRIO (achado BD-39, 2026-07-23): sem ele o poller
+        # cria o WorkItem com requester=system:adapter-jira-poller, e aí a
+        # resposta de clarificação do PRÓPRIO autor do ticket não autoriza
+        # (principal do autor != system principal) — o fluxo trava em
+        # needs_clarification para sempre.
+        fields = ["summary", "description", "labels", "status", "project", "reporter"]
+        issues: list[dict[str, Any]] = []
+        next_token: str | None = None
+        while True:
+            body: dict[str, Any] = {"jql": jql, "fields": fields, "maxResults": 100}
+            if next_token:
+                body["nextPageToken"] = next_token
+            resp = self._http.post(
+                f"{self._base}/rest/api/3/search/jql",
+                headers=self._headers(),
+                json=body,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            issues.extend(data.get("issues", []))
+            next_token = data.get("nextPageToken")
+            if data.get("isLast") or not next_token:
+                break
+        return issues
 
     def get_comments(self, key: str) -> list[dict[str, Any]]:
         resp = self._http.get(

@@ -42,6 +42,12 @@ services:
       DSE_FAIRNESS_MODE: ${DSE_FAIRNESS_MODE:-worker-side}
       # Fase 2 (WSB-E3-T2) — POLITICA do gate de aprovacao (P1: fora do modelo).
       DSE_REQUIRE_APPROVAL_RISK_CLASSES: ${DSE_REQUIRE_APPROVAL_RISK_CLASSES:-high}
+      # Mapa status DSE -> coluna Jira (move o card no board). O default cobre
+      # In Progress / In Review / Done; blocked/escalated/failed apontam para
+      # uma coluna "Blocked" que NEM todo board tem. Override abaixo mapeia
+      # esses 3 para "" (no-op: o card fica onde está e o comentario de falha
+      # explica) — boards com coluna Blocked podem sobrescrever com o nome real.
+      DSE_JIRA_STATUS_MAP: ${DSE_JIRA_STATUS_MAP:-{"blocked":"","escalated":"","failed":""}}
       # Consumidos pelas Activities cross-workstream registradas neste worker
       # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
       DSE_MODEL_GATEWAY_URL: http://model-gateway:4000

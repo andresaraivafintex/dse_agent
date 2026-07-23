@@ -67,7 +67,18 @@ class JiraPoller:
             since_iso = since.strftime("%Y-%m-%d %H:%M") if since else None
             issues = self._client.search_updated(project, since_iso)
             for issue in issues:
-                reconciled += self._reconcile_issue(issue, now=now)
+                # Resiliência por issue (achado do disparo real BD-39,
+                # 2026-07-23): search_updated devolve o lote em ORDER BY updated
+                # ASC, então um issue recém-marcado ordena por ÚLTIMO. Se um
+                # issue anterior estourar no reconcile (comentário malformado,
+                # ADF inesperado, etc.), a falha NÃO pode abortar o lote e deixar
+                # o recém-marcado para trás — isola cada issue e segue.
+                try:
+                    reconciled += self._reconcile_issue(issue, now=now)
+                except Exception:  # noqa: BLE001 — um issue ruim não trava o projeto
+                    logger.exception(
+                        "reconcile falhou para %s; segue o lote", issue.get("key", "?")
+                    )
             # Cursor recua a janela de graça para não "perder" atualizações
             # que ainda estavam dentro da janela nesta rodada.
             self._set_cursor(project, now - self._grace)
