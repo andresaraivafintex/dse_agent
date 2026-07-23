@@ -312,7 +312,8 @@ def test_channel_binding_resolves_repo_at_admission():
             "VALUES (%s,'slack','channel','C_BOUND','andre2654/fintex-wallet','main') ON CONFLICT DO NOTHING",
             (tenant,),
         )
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
     created = _post_event(
         {

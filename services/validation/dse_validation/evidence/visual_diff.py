@@ -25,7 +25,6 @@ from pathlib import Path
 
 from dse_contracts.activities import PublishArtifactInput, RunVisualDiffInput, VisualDiffResult
 
-from dse_validation import db
 from dse_validation.config import GarageConfig
 from dse_validation.evidence.garage import bucket_for_tenant, publish_artifact_core, s3_client
 

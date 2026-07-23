@@ -33,7 +33,6 @@ comportamento da Fase 1. Todos os nomes de signal vêm de
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from typing import Any, NamedTuple

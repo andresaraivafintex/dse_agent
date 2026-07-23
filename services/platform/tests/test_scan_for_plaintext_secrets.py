@@ -9,7 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCANNER = REPO_ROOT / "scripts" / "scan_for_plaintext_secrets.py"

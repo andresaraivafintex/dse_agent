@@ -23,13 +23,12 @@ import json
 import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("sandbox_runtime.activities")
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from temporalio import activity
 
 from dse_audit import emit as audit_emit
@@ -72,7 +71,7 @@ from .sessions import (
     classify_risk_class,
     hydrate_planner_context,
 )
-from .substrate import SUBSTRATE_ENV_VAR, AgentSubstrate, FakeSubstrate, substrate_from_env
+from .substrate import SUBSTRATE_ENV_VAR, AgentSubstrate, substrate_from_env
 from .toolsets import PlannerToolset, TesterToolset
 
 _STATE_DIR = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
@@ -833,7 +832,6 @@ async def _run_planner_turn_impl(
     é DERIVADO por `classify_risk_class` (determinístico), não pela palavra do
     LLM — é ele que dirige o gate do WS-B.
     """
-    branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare = _paths_for(inp.work_item_id)
 
     # Chamada de modelo (se houver) sai SÓ via gateway, stage=planner.

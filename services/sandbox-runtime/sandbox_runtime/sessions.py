@@ -28,7 +28,7 @@ from dse_contracts import L2Verdict, PlanArtifact
 
 from .retrieval import RetrievalHit, RetrievalService, render_untrusted_context
 from .skill_registry import Skill, read_approved_skills
-from .toolsets import ReviewerToolset, TesterToolset, Toolset, ToolInvocation
+from .toolsets import ReviewerToolset, Toolset, ToolInvocation
 
 
 # ---------------------------------------------------------------------------

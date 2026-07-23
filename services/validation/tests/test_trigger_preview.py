@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import pytest
 
 from dse_contracts.activities import TriggerPreviewInput
 
@@ -205,7 +204,8 @@ def test_build_pr_image_fail_safe_reasons(tmp_path, monkeypatch):
     ref, reason, port = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
     assert ref is None and reason.startswith("workspace_not_found")
     # workspace sem Dockerfile E sem package.json → placeholder (não é Node)
-    ws = tmp_path / "wi-nodf" / "workspace"; ws.mkdir(parents=True)
+    ws = tmp_path / "wi-nodf" / "workspace"
+    ws.mkdir(parents=True)
     ref, reason, port = build_pr_image(work_item_id="wi-nodf", repo="a/b", head_sha="s", cfg=cfg)
     assert ref is None and reason == "no_dockerfile_and_not_node" and port is None
 
@@ -216,7 +216,8 @@ def test_synthesize_node_dockerfile_for_app_without_dockerfile(tmp_path):
     import json as _json
     from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
 
-    ws = tmp_path / "ws"; ws.mkdir()
+    ws = tmp_path / "ws"
+    ws.mkdir()
     (ws / "package.json").write_text(_json.dumps({
         "type": "module", "main": "server.js",
         "scripts": {"start": "node server.js"}, "dependencies": {},
@@ -238,7 +239,8 @@ def test_synthesize_falls_back_to_node_main_without_start_script(tmp_path):
     import json as _json
     from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
 
-    ws = tmp_path / "ws"; ws.mkdir()
+    ws = tmp_path / "ws"
+    ws.mkdir()
     (ws / "package.json").write_text(_json.dumps({"main": "app.js", "scripts": {}}))
     path = _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT)
     assert path is not None
@@ -249,7 +251,8 @@ def test_synthesize_falls_back_to_node_main_without_start_script(tmp_path):
 
 def test_synthesize_returns_none_when_not_node(tmp_path):
     from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
-    ws = tmp_path / "ws"; ws.mkdir()  # sem package.json
+    ws = tmp_path / "ws"
+    ws.mkdir()  # sem package.json
     assert _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT) is None
 
 

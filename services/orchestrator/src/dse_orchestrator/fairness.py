@@ -27,7 +27,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from temporalio import activity
 from temporalio.worker import (

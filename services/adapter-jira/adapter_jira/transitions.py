@@ -11,7 +11,6 @@ o mesmo pedido de transição (mesma origem/estado) nunca enfileira duas vezes.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from dse_audit import emit as audit_emit
 

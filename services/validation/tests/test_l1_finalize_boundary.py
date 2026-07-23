@@ -16,7 +16,7 @@ from dse_validation.activities import (
     FinalizePrInput,
     RunL1PipelineInput,
 )
-from dse_contracts import PlanArtifact, SandboxHandle
+from dse_contracts import PlanArtifact
 
 
 def _handle_payload():

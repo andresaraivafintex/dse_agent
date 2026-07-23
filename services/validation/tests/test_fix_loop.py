@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 from dse_contracts import L2Verdict
 
-from dse_validation import db
 from dse_validation.config import L2Config
 from dse_validation.l2 import fix_loop
 

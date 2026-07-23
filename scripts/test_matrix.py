@@ -33,6 +33,7 @@ SUITE_GROUPS: dict[str, tuple[str, ...]] = {
         "services/adapter-teams",
     ),
     "control-plane": (
+        "services/console-projector",
         "services/ingest-gateway",
         "services/orchestrator",
     ),
@@ -51,6 +52,7 @@ SUITE_COVERAGE_TARGETS: dict[str, str] = {
     "services/adapter-jira": "services/adapter-jira/adapter_jira",
     "services/adapter-slack": "services/adapter-slack/adapter_slack",
     "services/adapter-teams": "services/adapter-teams/adapter_teams",
+    "services/console-projector": "services/console-projector/console_projector",
     "services/egress-proxy": "services/egress-proxy/egress_proxy",
     "services/ingest-gateway": "services/ingest-gateway/ingest_gateway",
     "services/model-gateway": "services/model-gateway/model_gateway_client",

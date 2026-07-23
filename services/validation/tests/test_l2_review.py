@@ -7,10 +7,9 @@ orquestração (recording de veredito+custo, guard cheapest-first, P3) é a de
 produção."""
 from __future__ import annotations
 
-import uuid
 
 import pytest
-from dse_contracts import L1Finding, L1Result, L2Verdict, PlanArtifact
+from dse_contracts import L1Finding, L1Result, PlanArtifact
 
 from dse_validation import db
 from dse_validation.l2.l2_review import L2PreconditionError, guard_l2_after_l1, run_l2_review

@@ -16,7 +16,7 @@ import pytest
 from dse_contracts.work_item import WorkItemStatus
 
 from console_projector.mappers import AUDIT_EVENT_MAP, STATUS_MAP, map_status, split_title
-from console_projector.projector import drain, run_once
+from console_projector.projector import drain
 
 from conftest import DSN
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import http.client
 
 import psycopg2
-import pytest
 
 from egress_proxy import Allowlist
 

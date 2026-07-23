@@ -10,7 +10,6 @@ stdout do collector que SÓ os acima do threshold saíram no exporter
 """
 from __future__ import annotations
 
-import json
 import subprocess
 import time
 import uuid

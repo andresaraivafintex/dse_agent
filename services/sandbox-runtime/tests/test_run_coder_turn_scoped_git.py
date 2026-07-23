@@ -43,6 +43,7 @@ def test_scoped_git_session_has_no_escape_hatch():
 
 def test_run_coder_turn_commits_and_pushes_only_scripted_files(work_item_id, state_dir):
     tenant_id = "tenant-a"
+    branch = f"dse/{work_item_id}"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
 
     script = [
@@ -64,7 +65,6 @@ def test_run_coder_turn_commits_and_pushes_only_scripted_files(work_item_id, sta
     assert result.cost_usd > 0
 
     workspace_dir, bare_repo_path = _paths_for(work_item_id)
-    branch = f"dse/{work_item_id}"
     log = subprocess.run(
         ["git", "log", "--oneline", branch], cwd=bare_repo_path, check=True, capture_output=True, text=True
     ).stdout
@@ -137,7 +137,6 @@ def test_scoped_git_session_push_raises_git_scope_violation_on_conflict(work_ite
     tenant_id = "tenant-a"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
     workspace_dir, _bare = _paths_for(work_item_id)
-    branch = f"dse/{work_item_id}"
 
     session = ScopedGitSession(workspace_dir=workspace_dir, branch="some-other-branch")
     with pytest.raises(GitScopeViolation):

@@ -8,7 +8,6 @@ idempotência (um comment_ref por WorkItem+surface) e convergência pós-crash.
 """
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from typing import Protocol
 
 

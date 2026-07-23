@@ -46,8 +46,6 @@ import json
 import os
 from typing import Any
 
-import psycopg2
-import psycopg2.extras
 from dse_audit import emit
 
 from .tenant_config import _get_connection

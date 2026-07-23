@@ -19,7 +19,6 @@ from temporalio.worker import Worker
 
 from dse_contracts import Actor, ConversationEvent, EventKind, Platform
 
-from dse_validation import db
 from dse_validation.review_signal import REVIEW_DECISION_SIGNAL_NAME, handle_review_event, interpret_review_decision
 
 TEMPORAL_ADDRESS = "localhost:7233"

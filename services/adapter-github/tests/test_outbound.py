@@ -4,7 +4,6 @@ substitui o transporte HTTP real; `GithubCommentBackend`/
 `MutableCommentWriter` são 100% reais."""
 from __future__ import annotations
 
-import json
 import uuid
 
 import psycopg2

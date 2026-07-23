@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
 
 from sandbox_runtime.skill_registry import Skill, read_approved_skills
 

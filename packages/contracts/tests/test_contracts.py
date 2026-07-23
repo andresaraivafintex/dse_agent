@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 
 import pytest
 from dse_contracts import (
@@ -9,7 +8,6 @@ from dse_contracts import (
     WorkItemStatus,
     to_public_status,
 )
-from dse_contracts.conversation_event import Actor as _Actor  # re-export sanity
 
 
 def test_conversation_event_build_is_deterministic_for_dedup():

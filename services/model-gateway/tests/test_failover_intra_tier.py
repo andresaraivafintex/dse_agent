@@ -42,7 +42,7 @@ from model_gateway_client import (
     mint_virtual_key,
     revoke_virtual_key,
 )
-from model_gateway_client import db, failover, ledger, policy
+from model_gateway_client import db, ledger, policy
 
 from .chaos_helpers import (
     ECHO_MODEL,

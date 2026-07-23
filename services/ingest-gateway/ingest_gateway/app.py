@@ -6,7 +6,7 @@ canal (liga/desliga sem precisar de acesso direto ao Postgres).
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from .db import get_connection

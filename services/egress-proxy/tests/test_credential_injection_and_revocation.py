@@ -11,7 +11,6 @@ lado do proxy.
 from __future__ import annotations
 
 import http.client
-import time
 
 import psycopg2
 import pytest

@@ -6,8 +6,6 @@ comportamento de compare-link/adoção, não o `git push` (esse é testado à pa
 contra um bare remote local real em test_pr_finalizer_idempotent.py)."""
 from __future__ import annotations
 
-import os
-import uuid
 
 from dse_contracts.mutable_comment import MutableCommentWriter
 

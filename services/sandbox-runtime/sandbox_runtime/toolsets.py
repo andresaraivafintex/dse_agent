@@ -23,7 +23,6 @@ executa uma tool sem passar por `Toolset.check` antes.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 # Caminhos considerados "de teste" (TesterToolset só escreve aqui). Cobre os

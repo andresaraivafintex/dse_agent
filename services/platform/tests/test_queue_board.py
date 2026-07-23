@@ -3,7 +3,6 @@ de operador (signals via FakeSignalSender + audit com identidade do operador).
 Postgres real."""
 from __future__ import annotations
 
-import json
 import uuid
 
 import psycopg2.extras

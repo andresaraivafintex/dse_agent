@@ -41,7 +41,7 @@ from dse_contracts.activities import PreviewRef, TriggerPreviewInput
 from dse_validation import db
 from dse_validation.config import PreviewConfig
 from dse_validation.preview import gitops
-from dse_validation.preview.paths_filter import is_ui_touching, matching_files, preview_decision
+from dse_validation.preview.paths_filter import preview_decision
 
 try:
     from dse_audit import emit as audit_emit

@@ -34,8 +34,6 @@ razão "egress-proxy não está respondendo em localhost:8806".
 from __future__ import annotations
 
 import socket
-import time
-from urllib.parse import urlparse
 
 import pytest
 import requests

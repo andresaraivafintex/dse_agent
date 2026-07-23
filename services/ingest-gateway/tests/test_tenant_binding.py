@@ -4,10 +4,8 @@ Binding presente resolve; binding ausente cai no DSE_TENANT_ID default COM
 audit row de aviso (nunca adivinha)."""
 from __future__ import annotations
 
-import os
 
 import psycopg2
-import pytest
 
 from ingest_gateway import resolve_tenant
 

@@ -6,7 +6,6 @@ import json
 import uuid
 
 import psycopg2
-import pytest
 from dse_contracts import Actor, ConversationEvent, EventKind, Platform
 
 from ingest_gateway.correlate import correlate

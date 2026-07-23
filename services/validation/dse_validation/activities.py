@@ -51,7 +51,7 @@ from dse_contracts.activities import (
 )
 from pydantic import BaseModel, Field
 
-from dse_validation.config import GitHubConfig, L1Config, L2Config
+from dse_validation.config import GitHubConfig
 from dse_validation.github.ci_status import consume_ci_status_core
 from dse_validation.github.client import build_github_client
 from dse_validation.github.pr_finalizer import adopt_pr_core, finalize_pr_core

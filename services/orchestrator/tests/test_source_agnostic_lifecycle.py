@@ -19,7 +19,7 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import DSN, insert_work_item, new_work_item_id, read_audit_actions
+from conftest import insert_work_item, new_work_item_id, read_audit_actions
 from fakes import FakeControlPlane, build_fake_activities
 
 import asyncio

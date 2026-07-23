@@ -138,7 +138,7 @@ def test_no_code_change_but_diff_present_fails(sandbox, feature_branch, git_sha)
     assert finding.status == GateStatus.FAIL
 
 
-def _mk_diff(files: list[str], lines: int = 20) -> "DiffSummary":
+def _mk_diff(files: list[str], lines: int = 20):
     from dse_validation.l1.plan_compliance import DiffSummary
 
     return DiffSummary(

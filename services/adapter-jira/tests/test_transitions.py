@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import psycopg2
-import pytest
 
 from adapter_jira.backend import FakeJiraClient
 from adapter_jira.transitions import TransitionWorker, enqueue_transition

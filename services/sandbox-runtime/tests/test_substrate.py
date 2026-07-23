@@ -6,7 +6,6 @@ provider) — sem exercitar um turno completo (que exigiria o model-gateway
 do WS-D de pé + inferência real, fora do escopo desta suíte; ver README)."""
 from __future__ import annotations
 
-from pathlib import Path
 
 from dse_contracts import GatewayCallHeaders, Stage
 from sandbox_runtime.substrate import AgentSubstrate, FakeSubstrate

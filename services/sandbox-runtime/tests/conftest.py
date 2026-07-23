@@ -6,7 +6,6 @@ import uuid
 import docker
 import pytest
 
-from sandbox_runtime import docker_driver
 
 # DSN de teste: prioriza a role de app (dse_app) mas cai para a superuser `dse`
 # usada localmente pela fundação; ambas veem as tabelas do WS-C (grants em

@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from dse_contracts import CheckpointRef, Stage
+from dse_contracts import CheckpointRef
 
 from . import docker_driver, git_checkpoint
 from .driver import (
