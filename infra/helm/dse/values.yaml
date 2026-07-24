@@ -60,6 +60,10 @@ security:
     capabilities:
       drop: ["ALL"]
 
+# Migrações como Job de hook do Helm (Fase 5 — deploy autossuficiente).
+migrations:
+  enabled: true
+
 runtime:
   # Único valor permitido nos perfis pilot/production. `false` faz o runtime
   # atual falhar fechado em K8s (não há Docker socket montado); o provisionador

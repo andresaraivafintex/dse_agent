@@ -32,6 +32,8 @@ WORKDIR /app
 # Copia so o que este servico precisa para instalar (contratos compartilhados
 # + o proprio pacote). Assume build context = raiz do monorepo (ver
 # docker-compose.wsb.yml: build.context: ../.. , build.dockerfile).
+# scripts/migrate.py: usado pelo Job de migração do chart (Fase 5)
+COPY scripts /app/scripts
 COPY packages/contracts /app/packages/contracts
 COPY packages/dse_audit /app/packages/dse_audit
 COPY packages/dse_identity /app/packages/dse_identity

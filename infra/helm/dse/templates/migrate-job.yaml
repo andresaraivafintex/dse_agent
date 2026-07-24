@@ -1,0 +1,42 @@
+{{- if .Values.migrations.enabled }}
+# Fase 5 (plano 09): migrações como Job de hook — o deploy é autossuficiente
+# (helm upgrade aplica o schema ANTES dos workloads novos subirem). Reusa a
+# imagem do orchestrator (carrega scripts/migrate.py + psycopg2) e o mesmo
+# secret de Postgres; idempotente por desenho (schema_migrations).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "dse.fullname" . }}-migrate
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "migrate" "Release" .Release) | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      containers:
+        - name: migrate
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag "digest" .Values.orchestrator.image.digest) }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
+          command: ["python", "scripts/migrate.py"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }
+            limits: { cpu: "500m", memory: "256Mi" }
+{{- end }}
