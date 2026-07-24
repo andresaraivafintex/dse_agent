@@ -66,6 +66,12 @@ SUITE_COVERAGE_TARGETS: dict[str, str] = {
 # de uma suíte, suba o piso no MESMO PR. Suítes sem entrada são report-only
 # até a primeira medição em CI semear o piso (medições locais 2026-07-23:
 # contracts 94%, tooling 23%).
+# Teto por-teste (plano 09 F4). Generoso: testes de integração com Temporal
+# time-skipping + chaos são os mais lentos, mas nenhum teste são deve passar
+# de ~2min. Um hang vira falha nomeada, não um job morto sem diagnóstico.
+DEFAULT_TEST_TIMEOUT_S = 180
+SUITE_TIMEOUTS: dict[str, int] = {}
+
 SUITE_COVERAGE_FLOORS: dict[str, int] = {
     "packages/contracts": 90,
     "tests": 20,
@@ -176,6 +182,12 @@ def main() -> int:
             "-q",
             suite,
             f"--junitxml={report}",
+            # Teto por-teste (plano 09 F4): um teste travado vira falha NOMEADA
+            # com traceback do ponto de hang, em vez de matar o job inteiro por
+            # timeout de 45min sem diagnóstico. 'thread' funciona mesmo com
+            # asyncio/subprocess. Override por suíte via SUITE_TIMEOUTS.
+            f"--timeout={SUITE_TIMEOUTS.get(suite, DEFAULT_TEST_TIMEOUT_S)}",
+            "--timeout-method=thread",
         ]
         if args.coverage:
             coverage_report = report.with_suffix(".coverage.xml")

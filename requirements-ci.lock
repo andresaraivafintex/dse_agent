@@ -297,11 +297,14 @@ pytest==9.1.1
     #   dse-validation
     #   pytest-asyncio
     #   pytest-cov
+    #   pytest-timeout
 pytest-asyncio==1.4.0
     # via
     #   dse-orchestrator
     #   dse-validation
 pytest-cov==7.1.0
+    # via -r requirements-ci.in
+pytest-timeout==2.4.0
     # via -r requirements-ci.in
 python-dateutil==2.9.0.post0
     # via botocore

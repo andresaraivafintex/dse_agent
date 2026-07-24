@@ -26,7 +26,6 @@ def ids():
     with conn.cursor() as cur:
         cur.execute("DELETE FROM gateway_kill_switches WHERE scope_id IN (%s,%s)", (tid, wid))
         cur.execute("DELETE FROM work_item_budgets WHERE work_item_id=%s", (wid,))
-        cur.execute("DELETE FROM model_call_ledger WHERE work_item_id=%s", (wid,))
     conn.commit()
     conn.close()
 

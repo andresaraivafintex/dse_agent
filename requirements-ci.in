@@ -21,4 +21,5 @@ mypy
 pip-audit
 pip-tools
 pytest-cov
+pytest-timeout
 ruff

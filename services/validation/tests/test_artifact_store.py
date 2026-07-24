@@ -9,6 +9,7 @@ obrigação do ADR-18 revisado).
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -114,6 +115,7 @@ def real_video_over_5mb(tmp_path_factory) -> Path:
     return out
 
 
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requer ffmpeg (vídeo real >5MB)")
 def test_multipart_upload_with_real_video(garage_ready, real_video_over_5mb, work_item_id, tenant_id):
     ref = garage.publish_artifact_core(
         PublishArtifactInput(
