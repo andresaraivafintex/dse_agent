@@ -187,6 +187,10 @@ jobs:
           VAULT_ADDR: http://localhost:8200
           VAULT_TOKEN: dse_dev_root
           VAULT_DEV_ROOT_TOKEN: dse_dev_root
+          # api_bases dos deployments de fallback (echo B) — deixa a detecção de
+          # degradação por COOLDOWN funcionar no runner (health-check tira o
+          # primário do pool antes da chamada; ver failover.detect_degradation).
+          DSE_FALLBACK_API_BASES: "http://model-gateway-echo-b:9000"
         run: >-
           python scripts/with_test_database.py --
           python scripts/test_matrix.py

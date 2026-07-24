@@ -87,19 +87,41 @@ class Degradation:
     fallback_candidates: list[str]
 
 
+def _fallback_api_bases() -> frozenset[str]:
+    """api_bases dos deployments de FALLBACK conhecidos (env DSE_FALLBACK_API_BASES,
+    CSV) — espelho dos api_base de fallback do litellm_config. Opt-in: sem a env,
+    a detecção por cooldown fica desligada e vale só o header de fallback."""
+    raw = os.environ.get("DSE_FALLBACK_API_BASES", "")
+    return frozenset(b.strip() for b in raw.split(",") if b.strip())
+
+
 def detect_degradation(requested_model: str, response_headers) -> Degradation | None:
-    """Detecção determinística: o LiteLLM conta os fallbacks tentados no
-    header. 0/ausente -> resposta veio do primário -> None."""
+    """Detecção determinística de que a resposta NÃO veio do primário. Dois
+    caminhos, ambos degradação auditável (P8 — nunca silenciosa):
+
+    1. Fallback em RUNTIME: `x-litellm-attempted-fallbacks` > 0 (o router tentou
+       o primário, falhou e caiu no fallback na mesma chamada).
+    2. Fallback por COOLDOWN: attempted=0 mas o `x-litellm-model-api-base` que
+       serviu é um api_base de FALLBACK conhecido (DSE_FALLBACK_API_BASES) — o
+       health-check do router já tinha tirado o primário do pool ANTES desta
+       chamada, então ela foi direto ao fallback sem "tentar" o primário. Sem
+       esta detecção, uma degradação por cooldown passaria silenciosa (achado
+       da primeira execução real do CI, 2026-07-24: no runner lento o
+       health-check corre entre o stop do primário e a chamada).
+    """
+    served = response_headers.get(MODEL_API_BASE_HEADER)
     raw = response_headers.get(ATTEMPTED_FALLBACKS_HEADER, "0")
     try:
         attempted = int(raw)
     except (TypeError, ValueError):
         attempted = 0
-    if attempted <= 0:
+
+    degraded = attempted > 0 or (served is not None and served in _fallback_api_bases())
+    if not degraded:
         return None
     return Degradation(
         requested_model=requested_model,
-        served_api_base=response_headers.get(MODEL_API_BASE_HEADER),
+        served_api_base=served,
         attempted_fallbacks=attempted,
         fallback_candidates=intra_tier_fallbacks().get(requested_model, []),
     )

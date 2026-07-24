@@ -249,3 +249,40 @@ def test_fallback_does_not_bypass_policy(unique_ids):
     finally:
         revoke_virtual_key(key)
         ensure_primary_serving()
+
+
+# --- Unidade: detecção de degradação por COOLDOWN (sem docker/race) ----------
+# Prova determinística da lógica que o teste de integração exercita sob timing
+# do runner: o primário fora do pool (health-check) → o fallback serve DIRETO
+# (attempted_fallbacks=0), e isso PRECISA contar como degradação auditável.
+
+def test_detect_degradation_runtime_fallback():
+    from model_gateway_client.failover import detect_degradation
+    deg = detect_degradation(ECHO_MODEL, {
+        "x-litellm-attempted-fallbacks": "1",
+        "x-litellm-model-api-base": FALLBACK_API_BASE,
+    })
+    assert deg is not None and deg.attempted_fallbacks == 1
+
+
+def test_detect_degradation_cooldown_direct_to_fallback(monkeypatch):
+    monkeypatch.setenv("DSE_FALLBACK_API_BASES", FALLBACK_API_BASE)
+    from model_gateway_client.failover import detect_degradation
+    # attempted=0 (primário já fora do pool) mas SERVIDO pelo fallback → degradação
+    deg = detect_degradation(ECHO_MODEL, {
+        "x-litellm-attempted-fallbacks": "0",
+        "x-litellm-model-api-base": FALLBACK_API_BASE,
+    })
+    assert deg is not None
+    assert deg.attempted_fallbacks == 0
+    assert deg.served_api_base == FALLBACK_API_BASE
+
+
+def test_detect_degradation_primary_is_not_degradation(monkeypatch):
+    monkeypatch.setenv("DSE_FALLBACK_API_BASES", FALLBACK_API_BASE)
+    from model_gateway_client.failover import detect_degradation
+    from .chaos_helpers import PRIMARY_API_BASE
+    assert detect_degradation(ECHO_MODEL, {
+        "x-litellm-attempted-fallbacks": "0",
+        "x-litellm-model-api-base": PRIMARY_API_BASE,
+    }) is None
