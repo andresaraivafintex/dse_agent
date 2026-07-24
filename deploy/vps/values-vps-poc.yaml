@@ -112,6 +112,24 @@ networkPolicy:
     - cidr: "0.0.0.0/0"
       except: ["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"]
 
+# As imagens STOCK (postgres/redis/temporal) iniciam como root e fazem o drop
+# de privilégio internamente (chown do PGDATA + gosu, que exigem CHOWN/SETUID).
+# O SC não-root estrito do chart (runAsNonRoot + drop ALL) as impede de subir
+# ("container has runAsNonRoot and image will run as root"). No POC relaxamos o
+# SC de POD (permite root) e o statefulContainerSecurityContext (mantém as caps
+# default). As imagens DSE seguem não-root (USER 10001 no Dockerfile) e travadas
+# pelo appContainerSecurityContext (INALTERADO). Fast-follow: helper
+# stockPodDefaults dedicado no chart em vez de relaxar o SC de pod global.
+security:
+  podSecurityContext:
+    runAsNonRoot: false
+    seccompProfile: { type: RuntimeDefault }
+  statefulContainerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    capabilities:
+      drop: []
+
 # --- infra na VPS (Postgres interno; Vault dev semeado com o secrets.env) ---
 postgres:
   enabled: true

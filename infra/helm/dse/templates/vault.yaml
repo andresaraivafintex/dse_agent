@@ -36,7 +36,12 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             capabilities:
-              drop: ["ALL"]
+              # A imagem oficial do Vault inicia como root e faz su-exec p/ o
+              # user vault (precisa de SETUID/SETGID, nas caps default). Dropar
+              # ALL impede o boot. Mantemos as caps default + IPC_LOCK. Perfis
+              # pilot/prod usam Vault EXTERNO (externallyManaged) — este pod não
+              # sobe lá, então o relaxamento fica restrito a dev/POC.
+              drop: []
               add: ["IPC_LOCK"]
           ports:
             - containerPort: 8200
