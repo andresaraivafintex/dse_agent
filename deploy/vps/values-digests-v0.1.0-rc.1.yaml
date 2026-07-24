@@ -1,0 +1,11 @@
+# Gerado pelo release v0.1.0-rc.1 — cole nos values
+# do perfil pilot/production (o chart recusa imagem sem digest).
+adapter-github: "sha256:c52c7b539f23d1f73fabd8dc9ef2abb43dfe0531e0bc56f99d0be2b2041e6089"
+adapter-jira: "sha256:dec7f0aa7f944c97ea35e34592455f4a1bd7e7009e7b8319784a79d07a9a94e5"
+adapter-slack: "sha256:429e54d1485319f037fa05c95c98669ea1c180f8367b36519ed92801f526498c"
+adapter-teams: "sha256:b1f992d8f80673f3fe1ba5b1cfa818072979542b23ef1b8387b116656bc511e8"
+agent-runner: "sha256:0d2e1f230e7470331d135df9f8d228d637f55fdd02b0084296f39f2a5cc25cba"
+console-projector: "sha256:60e089d2a2ac1739ebf60e0c9dd5b8ce99420d971c70f6bda4ff7bd4119b442c"
+ingest-gateway: "sha256:81417a9f20b8b01a0c95840ac34b442e33f8f65882df103c782874aeaa5e6402"
+orchestrator: "sha256:d3acd185f88ca4ff6af84d440dbd05c8551e72d880458d8db2a1c9a0de2afe0f"
+platform: "sha256:9ba08d29c5116b0b1e23c08ef4e824c5e7e1fefbec5e555251efbbd08a19dcfe"

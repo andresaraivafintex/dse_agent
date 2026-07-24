@@ -48,18 +48,23 @@ else
   log "runsc já instalado"
 fi
 
-# k3s usa containerd embutido: template de config para registrar o handler runsc
-K3S_CONTAINERD_TMPL=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.tmpl
-if [ ! -f "$K3S_CONTAINERD_TMPL" ]; then
+# k3s usa containerd embutido: template de config para registrar o handler
+# runsc. IMPORTANTE (achado da VPS real, containerd v1.7.x-k3s2): o arquivo é
+# `config.toml.tmpl` (não config-v3) e o plugin CRI é
+# `io.containerd.grpc.v1.cri` — o path v3/cri.v1.runtime NÃO registra o handler
+# (Pod fica ContainerCreating com "no runtime for runsc is configured").
+K3S_CONTAINERD_TMPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+if ! grep -q 'runtimes.runsc' "$K3S_CONTAINERD_TMPL" 2>/dev/null; then
   log "registrando handler runsc no containerd do k3s"
   mkdir -p "$(dirname "$K3S_CONTAINERD_TMPL")"
   cat > "$K3S_CONTAINERD_TMPL" <<'EOF'
 {{ template "base" . }}
 
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
   systemctl restart k3s
+  sleep 15
 else
   log "handler runsc já registrado"
 fi
