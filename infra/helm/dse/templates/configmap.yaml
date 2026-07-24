@@ -35,6 +35,13 @@ data:
   DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.modelGateway.allowFixture | quote }}
+  # URLs dos adapters p/ o post_tracking_comment (status de volta ao Slack/GitHub
+  # via /internal/status-comment). FQDN (não nome curto) por 2 motivos: (1) o
+  # default do código é "http://adapter-slack:8801" — nome errado (o Service é
+  # dse-<...>-adapter-slack) E sem .svc; (2) o orchestrator tem HTTPS_PROXY —
+  # nome curto é sequestrado pelo egress-proxy (403). O FQDN casa o NO_PROXY.
+  DSE_ADAPTER_GITHUB_URL: "http://{{ include "dse.fullname" . }}-adapter-github.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.adapters.github.port }}"
+  DSE_ADAPTER_SLACK_URL: "http://{{ include "dse.fullname" . }}-adapter-slack.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.adapters.slack.port }}"
   DSE_SANDBOX_INPROCESS: {{ ternary "1" "0" .Values.runtime.inProcess | quote }}
   DSE_SANDBOX_LOCAL_FALLBACK_ALLOWED: {{ ternary "1" "0" .Values.runtime.localFallbackAllowed | quote }}
   DSE_SANDBOX_RUNTIME_CLASS: {{ .Values.runtime.sandboxRuntimeClassName | quote }}
