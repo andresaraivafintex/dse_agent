@@ -32,8 +32,12 @@ WORKDIR /app
 # Copia so o que este servico precisa para instalar (contratos compartilhados
 # + o proprio pacote). Assume build context = raiz do monorepo (ver
 # docker-compose.wsb.yml: build.context: ../.. , build.dockerfile).
-# scripts/migrate.py: usado pelo Job de migração do chart (Fase 5)
+# scripts/migrate.py: usado pelo Job de migração do chart (Fase 5). Os .sql
+# vivem em migrations/ e PRECISAM ir na imagem — migrate.py resolve
+# MIGRATIONS_DIR = <script>/../../migrations = /app/migrations. Sem este COPY o
+# hook "sucede" sem aplicar nada ("Nenhuma migração encontrada").
 COPY scripts /app/scripts
+COPY migrations /app/migrations
 COPY packages/contracts /app/packages/contracts
 COPY packages/dse_audit /app/packages/dse_audit
 COPY packages/dse_identity /app/packages/dse_identity
