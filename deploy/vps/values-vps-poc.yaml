@@ -60,8 +60,10 @@ modelGateway:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
   allowFixture: true           # POC: sem provider real obrigatório
   resources:
-    requests: { cpu: "200m", memory: "384Mi" }
-    limits: { cpu: "750m", memory: "768Mi" }
+    # LiteLLM é memory-hungry no boot (carrega o cost map + providers); 768Mi
+    # dava OOMKilled (exit 137). Memória não é escassa no node (8GB), só CPU.
+    requests: { cpu: "200m", memory: "512Mi" }
+    limits: { cpu: "750m", memory: "1536Mi" }
 adapters:
   # v0: adapters de webhook DESLIGADOS (o trigger é direto no ingest, passo 8 do
   # runbook — sem túnel/webhook). ingest-gateway FICA (host do disparo manual).

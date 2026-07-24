@@ -37,6 +37,14 @@ spec:
               value: {{ include "dse.fullname" . }}-postgres
             - name: DYNAMIC_CONFIG_FILE_PATH
               value: "config/dynamicconfig/docker.yaml"
+            # O auto-setup do Temporal lê POSTGRES_PWD (não POSTGRES_PASSWORD,
+            # que é o nome no secret). Sem isto: "password authentication failed
+            # for user dse". POSTGRES_USER vem do envFrom abaixo.
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dse.postgresSecretName" . }}
+                  key: POSTGRES_PASSWORD
           envFrom:
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
