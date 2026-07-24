@@ -33,6 +33,10 @@ jobs:
           - { name: platform, dockerfile: services/platform/Dockerfile }
           - { name: console-projector, dockerfile: services/console-projector/Dockerfile }
           - { name: agent-runner, dockerfile: services/sandbox-runtime/agent-runner/Dockerfile }
+          # egress-proxy e model-gateway são Deployments próprios no chart
+          # (validation NÃO — roda dentro do worker do orchestrator).
+          - { name: egress-proxy, dockerfile: services/egress-proxy/Dockerfile }
+          - { name: model-gateway, dockerfile: services/model-gateway/Dockerfile.proxy }
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

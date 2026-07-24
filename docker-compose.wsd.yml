@@ -43,8 +43,10 @@ services:
     # stock não tem driver Postgres e o hook de budget ficaria inerte. O digest
     # pinado vive no FROM do Dockerfile.proxy (upgrade segue explícito).
     build:
-      context: ./services/model-gateway
-      dockerfile: Dockerfile.proxy
+      # contexto = raiz do monorepo (mesmo do release) para o Dockerfile.proxy
+      # embutir config/hook por caminho services/model-gateway/...
+      context: .
+      dockerfile: services/model-gateway/Dockerfile.proxy
     image: dse-model-gateway-proxy:local
     container_name: dse_model_gateway
     depends_on:

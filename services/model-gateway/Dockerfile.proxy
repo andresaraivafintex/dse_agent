@@ -13,3 +13,13 @@ FROM ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b
 # ensurepip (presente) e instala só o driver, pinado.
 RUN python -m ensurepip --upgrade \
     && python -m pip install --no-cache-dir psycopg2-binary==2.9.10
+
+# K8s (sem volume mount): o config e o hook do budget são EMBUTIDOS na imagem.
+# No compose (dev) os volumes ainda sobrescrevem estes arquivos p/ hot-reload.
+# Contexto de build = RAIZ do monorepo (release usa context: .; o compose foi
+# alinhado para o mesmo contexto).
+COPY services/model-gateway/litellm_config.yaml /app/config.yaml
+COPY services/model-gateway/dse_budget_hook.py /app/dse_budget_hook.py
+
+# args do entrypoint `litellm` (mesmos do compose command)
+CMD ["--config", "/app/config.yaml", "--port", "4000"]
