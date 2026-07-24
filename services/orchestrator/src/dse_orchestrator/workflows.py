@@ -61,6 +61,7 @@ with workflow.unsafe.imports_passed_through():
         VisualDiffResult,
     )
     from dse_contracts.constants import WORKFLOW_TYPE
+    from dse_contracts.failure import FAIL_CLOSED_CLASSES, FailureClass, parse_failure_type
     from dse_contracts.plan_artifact import PlanArtifact
     from dse_contracts.work_item import MergedByHumanSignal, WorkItemStatus
 
@@ -101,10 +102,11 @@ _MAX_OPERATOR_EVENTS = 25
 # fundacao deveria ganhar este membro (+ mapa publico -> "blocked").
 STATUS_AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
 
-# Erros retornados pelas Activities de modelo (WS-D/WS-C) que representam uma
-# recusa de POLITICA fail-closed — nunca sao "adivinhados" nem truncados (P6):
-# viram uma falha limpa e auditada na fronteira. Bater por substring no tipo/
-# mensagem do erro da Activity (WS-D marca non_retryable=True nesses casos).
+# Fase 2 (plano 09): a classificação PRIMÁRIA é estruturada — o raiser declara
+# a classe no `type` do ApplicationError (vocabulário dse.failure.* + legados;
+# ver dse_contracts.failure e _failure_class_from). Esta lista de substrings é
+# SÓ o fallback para histórias/raisers anteriores ao vocabulário — aposentar
+# junto com o patch marker "structured-failure-codes-v1" na release seguinte.
 _FAIL_CLOSED_MARKERS = (
     "egress",            # egress-proxy indisponivel -> zero egress (fail-closed)
     "fail_closed",
@@ -121,6 +123,21 @@ _FAIL_CLOSED_MARKERS = (
     "provider_billing",
     "credit balance",
 )
+
+
+def _failure_class_from(exc: Exception) -> "FailureClass | None":
+    """Anda a cadeia de causas do erro da Activity lendo o `type` do
+    ApplicationError (canônico dse.failure.* ou legado) — determinístico e
+    sem I/O (seguro no sandbox do workflow). Profundidade capada."""
+    cause: Exception | None = exc
+    for _ in range(6):
+        if cause is None:
+            return None
+        parsed = parse_failure_type(getattr(cause, "type", None))
+        if parsed is not None:
+            return parsed
+        cause = getattr(cause, "cause", None) or getattr(cause, "__cause__", None)
+    return None
 
 
 class _CancelledByOperator(Exception):
@@ -823,10 +840,19 @@ class WorkItemLifecycleWorkflow:
             )
         except ActivityError as exc:
             blob = f"{type(exc.cause).__name__}:{exc.cause}".lower() if exc.cause else str(exc).lower()
-            if any(marker in blob for marker in _FAIL_CLOSED_MARKERS):
+            fail_class = None
+            if workflow.patched("structured-failure-codes-v1"):
+                # Fase 2 (plano 09): a decisão vem do `type` estruturado do
+                # ApplicationError — a MENSAGEM não decide mais nada.
+                fail_class = _failure_class_from(exc)
+            if fail_class is None and any(marker in blob for marker in _FAIL_CLOSED_MARKERS):
+                # fallback (histórias/raisers pré-vocabulário) — aposentar na
+                # release seguinte junto com _FAIL_CLOSED_MARKERS.
+                fail_class = FailureClass.policy_fail_closed
+            if fail_class is not None and fail_class in FAIL_CLOSED_CLASSES:
                 await self._audit(
                     "model_path_fail_closed_detected",
-                    {"activity": name, "error": blob[:300]},
+                    {"activity": name, "failure_class": fail_class.value, "error": blob[:300]},
                 )
                 raise _FailClosed(f"{name}:{blob[:200]}")
             raise _ActivityRetriesExhausted(name, blob[:300])

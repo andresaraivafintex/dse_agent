@@ -23,6 +23,13 @@ from .agent_turn import (
     WorkspaceBootstrapRequest,
     WorkspaceBootstrapResult,
 )
+from .failure import (
+    FAIL_CLOSED_CLASSES,
+    FAILURE_TYPE_PREFIX,
+    FailureClass,
+    failure_type,
+    parse_failure_type,
+)
 from .mutable_comment import CommentBackend, MutableCommentWriter
 from .constants import (
     OTEL_ATTR_TASK_CLASS,
@@ -102,6 +109,11 @@ __all__ = [
     "AgentTurnResult",
     "CheckpointOpRequest",
     "CheckpointOpResult",
+    "FAIL_CLOSED_CLASSES",
+    "FAILURE_TYPE_PREFIX",
+    "FailureClass",
+    "failure_type",
+    "parse_failure_type",
     "KNOWN_SUBSTRATES",
     "PostTurnRequest",
     "PostTurnResult",

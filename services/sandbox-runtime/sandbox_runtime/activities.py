@@ -918,11 +918,15 @@ _PERMANENT_PROVIDER_MARKERS = (
 def _raise_if_permanent_provider_error(exc: Exception) -> None:
     blob = f"{type(exc).__name__}:{exc}".lower()
     if any(m in blob for m in _PERMANENT_PROVIDER_MARKERS):
+        from dse_contracts.failure import FailureClass, failure_type
         from temporalio.exceptions import ApplicationError
 
+        # Fase 2 (plano 09): a classe viaja no TYPE (vocabulário fechado do
+        # contrato) — o workflow não depende mais de substring da mensagem.
+        # ("ProviderBillingError" legado segue reconhecido no parse p/ replay.)
         raise ApplicationError(
             f"provider_billing_or_auth: {str(exc)[:200]}",
-            type="ProviderBillingError",
+            type=failure_type(FailureClass.provider_billing),
             non_retryable=True,
         ) from exc
 

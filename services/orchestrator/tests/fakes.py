@@ -34,7 +34,13 @@ def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
         return
     spec["times"] = times - 1
     marker = spec.get("marker", "egress_proxy_unreachable_fail_closed")
-    raise ApplicationError(marker, type="EgressFailClosed", non_retryable=True)
+    # Fase 2 (plano 09): o default é o TYPE canônico do vocabulário do
+    # contrato (a mensagem não decide mais); "type" no spec permite simular
+    # raisers legados ("EgressFailClosed") para o teste de compat do fallback.
+    from dse_contracts.failure import FailureClass, failure_type
+
+    err_type = spec.get("type", failure_type(FailureClass.policy_fail_closed))
+    raise ApplicationError(marker, type=err_type, non_retryable=True)
 
 
 def _maybe_transient_fail(state: "FakeControlPlane", name: str) -> None:
