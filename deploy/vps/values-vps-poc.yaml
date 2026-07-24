@@ -1,0 +1,96 @@
+# Overlay do POC na VPS (2 vCPU / 8 GB) — plano 09, deploy k3s/Helm + túnel.
+# Perfil DEVELOPMENT (sem os gates estritos de piloto: sem ESO, sem worker
+# versioning, sem exigir digest em tudo) MAS com o sandbox ISOLADO de verdade
+# (gVisor + driver k8s), que é o ponto do POC.
+#
+# Uso:
+#   helm upgrade --install dse infra/helm/dse \
+#     -f infra/helm/dse/values-dev.yaml \
+#     -f deploy/vps/values-vps-poc.yaml
+#
+# IPs REAIS do cluster k3s desta VPS (verificados 2026-07-24):
+#   apiserver ClusterIP (NO_PROXY) = 10.43.0.1 ; node InternalIP (netpol) = 172.16.0.4
+#
+# PRÉ-REQUISITOS (ver README.md, seção "POC k3s/Helm"):
+#  1. namespace `dse` criado; pull secret do GHCR (ghcr-pull) no namespace.
+#  2. `kubectl apply -f deploy/k8s/sandbox-isolation.yaml` ANTES do helm
+#     (o chart põe Role/RoleBinding em dse-sandboxes, que este arquivo cria).
+#  3. Vault dev do chart semeado com o secrets.env (Anthropic/GitHub App/Slack).
+
+tenant:
+  id: "fintex-poc"
+  dataClass: "internal"
+
+deploymentProfile: development
+
+global:
+  imageRegistry: ""            # vazio: só as imagens DSE ganham o path GHCR abaixo
+  imagePullSecrets:
+    - name: ghcr-pull
+
+# --- imagens DSE do release (GHCR, por tag rc). Stock (postgres/temporal/redis/
+#     vault/otel) ficam nos repositórios públicos, sem prefixo. ---
+_ghcrTag: &ghcrTag "v0.1.0-rc.2"
+
+orchestrator:
+  image: { repository: ghcr.io/andresaraivafintex/dse_agent/orchestrator, tag: *ghcrTag, digest: "" }
+  resources:
+    requests: { cpu: "400m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+egressProxy:
+  image: { repository: ghcr.io/andresaraivafintex/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
+  replicas: 1                  # POC: 1 réplica (o gate de >=2 é só perfil estrito)
+modelGateway:
+  image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
+  allowFixture: true           # POC: sem provider real obrigatório
+adapters:
+  slack:
+    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
+  github:
+    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
+  ingestGateway:
+    image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
+
+# --- sandbox ISOLADO de verdade (o ponto do POC) ---
+runtime:
+  inProcess: false
+  localFallbackAllowed: false
+  agentSubstrate: claude-agent
+  sandboxRuntimeClassName: gvisor
+  sandboxDriver: k8s
+  sandboxRbac:
+    create: true
+  agentRunnerImage:
+    repository: ghcr.io/andresaraivafintex/dse_agent/agent-runner
+    tag: *ghcrTag
+    digest: ""
+  sandboxCpuLimit: "1"         # 1 tarefa por vez na VPS 2 vCPU
+  sandboxMemLimit: "1536Mi"
+
+networkPolicy:
+  kubeApiServer:
+    serviceHost: "10.43.0.1"   # ClusterIP que o kubectl mira → NO_PROXY
+    cidrs: ["172.16.0.4/32"]   # node InternalIP → regra de egress (pós-DNAT)
+    port: 6443
+  # egress do proxy p/ internet (clone do repo + Anthropic). RFC1918/loopback/
+  # metadata excluídos (mesma regra que o gate estrito exigiria).
+  egressProxyExternalCidrs:
+    - cidr: "0.0.0.0/0"
+      except: ["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"]
+
+# --- infra na VPS (Postgres interno; Vault dev semeado com o secrets.env) ---
+postgres:
+  enabled: true
+  persistence: { enabled: true, size: 10Gi }
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "750m", memory: "1Gi" }
+temporal:
+  resources:
+    requests: { cpu: "300m", memory: "640Mi" }
+    limits: { cpu: "1", memory: "1280Mi" }
+
+# Teams/model-server desligados (topologia A, POC)
+modelServer:
+  enabled: false
+adapters_teams_note: "adapter-jira/teams não estão no chart adapters.yaml — fast-follow"

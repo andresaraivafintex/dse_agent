@@ -54,3 +54,66 @@ um domínio para os webhooks.
 - `provision_sandbox` clona o repo alvo host-side (runtime docker); o runtime
   K8s da VPS usa o bootstrap in-pod do runner — o clone do repo REAL de
   cliente via egress dentro do pod é o item final da Fase 1, fechado aqui.
+
+---
+
+## POC k3s/Helm + túnel (sem domínio) — runbook executável
+
+Estado pronto (2026-07-24): fiação do sandbox K8s mergeada e CI-verde; imagens
+no GHCR (release v0.1.0-rc.2, 11 imagens por digest/tag); values do POC em
+`deploy/vps/values-vps-poc.yaml` com os IPs reais do cluster
+(apiserver 10.43.0.1, node 172.16.0.4). Acesso: `ssh dse-vps`.
+
+Ordem (cada passo é idempotente):
+
+1. **Namespace + pull secret do GHCR** (as imagens são privadas):
+   ```bash
+   kubectl create namespace dse
+   kubectl create secret docker-registry ghcr-pull -n dse \
+     --docker-server=ghcr.io --docker-username=<user> --docker-password=<GHCR_TOKEN_read:packages>
+   ```
+   (Token com `read:packages`. Alternativa sem secret: importar as imagens no
+   k3s com `k3s ctr images import`, como foi feito com o agent-runner.)
+
+2. **Isolamento do sandbox ANTES do helm** (o chart põe Role/RoleBinding em
+   `dse-sandboxes`, que este arquivo cria):
+   ```bash
+   kubectl apply -f deploy/k8s/sandbox-isolation.yaml
+   ```
+
+3. **Seed do Vault dev do chart com o `secrets.env`** (Anthropic/GitHub App/
+   Slack). O chart sobe um Vault dev; semeie os paths que os adapters/gateway
+   leem (`secret/dse/github-app`, `secret/dse/slack/webhook`,
+   `secret/dse/model-gateway/providers`) — mesmo mapeamento do `dse.sh`.
+
+4. **Install**:
+   ```bash
+   helm upgrade --install dse infra/helm/dse \
+     -f infra/helm/dse/values-dev.yaml -f deploy/vps/values-vps-poc.yaml -n dse
+   ```
+   As migrações rodam como Job de hook. Aguarde os pods `Ready`.
+
+5. **Verificação da fiação** (do review adversarial):
+   ```bash
+   kubectl exec deploy/dse-dse-orchestrator -n dse -- kubectl get pods -n dse-sandboxes   # <1s (não timeout)
+   kubectl auth can-i --as=system:serviceaccount:dse:dse-dse-orchestrator-worker create pods -n dse-sandboxes  # yes
+   kubectl auth can-i --as=system:serviceaccount:dse:dse-dse-orchestrator-worker get secrets -n dse-sandboxes   # no
+   ```
+
+6. **Túnel (webhooks, sem domínio)**: cloudflared na VPS apontando para o
+   Service do ingress/adapters → URL pública HTTPS. Registrar as rotas
+   (`/github/webhook`, `/slack/events`) no GitHub App/Slack.
+
+7. **Prova viva do turno real sob gVisor**: disparar um work item contra um
+   repo PÚBLICO (o mínimo). Verificar: Pod de sandbox `runtimeClassName: gvisor`
+   sobe em dse-sandboxes; `/workspace` tem o código clonado; `.git/config` sem
+   `x-access-token`; o Coder edita; PR aberto. Só então o release promove
+   `pilotReadiness.sandboxIsolationVerified`.
+
+### Fast-follow (não bloqueia o POC público)
+- Repo PRIVADO: injeção de token no egress-proxy (proxy.py) + trava read-only
+  (`git-receive-pack`→403); token = `contents:read`; repo derivado server-side
+  (ignorar `X-Dse-Repo`).
+- Checkpoint PVC (recuperação de rebuild; emptyDir não recupera).
+- adapter-jira/teams no chart (hoje só slack/github/ingest-gateway).
+- Perfil `pilot` estrito (ESO/SOPS, worker versioning, todos os digests).
