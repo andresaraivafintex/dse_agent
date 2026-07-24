@@ -8,6 +8,7 @@
 -e ./services/adapter-jira
 -e ./services/adapter-slack
 -e ./services/adapter-teams
+-e ./services/console-projector
 -e ./services/egress-proxy
 -e ./services/ingest-gateway
 -e ./services/model-gateway

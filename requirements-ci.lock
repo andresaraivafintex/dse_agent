@@ -26,6 +26,8 @@
     #   dse-sandbox-runtime
     #   dse-validation
     #   model-gateway-client
+-e ./services/console-projector
+    # via -r requirements-ci.in
 -e ./packages/contracts
     # via
     #   -r requirements-ci.in
@@ -33,6 +35,7 @@
     #   dse-adapter-jira
     #   dse-adapter-slack
     #   dse-adapter-teams
+    #   dse-console-projector
     #   dse-egress-proxy
     #   dse-ingest-gateway
     #   dse-orchestrator
@@ -241,6 +244,7 @@ protobuf==7.35.1
 psycopg2-binary==2.9.12
     # via
     #   dse-audit
+    #   dse-console-projector
     #   dse-egress-proxy
     #   dse-identity
     #   dse-ingest-gateway
