@@ -62,6 +62,15 @@ SUITE_COVERAGE_TARGETS: dict[str, str] = {
     "services/validation": "services/validation/dse_validation",
 }
 
+# Ratchet de cobertura (plano 09 F4): piso NUNCA desce — ao subir a cobertura
+# de uma suíte, suba o piso no MESMO PR. Suítes sem entrada são report-only
+# até a primeira medição em CI semear o piso (medições locais 2026-07-23:
+# contracts 94%, tooling 23%).
+SUITE_COVERAGE_FLOORS: dict[str, int] = {
+    "packages/contracts": 90,
+    "tests": 20,
+}
+
 
 def _registered_suites(groups: Iterable[str]) -> list[str]:
     suites: list[str] = []
@@ -178,6 +187,9 @@ def main() -> int:
                     "--cov-report=term-missing:skip-covered",
                 ]
             )
+            floor = SUITE_COVERAGE_FLOORS.get(suite)
+            if floor is not None:
+                command.append(f"--cov-fail-under={floor}")
         command.extend(args.pytest_arg)
         print(f"\n[{suite}] {' '.join(command)}", flush=True)
         completed = subprocess.run(command, cwd=ROOT, env=os.environ.copy(), check=False)

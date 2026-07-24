@@ -1,0 +1,54 @@
+# Canário noturno de turno REAL (plano 09, Fase 4): um turno do Coder contra
+# o model-gateway com provider de verdade, budget ≤ US$ 0,50. Ativa quando o
+# repo tiver o secret DSE_CANARY_ANTHROPIC_KEY — sem ele o job sai como no-op
+# (o repo ainda é local-only; este arquivo é o kit pronto da Fase 5).
+name: canary-real-turn
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # 03:00 America/Sao_Paulo
+  workflow_dispatch: {}
+
+jobs:
+  real-turn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAVE_KEY: ${{ secrets.DSE_CANARY_ANTHROPIC_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sem secret configurado — no-op
+        if: env.HAVE_KEY != 'true'
+        run: echo "DSE_CANARY_ANTHROPIC_KEY ausente; canário inerte até a Fase 5 configurar secrets."
+
+      - uses: actions/setup-python@v5
+        if: env.HAVE_KEY == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.lock
+
+      - name: Install locked environment
+        if: env.HAVE_KEY == 'true'
+        run: python -m pip install -r requirements-ci.lock
+
+      - name: Boot foundation + gateway (provider real)
+        if: env.HAVE_KEY == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.DSE_CANARY_ANTHROPIC_KEY }}
+        run: |
+          printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY" > secrets.env
+          chmod 600 secrets.env
+          docker compose -f docker-compose.yml -f docker-compose.wsd.yml up -d
+          python scripts/migrate.py
+
+      - name: Run canary turn (budget ≤ $0.50)
+        if: env.HAVE_KEY == 'true'
+        env:
+          DSE_CANARY: "1"
+          DSE_CANARY_BUDGET_USD: "0.50"
+          DSE_CODER_SUBSTRATE: claude-agent
+        run: >-
+          python -m pytest services/sandbox-runtime/tests/test_canary_real_turn.py
+          -q --no-header -rA

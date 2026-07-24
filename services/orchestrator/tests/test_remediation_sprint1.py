@@ -21,13 +21,17 @@ from conftest import DSN, insert_work_item, new_work_item_id, read_audit_actions
 from fakes import FakeControlPlane, build_fake_activities
 
 
-async def _wait_for_status(handle, expected: set[str], attempts: int = 400) -> str:
+async def _wait_for_status(handle, expected: set[str], attempts: int = 1200) -> str:
+    # Fase 4 (plano 09): 400×25ms=10s flakeava sob carga da máquina (k3d +
+    # docker + suítes em paralelo — falhas variavam entre rodadas e passavam
+    # isoladas). 1200×50ms=60s de teto; o retorno continua imediato ao atingir
+    # o status — só o pior caso ganhou folga.
     status = "unknown"
     for _ in range(attempts):
         status = await handle.query(WorkItemLifecycleWorkflow.get_status)
         if status in expected:
             return status
-        await asyncio.sleep(0.025)
+        await asyncio.sleep(0.05)
     raise AssertionError(f"status nao chegou em {expected}; ultimo={status!r}")
 
 

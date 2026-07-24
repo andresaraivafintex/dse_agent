@@ -84,6 +84,12 @@ use exclusivamente o arquivo abaixo (não edite o 0001):
 Rode `make migrate` para aplicar todas as migrações em ordem (idempotente — usa uma tabela
 `schema_migrations` para não reaplicar).
 
+**Numeração (plano 09, Fase 4):** prefixo numérico é ÚNICO — o CI falha em
+colisão nova (`tests/test_ci_tooling.py::test_migration_numeric_prefixes_are_unique`).
+A colisão histórica `0020_wsc4`/`0020_wse4` está congelada (já aplicada em
+ambientes reais; nunca renumere migração aplicada). Antes de criar uma
+migração, use o menor número livre acima do maior existente.
+
 ## docker-compose — cada workstream escreve seu próprio fragment
 
 `docker-compose.yml` (fundação) já sobe: `postgres`, `temporal` (+ `temporal-ui`), `redis`,

@@ -49,6 +49,10 @@ lint:
 		-not -path '*/node_modules/*' -not -path '*/.venv*/*' \
 		-not -path '*/preview_repo/*')
 	ruff check packages services scripts/test_matrix.py
+	# mypy ratchet (plano 09 F4): gate nos pacotes já limpos; próximo degrau é
+	# services/orchestrator (baseline 2026-07-23: 426 erros — reduzir e incluir).
+	python3 -m mypy packages/contracts/dse_contracts packages/dse_audit/dse_audit \
+		packages/dse_identity/dse_identity --ignore-missing-imports
 
 # Imagem do sandbox com o agent-runner (Fase 1 — turno isolado). Com ela
 # construída, DSE_SANDBOX_IMAGE=dse/agent-runner:local DSE_SANDBOX_INPROCESS=0

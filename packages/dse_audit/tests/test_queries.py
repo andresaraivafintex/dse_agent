@@ -13,7 +13,7 @@ from dse_audit import emit, export_audit_range, export_audit_range_csv, reconstr
 
 # Sequência canônica de um WorkItem completo pela máquina de estados da
 # proposta técnica §9.3 (Fase 1 core loop).
-LIFECYCLE = [
+LIFECYCLE: list[tuple[str, str, dict[str, object]]] = [
     ("system:ingest-gateway", "admitted", {"channel": "#eng-payments"}),
     ("usr_requester", "clarified", {"answer": "use tabela orders"}),
     ("system:orchestrator", "plan", {"risk_class": "low", "files": ["svc/orders.py"]}),

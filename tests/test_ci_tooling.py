@@ -1,8 +1,34 @@
 from __future__ import annotations
 
+import collections
+import pathlib
+import re
+
 import pytest
 
 from scripts import test_matrix, with_test_database
+
+_MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
+
+# Colisão histórica ANTERIOR ao gate (0020_wsc4.sql + 0020_wse4.sql): as duas
+# já foram aplicadas (schema_migrations registra por NOME; a ordenação
+# lexicográfica as executa de forma estável) — renumerar quebraria todo
+# ambiente existente. Congeladas aqui; NENHUMA colisão nova é aceita.
+_GRANDFATHERED_PREFIXES = {"0020"}
+
+
+def test_migration_numeric_prefixes_are_unique() -> None:
+    prefixes = [
+        re.match(r"(\d+)_", f.name).group(1)
+        for f in sorted(_MIGRATIONS_DIR.glob("*.sql"))
+        if re.match(r"(\d+)_", f.name)
+    ]
+    duplicated = {p for p, n in collections.Counter(prefixes).items() if n > 1}
+    new_collisions = duplicated - _GRANDFATHERED_PREFIXES
+    assert not new_collisions, (
+        f"prefixo de migração duplicado: {sorted(new_collisions)} — reserve o número "
+        "seguinte livre (CONVENTIONS.md, 'Migrações') em vez de colidir"
+    )
 
 
 def test_test_matrix_registers_every_suite_exactly_once() -> None:
