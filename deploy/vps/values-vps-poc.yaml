@@ -39,13 +39,17 @@ global:
 _ghcrTag: &ghcrTag "v0.1.0-rc.2"
 
 orchestrator:
+  replicas: 1                  # POC: 1 réplica no node 2-core (HA fora do escopo; libera ~400m de CPU)
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/orchestrator, tag: *ghcrTag, digest: "" }
   resources:
-    requests: { cpu: "400m", memory: "512Mi" }
+    requests: { cpu: "350m", memory: "512Mi" }
     limits: { cpu: "1", memory: "1Gi" }
 egressProxy:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
   replicas: 1                  # POC: 1 réplica (o gate de >=2 é só perfil estrito)
+  resources:
+    requests: { cpu: "75m", memory: "160Mi" }
+    limits: { cpu: "500m", memory: "384Mi" }
   # Allowlist: api.anthropic.com (o gateway chama a Anthropic via HTTPS_PROXY)
   # + github (clone/PR). Sem anthropic o turno morre na 1ª chamada de modelo.
   allowlist:
@@ -55,6 +59,9 @@ egressProxy:
 modelGateway:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
   allowFixture: true           # POC: sem provider real obrigatório
+  resources:
+    requests: { cpu: "200m", memory: "384Mi" }
+    limits: { cpu: "750m", memory: "768Mi" }
 adapters:
   # v0: adapters de webhook DESLIGADOS (o trigger é direto no ingest, passo 8 do
   # runbook — sem túnel/webhook). ingest-gateway FICA (host do disparo manual).
@@ -66,6 +73,9 @@ adapters:
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
   ingestGateway:
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
+    resources:
+      requests: { cpu: "75m", memory: "128Mi" }
+      limits: { cpu: "400m", memory: "256Mi" }
 
 # validation NÃO sobe: a imagem dse/validation não está no release (→
 # ImagePullBackOff) e o finalize_pr roda no worker do orchestrator, não aqui.
@@ -107,11 +117,23 @@ postgres:
   enabled: true
   persistence: { enabled: true, size: 10Gi }
   resources:
-    requests: { cpu: "250m", memory: "512Mi" }
+    requests: { cpu: "200m", memory: "512Mi" }
     limits: { cpu: "750m", memory: "1Gi" }
-temporal:
+redis:
   resources:
-    requests: { cpu: "300m", memory: "640Mi" }
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits: { cpu: "300m", memory: "256Mi" }
+vault:
+  resources:
+    requests: { cpu: "50m", memory: "160Mi" }
+    limits: { cpu: "300m", memory: "384Mi" }
+temporal:
+  # UI do Temporal DESLIGADA no POC (economiza ~100m de CPU no node 2-core);
+  # observo os workflows via `kubectl` / logs do orchestrator.
+  ui:
+    enabled: false
+  resources:
+    requests: { cpu: "250m", memory: "640Mi" }
     limits: { cpu: "1", memory: "1280Mi" }
 
 # Teams/model-server desligados (topologia A, POC)
