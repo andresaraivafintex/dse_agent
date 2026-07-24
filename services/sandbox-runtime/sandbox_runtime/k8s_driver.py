@@ -75,6 +75,16 @@ def pod_name_for(work_item_id: str) -> str:
     return f"dse-sbx-{slug}"[:63].rstrip("-")
 
 
+def _label_value(v: str) -> str:
+    """Valor de label do K8s: no máximo 63 chars, sem terminar em -/_/.
+
+    O work_item_id real é `wi_` + sha256 (64 hex) = 67 chars, que estoura o
+    limite e faz o `kubectl apply` do Pod falhar (metadata.labels inválido).
+    Truncamos preservando o prefixo reconhecível. Este label é INFORMATIVO —
+    nenhum seletor o usa (os Pods são endereçados por pod_name_for)."""
+    return v[:63].rstrip("-_.")
+
+
 def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig | None = None) -> dict[str, Any]:
     """Pod spec efêmero e ENDURECIDO. Núcleo de segurança do §G (testável).
 
@@ -164,8 +174,8 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
             "namespace": cfg.namespace,
             "labels": {
                 "app.kubernetes.io/managed-by": "dse-sandbox",
-                "dse.fintex/work-item": request.work_item_id,
-                "dse.fintex/tenant": request.tenant_id,
+                "dse.fintex/work-item": _label_value(request.work_item_id),
+                "dse.fintex/tenant": _label_value(request.tenant_id),
             },
             "annotations": annotations,
         },
