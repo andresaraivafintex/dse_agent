@@ -34,28 +34,13 @@ from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
 from conftest import (
+    wait_for_status,
     insert_work_item,
     new_work_item_id,
     read_audit_actions,
     read_skill_episodes,
 )
 from fakes import FakeControlPlane, build_fake_activities
-
-
-async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
-    from temporalio.service import RPCError
-
-    status = None
-    for _ in range(attempts):
-        try:
-            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except RPCError:
-            await asyncio.sleep(0.05)
-            continue
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
 
 
 async def _wait_until(predicate, attempts: int = 400, msg: str = "condicao nunca ficou true"):
@@ -102,12 +87,12 @@ async def test_changes_requested_runs_merge_base_before_coder(time_skipping_env)
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
         await _wait_until(lambda: state.update_base_calls >= 1,
                           msg="merge-base nunca rodou no changes_requested")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -142,7 +127,7 @@ async def test_merge_base_conflict_escalates_and_does_not_rerun_coder(time_skipp
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "rebaseia"})
         result = await handle.result()
 
@@ -173,7 +158,7 @@ async def test_merge_base_orphaned_threads_violation_escalates(time_skipping_env
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "x"})
         result = await handle.result()
 
@@ -208,7 +193,7 @@ async def test_recurring_clarification_gap_emits_skill_episode(time_skipping_env
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
         # responde sempre so o repo -> base_branch/acceptance_criteria RECORREM faltando
         for _ in range(3):
-            await _wait_for_status(handle, {"needs_clarification"})
+            await wait_for_status(handle, {"needs_clarification"})
             await handle.signal("clarification_answer", {"repo": "acme/repo"})
         result = await handle.result()
 
@@ -249,11 +234,11 @@ async def test_non_recurring_clarification_emits_no_episode(time_skipping_env):
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"needs_clarification"})
+        await wait_for_status(handle, {"needs_clarification"})
         # responde TUDO de uma vez -> completa sem recorrencia
         await handle.signal("clarification_answer",
                             {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "X"})
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -282,11 +267,11 @@ async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         # um round de changes_requested -> conta na taxa + 1 refresh de evidencia
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "y"})
         await _wait_until(lambda: state.finalize_calls >= 2, msg="fix cycle nunca completou")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -334,10 +319,10 @@ async def test_pr_quality_metric_emitted_on_escalation(time_skipping_env):
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, review_round_cap=1, coder_retry_cap=99),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r1"})
         await _wait_until(lambda: state.finalize_calls >= 2, msg="round 1 nunca completou")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r2"})
         result = await handle.result()
 

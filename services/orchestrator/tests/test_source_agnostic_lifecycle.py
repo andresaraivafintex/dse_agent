@@ -19,20 +19,9 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
-import asyncio
-
-
-async def _wait_for_status(handle, expected: set[str], attempts: int = 400) -> str:
-    status = "unknown"
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected:
-            return status
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"status nao chegou em {expected}; ultimo={status!r}")
 
 
 def _slack_input(work_item_id: str) -> WorkItemLifecycleInput:
@@ -70,9 +59,9 @@ async def test_slack_origin_work_item_reaches_done(time_skipping_env):
             id=work_item_id, task_queue=task_queue,
         )
         # estaciona em review_ready aguardando o verdict humano
-        await _wait_for_status(handle, {"review_ready", "pr_ready"})
+        await wait_for_status(handle, {"review_ready", "pr_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await _wait_for_status(handle, {"merge_pending", "pr_ready"})
+        await wait_for_status(handle, {"merge_pending", "pr_ready"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 

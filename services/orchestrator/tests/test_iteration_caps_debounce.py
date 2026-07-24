@@ -26,26 +26,8 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
-
-
-async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
-    from temporalio.service import RPCError
-
-    status = None
-    for _ in range(attempts):
-        try:
-            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except RPCError:
-            # query pode dar timeout transiente se aterrissar na janela de
-            # continue_as_new no servidor de time-skipping — re-polla
-            await asyncio.sleep(0.05)
-            continue
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
 
 
 async def _wait_until(predicate, attempts: int = 400, msg: str = "condicao nunca ficou true"):
@@ -86,7 +68,7 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
         # sem continue_as_new entre elas, sinais nao se perdem) e manda os 6
         # comentarios ANTES de o loop de review consumi-los: chegam como um
         # unico lote pendente.
-        await _wait_for_status(handle, {"implementing", "validating", "review_ready"})
+        await wait_for_status(handle, {"implementing", "validating", "review_ready"})
         for i in range(6):
             await handle.signal("review_comment",
                                 {"verdict": "changes_requested", "comment": f"ajuste {i}"})
@@ -100,7 +82,7 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
                 break
             await time_skipping_env.sleep(2)
         assert state.finalize_calls >= 2, "fix cycle do lote nunca re-finalizou o PR"
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -137,7 +119,7 @@ async def test_review_comments_alone_never_refresh_evidence(time_skipping_env):
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, evidence_debounce_seconds=60.0),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -163,7 +145,7 @@ async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skippi
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         # espera a evidencia INICIAL rodar (o status pr_ready e gravado antes
         # do pipeline; um refresh enviado antes do pipeline iniciar seria
         # legitimamente absorvido por ele — semantica do debounce)
@@ -201,13 +183,13 @@ async def test_review_round_cap_escalates_never_loops_forever(time_skipping_env)
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, review_round_cap=1, coder_retry_cap=99),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         # round 1: dentro do cap — fix normal
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r1"})
         await _wait_until(lambda: state.finalize_calls >= 2,
                           msg="primeiro fix cycle nunca completou")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         # round 2: estoura o cap -> escalated
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r2"})
@@ -237,7 +219,7 @@ async def test_evidence_refresh_cap_declines_cleanly_without_blocking(time_skipp
             WorkItemLifecycleWorkflow.run,
             _wf_input(work_item_id, evidence_refresh_cap=1),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await _wait_until(lambda: state.trigger_preview_calls >= 1,
                           msg="evidencia inicial nunca rodou")
 

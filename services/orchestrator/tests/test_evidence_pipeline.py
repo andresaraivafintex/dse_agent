@@ -17,7 +17,6 @@ RunVisualDiffInput) — payload derivado do contrato quebra AQUI, nao no wire
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest
@@ -34,30 +33,13 @@ from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
 from conftest import (
+    wait_for_status,
     insert_work_item,
     new_work_item_id,
     read_audit_actions,
     read_evidence_row,
 )
 from fakes import FakeControlPlane, build_fake_activities
-
-
-async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
-    from temporalio.service import RPCError
-
-    status = None
-    for _ in range(attempts):
-        try:
-            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except RPCError:
-            # query pode dar timeout transiente se aterrissar na janela de
-            # continue_as_new no servidor de time-skipping — re-polla
-            await asyncio.sleep(0.05)
-            continue
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
 
 
 def _wf_input(work_item_id: str, **kw) -> WorkItemLifecycleInput:
@@ -84,7 +66,7 @@ async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -141,7 +123,7 @@ async def test_docs_only_pr_skips_preview_deterministically(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -173,7 +155,7 @@ async def test_backend_service_pr_now_previews_and_posts_link(time_skipping_env)
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -204,7 +186,7 @@ async def test_degraded_preview_does_not_block_pr(time_skipping_env):
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
         # chega em pr_ready MESMO com preview degradado
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -235,7 +217,7 @@ async def test_preview_activity_crash_degrades_not_blocks(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()

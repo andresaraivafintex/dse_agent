@@ -16,7 +16,7 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
 
@@ -52,13 +52,13 @@ async def test_happy_path_reaches_done(time_skipping_env):
 
         # workflow deve chegar em pr_ready e ficar esperando review humano —
         # fazemos polling curto via query ate ver o status esperado.
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
         # estados finos (spec §2): apos aprovar, o workflow estaciona em
         # merge_pending esperando o merge humano; `pr_ready` cobre o fallback
         # coarse de runs sem o patch de estados finos.
-        await _wait_for_status(handle, {"merge_pending", "pr_ready"})
+        await wait_for_status(handle, {"merge_pending", "pr_ready"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
 
         result = await handle.result()
@@ -113,7 +113,7 @@ async def test_l1_failure_triggers_fix_loop_then_passes(time_skipping_env):
             id=work_item_id,
             task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -164,12 +164,3 @@ async def test_l1_failure_exhausts_retry_cap_and_fails(time_skipping_env):
     assert "coder_retry_cap_exhausted" in actions
 
 
-async def _wait_for_status(handle, expected_statuses: set[str], attempts: int = 100) -> None:
-    import asyncio
-
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected_statuses:
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected_statuses}, ultimo={status!r}")

@@ -17,22 +17,8 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import DSN, insert_work_item, new_work_item_id, read_audit_actions
+from conftest import DSN, insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
-
-
-async def _wait_for_status(handle, expected: set[str], attempts: int = 1200) -> str:
-    # Fase 4 (plano 09): 400×25ms=10s flakeava sob carga da máquina (k3d +
-    # docker + suítes em paralelo — falhas variavam entre rodadas e passavam
-    # isoladas). 1200×50ms=60s de teto; o retorno continua imediato ao atingir
-    # o status — só o pior caso ganhou folga.
-    status = "unknown"
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nao chegou em {expected}; ultimo={status!r}")
 
 
 def _input(work_item_id: str, **overrides) -> WorkItemLifecycleInput:
@@ -122,10 +108,10 @@ async def test_ci_pending_polls_until_green_before_review(time_skipping_env):
             id=work_item_id,
             task_queue=task_queue,
         )
-        await _wait_for_status(handle, {WorkItemStatus.review_ready.value})
+        await wait_for_status(handle, {WorkItemStatus.review_ready.value})
         assert state.calls_log.count("consume_ci_status") == 3
         await handle.signal("review_comment", {"verdict": "approved"})
-        await _wait_for_status(handle, {WorkItemStatus.merge_pending.value})
+        await wait_for_status(handle, {WorkItemStatus.merge_pending.value})
         await handle.signal(
             "merged_by_human", {"merged_by": "usr_test", "pr_number": 1000}
         )
@@ -156,9 +142,9 @@ async def test_unverified_merge_signal_is_rejected_and_wait_continues(time_skipp
             id=work_item_id,
             task_queue=task_queue,
         )
-        await _wait_for_status(handle, {WorkItemStatus.review_ready.value})
+        await wait_for_status(handle, {WorkItemStatus.review_ready.value})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await _wait_for_status(handle, {WorkItemStatus.merge_pending.value})
+        await wait_for_status(handle, {WorkItemStatus.merge_pending.value})
 
         await handle.signal("merged_by_human", {})
         for _ in range(100):
@@ -198,9 +184,9 @@ async def test_forged_merge_signal_refuted_by_github_api(time_skipping_env):
             WorkItemLifecycleWorkflow.run, _input(work_item_id),
             id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {WorkItemStatus.review_ready.value})
+        await wait_for_status(handle, {WorkItemStatus.review_ready.value})
         await handle.signal("review_comment", {"verdict": "approved"})
-        await _wait_for_status(handle, {WorkItemStatus.merge_pending.value})
+        await wait_for_status(handle, {WorkItemStatus.merge_pending.value})
 
         # envelope VÁLIDO (pr_number certo), mas a API diz "não merged" → refuta
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -240,7 +226,7 @@ async def test_plan_risk_and_sha_boundaries_are_persisted_and_propagated(time_sk
             id=work_item_id,
             task_queue=task_queue,
         )
-        await _wait_for_status(handle, {WorkItemStatus.review_ready.value})
+        await wait_for_status(handle, {WorkItemStatus.review_ready.value})
         assert state.last_l1_payload is not None
         assert state.last_l1_payload["base_sha"] == "base0001"
         assert state.last_l1_payload["head_sha"].startswith("head")

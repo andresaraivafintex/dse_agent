@@ -178,15 +178,27 @@ def _require_postgres():
         pytest.skip(f"Postgres da fundacao indisponivel em {DSN}: {exc}")
 
 
-async def wait_for_status(handle, expected, attempts: int = 600, sleep_s: float = 0.05) -> str:
+async def wait_for_status(handle, expected, attempts: int = 120, sleep_s: float = 0.25) -> str:
     """Polling resiliente de status de workflow (Fase 4, plano 09).
 
-    Uma query pode estourar deadline TRANSIENTE quando aterrissa na janela de
-    continue_as_new OU quando o worker está saturado (runner CI de 2 vCPU:
-    "query deadline exceeded" / "Timeout expired"). Isso é flake de infra de
-    teste, não de lógica — re-polla em vez de propagar. Captura tanto o
-    RPCError da API quanto o RPCError cru do bridge Rust (nome do tipo), que
-    nem sempre é subclasse do primeiro. Teto de tempo generoso (600×50ms=30s).
+    Duas armadilhas de runner que este helper trata, ambas vistas na primeira
+    execução real do CI (2 vCPU):
+
+    1. TIME-SKIPPING sufocado por polling agressivo. Sob
+       `WorkflowEnvironment.start_time_skipping`, o relógio só AVANÇA quando
+       não há chamada de API pendente — e `handle.query()` PAUSA o skip
+       enquanto executa. Um poll de 50ms num runner saturado (query lenta)
+       não deixa janela idle para o relógio pular, então os timers do workflow
+       (lembrete de 24h, escalação de 3 dias) nunca disparam e o teste TRAVA.
+       O intervalo maior (250ms) garante a janela de time-skip entre queries.
+
+    2. Deadline TRANSIENTE da query (continue_as_new ou worker saturado:
+       "query deadline exceeded" / "Timeout expired") — re-polla em vez de
+       propagar. Captura o RPCError da API E o RPCError cru do bridge Rust
+       (pelo nome do tipo), que nem sempre é subclasse do primeiro.
+
+    Teto ~30s (120×250ms) de tempo de workflow — mais que suficiente com o
+    time-skip funcionando; o pytest-timeout de 180s é o backstop absoluto.
     """
     import asyncio
 

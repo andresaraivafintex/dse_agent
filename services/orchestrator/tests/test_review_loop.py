@@ -19,7 +19,7 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
 
@@ -42,12 +42,12 @@ async def test_changes_requested_cycles_back_to_coder_same_pr(time_skipping_env)
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         first_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
 
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
         await asyncio.sleep(0.2)  # deixa o ciclo de fix rodar
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
         second_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
         assert second_pr_number == first_pr_number  # MESMO PR, nunca recria
@@ -87,7 +87,7 @@ async def test_ci_red_triggers_fix_before_waking_human(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -119,7 +119,7 @@ async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
 
         # Confirma (via query/audit, NAO via handle.result() com timeout —
@@ -164,11 +164,3 @@ def test_no_automatic_merge_path_in_source():
     assert not offenders, f"encontrada possivel chamada de merge automatico: {offenders}"
 
 
-async def _wait_for_status(handle, expected_statuses: set[str], attempts: int = 300) -> str:
-    status = None
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected_statuses:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected_statuses}, ultimo={status!r}")

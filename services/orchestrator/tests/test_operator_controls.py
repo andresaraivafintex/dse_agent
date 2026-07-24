@@ -14,7 +14,7 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
 
@@ -63,7 +63,7 @@ async def test_pause_blocks_next_activity_but_not_current(time_skipping_env):
         assert status_while_paused != WorkItemStatus.review_ready.value
 
         await handle.signal("resume", "ok pode seguir")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
     actions = read_audit_actions(work_item_id)
     assert "pause" not in actions  # sinais de operador nao emitem audit por si (log interno via query)
@@ -129,7 +129,7 @@ async def test_reassign_model_is_forwarded_to_next_coder_turn(time_skipping_env)
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
         await handle.signal("reassign_model", "claude-opus-4")
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
 
     # `reassign_model` nao gera uma linha de audit propria (nao e uma
     # transicao de estado de negocio); a prova funcional de que o sinal foi
@@ -174,11 +174,3 @@ async def test_escalate_signal_forces_terminal_escalated(time_skipping_env):
     assert "escalated" in actions
 
 
-async def _wait_for_status(handle, expected_statuses: set[str], attempts: int = 300) -> str:
-    status = None
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected_statuses:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected_statuses}, ultimo={status!r}")

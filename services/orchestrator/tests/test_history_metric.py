@@ -11,7 +11,6 @@ regra de alerta do WS-F consulta.
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest
@@ -25,26 +24,8 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id
+from conftest import insert_work_item, new_work_item_id, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
-
-
-async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
-    from temporalio.service import RPCError
-
-    status = None
-    for _ in range(attempts):
-        try:
-            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except RPCError:
-            # query pode dar timeout transiente se aterrissar na janela de
-            # continue_as_new no servidor de time-skipping — re-polla
-            await asyncio.sleep(0.05)
-            continue
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
 
 
 def _collect_points(reader: InMemoryMetricReader, metric_name: str):
@@ -79,7 +60,7 @@ async def test_full_lifecycle_emits_history_metric_with_work_item_attrs(time_ski
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()

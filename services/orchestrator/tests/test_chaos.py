@@ -54,7 +54,7 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item
+from conftest import insert_work_item, new_work_item_id, read_audit_actions, read_work_item, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
 _TEMPORAL_ADDRESS = os.environ.get("DSE_TEMPORAL_ADDRESS", "localhost:7233")
@@ -198,16 +198,6 @@ def test_chaos_worker_process_script_exists():
 # ===========================================================================
 
 
-async def _wait_for_status_local(handle, expected, attempts: int = 400) -> str:
-    status = None
-    for _ in range(attempts):
-        status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
-
-
 @pytest.mark.asyncio
 async def test_egress_proxy_unavailable_fails_closed_no_egress(time_skipping_env):
     """egress-proxy indisponivel -> zero egress (fail-closed): o Coder nao
@@ -293,7 +283,7 @@ async def test_gateway_oscillation_transient_recovers_and_completes(time_skippin
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status_local(handle, {"review_ready"})  # recuperou apesar da oscilacao
+        await wait_for_status(handle, {"review_ready"})  # recuperou apesar da oscilacao
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
