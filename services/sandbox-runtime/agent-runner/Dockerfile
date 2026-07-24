@@ -26,9 +26,11 @@ RUN apt-get update \
 # (ex. `node --test` p/ repos Node, `npm test`). O claude-agent-sdk embute o
 # Node internamente mas NÃO o expõe no PATH — sem isto o Tester falha com
 # "node: not found" em repos Node (achado empírico: fintex-wallet é Node).
-# NodeSource p/ node >=20 (o repo exige `engines.node >=20`; `node --test`
-# estável a partir do 20).
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# NodeSource p/ node 22 LTS (satisfaz `engines.node >=20`). Node 22 (não 20)
+# porque o `node --test` só EXPANDE GLOB a partir do 21 — repos com
+# `"test": "node --test \"test/*.test.js\""` (ex. fintex-wallet) falham no 20
+# com "Could not find 'test/*.test.js'" (glob tratado como path literal).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
