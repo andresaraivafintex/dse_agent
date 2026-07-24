@@ -18,7 +18,7 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "egress-proxy" "Release" .Release) | nindent 8 }}
     spec:
-      {{- include "dse.podDefaults" . | nindent 6 }}
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: egress-proxy
           image: {{ include "dse.image" (dict "root" $ "repository" .Values.egressProxy.image.repository "tag" .Values.egressProxy.image.tag "digest" .Values.egressProxy.image.digest) }}

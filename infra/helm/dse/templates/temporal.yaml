@@ -86,7 +86,7 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "temporal-ui" "Release" .Release) | nindent 8 }}
     spec:
-      {{- include "dse.podDefaults" . | nindent 6 }}
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
       containers:
         - name: temporal-ui
           image: {{ include "dse.image" (dict "root" $ "repository" .Values.temporal.ui.image.repository "tag" .Values.temporal.ui.image.tag "digest" .Values.temporal.ui.image.digest) }}
