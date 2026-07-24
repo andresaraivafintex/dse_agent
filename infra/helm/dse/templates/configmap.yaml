@@ -27,8 +27,13 @@ data:
   # cujos search domains não acham o Service de egress-proxy em global.namespace.
   # Sem o FQDN, o HTTP(S)_PROXY do Pod dá NXDOMAIN e o clone in-pod falha.
   DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.egressProxy.port }}"
-  DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
-  DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
+  # FQDN (não nome curto): o orchestrator e o Pod de sandbox têm HTTPS_PROXY=
+  # egress-proxy + NO_PROXY=.svc,.cluster.local. Com nome curto a chamada ao
+  # model-gateway é sequestrada pelo proxy (host interno fora da allowlist) →
+  # 502 body vazio, o Planner devolve plano vazio e o turno escala. O FQDN casa
+  # o NO_PROXY e a chamada vai direta ao Service.
+  DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
+  DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.modelGateway.allowFixture | quote }}
   DSE_SANDBOX_INPROCESS: {{ ternary "1" "0" .Values.runtime.inProcess | quote }}
   DSE_SANDBOX_LOCAL_FALLBACK_ALLOWED: {{ ternary "1" "0" .Values.runtime.localFallbackAllowed | quote }}
