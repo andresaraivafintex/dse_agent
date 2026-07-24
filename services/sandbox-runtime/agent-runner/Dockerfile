@@ -38,6 +38,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
+# bandit: SAST do pipeline L1 (dse_validation.l1.sast roda `bandit -r <dir>`
+# DENTRO do Pod via kubectl exec). Sem bandit o L1 dá sast=ERROR e reprova. É
+# tool Python; num repo sem .py roda e não acha nada → PASS.
+RUN pip install --no-cache-dir bandit
+
 # contrato tipado da fronteira worker→runner (AgentTurnRequest/Result): o
 # runner valida com o modelo REAL (spec §5), nunca com dict solto.
 COPY packages/contracts /app/packages/contracts
