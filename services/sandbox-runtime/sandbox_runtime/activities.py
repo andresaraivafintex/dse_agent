@@ -1305,40 +1305,59 @@ def _tester_pod_sync(
     # do path local era isto rodando no worker, que não tem o workspace).
     _pod_sh("cd /workspace && git config user.name dse-tester && git config user.email tester@dse.local")
 
-    # autoria REAL: contexto do workspace (git show HEAD + package.json + teste
-    # exemplo). kubectl cp o /workspace do Pod → clone local só de leitura.
-    authoring_script: list[dict[str, Any]] | None = None
-    tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
-    try:
-        local_ws = os.path.join(tmp, "ws")
-        cp = _sp.run(
-            kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws],
-            capture_output=True, text=True, timeout=180,
-        )
-        if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
-            authoring_script = _model_authored_test_script(inp, local_ws, headers, virtual_key)
-        else:
-            logger.warning("tester k8s: kubectl cp do workspace falhou (rc=%s): %.200s",
-                           cp.returncode, (cp.stderr or "")[:200])
-    finally:
-        _shutil.rmtree(tmp, ignore_errors=True)
+    # idempotência (retry): se um round anterior do Tester já autorou testes
+    # (commit `tester(...)`) e eles ainda existem no Pod, RE-RODA em vez de
+    # re-autorar — alvo FIXO p/ o Coder convergir (o path local faz o mesmo com
+    # _tester_authored_files_in_history). Sem isto cada retry autora um arquivo
+    # novo, o alvo se move e o loop Coder↔Tester nunca fecha.
+    reused = [
+        f for f in _pod_sh(
+            "cd /workspace && git log --pretty=%H --grep='^tester(' -n 8 2>/dev/null | "
+            'while read h; do git show --name-only --pretty=format: "$h" 2>/dev/null; done | '
+            'sort -u | while read f; do [ -n "$f" ] && [ -f "$f" ] && echo "$f"; done'
+        ).stdout.splitlines() if f.strip()
+    ]
 
-    # escreve os test files NO POD (conteúdo via stdin — sem quoting do content)
     test_files: list[str] = []
-    for s in (authoring_script or []):
-        if s.get("tool") != "write_file":
-            continue
-        path, content = str(s.get("path") or ""), str(s.get("content") or "")
-        if not path:
-            continue
-        w = _pod_sh(
-            f'cd /workspace && mkdir -p "$(dirname {_shlex.quote(path)})" && cat > {_shlex.quote(path)}',
-            input_text=content,
-        )
-        if w.returncode == 0:
-            test_files.append(path)
-        else:
-            logger.warning("tester k8s: falha escrevendo %s no Pod: %.200s", path, (w.stderr or "")[:200])
+    authored_new = False
+    if reused:
+        test_files = reused
+        logger.info("tester k8s: reusando %d teste(s) autorado(s) em round anterior", len(reused))
+    else:
+        # autoria REAL: contexto do workspace (git show HEAD + package.json +
+        # teste exemplo). kubectl cp o /workspace do Pod → clone local read-only.
+        authoring_script: list[dict[str, Any]] | None = None
+        tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
+        try:
+            local_ws = os.path.join(tmp, "ws")
+            cp = _sp.run(
+                kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws],
+                capture_output=True, text=True, timeout=180,
+            )
+            if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
+                authoring_script = _model_authored_test_script(inp, local_ws, headers, virtual_key)
+            else:
+                logger.warning("tester k8s: kubectl cp do workspace falhou (rc=%s): %.200s",
+                               cp.returncode, (cp.stderr or "")[:200])
+        finally:
+            _shutil.rmtree(tmp, ignore_errors=True)
+
+        # escreve os test files NO POD (conteúdo via stdin — sem quoting do content)
+        for s in (authoring_script or []):
+            if s.get("tool") != "write_file":
+                continue
+            path, content = str(s.get("path") or ""), str(s.get("content") or "")
+            if not path:
+                continue
+            w = _pod_sh(
+                f'cd /workspace && mkdir -p "$(dirname {_shlex.quote(path)})" && cat > {_shlex.quote(path)}',
+                input_text=content,
+            )
+            if w.returncode == 0:
+                test_files.append(path)
+                authored_new = True
+            else:
+                logger.warning("tester k8s: falha escrevendo %s no Pod: %.200s", path, (w.stderr or "")[:200])
 
     # roda a suíte NO POD (detecção determinística: package.json com script
     # "test" → npm test; senão pytest). node/npm/pytest vêm da imagem (rebuild).
@@ -1359,15 +1378,15 @@ def _tester_pod_sync(
     # commit dos test files NO POD (branch corrente; checkpoint pós-tester captura
     # e o finalize dá push). Sem push aqui.
     head_sha = None
-    if test_files:
+    if authored_new and test_files:
         files_arg = " ".join(_shlex.quote(p) for p in test_files)
         msg = f"tester({inp.work_item_id}): {(inp.instruction or '')[:60]}"
         _pod_sh(
             f"cd /workspace && git add {files_arg} && git commit -m {_shlex.quote(msg)} || true",
             timeout=120,
         )
-        h = _pod_sh("cd /workspace && git rev-parse HEAD", timeout=60)
-        head_sha = (h.stdout or "").strip() or None
+    h = _pod_sh("cd /workspace && git rev-parse HEAD", timeout=60)
+    head_sha = (h.stdout or "").strip() or None
 
     audit_emit(
         actor="system:sandbox-runtime",
