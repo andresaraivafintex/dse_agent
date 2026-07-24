@@ -72,6 +72,56 @@ class DockerExecSandbox:
             )
 
 
+class KubectlExecSandbox:
+    """Executa comandos via ``kubectl exec`` no Pod de sandbox (driver K8s).
+
+    Espelha ``DockerExecSandbox`` para o runtime K8s: no driver K8s o
+    ``SandboxHandle.container_id`` é o NOME do Pod (ver ``activities.py``,
+    ``container_id = driver.sandbox_id_for``). Roda a partir do worker do
+    orchestrator, que tem ``kubectl`` e RBAC de ``pods/exec`` no namespace do
+    sandbox (least-privilege verificado). ``kubectl exec`` não tem flag de
+    working-dir, então embrulhamos em ``sh -c 'cd <cwd> && exec <argv>'`` com
+    cada argumento devidamente escapado.
+    """
+
+    def __init__(
+        self,
+        pod_name: str,
+        namespace: str | None = None,
+        default_cwd: str = "/workspace",
+        kubectl: str | None = None,
+        context: str | None = None,
+    ):
+        self.pod_name = pod_name
+        self.namespace = namespace or os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
+        self.default_cwd = default_cwd
+        self.kubectl = kubectl or os.environ.get("DSE_KUBECTL", "kubectl")
+        self.context = context if context is not None else os.environ.get("DSE_SANDBOX_KUBE_CONTEXT", "")
+
+    def run(self, argv: list[str], cwd: str | None = None, timeout: int = 300) -> ExecResult:
+        import shlex
+
+        workdir = cwd or self.default_cwd
+        inner = "cd " + shlex.quote(workdir) + " && exec " + " ".join(shlex.quote(a) for a in argv)
+        base = [self.kubectl]
+        if self.context:
+            base += ["--context", self.context]
+        full_argv = base + ["exec", "-i", self.pod_name, "-n", self.namespace, "--", "sh", "-c", inner]
+        try:
+            proc = subprocess.run(full_argv, capture_output=True, text=True, timeout=timeout)
+            return ExecResult(
+                argv=argv, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr
+            )
+        except subprocess.TimeoutExpired as e:
+            return ExecResult(
+                argv=argv,
+                returncode=-1,
+                stdout=(e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""),
+                stderr=(e.stderr or b"").decode() if isinstance(e.stderr, bytes) else (e.stderr or ""),
+                timed_out=True,
+            )
+
+
 class LocalFakeSandbox:
     """Modo local/teste: roda o comando diretamente num diretório local, sem
     Docker. Usado pelos testes de `dse_validation` para provar a lógica do
@@ -136,6 +186,14 @@ def executor_for_handle(sandbox_handle, repo_dir: str = "/workspace/repo") -> Sa
         state_dir = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
         local_ws = Path(state_dir) / wi / "workspace"
         return LocalFakeSandbox(local_ws)
+    # Driver K8s (POC/produção isolada): o agente roda DENTRO do Pod de sandbox;
+    # o "container_id" do handle é o NOME do Pod. L1/finalize devem operar nesse
+    # Pod via `kubectl exec` — não `docker exec` (não há Docker no node). O
+    # default_cwd do runtime K8s é /workspace (onde o runner clona), não
+    # /workspace/repo (layout docker). Gated pelo mesmo env do driver.
+    driver = os.environ.get("DSE_SANDBOX_DRIVER", "").strip().lower()
+    if driver in {"k8s", "kubernetes"} and getattr(sandbox_handle, "container_id", None):
+        return KubectlExecSandbox(sandbox_handle.container_id)
     if getattr(sandbox_handle, "container_id", None):
         return DockerExecSandbox(sandbox_handle.container_id, default_cwd=repo_dir)
     raise RuntimeError(
