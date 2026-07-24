@@ -114,6 +114,12 @@ spec:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # GITHUB_WEBHOOK_SECRET (verificação HMAC do webhook) + GitHub App
+            # (config._from_vault_or_env lê do ambiente). Ver extraEnvSecret.
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
           env:
             - name: VAULT_ADDR
               value: {{ .Values.secrets.vaultAddr | quote }}

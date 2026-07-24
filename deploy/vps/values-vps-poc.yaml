@@ -65,14 +65,19 @@ modelGateway:
     requests: { cpu: "200m", memory: "512Mi" }
     limits: { cpu: "750m", memory: "1536Mi" }
 adapters:
-  # v0: adapters de webhook DESLIGADOS (o trigger é direto no ingest, passo 8 do
-  # runbook — sem túnel/webhook). ingest-gateway FICA (host do disparo manual).
+  # Track B (webhook): adapter-github LIGADO — recebe o webhook do GitHub
+  # (issues.labeled com label `dse`), verifica o HMAC (GITHUB_WEBHOOK_SECRET) e
+  # chama admit_work_item. O dispatcher (Deployment separado) faz o start_workflow.
+  # Slack segue desligado (POC é só GitHub).
   slack:
     enabled: false
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
   github:
-    enabled: false
+    enabled: true
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
+    resources:
+      requests: { cpu: "75m", memory: "128Mi" }
+      limits: { cpu: "400m", memory: "256Mi" }
   ingestGateway:
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
     resources:
