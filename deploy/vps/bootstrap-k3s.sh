@@ -69,7 +69,10 @@ k3s kubectl apply -f "$(dirname "$0")/../k8s/sandbox-isolation.yaml"
 
 # --- helm + sops + age --------------------------------------------------------
 command -v helm >/dev/null 2>&1 || { log "instalando helm"; curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash; }
-command -v sops >/dev/null 2>&1 || { log "instalando sops"; curl -sfLo /usr/local/bin/sops https://github.com/getsops/sops/releases/latest/download/sops-$(uname -s | tr A-Z a-z).$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 ); chmod +x /usr/local/bin/sops; }
+# sops: o asset do release carrega a versão no nome — "latest/download" com
+# nome sem versão dá 404 (achado do bootstrap real na VPS, 2026-07-23).
+SOPS_VERSION="${SOPS_VERSION:-v3.11.0}"
+command -v sops >/dev/null 2>&1 || { log "instalando sops ${SOPS_VERSION}"; curl -sfLo /usr/local/bin/sops "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 )"; chmod +x /usr/local/bin/sops; }
 command -v age >/dev/null 2>&1 || { log "instalando age"; apt-get update -qq && apt-get install -y -qq age; }
 
 log "bootstrap concluído. Próximos passos: deploy/vps/README.md"
