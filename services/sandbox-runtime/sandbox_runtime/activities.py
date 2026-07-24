@@ -1269,6 +1269,141 @@ async def run_tester_turn(inp: RunTesterTurnInput) -> TesterTurnResult:
     return await _run_tester_turn_impl(inp)
 
 
+def _tester_pod_sync(
+    inp: "RunTesterTurnInput",
+    sandbox_id: str,
+    headers: Any,
+    virtual_key: str,
+    push: bool,
+) -> TesterTurnResult:
+    """Corpo SÍNCRONO da bridge do Tester no runtime K8s (rodado sob heartbeat).
+
+    Opera DENTRO do Pod de sandbox via `kubectl exec` — o workspace e o
+    toolchain (node/git) vivem no Pod (o Coder já rodou lá), NÃO no worker. A
+    autoria (modelo) precisa do contexto do workspace: `kubectl cp` traz um clone
+    local SÓ de leitura pra alimentar `_model_authored_test_script`; a escrita, a
+    execução da suíte e o commit dos testes acontecem no Pod. Simplificação vs o
+    path Docker/dev: sem loop de infra-error nem idempotência de re-run (1
+    autoria; autoria vazia → tests_ran=False → o gate para limpo)."""
+    import shlex as _shlex
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile as _tf
+
+    ns = os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
+    kubectl = os.environ.get("DSE_KUBECTL", "kubectl")
+    kctx = os.environ.get("DSE_SANDBOX_KUBE_CONTEXT", "")
+    kbase = [kubectl] + (["--context", kctx] if kctx else [])
+
+    def _pod_sh(script: str, *, timeout: int = 600, input_text: str | None = None) -> "_sp.CompletedProcess":
+        return _sp.run(
+            kbase + ["exec", "-i", sandbox_id, "-n", ns, "--", "sh", "-c", script],
+            capture_output=True, text=True, timeout=timeout, input=input_text,
+        )
+
+    # identidade git NO POD (onde o repo realmente está — o "git config exit 128"
+    # do path local era isto rodando no worker, que não tem o workspace).
+    _pod_sh("cd /workspace && git config user.name dse-tester && git config user.email tester@dse.local")
+
+    # autoria REAL: contexto do workspace (git show HEAD + package.json + teste
+    # exemplo). kubectl cp o /workspace do Pod → clone local só de leitura.
+    authoring_script: list[dict[str, Any]] | None = None
+    tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
+    try:
+        local_ws = os.path.join(tmp, "ws")
+        cp = _sp.run(
+            kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws],
+            capture_output=True, text=True, timeout=180,
+        )
+        if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
+            authoring_script = _model_authored_test_script(inp, local_ws, headers, virtual_key)
+        else:
+            logger.warning("tester k8s: kubectl cp do workspace falhou (rc=%s): %.200s",
+                           cp.returncode, (cp.stderr or "")[:200])
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+    # escreve os test files NO POD (conteúdo via stdin — sem quoting do content)
+    test_files: list[str] = []
+    for s in (authoring_script or []):
+        if s.get("tool") != "write_file":
+            continue
+        path, content = str(s.get("path") or ""), str(s.get("content") or "")
+        if not path:
+            continue
+        w = _pod_sh(
+            f'cd /workspace && mkdir -p "$(dirname {_shlex.quote(path)})" && cat > {_shlex.quote(path)}',
+            input_text=content,
+        )
+        if w.returncode == 0:
+            test_files.append(path)
+        else:
+            logger.warning("tester k8s: falha escrevendo %s no Pod: %.200s", path, (w.stderr or "")[:200])
+
+    # roda a suíte NO POD (detecção determinística: package.json com script
+    # "test" → npm test; senão pytest). node/npm/pytest vêm da imagem (rebuild).
+    run = _pod_sh(
+        'cd /workspace && '
+        'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
+        'npm install --no-audit --no-fund >/dev/null 2>&1 || true; npm test --silent; '
+        'else python3 -m pytest -q; fi',
+        timeout=600,
+    )
+    tests_ran = bool(test_files)
+    tests_passed = tests_ran and run.returncode == 0
+    returncode = run.returncode
+    if tests_ran and not tests_passed:
+        logger.warning("tester k8s: suíte falhou (rc=%s): %.300s",
+                       returncode, ((run.stdout or "") + (run.stderr or ""))[-300:])
+
+    # commit dos test files NO POD (branch corrente; checkpoint pós-tester captura
+    # e o finalize dá push). Sem push aqui.
+    head_sha = None
+    if test_files:
+        files_arg = " ".join(_shlex.quote(p) for p in test_files)
+        msg = f"tester({inp.work_item_id}): {(inp.instruction or '')[:60]}"
+        _pod_sh(
+            f"cd /workspace && git add {files_arg} && git commit -m {_shlex.quote(msg)} || true",
+            timeout=120,
+        )
+        h = _pod_sh("cd /workspace && git rev-parse HEAD", timeout=60)
+        head_sha = (h.stdout or "").strip() or None
+
+    audit_emit(
+        actor="system:sandbox-runtime",
+        action="tester_turn_completed",
+        tenant_id=inp.tenant_id,
+        work_item_id=inp.work_item_id,
+        details={
+            "stage": "tester", "runtime": "k8s", "test_files": test_files,
+            "tests_ran": tests_ran, "tests_passed": tests_passed, "returncode": returncode,
+        },
+    )
+    return TesterTurnResult(
+        sandbox_id=inp.work_item_id,
+        test_files=test_files,
+        tests_ran=tests_ran,
+        tests_passed=tests_passed,
+        returncode=returncode,
+        head_sha=head_sha,
+        cost_usd=0.0,
+    )
+
+
+async def _run_tester_turn_pod(
+    inp: "RunTesterTurnInput", *, sandbox_id: str, headers: Any, virtual_key: str, push: bool = True,
+) -> TesterTurnResult:
+    """Tester no runtime K8s (Pod). Roda o corpo síncrono sob heartbeat — a
+    autoria do modelo + `npm install`/`npm test` podem levar minutos."""
+    return await run_sync_with_heartbeat(
+        lambda _c: _tester_pod_sync(inp, sandbox_id, headers, virtual_key, push),
+        None,
+        stage=Stage.tester.value,
+        work_item_id=inp.work_item_id,
+        operation="tester_pod_bridge",
+    )
+
+
 async def _run_tester_turn_impl(
     inp: RunTesterTurnInput,
     *,
@@ -1292,6 +1427,25 @@ async def _run_tester_turn_impl(
         data_class=inp.data_class,
     )
     vk = mint_virtual_key(headers)
+
+    # Runtime K8s: o workspace vive DENTRO do Pod (o Coder rodou lá via
+    # RemoteSubstrate), não no FS do worker. O path local abaixo
+    # (ScopedGitSession/ScriptedAgentSession) assume workspace host-visible e
+    # quebra no K8s (git config exit 128, sem workspace). Roteia p/ a bridge que
+    # opera DENTRO do Pod via kubectl exec.
+    try:
+        _driver = select_sandbox_driver()
+        _host_visible = _driver.workspace_is_host_visible
+    except Exception:  # noqa: BLE001 — sem driver resolvível → mantém path local
+        _driver, _host_visible = None, True
+    if _driver is not None and not _host_visible:
+        return await _run_tester_turn_pod(
+            inp,
+            sandbox_id=_driver.sandbox_id_for(inp.work_item_id),
+            headers=headers,
+            virtual_key=vk.virtual_key,
+            push=push,
+        )
 
     # Autoria REAL (mesmo seletor do planner, P1 por config): sem script
     # explícito (testes) e com substrato real, o MODELO escreve os testes.
