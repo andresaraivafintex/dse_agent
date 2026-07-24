@@ -109,3 +109,26 @@ def build_event_from_block_action(payload: dict[str, Any], *, resolved_principal
         content_snapshot=f"button:{action_id}={value}",
         signature_verified=True,
     )
+
+
+def build_repo_select_signal_event(
+    payload: dict[str, Any], action: dict[str, Any], *, resolved_principal: str, content: str
+) -> ConversationEvent:
+    """Escolha do static_select de repo -> ConversationEvent kind=clarification_answer.
+    `content` (ex.: 'repo=org/x branch=main') é o marcador que o dispatcher extrai
+    (mesma regex do C4). message_id = action_ts (único por clique -> dedup por
+    event_id; re-seleção gera evento novo)."""
+    channel = payload["channel"]["id"]
+    message = payload.get("message", {})
+    thread_ts = message.get("thread_ts", message.get("ts", "0"))
+    action_ts = payload.get("action_ts", action.get("action_ts", "0"))
+    return ConversationEvent.build(
+        platform=Platform.slack,
+        thread_key=f"{channel}:{thread_ts}",
+        message_id=action_ts,
+        kind=EventKind.clarification_answer,
+        source_ref={"channel": channel, "thread_ts": thread_ts},
+        actor=_actor_from_user_id(payload["user"]["id"], resolved_principal),
+        content_snapshot=content,
+        signature_verified=True,
+    )

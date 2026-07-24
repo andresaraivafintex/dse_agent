@@ -42,6 +42,34 @@ def approval_blocks(body: str) -> list[dict]:
     ]
 
 
+def repo_select_blocks(work_item_id: str, repos: list[str], body: str) -> list[dict]:
+    """Block Kit do seletor de repo (clarificação de repo ambíguo — resolve_repo
+    Rung 5). Uma section (o texto da pergunta) + um static_select. O `block_id`
+    carrega o work_item_id — o /slack/interactions extrai daí e endereça o signal
+    SEM depender de correlação por source_ref (o status-comment é postado fora da
+    thread). action_id fixo `dse_repo_select` discrimina do approve/reject. Cada
+    option.value = o repo (owner/name). Selecionar equivale a responder
+    `repo=<escolha>` à clarificação — mesmo caminho dispatcher->workflow do texto."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+        {
+            "type": "actions",
+            "block_id": f"dse_repo_select:{work_item_id}",
+            "elements": [
+                {
+                    "type": "static_select",
+                    "action_id": "dse_repo_select",
+                    "placeholder": {"type": "plain_text", "text": "Select a repository"},
+                    "options": [
+                        {"text": {"type": "plain_text", "text": r[:75]}, "value": r}
+                        for r in repos[:100]  # Slack: máx. 100 opções
+                    ],
+                },
+            ],
+        },
+    ]
+
+
 class SlackCommentBackend:
     """Implementa `dse_contracts.mutable_comment.CommentBackend`. `surface_ref`
     pode carregar `blocks` (Slack-specific) — quando presente, a mensagem é

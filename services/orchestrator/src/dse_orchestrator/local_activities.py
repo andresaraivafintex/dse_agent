@@ -601,6 +601,7 @@ async def emit_audit_event(payload: dict[str, Any]) -> None:
 _STATUS_BODIES = {
     "needs_clarification": "🔎 The DSE needs clarification before it can start:\n\n{detail}",
     "awaiting_plan_approval": "📋 Plan ready — awaiting human approval (risk: {detail}).",
+    "awaiting_repo_selection": "🔎 Which repository should I use?\n\n{detail}",
     "implementing": "⚙️ The DSE is implementing the change in an isolated sandbox.",
     "validating": "🧪 Implementation ready — running validation (L1/L2) in the sandbox.",
     "pr_ready": "✅ PR opened with the change and evidence — ready for human review.",

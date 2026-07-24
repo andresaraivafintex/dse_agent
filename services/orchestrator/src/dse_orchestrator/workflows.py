@@ -1071,11 +1071,24 @@ class WorkItemLifecycleWorkflow:
             question = "I need the following information before I can start: " + ", ".join(
                 _field_labels.get(m, m) for m in completeness["missing"]
             ) + ". Reply in this thread and I will resume automatically."
+            # Repo-select dropdown (Slack): quando os ÚNICOS campos faltantes são
+            # resolvíveis escolhendo o repo (repo e/ou base_branch — o binding do
+            # repo traz os dois), sinaliza ao adapter (via o status do comentário)
+            # que ele pode renderizar um static_select. work_items.status continua
+            # needs_clarification (o dispatcher roteia clarification_answer sem olhar
+            # o status). Guardado por patch marker (replay-safe: histories em voo que
+            # já postaram com 'needs_clarification' re-executam idênticas).
+            comment_status = "needs_clarification"
+            if workflow.patched("repo-select-dropdown-v1") and (
+                "repo" in completeness["missing"]
+                and set(completeness["missing"]) <= {"repo", "base_branch"}
+            ):
+                comment_status = "awaiting_repo_selection"
             try:
                 await workflow.execute_activity(
                     ACTIVITY_POST_TRACKING_COMMENT,
                     {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
-                     "status": "needs_clarification", "detail": question},
+                     "status": comment_status, "detail": question},
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )

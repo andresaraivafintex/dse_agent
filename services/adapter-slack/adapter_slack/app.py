@@ -26,6 +26,7 @@ from ingest_gateway import (
     admit_work_item,
     correlate,
     get_connection,
+    is_authorized_to_steer,
     record_signal_event,
     resolve_tenant,
     resolve_repo,
@@ -34,13 +35,14 @@ from ingest_gateway import (
 )
 from pydantic import BaseModel
 
-from .backend import SlackCommentBackend, approval_blocks, build_real_slack_client
+from .backend import SlackCommentBackend, approval_blocks, build_real_slack_client, repo_select_blocks
 from .comment_store import SURFACE, PgCommentStateStore
 from .config import get_slack_bot_token, get_slack_signing_secret, get_tenant_id
 from .events import (
     build_event_from_app_mention,
     build_event_from_block_action,
     build_event_from_thread_message,
+    build_repo_select_signal_event,
     parse_slack_approval,
 )
 
@@ -75,6 +77,32 @@ def _resolve_tenant_for(team_id: str | None) -> str:
         return rt.tenant_id
     finally:
         conn.close()
+
+
+def _distinct_repos_for_tenant(conn, tenant_id: str) -> list[str]:
+    """Repos distintos do tenant — espelha a fonte que resolve_repo Rung 4/5
+    considerou ambígua (mesmo WHERE, sem filtro de plataforma). Ordenado ->
+    Block Kit determinístico."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT repo FROM repo_bindings "
+            "WHERE tenant_id = %s AND repo IS NOT NULL ORDER BY repo",
+            (tenant_id,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _base_branch_for_repo(conn, tenant_id: str, repo: str) -> str:
+    """base_branch do binding do repo escolhido (o repo ambíguo não trouxe um).
+    Default 'main' (convenção do resolve_repo Rung 1)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT base_branch FROM repo_bindings "
+            "WHERE tenant_id = %s AND repo = %s AND base_branch IS NOT NULL LIMIT 1",
+            (tenant_id, repo),
+        )
+        row = cur.fetchone()
+    return row[0] if row and row[0] else "main"
 
 
 def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str,
@@ -206,12 +234,50 @@ async def slack_interactions(request: Request) -> dict:
     principal = resolve_principal("slack", user_id)
     team_id = (payload.get("team") or {}).get("id") or payload.get("user", {}).get("team_id")
     tenant_id = _resolve_tenant_for(team_id)
+    action = payload["actions"][0]
+
+    # Seletor de repo (clarificação de repo ambíguo): NÃO é aprovação. Endereça
+    # pelo work_item_id do block_id (não por correlação — o status-comment é
+    # postado FORA da thread). O repo+base_branch viram o marcador
+    # `repo=X branch=Y` no content -> o dispatcher extrai (regex C4) ->
+    # SIGNAL clarification_answer -> o workflow repõe input.repo/base_branch.
+    # Efeito idêntico a digitar `repo=org/x branch=main` na thread.
+    if action.get("action_id") == "dse_repo_select":
+        block_id = action.get("block_id", "")
+        work_item_id = block_id.split(":", 1)[1] if ":" in block_id else block_id
+        repo = (action.get("selected_option") or {}).get("value")
+        if not work_item_id or not repo:
+            return {"ok": True, "path": "repo_select_noop"}
+        # Paridade de segurança com o gate de clarification_answer do correlate
+        # (steering allowlist). Sem isto qualquer um no canal escolheria o repo.
+        if not is_authorized_to_steer(tenant_id, principal):
+            audit_emit(actor=principal, action="steering_rejected_unauthorized",
+                       tenant_id=tenant_id,
+                       details={"kind": "repo_select", "work_item_id": work_item_id})
+            return {"ok": True, "path": "unauthorized"}
+        channel = payload["channel"]["id"]
+        conn = get_connection()
+        try:
+            content = f"repo={repo} branch={_base_branch_for_repo(conn, tenant_id, repo)}"
+            conv_event = build_repo_select_signal_event(
+                payload, action, resolved_principal=principal, content=content
+            )
+            record_signal_event(
+                conv_event, tenant_id=tenant_id, channel=channel,
+                work_item_id=work_item_id, sanitized_content=content, conn=conn,
+            )
+            conn.commit()  # persiste o ingest_event p/ o dispatcher drenar
+        except AdmissionBlocked:
+            return {"ok": True, "path": "blocked_kill_switch"}
+        finally:
+            conn.close()
+        return {"ok": True, "path": "repo_selected", "work_item_id": work_item_id, "repo": repo}
+
     conv_event = build_event_from_block_action(payload, resolved_principal=principal)
 
     # C1 (relatório 07): deriva o verdict/route do botão para marcadores
     # DETERMINÍSTICOS — sem isto o dispatcher default para `approved` e um
     # "reject" aprovaria o plano silenciosamente (bug de segurança do gate).
-    action = payload["actions"][0]
     verdict, route = parse_slack_approval(action.get("action_id", ""), action.get("value", ""))
     extra_payload: dict = {"approval_verdict": verdict}
     if route:
@@ -247,6 +313,21 @@ def upsert_status_comment(req: StatusCommentRequest) -> dict:
     surface_ref = {"channel": req.channel}
     if req.status == "awaiting_plan_approval":
         surface_ref["blocks"] = approval_blocks(req.body)
+    elif req.status == "awaiting_repo_selection":
+        # Repo ambíguo: oferece um static_select com os repos do tenant. Com < 2
+        # repos degrada p/ texto puro (nada a escolher -> só a pergunta de texto).
+        conn = get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT tenant_id FROM work_items WHERE id = %s", (req.work_item_id,))
+                row = cur.fetchone()
+            tenant_id = row[0] if row else get_tenant_id()
+            repos = _distinct_repos_for_tenant(conn, tenant_id)
+            conn.commit()
+        finally:
+            conn.close()
+        if len(repos) >= 2:
+            surface_ref["blocks"] = repo_select_blocks(req.work_item_id, repos, req.body)
     comment_ref = writer.upsert(req.work_item_id, surface_ref, req.body)
 
     audit_emit(
