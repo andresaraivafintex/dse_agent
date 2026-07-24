@@ -45,8 +45,13 @@ spec:
   policyTypes: ["Egress"]
   egress: []   # nada — o allow abaixo é o único caminho
 ---
-# Único egress permitido: DNS + o egress-proxy (que aplica o allowlist real de
-# hosts). Assim todo tráfego de saída do agente passa pelo proxy auditável.
+# Único egress permitido: DNS + egress-proxy (que aplica o allowlist real de
+# hosts) + model-gateway (o turno faz chamada de modelo). Todo o resto do
+# tráfego de saída do agente passa pelo proxy auditável.
+# Selectors/portas ALINHADOS ao chart (deploy real): label
+# app.kubernetes.io/name (não {app: ...}) e porta do egress-proxy 8806
+# (values.yaml egressProxy.port) — o valor antigo (3128) deixava o Pod sem
+# rota ao proxy sob default-deny.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -61,9 +66,15 @@ spec:
     - to:
         - namespaceSelector: {}
           podSelector:
-            matchLabels: {app: egress-proxy}
+            matchLabels: {app.kubernetes.io/name: egress-proxy}
       ports:
-        - {protocol: TCP, port: 3128}
+        - {protocol: TCP, port: 8806}
+    - to:  # model-gateway (chamada de modelo do turno)
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: model-gateway}
+      ports:
+        - {protocol: TCP, port: 4000}
     - ports:  # DNS
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}

@@ -65,12 +65,20 @@ class WorkspaceBootstrapRequest(BaseModel, extra="forbid"):
     materializa o workspace git da tarefa no runtime alvo. No Docker o
     checkpoint é o bind mount `/checkpoint.git`; no K8s, o volume do Pod.
     O hook pre-receive de escopo (branch único, sem force-push) é instalado
-    no bare repo ANTES do primeiro push — o enforcement mora no remoto."""
+    no bare repo ANTES do primeiro push — o enforcement mora no remoto.
+
+    `repo` (ex.: "andre2654/fintex-wallet"): quando presente, o bootstrap
+    CLONA o repo real de dentro do Pod, através do egress-proxy (HTTPS_PROXY),
+    em vez de iniciar um workspace vazio — o token nunca entra no Pod (o proxy
+    injeta a credencial; repo público via CONNECT anônimo). Ausente → workspace
+    vazio (mecânica original / testes)."""
 
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     work_item_id: str
     branch: str
     base_branch: str = "main"
+    repo: str | None = None
+    repo_host: str = "github.com"
     workspace_dir: str = "/workspace"
     checkpoint_path: str = "/checkpoint.git"
     provision_checkpoint: bool = True

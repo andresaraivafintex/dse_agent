@@ -18,7 +18,7 @@ spec:
         {{- include "dse.labels" . | nindent 8 }}
         {{- include "dse.selectorLabels" (dict "component" "orchestrator" "Release" .Release) | nindent 8 }}
     spec:
-      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      {{- include "dse.workerPodDefaults" . | nindent 6 }}
       terminationGracePeriodSeconds: 120
       containers:
         - name: orchestrator
@@ -39,8 +39,16 @@ spec:
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
             - name: HTTP_PROXY
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            # O API server do K8s (kubectl que cria os Pods de sandbox) tem de
+            # ficar FORA do proxy — senão o HTTPS_PROXY sequestra a chamada e o
+            # kubectl trava. NO_PROXY usa o ClusterIP que o kubectl MIRA
+            # (serviceHost), NÃO o CIDR pós-DNAT da NetworkPolicy.
             - name: NO_PROXY
-              value: ".svc,.cluster.local"
+              value: ".svc,.cluster.local{{ if .Values.networkPolicy.kubeApiServer.serviceHost }},{{ .Values.networkPolicy.kubeApiServer.serviceHost }}{{ end }}"
+            # kubectl grava cache de discovery em $HOME/.kube/cache; sob
+            # readOnlyRootFilesystem, HOME precisa apontar para o /tmp emptyDir.
+            - name: HOME
+              value: "/tmp"
           resources:
             {{- toYaml .Values.orchestrator.resources | nindent 12 }}
           volumeMounts:

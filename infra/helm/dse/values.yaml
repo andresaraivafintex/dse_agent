@@ -73,6 +73,30 @@ runtime:
   localFallbackAllowed: true
   agentSubstrate: fixture
   sandboxRuntimeClassName: ""
+  # Driver do sandbox: "docker" (dev local, workspace host-visível) ou "k8s"
+  # (Pod efêmero gVisor por tarefa; o worker cria/exec/deleta via kubectl).
+  sandboxDriver: "docker"
+  # Namespace dos Pods de sandbox — SEPARADO do control plane (PSA restricted +
+  # NetworkPolicies próprias em deploy/k8s/sandbox-isolation.yaml).
+  sandboxNamespace: "dse-sandboxes"
+  # RBAC do worker (SA dedicada + Role para criar/exec/deletar pods no
+  # sandboxNamespace). Ligar SÓ com sandboxDriver=k8s.
+  sandboxRbac:
+    create: false
+  # Imagem do agent-runner que roda DENTRO do Pod de sandbox (pinada por digest
+  # em perfil estrito, igual aos demais componentes).
+  agentRunnerImage:
+    repository: dse/agent-runner
+    tag: "0.1.0"
+    digest: ""
+  sandboxCpuLimit: "1"
+  sandboxMemLimit: "2Gi"
+  # PVC do checkpoint git do sandbox (recuperação pós-chaos/rebuild). emptyDir
+  # basta para o 1º turno; PVC é fast-follow.
+  checkpointPvc:
+    enabled: false
+    size: 5Gi
+    storageClassName: ""
 
 # ---------------------------------------------------------------------------
 # Postgres — control plane (work_items/audit_log/etc.) reside no VPC do
@@ -190,6 +214,9 @@ egressProxy:
     - host: "api.github.com"
       port: 443
       purpose: "GitHub App API (PR finalizer, status comments)"
+    - host: "github.com"
+      port: 443
+      purpose: "clone do repo alvo dentro do sandbox (git via proxy)"
     - host: "slack.com"
       port: 443
       purpose: "Slack Web API (mensagem de status)"
@@ -334,3 +361,17 @@ networkPolicy:
   # ficar vazia. O default sugerido no overlay bloqueia redes privadas e o
   # metadata endpoint; a allowlist L7 do proxy continua sendo obrigatória.
   egressProxyExternalCidrs: []
+  # Rota do worker do orchestrator até o API server do K8s (o kubectl que cria
+  # os Pods de sandbox). Necessário com sandboxDriver=k8s sob default-deny.
+  # DOIS consumidores com endereços DIFERENTES (não confundir):
+  #  - serviceHost: o ClusterIP que o kubectl MIRA (KUBERNETES_SERVICE_HOST,
+  #    ex.: 10.43.0.1 no k3s). Vai para o NO_PROXY do orchestrator (senão o
+  #    HTTPS_PROXY sequestra a chamada). NO_PROXY é agnóstico de porta.
+  #  - cidrs: o endpoint que a NetworkPolicy de egress precisa LIBERAR. Sob
+  #    k3s/Calico/Cilium a policy é avaliada PÓS-DNAT → geralmente o IP do NÓ
+  #    (nodeIP/32), não o ClusterIP. VERIFICAR contra o CNI do cluster-alvo.
+  #  - port: porta do endpoint na regra da NetworkPolicy (6443 no nodeIP).
+  kubeApiServer:
+    serviceHost: "10.43.0.1"
+    cidrs: []
+    port: 6443

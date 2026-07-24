@@ -81,6 +81,32 @@ volumes:
       sizeLimit: {{ .Values.security.tmpSizeLimit }}
 {{- end -}}
 
+{{/*
+Defaults do POD do WORKER do orchestrator. Igual ao appPodDefaults, mas quando
+runtime.sandboxRbac.create está ligado usa a SA DEDICADA do worker (com o RBAC
+de criar/exec/deletar Pods de sandbox) e MONTA o token — só aqui, não na SA
+global (que segue sem poder). O gate estrito inspeciona
+serviceAccount.automountServiceAccountToken (a SA global), não este PodSpec.
+*/}}
+{{- define "dse.workerPodDefaults" -}}
+{{- if .Values.runtime.sandboxRbac.create -}}
+serviceAccountName: {{ include "dse.fullname" . }}-orchestrator-worker
+automountServiceAccountToken: true
+securityContext:
+  {{- include "dse.podSecurityContext" . | nindent 2 }}
+{{- with .Values.global.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- else -}}
+{{ include "dse.podDefaults" . }}
+{{- end }}
+volumes:
+  - name: dse-runtime-tmp
+    emptyDir:
+      sizeLimit: {{ .Values.security.tmpSizeLimit }}
+{{- end -}}
+
 {{- define "dse.appTmpMount" -}}
 - name: dse-runtime-tmp
   mountPath: /tmp
@@ -269,6 +295,18 @@ falhar durante lint/template, antes de qualquer chamada ao cluster.
   {{- end -}}
   {{- if not $gates.workerVersioningRegistrationVerified -}}
     {{- fail (printf "profile %s bloqueado: build id ainda não foi registrado/verificado na task queue Temporal" $profile) -}}
+  {{- end -}}
+{{- end -}}
+{{/* Guard do driver K8s — vale em QUALQUER perfil (correção, não gate de piloto):
+     sandboxDriver=k8s sem RBAC ou sem rota ao API server renderiza verde mas o
+     provisionamento trava no cluster (o worker não cria Pod / o kubectl é
+     bloqueado pela default-deny). Fail-closed no render. */}}
+{{- if eq .Values.runtime.sandboxDriver "k8s" -}}
+  {{- if not .Values.runtime.sandboxRbac.create -}}
+    {{- fail "runtime.sandboxDriver=k8s exige runtime.sandboxRbac.create=true (o worker precisa do RBAC para criar os Pods de sandbox)" -}}
+  {{- end -}}
+  {{- if empty .Values.networkPolicy.kubeApiServer.cidrs -}}
+    {{- fail "runtime.sandboxDriver=k8s exige networkPolicy.kubeApiServer.cidrs não-vazio (rota do worker ao API server; senão o kubectl é bloqueado pela default-deny)" -}}
   {{- end -}}
 {{- end -}}
 {{- end -}}

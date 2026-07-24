@@ -21,11 +21,18 @@
   "properties": {
     "deploymentProfile": {
       "type": "string",
-      "enum": ["development", "pilot", "production"]
+      "enum": [
+        "development",
+        "pilot",
+        "production"
+      ]
     },
     "tenant": {
       "type": "object",
-      "required": ["id", "dataClass"],
+      "required": [
+        "id",
+        "dataClass"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -35,7 +42,11 @@
         },
         "dataClass": {
           "type": "string",
-          "enum": ["internal", "confidential", "restricted"]
+          "enum": [
+            "internal",
+            "confidential",
+            "restricted"
+          ]
         }
       }
     },
@@ -49,114 +60,318 @@
         "workerVersioningRegistrationVerified"
       ],
       "properties": {
-        "sandboxIsolationVerified": { "type": "boolean" },
-        "modelGatewayFailClosedVerified": { "type": "boolean" },
-        "egressStrictPolicyVerified": { "type": "boolean" },
-        "auditLedgerMigrationsVerified": { "type": "boolean" },
-        "workerVersioningRegistrationVerified": { "type": "boolean" }
+        "sandboxIsolationVerified": {
+          "type": "boolean"
+        },
+        "modelGatewayFailClosedVerified": {
+          "type": "boolean"
+        },
+        "egressStrictPolicyVerified": {
+          "type": "boolean"
+        },
+        "auditLedgerMigrationsVerified": {
+          "type": "boolean"
+        },
+        "workerVersioningRegistrationVerified": {
+          "type": "boolean"
+        }
       }
     },
     "runtime": {
       "type": "object",
-      "required": ["inProcess", "localFallbackAllowed", "agentSubstrate", "sandboxRuntimeClassName"],
+      "required": [
+        "inProcess",
+        "localFallbackAllowed",
+        "agentSubstrate",
+        "sandboxRuntimeClassName",
+        "sandboxDriver",
+        "sandboxNamespace",
+        "sandboxRbac"
+      ],
       "properties": {
-        "inProcess": { "type": "boolean" },
-        "localFallbackAllowed": { "type": "boolean" },
-        "agentSubstrate": { "type": "string", "minLength": 1 },
-        "sandboxRuntimeClassName": { "type": "string" }
+        "inProcess": {
+          "type": "boolean"
+        },
+        "localFallbackAllowed": {
+          "type": "boolean"
+        },
+        "agentSubstrate": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sandboxRuntimeClassName": {
+          "type": "string"
+        },
+        "sandboxDriver": {
+          "type": "string",
+          "enum": [
+            "docker",
+            "k8s"
+          ]
+        },
+        "sandboxNamespace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sandboxRbac": {
+          "type": "object",
+          "properties": {
+            "create": {
+              "type": "boolean"
+            }
+          }
+        },
+        "agentRunnerImage": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
+        },
+        "sandboxCpuLimit": {
+          "type": "string"
+        },
+        "sandboxMemLimit": {
+          "type": "string"
+        },
+        "checkpointPvc": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "size": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "serviceAccount": {
       "type": "object",
-      "required": ["create", "automountServiceAccountToken"],
+      "required": [
+        "create",
+        "automountServiceAccountToken"
+      ],
       "properties": {
-        "create": { "type": "boolean" },
-        "name": { "type": "string" },
-        "automountServiceAccountToken": { "type": "boolean" },
-        "annotations": { "type": "object" }
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "automountServiceAccountToken": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "type": "object"
+        }
       }
     },
     "security": {
       "type": "object",
-      "required": ["podSecurityContext", "appContainerSecurityContext", "statefulContainerSecurityContext"],
+      "required": [
+        "podSecurityContext",
+        "appContainerSecurityContext",
+        "statefulContainerSecurityContext"
+      ],
       "properties": {
-        "podSecurityContext": { "type": "object" },
-        "appContainerSecurityContext": { "type": "object" },
-        "statefulContainerSecurityContext": { "type": "object" }
+        "podSecurityContext": {
+          "type": "object"
+        },
+        "appContainerSecurityContext": {
+          "type": "object"
+        },
+        "statefulContainerSecurityContext": {
+          "type": "object"
+        }
       }
     },
     "postgres": {
       "type": "object",
-      "required": ["enabled", "image", "auth"],
+      "required": [
+        "enabled",
+        "image",
+        "auth"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
         "auth": {
           "type": "object",
-          "required": ["existingSecret", "username", "password", "database"],
+          "required": [
+            "existingSecret",
+            "username",
+            "password",
+            "database"
+          ],
           "properties": {
-            "existingSecret": { "type": "string" },
-            "username": { "type": "string" },
-            "password": { "type": "string" },
-            "database": { "type": "string" }
+            "existingSecret": {
+              "type": "string"
+            },
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            },
+            "database": {
+              "type": "string"
+            }
           }
         }
       }
     },
     "vault": {
       "type": "object",
-      "required": ["externallyManaged", "devMode", "devRootToken"],
+      "required": [
+        "externallyManaged",
+        "devMode",
+        "devRootToken"
+      ],
       "properties": {
-        "externallyManaged": { "type": "boolean" },
-        "devMode": { "type": "boolean" },
-        "devRootToken": { "type": "string" },
-        "image": { "$ref": "#/definitions/image" }
+        "externallyManaged": {
+          "type": "boolean"
+        },
+        "devMode": {
+          "type": "boolean"
+        },
+        "devRootToken": {
+          "type": "string"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        }
       }
     },
     "secrets": {
       "type": "object",
-      "required": ["vaultAddr", "externalSecrets"],
+      "required": [
+        "vaultAddr",
+        "externalSecrets"
+      ],
       "properties": {
-        "vaultAddr": { "type": "string", "minLength": 1 },
+        "vaultAddr": {
+          "type": "string",
+          "minLength": 1
+        },
         "externalSecrets": {
           "type": "object",
-          "required": ["enabled", "secretStoreRef", "secretStoreKind", "refreshInterval", "remoteKey"],
+          "required": [
+            "enabled",
+            "secretStoreRef",
+            "secretStoreKind",
+            "refreshInterval",
+            "remoteKey"
+          ],
           "properties": {
-            "enabled": { "type": "boolean" },
-            "secretStoreRef": { "type": "string" },
-            "secretStoreKind": { "type": "string", "enum": ["SecretStore", "ClusterSecretStore"] },
-            "refreshInterval": { "type": "string" },
-            "remoteKey": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "secretStoreRef": {
+              "type": "string"
+            },
+            "secretStoreKind": {
+              "type": "string",
+              "enum": [
+                "SecretStore",
+                "ClusterSecretStore"
+              ]
+            },
+            "refreshInterval": {
+              "type": "string"
+            },
+            "remoteKey": {
+              "type": "string"
+            }
           }
         }
       }
     },
     "egressProxy": {
       "type": "object",
-      "required": ["enabled", "image", "replicas", "port", "repoHost", "credentialBroker", "allowlist", "resources"],
+      "required": [
+        "enabled",
+        "image",
+        "replicas",
+        "port",
+        "repoHost",
+        "credentialBroker",
+        "allowlist",
+        "resources"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
-        "replicas": { "type": "integer", "minimum": 1 },
-        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "repoHost": { "type": "string", "minLength": 1 },
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "repoHost": {
+          "type": "string",
+          "minLength": 1
+        },
         "credentialBroker": {
           "type": "object",
-          "required": ["enabled", "allowFixture"],
+          "required": [
+            "enabled",
+            "allowFixture"
+          ],
           "properties": {
-            "enabled": { "type": "boolean" },
-            "allowFixture": { "type": "boolean" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "allowFixture": {
+              "type": "boolean"
+            }
           }
         },
         "allowlist": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["host", "port", "purpose"],
+            "required": [
+              "host",
+              "port",
+              "purpose"
+            ],
             "properties": {
-              "host": { "type": "string", "minLength": 1 },
-              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-              "purpose": { "type": "string", "minLength": 1 }
+              "host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535
+              },
+              "purpose": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }
@@ -164,53 +379,114 @@
     },
     "modelGateway": {
       "type": "object",
-      "required": ["enabled", "allowFixture", "image"],
+      "required": [
+        "enabled",
+        "allowFixture",
+        "image"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "allowFixture": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" }
+        "enabled": {
+          "type": "boolean"
+        },
+        "allowFixture": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        }
       }
     },
     "orchestrator": {
       "type": "object",
-      "required": ["enabled", "image", "workerVersioning"],
+      "required": [
+        "enabled",
+        "image",
+        "workerVersioning"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "image": { "$ref": "#/definitions/image" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
         "workerVersioning": {
           "type": "object",
-          "required": ["enabled", "buildId"],
+          "required": [
+            "enabled",
+            "buildId"
+          ],
           "properties": {
-            "enabled": { "type": "boolean" },
-            "buildId": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "buildId": {
+              "type": "string"
+            }
           }
         }
       }
     },
     "auditLedger": {
       "type": "object",
-      "required": ["enabled"],
+      "required": [
+        "enabled"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "networkPolicy": {
       "type": "object",
-      "required": ["enabled", "dns", "egressProxyExternalCidrs"],
+      "required": [
+        "enabled",
+        "dns",
+        "egressProxyExternalCidrs"
+      ],
       "properties": {
-        "enabled": { "type": "boolean" },
-        "dns": { "type": "object" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "dns": {
+          "type": "object"
+        },
         "egressProxyExternalCidrs": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["cidr"],
+            "required": [
+              "cidr"
+            ],
             "properties": {
-              "cidr": { "type": "string", "minLength": 3 },
+              "cidr": {
+                "type": "string",
+                "minLength": 3
+              },
               "except": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               }
+            }
+          }
+        },
+        "kubeApiServer": {
+          "type": "object",
+          "properties": {
+            "cidrs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "port": {
+              "type": "integer"
+            },
+            "serviceHost": {
+              "type": "string"
             }
           }
         }
@@ -220,10 +496,20 @@
   "definitions": {
     "image": {
       "type": "object",
-      "required": ["repository", "tag", "digest"],
+      "required": [
+        "repository",
+        "tag",
+        "digest"
+      ],
       "properties": {
-        "repository": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string", "minLength": 1 },
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
         "digest": {
           "type": "string",
           "pattern": "^$|^sha256:[a-fA-F0-9]{64}$"

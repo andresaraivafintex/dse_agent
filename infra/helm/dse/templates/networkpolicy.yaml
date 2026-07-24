@@ -217,4 +217,30 @@ spec:
       ports:
         - { protocol: TCP, port: 443 }
     {{- end }}
+{{- if .Values.runtime.sandboxRbac.create }}
+---
+# Rota do worker do orchestrator até o API server do K8s — o kubectl que cria
+# os Pods de sandbox. Só existe com sandboxDriver=k8s; sob default-deny o
+# orchestrator não alcançaria o apiserver sem esta regra.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-orchestrator-kube-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orchestrator
+  policyTypes: ["Egress"]
+  egress:
+    {{- range .Values.networkPolicy.kubeApiServer.cidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - { protocol: TCP, port: {{ $.Values.networkPolicy.kubeApiServer.port }} }
+    {{- end }}
+{{- end }}
 {{- end }}

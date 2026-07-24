@@ -67,12 +67,38 @@ def _checkpoint_has_branch(checkpoint_path: str, branch: str) -> bool:
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
+def _clone_target_repo(req: WorkspaceBootstrapRequest) -> str:
+    """Clona o repo real do cliente DENTRO do Pod, via o egress-proxy
+    (HTTPS_PROXY já no ambiente do runner). A URL NÃO carrega credencial — para
+    repo público o CONNECT é anônimo; para privado o proxy re-origina o TLS e
+    injeta o token (fast-follow). Depois re-aponta `origin` para o checkpoint
+    local (a URL do GitHub some do config), cria o branch da tarefa a partir da
+    base e faz o primeiro push escopado. Retorna o sha do tip da tarefa."""
+    url = f"https://{req.repo_host}/{req.repo}.git"
+    # --depth: histórico raso basta para o turno; o push do tip para o
+    # checkpoint local carrega os objetos necessários.
+    _git(["clone", "--depth", "50", "--branch", req.base_branch, url, req.workspace_dir])
+    session = ScopedGitSession(workspace_dir=req.workspace_dir, branch=req.branch)
+    session.ensure_identity()
+    _git(["checkout", "-b", req.branch], cwd=req.workspace_dir)
+    write_task_branch_marker(req.workspace_dir, req.branch)
+    # origin passa a ser o checkpoint (nunca mais o GitHub) — o commit/push do
+    # turno vai para o bare local, sob o hook de escopo; o PR final é aberto
+    # deterministicamente pela Activity, nunca daqui.
+    _git(["remote", "set-url", "origin", req.checkpoint_path], cwd=req.workspace_dir)
+    session.push()
+    return session.current_sha()
+
+
 def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapResult:
-    """Idempotente nos três estados possíveis do runtime:
+    """Idempotente nos estados possíveis do runtime:
       1. workspace já é repo git → devolve o HEAD (retomada pós-restart);
       2. checkpoint já tem o branch → clone (+checkout) — é o rebuild do
          chaos test, agora DENTRO do sandbox;
-      3. nada existe → init do zero (espelha `git_checkpoint.init_task_workspace`).
+      3. `repo` pedido → clona o repo real do cliente via egress-proxy
+         (`_clone_target_repo`); falha aqui é FAIL-CLOSED (nunca cai para o
+         workspace vazio quando um repo foi explicitamente pedido);
+      4. sem repo → init do zero (espelha `git_checkpoint.init_task_workspace`).
     """
     try:
         _ensure_safe_directory()
@@ -94,6 +120,18 @@ def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapRes
             write_task_branch_marker(req.workspace_dir, req.branch)
             sha = _git(["rev-parse", "HEAD"], cwd=req.workspace_dir).stdout.strip()
             return WorkspaceBootstrapResult(sha=sha, created=False)
+
+        if req.repo:
+            # Clone do repo REAL. Falha não cai para init vazio (P6/fail-closed):
+            # um repo foi pedido; workspace vazio mascararia o problema.
+            try:
+                sha = _clone_target_repo(req)
+            except Exception as exc:  # noqa: BLE001
+                return WorkspaceBootstrapResult(
+                    error=f"clone de {req.repo!r} falhou: {type(exc).__name__}: {str(exc)[:300]}",
+                    error_kind="clone_error",
+                )
+            return WorkspaceBootstrapResult(sha=sha, created=True)
 
         _git(["init"], cwd=req.workspace_dir)
         _git(["checkout", "-b", req.branch], cwd=req.workspace_dir)

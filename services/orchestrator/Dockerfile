@@ -62,7 +62,15 @@ RUN pip install --no-cache-dir \
 # (esta imagem é 3.11). claude-agent-sdk roda em 3.11 e embute o CLI (Node).
 RUN pip install --no-cache-dir "claude-agent-sdk>=0.2.124"
 
-ENV DSE_ORCHESTRATOR_HEALTH_PORT=8900
+# Não-root (uid 10001): o chart exige runAsNonRoot no perfil estrito. Sob
+# readOnlyRootFilesystem o app só escreve em /tmp (emptyDir) — HOME=/tmp cobre
+# o cache de discovery do kubectl ($HOME/.kube/cache) e o state dir do sandbox
+# (DSE_SANDBOX_STATE_DIR default /tmp/dse-sandboxes). No driver K8s não há
+# clone host-side, então nada mais precisa de escrita.
+RUN groupadd -g 10001 dse && useradd -u 10001 -g 10001 -m -s /usr/sbin/nologin dse
+
+ENV DSE_ORCHESTRATOR_HEALTH_PORT=8900 HOME=/tmp PYTHONUNBUFFERED=1
 EXPOSE 8900
 
+USER 10001:10001
 CMD ["python", "-m", "dse_orchestrator.worker"]

@@ -1,0 +1,50 @@
+{{- if .Values.runtime.sandboxRbac.create }}
+# RBAC do worker do orchestrator para gerenciar os Pods de sandbox (plano 09,
+# fiação K8s). Identidade DEDICADA: só o orchestrator monta este token (ver
+# dse.workerPodDefaults); a SA global das demais workloads segue sem poder.
+# Menor privilégio: Role NAMESPACED em runtime.sandboxNamespace, exatamente os
+# verbos que o k8s_driver usa (apply/wait/exec/delete) — sem secrets, sem
+# ClusterRole, sem pods/log.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dse.fullname" . }}-orchestrator-worker
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+# O token vem do PodSpec do orchestrator (automountServiceAccountToken: true
+# lá), não da montagem default desta SA.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dse.fullname" . }}-sandbox-pod-manager
+  namespace: {{ .Values.runtime.sandboxNamespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dse.fullname" . }}-sandbox-pod-manager
+  namespace: {{ .Values.runtime.sandboxNamespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dse.fullname" . }}-sandbox-pod-manager
+subjects:
+  # binding cross-namespace: a SA vive em global.namespace, a Role em sandboxNamespace
+  - kind: ServiceAccount
+    name: {{ include "dse.fullname" . }}-orchestrator-worker
+    namespace: {{ .Values.global.namespace }}
+{{- end }}

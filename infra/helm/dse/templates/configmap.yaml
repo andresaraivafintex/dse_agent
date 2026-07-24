@@ -23,7 +23,10 @@ data:
   DSE_REDIS_HOST: {{ include "dse.fullname" . }}-redis
   DSE_REDIS_PORT: "6379"
   VAULT_ADDR: {{ .Values.secrets.vaultAddr | quote }}
-  DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+  # FQDN (não nome curto): o Pod de sandbox roda em runtime.sandboxNamespace,
+  # cujos search domains não acham o Service de egress-proxy em global.namespace.
+  # Sem o FQDN, o HTTP(S)_PROXY do Pod dá NXDOMAIN e o clone in-pod falha.
+  DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.egressProxy.port }}"
   DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.modelGateway.allowFixture | quote }}
@@ -31,6 +34,17 @@ data:
   DSE_SANDBOX_LOCAL_FALLBACK_ALLOWED: {{ ternary "1" "0" .Values.runtime.localFallbackAllowed | quote }}
   DSE_SANDBOX_RUNTIME_CLASS: {{ .Values.runtime.sandboxRuntimeClassName | quote }}
   DSE_CODER_SUBSTRATE: {{ .Values.runtime.agentSubstrate | quote }}
+  # Driver do sandbox + config do provisionamento K8s (consumidos por
+  # sandbox_runtime.driver.select_sandbox_driver e k8s_driver.K8sSandboxConfig).
+  DSE_SANDBOX_DRIVER: {{ .Values.runtime.sandboxDriver | quote }}
+  DSE_SANDBOX_K8S_NAMESPACE: {{ .Values.runtime.sandboxNamespace | quote }}
+  DSE_AGENT_RUNNER_IMAGE: {{ include "dse.image" (dict "root" $ "repository" .Values.runtime.agentRunnerImage.repository "tag" .Values.runtime.agentRunnerImage.tag "digest" .Values.runtime.agentRunnerImage.digest) | quote }}
+  # SA que o POD de sandbox roda como (sem RBAC) — igual ao objeto criado em
+  # deploy/k8s/sandbox-isolation.yaml. NÃO é a SA do worker (essa tem o RBAC).
+  DSE_SANDBOX_SERVICE_ACCOUNT: "dse-sandbox-runner"
+  DSE_SANDBOX_CPU_LIMIT: {{ .Values.runtime.sandboxCpuLimit | quote }}
+  DSE_SANDBOX_MEM_LIMIT: {{ .Values.runtime.sandboxMemLimit | quote }}
+  DSE_SANDBOX_CHECKPOINT_PVC: {{ if .Values.runtime.checkpointPvc.enabled }}{{ include "dse.fullname" . }}-sandbox-checkpoint{{ else }}""{{ end }}
   DSE_WORKER_USE_VERSIONING: {{ ternary "true" "false" .Values.orchestrator.workerVersioning.enabled | quote }}
   DSE_WORKER_BUILD_ID: {{ .Values.orchestrator.workerVersioning.buildId | quote }}
   DSE_EGRESS_PORT: {{ .Values.egressProxy.port | quote }}

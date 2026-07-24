@@ -52,7 +52,13 @@ from dse_contracts import (
 
 from . import docker_driver, git_checkpoint, leases_store, metrics
 from .activity_heartbeat import run_sync_with_heartbeat
-from .driver import DEFAULT_SANDBOX_DRIVER, select_sandbox_driver
+from .driver import (
+    DEFAULT_SANDBOX_DRIVER,
+    SandboxCheckpointRequest,
+    SandboxProvisionRequest,
+    SandboxRebuildRequest,
+    select_sandbox_driver,
+)
 from .model_gateway_client import mint_virtual_key
 from .remote_substrate import RemoteSubstrate
 from .retrieval import RetrievalService
@@ -111,71 +117,92 @@ class ProvisionSandboxInput(BaseModel):
 async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
     profile = validate_runtime_startup()
     branch = inp.branch or _default_branch(inp.work_item_id)
+    driver = select_sandbox_driver()
     workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
-    is_new_checkpoint_repo = not Path(bare_repo_path).exists()
-    if is_new_checkpoint_repo:
-        git_checkpoint.provision_checkpoint_repo(bare_repo_path, branch)
-    if not Path(workspace_dir).exists():
-        # S4 (Fase 5): se a tarefa tem um repo alvo (ex.: github.com/andre2654/
-        # fintex-wallet), CLONA o código real (com token minto no control plane
-        # e scrubbado do config) — o Coder trabalha no repo de verdade. Sem
-        # repo/token (testes), cai para o workspace vazio da mecânica original.
-        cloned = False
-        if inp.repo:
-            from . import repo_clone
-            token = repo_clone.mint_installation_token()
-            cloned = repo_clone.clone_repo_into(
-                workspace_dir=workspace_dir, repo=inp.repo,
-                base_branch=inp.base_branch, task_branch=branch,
-                bare_repo_path=bare_repo_path, token=token,
+    if not driver.workspace_is_host_visible:
+        # === Runtime K8s: o workspace vive num volume do Pod (não visível ao
+        # worker), então NADA é clonado/init no host — o driver sobe o Pod e o
+        # bootstrap clona o repo real DENTRO dele, via egress-proxy; o token do
+        # repo nunca entra no control plane. As skills materializadas no host
+        # (caminho Docker abaixo) NÃO chegam ao Pod — limitação conhecida do
+        # driver K8s (skills in-pod é fast-follow). ===
+        provisioned = driver.provision(
+            SandboxProvisionRequest(
+                work_item_id=inp.work_item_id,
+                tenant_id=inp.tenant_id,
+                branch=branch,
+                workspace_path=workspace_dir,
+                checkpoint_path=bare_repo_path,
+                budget=inp.budget or {},
+                repo=inp.repo,
+                base_branch=inp.base_branch,
             )
-            if cloned and not repo_clone.token_absent_from_config(workspace_dir):
-                raise RuntimeError("SEGURANCA: token vazou no git config do workspace")
-            if not cloned and profile is RuntimeProfile.production:
-                validate_runtime_profile(
-                    local_fallback=(
-                        f"clone de {inp.repo!r} falhou/sem credencial e cairia para workspace vazio"
-                    )
+        )
+    else:
+        is_new_checkpoint_repo = not Path(bare_repo_path).exists()
+        if is_new_checkpoint_repo:
+            git_checkpoint.provision_checkpoint_repo(bare_repo_path, branch)
+        if not Path(workspace_dir).exists():
+            # S4 (Fase 5): se a tarefa tem um repo alvo (ex.: github.com/andre2654/
+            # fintex-wallet), CLONA o código real (com token minto no control plane
+            # e scrubbado do config) — o Coder trabalha no repo de verdade. Sem
+            # repo/token (testes), cai para o workspace vazio da mecânica original.
+            cloned = False
+            if inp.repo:
+                from . import repo_clone
+                token = repo_clone.mint_installation_token()
+                cloned = repo_clone.clone_repo_into(
+                    workspace_dir=workspace_dir, repo=inp.repo,
+                    base_branch=inp.base_branch, task_branch=branch,
+                    bare_repo_path=bare_repo_path, token=token,
                 )
-        if not cloned:
-            git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
+                if cloned and not repo_clone.token_absent_from_config(workspace_dir):
+                    raise RuntimeError("SEGURANCA: token vazou no git config do workspace")
+                if not cloned and profile is RuntimeProfile.production:
+                    validate_runtime_profile(
+                        local_fallback=(
+                            f"clone de {inp.repo!r} falhou/sem credencial e cairia para workspace vazio"
+                        )
+                    )
+            if not cloned:
+                git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
 
-    # Skills tickadas para o repo (console → skill_registry.repo_scope, 0029)
-    # materializadas AQUI — depois do clone, workspace garantidamente git.
-    # Guidance é best-effort no provision (o Planner continua falhando limpo
-    # se o registry cair — a leitura mandatória é a dele); qualquer skip fica
-    # auditado (P8).
-    try:
-        from .skill_files import materialize_skills as _materialize
-        from .skill_registry import read_approved_skills as _read_skills
-        _mat = _materialize(workspace_dir, _read_skills(inp.tenant_id, repo=inp.repo))
-        if _mat:
+        # Skills tickadas para o repo (console → skill_registry.repo_scope, 0029)
+        # materializadas AQUI — depois do clone, workspace garantidamente git.
+        # Guidance é best-effort no provision (o Planner continua falhando limpo
+        # se o registry cair — a leitura mandatória é a dele); qualquer skip fica
+        # auditado (P8).
+        try:
+            from .skill_files import materialize_skills as _materialize
+            from .skill_registry import read_approved_skills as _read_skills
+            _mat = _materialize(workspace_dir, _read_skills(inp.tenant_id, repo=inp.repo))
+            if _mat:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="skills_materialized",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"skills": _mat, "repo": inp.repo},
+                )
+        except Exception as exc:  # noqa: BLE001 — guidance não derruba o provision
             audit_emit(
                 actor="system:sandbox-runtime",
-                action="skills_materialized",
+                action="skills_materialization_skipped",
                 tenant_id=inp.tenant_id,
                 work_item_id=inp.work_item_id,
-                details={"skills": _mat, "repo": inp.repo},
+                details={"reason": f"{type(exc).__name__}: {str(exc)[:200]}"},
             )
-    except Exception as exc:  # noqa: BLE001 — guidance não derruba o provision
-        audit_emit(
-            actor="system:sandbox-runtime",
-            action="skills_materialization_skipped",
-            tenant_id=inp.tenant_id,
-            work_item_id=inp.work_item_id,
-            details={"reason": f"{type(exc).__name__}: {str(exc)[:200]}"},
-        )
 
-    provisioned = docker_driver.provision_container(
-        work_item_id=inp.work_item_id,
-        tenant_id=inp.tenant_id,
-        branch=branch,
-        workspace_host_path=workspace_dir,
-        checkpoint_bare_repo_path=bare_repo_path,
-        budget=inp.budget,
-        image=inp.image or docker_driver.DEFAULT_SANDBOX_IMAGE,
-    )
+        provisioned = docker_driver.provision_container(
+            work_item_id=inp.work_item_id,
+            tenant_id=inp.tenant_id,
+            branch=branch,
+            workspace_host_path=workspace_dir,
+            checkpoint_bare_repo_path=bare_repo_path,
+            budget=inp.budget,
+            image=inp.image or docker_driver.DEFAULT_SANDBOX_IMAGE,
+        )
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -219,9 +246,18 @@ class CheckpointSandboxInput(BaseModel):
 
 @activity.defn(name=ACTIVITY_CHECKPOINT_SANDBOX)
 async def checkpoint_sandbox(inp: CheckpointSandboxInput) -> CheckpointRef:
+    driver = select_sandbox_driver()
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare_repo_path = _paths_for(inp.work_item_id)
-    ref = git_checkpoint.checkpoint(inp.work_item_id, workspace_dir, branch, inp.phase)
+    if not driver.workspace_is_host_visible:
+        ref = driver.checkpoint(
+            SandboxCheckpointRequest(
+                work_item_id=inp.work_item_id, workspace_path=workspace_dir,
+                branch=branch, phase=inp.phase,
+            )
+        )
+    else:
+        ref = git_checkpoint.checkpoint(inp.work_item_id, workspace_dir, branch, inp.phase)
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -230,13 +266,19 @@ async def checkpoint_sandbox(inp: CheckpointSandboxInput) -> CheckpointRef:
         work_item_id=inp.work_item_id,
         details={"git_ref": ref.git_ref, "phase": ref.phase},
     )
-    existing = docker_driver.find_existing_container(inp.work_item_id)
+    if not driver.workspace_is_host_visible:
+        container_id = driver.sandbox_id_for(inp.work_item_id)
+        resource_class = "small"
+    else:
+        existing = docker_driver.find_existing_container(inp.work_item_id)
+        container_id = existing.id if existing else None
+        resource_class = existing.labels.get("dse.resource_class", "small") if existing else "small"
     leases_store.record_lifecycle_event(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
-        container_id=existing.id if existing else None,
+        container_id=container_id,
         branch=branch,
-        resource_class=(existing.labels.get("dse.resource_class", "small") if existing else "small"),
+        resource_class=resource_class,
         status="checkpointed",
     )
     return ref
@@ -257,35 +299,56 @@ class RebuildSandboxInput(BaseModel):
 @activity.defn(name=ACTIVITY_REBUILD_SANDBOX)
 async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
     validate_runtime_startup()
+    driver = select_sandbox_driver()
     branch = inp.branch or _default_branch(inp.work_item_id)
     old_workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
-    # Container antigo pode estar morto (chaos) — remove se ainda existir
-    # antes de recriar, para não colidir com o nome/labels do novo.
-    existing = docker_driver.find_existing_container(inp.work_item_id)
-    if existing is not None:
-        try:
-            existing.remove(force=True)
-        except Exception:  # noqa: BLE001 - já pode ter sido removido pelo daemon
-            pass
+    if not driver.workspace_is_host_visible:
+        # === Runtime K8s: rebuild = Pod novo montando o mesmo volume de
+        # checkpoint (PVC); o bootstrap recupera o branch do checkpoint. Com
+        # emptyDir (dev) o checkpoint morre com o Pod — o PVC é fast-follow. ===
+        rebuild_result = driver.rebuild(
+            SandboxRebuildRequest(
+                provision=SandboxProvisionRequest(
+                    work_item_id=inp.work_item_id,
+                    tenant_id=inp.tenant_id,
+                    branch=branch,
+                    workspace_path=old_workspace_dir,
+                    checkpoint_path=bare_repo_path,
+                    budget=inp.budget or {},
+                ),
+                checkpoint_ref=inp.checkpoint_ref,
+            )
+        )
+        provisioned = rebuild_result.sandbox
+        recovered_sha = rebuild_result.recovered_sha
+    else:
+        # Container antigo pode estar morto (chaos) — remove se ainda existir
+        # antes de recriar, para não colidir com o nome/labels do novo.
+        existing = docker_driver.find_existing_container(inp.work_item_id)
+        if existing is not None:
+            try:
+                existing.remove(force=True)
+            except Exception:  # noqa: BLE001 - já pode ter sido removido pelo daemon
+                pass
 
-    # Workspace novo (simula perda do container antigo — não reaproveita o
-    # diretório de trabalho anterior, só o bare repo de checkpoint, que é a
-    # fonte de verdade durável).
-    rebuilt_workspace_dir = old_workspace_dir + "-rebuilt"
-    recovered_sha = git_checkpoint.rebuild_from_checkpoint(
-        rebuilt_workspace_dir, bare_repo_path, branch, inp.checkpoint_ref
-    )
+        # Workspace novo (simula perda do container antigo — não reaproveita o
+        # diretório de trabalho anterior, só o bare repo de checkpoint, que é a
+        # fonte de verdade durável).
+        rebuilt_workspace_dir = old_workspace_dir + "-rebuilt"
+        recovered_sha = git_checkpoint.rebuild_from_checkpoint(
+            rebuilt_workspace_dir, bare_repo_path, branch, inp.checkpoint_ref
+        )
 
-    provisioned = docker_driver.provision_container(
-        work_item_id=inp.work_item_id,
-        tenant_id=inp.tenant_id,
-        branch=branch,
-        workspace_host_path=rebuilt_workspace_dir,
-        checkpoint_bare_repo_path=bare_repo_path,
-        budget=inp.budget,
-        image=inp.image or docker_driver.DEFAULT_SANDBOX_IMAGE,
-    )
+        provisioned = docker_driver.provision_container(
+            work_item_id=inp.work_item_id,
+            tenant_id=inp.tenant_id,
+            branch=branch,
+            workspace_host_path=rebuilt_workspace_dir,
+            checkpoint_bare_repo_path=bare_repo_path,
+            budget=inp.budget,
+            image=inp.image or docker_driver.DEFAULT_SANDBOX_IMAGE,
+        )
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -327,12 +390,21 @@ class TeardownSandboxInput(BaseModel):
 
 @activity.defn(name=ACTIVITY_TEARDOWN_SANDBOX)
 async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
-    existing = docker_driver.find_existing_container(inp.work_item_id)
+    driver = select_sandbox_driver()
     resource_class = "small"
     runtime_minutes = 0.0
-    if existing is not None:
-        resource_class = existing.labels.get("dse.resource_class", "small")
-        runtime_minutes = docker_driver.teardown_container(existing.id)
+    if not driver.workspace_is_host_visible:
+        # Runtime K8s: deleta o Pod. O lifetime do Pod não é rastreado ainda
+        # (métrica fica 0.0 — fast-follow); o driver é fail-closed sem cluster.
+        # container_id = nome do Pod (o `existing` do Docker não existe aqui).
+        driver.teardown(driver.sandbox_id_for(inp.work_item_id))
+        container_id = driver.sandbox_id_for(inp.work_item_id)
+    else:
+        existing = docker_driver.find_existing_container(inp.work_item_id)
+        container_id = existing.id if existing else None
+        if existing is not None:
+            resource_class = existing.labels.get("dse.resource_class", "small")
+            runtime_minutes = docker_driver.teardown_container(existing.id)
 
     metrics.record_sandbox_runtime_minutes(
         tenant_id=inp.tenant_id,
@@ -351,7 +423,7 @@ async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
     leases_store.record_lifecycle_event(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
-        container_id=existing.id if existing else None,
+        container_id=container_id,
         branch=_default_branch(inp.work_item_id),
         resource_class=resource_class,
         status="torn_down",

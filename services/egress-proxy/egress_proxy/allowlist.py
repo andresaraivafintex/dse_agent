@@ -55,8 +55,10 @@ class Allowlist:
         (WS-D)/LiteLLM (WSC-E2-T3) — nenhum provider externo (api.anthropic.com,
         api.openai.com, bedrock-runtime.*) é adicionado aqui, nunca."""
         entries = [
-            AllowlistEntry(host=repo_host, reason="repo git remote da tarefa", category="repo"),
-            AllowlistEntry(host=repo_api_host, reason="REST API do GitHub (push/status)", category="repo"),
+            # port=443 explícito (não None): fecha o vetor HTTP-plano :80, onde a
+            # injeção de credencial poderia sair em claro. Git/HTTPS usam 443.
+            AllowlistEntry(host=repo_host, port=443, reason="repo git remote da tarefa", category="repo"),
+            AllowlistEntry(host=repo_api_host, port=443, reason="REST API do GitHub (push/status)", category="repo"),
             AllowlistEntry(
                 host=model_gateway_host,
                 port=model_gateway_port,

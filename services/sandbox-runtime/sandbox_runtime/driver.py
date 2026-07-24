@@ -31,6 +31,11 @@ class SandboxProvisionRequest:
     budget: dict[str, Any] = field(default_factory=dict)
     image: str = docker_driver.DEFAULT_SANDBOX_IMAGE
     user: str = docker_driver.DEFAULT_NONROOT_USER
+    # Repo alvo da tarefa. No driver K8s o workspace vive num volume do Pod
+    # (não visível ao worker), então o clone acontece DENTRO do Pod, no
+    # bootstrap, via egress-proxy. None → workspace vazio.
+    repo: str | None = None
+    base_branch: str = "main"
 
 
 @dataclass(frozen=True)

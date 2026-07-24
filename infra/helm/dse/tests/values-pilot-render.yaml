@@ -5,6 +5,15 @@ tenant:
 
 runtime:
   sandboxRuntimeClassName: gvisor
+  sandboxDriver: k8s
+  sandboxRbac:
+    create: true
+  agentRunnerImage:
+    digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+networkPolicy:
+  kubeApiServer:
+    cidrs: ["10.43.0.1/32"]
 
 pilotReadiness:
   sandboxIsolationVerified: true

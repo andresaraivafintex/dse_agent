@@ -57,7 +57,9 @@ class K8sSandboxConfig:
     # FRACO) — o build_pod_manifest loga/marca isso; produção deve setar.
     runtime_class: str = os.environ.get("DSE_SANDBOX_RUNTIME_CLASS", "gvisor")
     service_account: str = os.environ.get("DSE_SANDBOX_SERVICE_ACCOUNT", "dse-sandbox-runner")
-    egress_proxy_url: str = os.environ.get("DSE_EGRESS_PROXY_URL", "http://egress-proxy.dse.svc:3128")
+    # Default FQDN + porta 8806 (o valor real vem do configmap via env; este
+    # default só vale fora do chart e evita o footgun da porta 3128 stale).
+    egress_proxy_url: str = os.environ.get("DSE_EGRESS_PROXY_URL", "http://egress-proxy.dse.svc.cluster.local:8806")
     cpu_limit: str = os.environ.get("DSE_SANDBOX_CPU_LIMIT", "1")
     mem_limit: str = os.environ.get("DSE_SANDBOX_MEM_LIMIT", "2Gi")
     kubectl: str = os.environ.get("DSE_KUBECTL", "kubectl")
@@ -233,6 +235,7 @@ class KubernetesSandboxDriver:
             name, "bootstrap",
             WorkspaceBootstrapRequest(
                 work_item_id=request.work_item_id, branch=request.branch,
+                base_branch=request.base_branch, repo=request.repo,
             ).model_dump(),
         )
         result = WorkspaceBootstrapResult.model_validate(out)
