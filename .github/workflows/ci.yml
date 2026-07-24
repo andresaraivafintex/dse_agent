@@ -113,6 +113,11 @@ jobs:
           if ! docker network inspect dse_sandbox_net >/dev/null 2>&1; then
             docker network create --internal dse_sandbox_net
           fi
+          # Fragments ws* declaram dse_net como external (o merge do compose
+          # herda essa marcação) — no runner limpo ela não existe ainda.
+          if ! docker network inspect dse_net >/dev/null 2>&1; then
+            docker network create dse_net
+          fi
 
       - name: Start durable test dependencies
         run: |
@@ -206,14 +211,9 @@ jobs:
         with:
           version: v4.0.4
 
-      - name: Lint chart
-        run: helm lint infra/helm/dse
-
-      - name: Render development profile
-        run: helm template dse infra/helm/dse -f infra/helm/dse/values-dev.yaml >/tmp/dse-dev.yaml
-
-      - name: Render pilot profile
-        run: helm template dse infra/helm/dse -f infra/helm/dse/values-pilot.yaml >/tmp/dse-pilot.yaml
-
-      - name: Verify production profile
-        run: helm template dse infra/helm/dse -f infra/helm/dse/values-production.yaml >/tmp/dse-production.yaml
+      # Suíte canônica do chart (tests/test_profiles.sh): dev renderiza; pilot
+      # SEM digests DEVE falhar (fail-closed) e COM o fixture de digests passa
+      # todas as asserções de postura. Os passos crus antigos invertiam essa
+      # semântica (renderavam pilot sem o fixture e falhavam sempre).
+      - name: Chart profile suite (lint + render + fail-closed posture)
+        run: bash infra/helm/dse/tests/test_profiles.sh
