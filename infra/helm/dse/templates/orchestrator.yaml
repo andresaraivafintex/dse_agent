@@ -34,6 +34,12 @@ spec:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # GitHub App (finalize_pr / clone) + LITELLM master key (mint de
+            # virtual key). Ver extraEnvSecret em values.yaml.
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
           env:
             - name: HTTPS_PROXY
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"

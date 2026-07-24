@@ -23,6 +23,12 @@ tenant:
 
 deploymentProfile: development
 
+# Secret K8s (criado à mão no deploy, passo 3 do runbook) com as chaves que o
+# LiteLLM e o orchestrator leem do AMBIENTE — NÃO do Vault:
+#   ANTHROPIC_API_KEY, LITELLM_MASTER_KEY, DSE_LITELLM_MASTER_KEY,
+#   GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY.
+extraEnvSecret: "dse-poc-secrets"
+
 global:
   imageRegistry: ""            # vazio: só as imagens DSE ganham o path GHCR abaixo
   imagePullSecrets:
@@ -40,16 +46,34 @@ orchestrator:
 egressProxy:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
   replicas: 1                  # POC: 1 réplica (o gate de >=2 é só perfil estrito)
+  # Allowlist: api.anthropic.com (o gateway chama a Anthropic via HTTPS_PROXY)
+  # + github (clone/PR). Sem anthropic o turno morre na 1ª chamada de modelo.
+  allowlist:
+    - { host: "api.github.com", port: 443, purpose: "GitHub API (finalize PR)" }
+    - { host: "github.com", port: 443, purpose: "clone do repo alvo" }
+    - { host: "api.anthropic.com", port: 443, purpose: "provider de modelo (Coder)" }
 modelGateway:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
   allowFixture: true           # POC: sem provider real obrigatório
 adapters:
+  # v0: adapters de webhook DESLIGADOS (o trigger é direto no ingest, passo 8 do
+  # runbook — sem túnel/webhook). ingest-gateway FICA (host do disparo manual).
   slack:
+    enabled: false
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
   github:
+    enabled: false
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
   ingestGateway:
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
+
+# validation NÃO sobe: a imagem dse/validation não está no release (→
+# ImagePullBackOff) e o finalize_pr roda no worker do orchestrator, não aqui.
+validation:
+  enabled: false
+# otel é best-effort; poupa RAM na VPS 2 vCPU.
+otelCollector:
+  enabled: false
 
 # --- sandbox ISOLADO de verdade (o ponto do POC) ---
 runtime:

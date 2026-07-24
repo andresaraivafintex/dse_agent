@@ -81,10 +81,23 @@ Ordem (cada passo é idempotente):
    kubectl apply -f deploy/k8s/sandbox-isolation.yaml
    ```
 
-3. **Seed do Vault dev do chart com o `secrets.env`** (Anthropic/GitHub App/
-   Slack). O chart sobe um Vault dev; semeie os paths que os adapters/gateway
-   leem (`secret/dse/github-app`, `secret/dse/slack/webhook`,
-   `secret/dse/model-gateway/providers`) — mesmo mapeamento do `dse.sh`.
+3. **Secret do POC** (o LiteLLM e o orchestrator leem do AMBIENTE, NÃO do
+   Vault — corrigido após a avaliação). Um secret, injetado nos dois pods via
+   `extraEnvSecret: dse-poc-secrets` (já no values-vps-poc.yaml):
+   ```bash
+   kubectl create secret generic dse-poc-secrets -n dse \
+     --from-literal=ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+     --from-literal=LITELLM_MASTER_KEY="$MASTER" \
+     --from-literal=DSE_LITELLM_MASTER_KEY="$MASTER" \
+     --from-literal=DSE_CODER_MODEL="anthropic/claude-haiku" \
+     --from-literal=GITHUB_APP_ID="$GITHUB_APP_ID" \
+     --from-literal=GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID" \
+     --from-literal=GITHUB_APP_PRIVATE_KEY="$(cat app.pem)"
+   ```
+   `LITELLM_MASTER_KEY` (gateway) e `DSE_LITELLM_MASTER_KEY` (orchestrator) TÊM
+   que ser idênticos — senão o mint de virtual key dá 401 e cai para fixture
+   (sem código real). Valores vêm do `secrets.env` do laptop.
+   **Verifica:** `kubectl exec deploy/dse-dse-model-gateway -n dse -- sh -c 'echo $ANTHROPIC_API_KEY'` não vazio.
 
 4. **Install**:
    ```bash

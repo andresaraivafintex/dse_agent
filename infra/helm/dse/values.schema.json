@@ -491,6 +491,9 @@
           }
         }
       }
+    },
+    "extraEnvSecret": {
+      "type": "string"
     }
   },
   "definitions": {

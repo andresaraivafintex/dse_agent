@@ -36,6 +36,11 @@ spec:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # ANTHROPIC_API_KEY + LITELLM_MASTER_KEY (o LiteLLM lê do ambiente).
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
           env:
             - name: HTTPS_PROXY
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
