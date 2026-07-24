@@ -72,3 +72,28 @@ def ensure_primary_serving(timeout_seconds: float = 60.0) -> None:
     raise AssertionError(
         f"primário nunca voltou a servir em {timeout_seconds}s (último api_base={last!r})"
     )
+
+
+def wait_until_fallback_serves(timeout_seconds: float = 60.0) -> None:
+    """Após derrubar o primário, espera o router ESTABILIZAR servindo pelo
+    FALLBACK (echo-b) — elimina a corrida entre `docker stop` e a chamada
+    instrumentada do teste (o primário podia ainda estar servindo, então não
+    havia degradação nenhuma). Usa raw_completion (master key direta), que NÃO
+    escreve no ledger/audit dos testes. Depois disto o primário está em
+    cooldown, então a chamada instrumentada vai DIRETO ao fallback
+    (attempted_fallbacks=0) — degradação por cooldown, detectada via
+    DSE_FALLBACK_API_BASES."""
+    deadline = time.monotonic() + timeout_seconds
+    last: str | None = None
+    while time.monotonic() < deadline:
+        try:
+            resp = raw_completion("healthcheck-fallback")
+            last = resp.headers.get("x-litellm-model-api-base")
+            if resp.status_code == 200 and last == FALLBACK_API_BASE:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+    raise AssertionError(
+        f"fallback nunca assumiu em {timeout_seconds}s (último api_base={last!r})"
+    )
