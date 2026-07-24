@@ -108,6 +108,16 @@ jobs:
       - name: Install locked environment
         run: python -m pip install -r requirements-ci.lock
 
+      # O runner limpo não tem git configurado como uma máquina de dev: sem
+      # init.defaultBranch (o git cai em "master") os testes que clonam um bare
+      # criado sem -b fazem checkout de um HEAD inexistente e o merge/drift fica
+      # incoerente; sem user.identity, qualquer commit de teste falha.
+      - name: Configure git for deterministic tests
+        run: |
+          git config --global init.defaultBranch main
+          git config --global user.name "DSE CI"
+          git config --global user.email "ci@dse.local"
+
       - name: Create isolated Docker network
         run: |
           if ! docker network inspect dse_sandbox_net >/dev/null 2>&1; then

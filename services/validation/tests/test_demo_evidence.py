@@ -13,11 +13,24 @@ from dse_contracts.activities import RunDemoEvidenceInput
 
 from dse_validation import db
 from dse_validation.evidence import garage
+import shutil
+
+import pytest
+
 from dse_validation.evidence.demo import is_real_video, run_demo_evidence_core
 
 FIXTURE_DEMO_DIR = Path(__file__).parent / "fixtures" / "demos" / "wi_demo_fixture"
+_PLAYWRIGHT_DIR = Path(__file__).resolve().parent.parent / "playwright"
 
 
+def _demo_video_capable() -> bool:
+    """Grava vídeo/trace REAL exige ffmpeg + os browsers do Playwright
+    instalados (services/validation/playwright/node_modules). No runner CI
+    minimalista faltam — o teste roda de verdade no dev/VPS onde existem."""
+    return shutil.which("ffmpeg") is not None and (_PLAYWRIGHT_DIR / "node_modules").exists()
+
+
+@pytest.mark.skipif(not _demo_video_capable(), reason="requer ffmpeg + browsers do Playwright")
 def test_demo_evidence_records_real_video_and_trace(work_item_id, tenant_id, tmp_path):
     res = run_demo_evidence_core(
         RunDemoEvidenceInput(

@@ -176,3 +176,34 @@ def _require_postgres():
         conn.close()
     except Exception as exc:  # pragma: no cover - so em ambiente sem infra
         pytest.skip(f"Postgres da fundacao indisponivel em {DSN}: {exc}")
+
+
+async def wait_for_status(handle, expected, attempts: int = 600, sleep_s: float = 0.05) -> str:
+    """Polling resiliente de status de workflow (Fase 4, plano 09).
+
+    Uma query pode estourar deadline TRANSIENTE quando aterrissa na janela de
+    continue_as_new OU quando o worker está saturado (runner CI de 2 vCPU:
+    "query deadline exceeded" / "Timeout expired"). Isso é flake de infra de
+    teste, não de lógica — re-polla em vez de propagar. Captura tanto o
+    RPCError da API quanto o RPCError cru do bridge Rust (nome do tipo), que
+    nem sempre é subclasse do primeiro. Teto de tempo generoso (600×50ms=30s).
+    """
+    import asyncio
+
+    from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
+
+    status = None
+    for _ in range(attempts):
+        try:
+            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
+        except Exception as exc:  # noqa: BLE001 — só timeout/deadline de query é transiente
+            name = type(exc).__name__
+            msg = str(exc).lower()
+            if "rpcerror" in name.lower() or "deadline" in msg or "timeout" in msg:
+                await asyncio.sleep(sleep_s)
+                continue
+            raise
+        if status in expected:
+            return status
+        await asyncio.sleep(sleep_s)
+    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")

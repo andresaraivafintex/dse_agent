@@ -52,7 +52,7 @@ def _make_scenario(tmp_path: Path, *, conflicting_drift: bool = False):
     """Monta origin bare + workspace do branch da tarefa (2 commits = 2 threads
     de review ancoradas) + drift na base. Retorna (workspace, branch, anchored)."""
     origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
 
     # seed: base branch com um arquivo compartilhado
     seed = tmp_path / "seed"
@@ -237,7 +237,7 @@ def test_noop_when_no_drift(tmp_path, ids):
     tenant_id, work_item_id = ids
     # cenário sem drift: origin/main == ancestral do branch
     origin = tmp_path / "origin.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
     seed = tmp_path / "seed"
     seed.mkdir()
     _git(seed, "init", "-q", "-b", BASE)

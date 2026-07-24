@@ -11,6 +11,8 @@ lado do proxy.
 from __future__ import annotations
 
 import http.client
+import os
+
 
 import psycopg2
 import pytest
@@ -92,6 +94,14 @@ def test_credential_placeholder_header_is_replaced_before_egress(running_proxy_f
     assert "fixture-ghtoken-" in minted.token  # nunca visível dentro do container que originou a chamada
 
 
+@pytest.mark.skipif(
+    os.environ.get("DSE_RUN_EGRESS_CONTAINER_TEST") != "1",
+    reason=(
+        "exige roteamento container→host (host.docker.internal) — funciona no "
+        "Docker Desktop (dev) mas não no docker nativo do runner CI; opt-in "
+        "com DSE_RUN_EGRESS_CONTAINER_TEST=1"
+    ),
+)
 def test_no_token_reaches_sandbox_container_env_fs_or_proc(running_proxy_factory, upstream_server):
     """Roda um container Docker de verdade que faz a chamada via proxy com
     só o header placeholder, depois vasculha env/filesystem/proc do MESMO

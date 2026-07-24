@@ -30,6 +30,7 @@ from conftest import (
     new_work_item_id,
     read_audit_actions,
     read_gate_row,
+    wait_for_status,
 )
 from fakes import FakeControlPlane, build_fake_activities
 
@@ -44,25 +45,6 @@ def _reset_codeowners():
 
 def _with_codeowners(owners: list[str]):
     policy.set_codeowners_reader(lambda tenant_id, repo: "* " + " ".join(owners))
-
-
-async def _wait_for_status(handle, expected, attempts: int = 400) -> str:
-    from temporalio.service import RPCError
-
-    status = None
-    for _ in range(attempts):
-        try:
-            status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except RPCError:
-            # Query pode estourar timeout TRANSIENTE quando aterrissa exatamente
-            # na janela de continue_as_new (re_clarify) no servidor de
-            # time-skipping — flake de infra de teste, nao de logica; re-polla.
-            await asyncio.sleep(0.05)
-            continue
-        if status in expected:
-            return status
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
 
 
 @pytest.mark.asyncio
@@ -81,7 +63,7 @@ async def test_low_risk_auto_approves_without_gate(time_skipping_env):
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -114,7 +96,7 @@ async def test_high_risk_parks_and_requires_named_approval(time_skipping_env):
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
 
         # estaciona no gate: NAO provisiona sandbox nem chama Coder ate aprovar
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         assert state.provision_calls == 0
         assert state.coder_turn_calls == 0
         gate = read_gate_row(work_item_id)
@@ -124,7 +106,7 @@ async def test_high_risk_parks_and_requires_named_approval(time_skipping_env):
         # aprovacao por humano nomeado -> segue
         await handle.signal("plan_approval",
                             {"verdict": "approved", "actor": "usr_alice"})
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         assert state.coder_turn_calls == 1
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -190,11 +172,11 @@ async def test_migrations_path_forces_high_even_when_planner_says_low(time_skipp
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         gate = read_gate_row(work_item_id)
         assert gate[6] == "high"  # risk_class efetivo, apesar do Planner dizer low
         await handle.signal("plan_approval", {"verdict": "approved", "actor": "usr_dba"})
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -218,7 +200,7 @@ async def test_rejection_cancel_is_terminal_failed_and_audited(time_skipping_env
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         await handle.signal("plan_approval", {
             "verdict": "rejected", "route": "cancel", "actor": "usr_alice",
             "justification": "fora de escopo regulatorio",
@@ -252,7 +234,7 @@ async def test_rejection_re_plan_reruns_planner_then_gate(time_skipping_env):
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         assert state.planner_calls == 1
         # rejeita pedindo re_plan -> planner roda de novo e re-estaciona no gate
         await handle.signal("plan_approval", {
@@ -266,11 +248,11 @@ async def test_rejection_re_plan_reruns_planner_then_gate(time_skipping_env):
                 break
             await asyncio.sleep(0.05)
         assert state.planner_calls == 2  # RE-planejou
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         assert state.coder_turn_calls == 0  # nunca implementou sem passar pelo gate
         # agora aprova
         await handle.signal("plan_approval", {"verdict": "approved", "actor": "usr_alice"})
-        await _wait_for_status(handle, {"review_ready"})
+        await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -298,21 +280,21 @@ async def test_rejection_re_clarify_returns_to_clarification_gate(time_skipping_
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         await handle.signal("plan_approval", {
             "verdict": "rejected", "route": "re_clarify", "actor": "usr_alice",
             "justification": "criterios de aceite ambiguos",
         })
         # volta ao gate de clarificacao (needs_clarification) — NAO a implementacao.
         # re_clarify reabre a rodada de clarificacao (limpa acceptance_criteria).
-        await _wait_for_status(handle, {"needs_clarification"})
+        await wait_for_status(handle, {"needs_clarification"})
         assert state.coder_turn_calls == 0
         actions = read_audit_actions(work_item_id)
         assert "plan_rejected_route_re_clarify" in actions
 
         # responder a clarificacao re-abre planner + gate (nunca pula p/ impl):
         await handle.signal("clarification_answer", {"acceptance_criteria": "agora claro"})
-        await _wait_for_status(handle, {"awaiting_plan_approval"})
+        await wait_for_status(handle, {"awaiting_plan_approval"})
         assert state.planner_calls == 2  # re-planejou apos re-clarificar
         assert state.coder_turn_calls == 0  # ainda nao implementou (passou pelo gate)
         # encerra limpo via cancel de operador (nao e o foco do teste)

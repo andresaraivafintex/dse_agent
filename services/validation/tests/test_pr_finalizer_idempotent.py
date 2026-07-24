@@ -135,7 +135,7 @@ def test_push_branch_uses_real_git_against_local_bare_remote(tmp_path, git_repo)
     GitHubClient é só a URL — trocar por `https://x-access-token:<token>@...`
     em produção não muda a chamada de `git push` em si."""
     bare_remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "-q", "--bare", str(bare_remote)], check=True)
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare_remote)], check=True)
 
     class LocalRemoteGitHubClient:
         def authenticated_remote_url(self, repo: str) -> str:

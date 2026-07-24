@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import pytest
 
 from dse_contracts.activities import TriggerPreviewInput
 
@@ -430,6 +431,26 @@ def test_cluster_failure_degrades_instead_of_blocking(work_item_id, tenant_id, t
 # ---------------------------------------------------------------------------
 # 2. Integração REAL contra o cluster k3d (exit criterion da fase)
 # ---------------------------------------------------------------------------
+def _k3d_cluster_available() -> bool:
+    """Exige a capacidade COMPLETA: cluster k3d ativo E Argo CD instalado
+    (o teste materializa uma Application de verdade). No runner CI não há
+    cluster; num k3d sem Argo CD também pula — a prova roda só no ambiente
+    completo (dev/VPS com Argo CD)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("kubectl") is None:
+        return False
+    ctx = subprocess.run(["kubectl", "config", "current-context"], capture_output=True, text=True)
+    if ctx.returncode != 0 or not ctx.stdout.strip().startswith("k3d-"):
+        return False
+    argo = subprocess.run(
+        ["kubectl", "get", "namespace", "argocd"], capture_output=True, text=True
+    )
+    return argo.returncode == 0
+
+
+@pytest.mark.skipif(not _k3d_cluster_available(), reason="requer cluster k3d ativo (Argo CD)")
 def test_preview_e2e_real_cluster_create_serve_and_ttl_reap(work_item_id, tenant_id):
     """Contra o cluster k3d REAL: (a) ApplicationSet do Argo CD materializa o
     namespace efêmero com Deployment+Service; (b) a URL do preview responde
