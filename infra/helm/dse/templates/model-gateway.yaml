@@ -52,12 +52,15 @@ spec:
             {{- toYaml .Values.modelGateway.resources | nindent 12 }}
           volumeMounts:
             {{- include "dse.appTmpMount" . | nindent 12 }}
+          # O LiteLLM protege /health com auth (master key) -> 401 na probe, que
+          # reiniciava o pod. Os endpoints sem auth são /health/liveliness e
+          # /health/readiness.
           readinessProbe:
-            httpGet: { path: /health, port: {{ .Values.modelGateway.port }} }
+            httpGet: { path: /health/readiness, port: {{ .Values.modelGateway.port }} }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /health, port: {{ .Values.modelGateway.port }} }
+            httpGet: { path: /health/liveliness, port: {{ .Values.modelGateway.port }} }
             initialDelaySeconds: 15
             periodSeconds: 20
 ---
