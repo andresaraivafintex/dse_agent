@@ -19,8 +19,19 @@ WORKDIR /app
 # deps do runtime do agente (substrato openhands + git). Pinar em produção.
 # git é necessário para o ScopedGitSession (checkpoint/push do branch da tarefa).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# node 20 + npm: o Tester roda a suíte de testes do repo alvo DENTRO do Pod
+# (ex. `node --test` p/ repos Node, `npm test`). O claude-agent-sdk embute o
+# Node internamente mas NÃO o expõe no PATH — sem isto o Tester falha com
+# "node: not found" em repos Node (achado empírico: fintex-wallet é Node).
+# NodeSource p/ node >=20 (o repo exige `engines.node >=20`; `node --test`
+# estável a partir do 20).
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
