@@ -158,6 +158,38 @@ class WorkItemLifecycleInput:
     plan_round_cap: int = 3  # capped re_plan (rejection path — WSB-E3-T3)
     l2_retry_cap: int = 2  # L2 objections -> Coder, capped
 
+    # Deadline of the awaiting_plan_approval gate. Before this existed the gate
+    # was an UNBOUNDED park: a plan nobody answered sat there forever, nobody
+    # was reminded, and the console rendered it as merely blocked.
+    # Defaults chosen for a business process, mirroring the clarification gate
+    # (same humans, same surface): a reminder after 24h and escalation at 72h.
+    # 72h is the smallest window that survives a weekend — an approver who goes
+    # offline Friday evening is reminded on Saturday and still has Monday to
+    # decide before the item escalates. Anything shorter escalates healthy items
+    # every weekend; anything longer lets a plan rot for most of a sprint.
+    # <= 0 in `plan_approval_timeout_hours` DISABLES the deadline (unbounded
+    # wait, the pre-timeout behaviour) for a tenant on a slower approval cycle.
+    # A reminder that does not fit inside the deadline (e.g. 24h reminder with a
+    # 12h timeout) is moved to half the deadline, not clamped to it — see
+    # `workflows._approval_windows`.
+    # THESE TWO LITERALS ARE THE ONLY WAY TO SET THE WINDOW, and there is
+    # deliberately no env var beside them. There was one pair
+    # (`DSE_PLAN_APPROVAL_REMINDER_HOURS` / `_TIMEOUT_HOURS`); it was removed
+    # because it could not take effect: the only starter is
+    # `ingest_gateway.dispatcher._dispatch_row`, which calls
+    # `start_workflow(WORKFLOW_TYPE, work_item_id)` with a bare string, so
+    # `_coerce_input` builds this dataclass from its defaults and
+    # `config.apply_to_input` — the function that would carry env values in — has
+    # no production caller at all. That is true of every knob in config.py
+    # (activity_heartbeat_seconds, plan_round_cap, …), but a dead knob over a
+    # deadline that ESCALATES work is the one an operator would actually reach
+    # for. Changing the deployed window means changing these literals; making env
+    # config real means changing that ONE dispatcher call to build an input and
+    # pass it through apply_to_input, which turns every knob live at once (out of
+    # this service's scope).
+    plan_approval_reminder_hours: float = 24.0
+    plan_approval_timeout_hours: float = 72.0
+
     # ------------------------------------------------------------------
     # Phase 3 — WSB-E4-T2: iteration caps + evidence refresh debounce (ADR-26)
     # and the evidence pipeline state (preview/demo/visual diff) that survives

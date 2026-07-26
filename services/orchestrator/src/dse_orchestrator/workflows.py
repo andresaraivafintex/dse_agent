@@ -126,6 +126,40 @@ _FAIL_CLOSED_MARKERS = (
 )
 
 
+# Where the reminder lands when the configured one does not fit inside the
+# deadline. Half the window is the least surprising reading of two numbers that
+# contradict each other: the ping keeps real lead time and the deadline itself is
+# never moved.
+_REMINDER_FALLBACK_FRACTION = 0.5
+
+
+def _approval_windows(
+    reminder_hours: float, timeout_hours: float
+) -> tuple[timedelta, timedelta, bool]:
+    """Splits the approval deadline into (window before the reminder, window
+    after it, reminder_was_overridden) — the same two-window shape the
+    clarification gate computes inline. Pure arithmetic over values carried in
+    the workflow INPUT, so it is replay-safe: no `time.time()`, no wall clock,
+    nothing read from the environment inside the sandbox.
+
+    A reminder is only useful STRICTLY INSIDE the deadline. Clamping it to the
+    deadline (the first version of this function) satisfied the arithmetic and
+    broke the promise the docstring made: a plausible misconfiguration —
+    reminder 24h, timeout 12h — fired the ping and the escalation in the SAME
+    instant, so the human was formally "pinged" and lost the item in the same
+    second. A reminder that does not fit (too late, zero, or negative) therefore
+    falls back to half the deadline, and the third element of the tuple says it
+    happened, so the caller can log the misconfiguration and record the
+    EFFECTIVE value instead of pretending the configured one was used.
+    """
+    total = timedelta(hours=max(timeout_hours, 0.0))
+    reminder = timedelta(hours=max(reminder_hours, 0.0))
+    if not timedelta(0) < reminder < total:
+        reminder = total * _REMINDER_FALLBACK_FRACTION
+        return reminder, total - reminder, True
+    return reminder, total - reminder, False
+
+
 def _failure_class_from(exc: Exception) -> "FailureClass | None":
     """Walks the Activity error's cause chain reading the ApplicationError
     `type` (canonical dse.failure.* or legacy) — deterministic and I/O-free
@@ -1155,17 +1189,52 @@ class WorkItemLifecycleWorkflow:
         reminder_delta: timedelta,
         remaining_delta: timedelta,
         reminder_action: str,
+        on_reminder=None,
     ) -> bool:
         """`True` if `condition()` became true within the total window
         (reminder + escalation); `False` if the whole deadline elapsed without
-        an answer (the caller decides what to do — it never keeps guessing)."""
+        an answer (the caller decides what to do — it never keeps guessing).
+
+        `on_reminder` is an optional coroutine run right after the reminder is
+        audited, for gates whose reminder must also show up on the human's
+        SURFACE — an audit row is a record, and nobody reads the ledger. (It is
+        still not a push notification; see `_post_plan_approval_reminder` for what
+        the outbound path can and cannot do.) Callers that do not pass it issue
+        exactly the same command sequence as before, which is what keeps the
+        clarification gate's in-flight histories replayable without a patch.
+        """
         try:
             await workflow.wait_condition(condition, timeout=reminder_delta)
             return True
         except asyncio.TimeoutError:
             pass
 
+        # THE SAME RACE `_expire_plan_approval` RE-CHECKS AT THE DEADLINE, one
+        # timer earlier. `wait_condition(timeout=)` reports the timeout even when
+        # the signal that satisfies the condition is delivered in the very
+        # workflow task that carries the fired timer, so the condition can
+        # already be true right here. For the plan gate that meant writing
+        # "this plan is still waiting for a decision" over a plan the human had
+        # just APPROVED — and on Slack that body lands inside the Block Kit whose
+        # Approve/Reject buttons are still live, inviting a second decision on an
+        # item already on its way to `implementing`. It also put a
+        # `plan_approval_reminder_sent` row in the append-only ledger for a
+        # reminder that was not needed.
+        #
+        # Re-checked only for callers that pass `on_reminder`, which is the exact
+        # set whose reminder is SURFACED to a human — and the exact set that is
+        # new in this change. The clarification gate has executions parked on
+        # this timer right now with no patch marker covering it, and returning
+        # early skips its audit Activity and its second timer: two commands its
+        # recorded histories contain, so replay would fail with a
+        # non-determinism error. Its sequence stays untouched, per the paragraph
+        # above.
+        if on_reminder is not None and condition():
+            return True
+
         await self._audit(reminder_action)
+        if on_reminder is not None:
+            await on_reminder()
 
         if remaining_delta.total_seconds() <= 0:
             return False
@@ -1643,10 +1712,55 @@ class WorkItemLifecycleWorkflow:
         # Durable wait for SIGNAL_PLAN_APPROVAL (routed by WS-A when
         # status==awaiting_plan_approval). Anti-clobber: we do not reset the
         # flag before reading the payload.
-        await workflow.wait_condition(
-            lambda: self._plan_approval_received or self._cancelled
-            or self._operator_escalate_requested
-        )
+        def gate_decided() -> bool:
+            return (self._plan_approval_received or self._cancelled
+                    or self._operator_escalate_requested)
+
+        # REPLAY GUARD — placed here, immediately before the wait, because THIS
+        # is the exact point where the command sequence forks: a
+        # `wait_condition(timeout=...)` issues a StartTimer command that the
+        # history of a run already parked at this gate does not contain, and
+        # there are such runs in flight right now. Replay of those histories
+        # finds no marker, takes the untimed branch, and reproduces the original
+        # commands one-for-one; only new executions record the marker and get a
+        # deadline. Everything the deadline triggers (reminder, gate projection,
+        # escalation) hangs off the patched branch, so nothing below can inject
+        # a command into an old history.
+        if workflow.patched("plan-approval-timeout-v1"):
+            timeout_hours = input.plan_approval_timeout_hours
+            if timeout_hours <= 0:
+                # Deadline explicitly disabled by the operator (see the field
+                # docs in models.py) — same unbounded park as before.
+                await workflow.wait_condition(gate_decided)
+            else:
+                reminder_delta, remaining_delta, reminder_overridden = _approval_windows(
+                    input.plan_approval_reminder_hours, timeout_hours
+                )
+                if reminder_overridden:
+                    logger.warning(
+                        "plan approval reminder (%gh) does not fit inside the deadline (%gh); "
+                        "reminding at %gh instead so the ping still precedes the escalation",
+                        input.plan_approval_reminder_hours, timeout_hours,
+                        reminder_delta.total_seconds() / 3600.0,
+                    )
+                decided = await self._wait_with_reminder(
+                    condition=gate_decided,
+                    reminder_delta=reminder_delta,
+                    remaining_delta=remaining_delta,
+                    reminder_action="plan_approval_reminder_sent",
+                    on_reminder=self._post_plan_approval_reminder,
+                )
+                if not decided:
+                    # Either raises _EscalateNow (no verdict: it neither
+                    # self-approves nor fails silently) or returns, meaning a
+                    # verdict landed after the timer fired and the normal verdict
+                    # handling below owns it.
+                    await self._expire_plan_approval(
+                        approvers, effective_risk, gate_decided=gate_decided
+                    )
+        else:
+            await workflow.wait_condition(gate_decided)
+
         if self._cancelled:
             raise _CancelledByOperator()
         if self._operator_escalate_requested:
@@ -1681,6 +1795,130 @@ class WorkItemLifecycleWorkflow:
             raise _PlanRejected(route=route, actor=actor, justification=justification)
 
         raise _EscalateNow(f"unknown_plan_verdict:{verdict!r}")
+
+    async def _post_plan_approval_reminder(self) -> None:
+        """Rewrites the body of the ONE mutable gate message when the reminder
+        window elapses, KEEPING the status at `awaiting_plan_approval`.
+
+        The status is not cosmetic here. The first version of this reminder
+        invented a pseudo-status (`awaiting_plan_approval_reminder`) and that
+        DESTROYED the gate it was reminding about: adapter-slack attaches
+        `approval_blocks(...)` only when `status == "awaiting_plan_approval"`
+        (services/adapter-slack/adapter_slack/app.py, `/internal/status-comment`),
+        and `SlackCommentBackend.edit` only forwards `blocks` when the caller
+        supplies them — so the reminder made Slack `chat_update` the message with
+        no Block Kit and the Approve/Reject buttons, the ONLY way a Slack approver
+        can answer, were replaced by plain text. The reminder made the task
+        unanswerable. Real status + `body` override (the shape
+        `_post_preview_link` already uses) keeps the buttons and still changes
+        what the human reads.
+
+        HONEST LIMIT — THIS DOES NOT NOTIFY ANYBODY. Every outbound path the
+        orchestrator has (`post_tracking_comment` -> each adapter's
+        `/internal/status-comment` -> `MutableCommentWriter`) EDITS the single
+        status message: Slack `chat_update` and GitHub's comment PATCH are both
+        silent by design, mentions added by an edit included. So this reminder
+        only pays off for a human who comes back to the thread, and the escalation
+        at the deadline is equally silent. Making it ring needs a NEW message,
+        which needs an endpoint no adapter has today: `POST /internal/nudge`
+        posting a Slack thread reply (`chat_postMessage(thread_ts=...)`, which
+        leaves the approval message and its buttons untouched), a GitHub
+        `issues.create_comment`, a Jira `add_comment` — plus its own local
+        activity here behind its own patch marker. That spans adapter-slack,
+        adapter-github, adapter-jira and the contracts package, so it is not in
+        this change; the deadline is deliberately long enough (72h) that a human
+        returning to the thread sees the countdown before the item escalates.
+
+        Best-effort: an adapter that is down must not consume the item's deadline
+        or take the workflow down.
+        """
+        input = self._input
+        _, remaining, _ = _approval_windows(
+            input.plan_approval_reminder_hours, input.plan_approval_timeout_hours
+        )
+        remaining_hours = remaining.total_seconds() / 3600.0
+        who = ", ".join(input.approvers) or "the resolved approvers"
+        # The body has to repeat the ask, because on Slack it REPLACES the plan
+        # text inside the same Block Kit message (the buttons sit under it).
+        body = (
+            "⏰ **Reminder — this plan is still waiting for a decision.**\n\n"
+            f"📋 Plan ready — awaiting human approval (risk: {input.risk_class}).\n"
+            f"Approvers: {who}.\n\n"
+            f"Approve or reject it within ~{remaining_hours:.0f}h. After that the DSE "
+            "stops and hands the task to a human owner (`escalated`) — it never "
+            "approves a plan because nobody answered."
+        )
+        try:
+            await workflow.execute_activity(
+                ACTIVITY_POST_TRACKING_COMMENT,
+                {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                 "status": STATUS_AWAITING_PLAN_APPROVAL, "body": body},
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
+        except ActivityError:
+            logger.warning(
+                "best-effort plan approval reminder failed; the deadline still stands"
+            )
+
+    async def _expire_plan_approval(self, approvers: list[str], effective_risk: str,
+                                    *, gate_decided) -> None:
+        """The approval deadline elapsed. Raises `_EscalateNow` when there is
+        really no verdict, or RETURNS when one landed after the timer fired (the
+        caller then handles it as an ordinary decision).
+
+        THE RE-CHECK IS THE POINT, not defensive noise. `wait_condition(timeout=)`
+        reports the timeout even when the signal that answers the gate is
+        delivered in the very workflow task that carries the fired timer, and
+        further signals can arrive while this coroutine is scheduled. Without the
+        re-check a human verdict that beat the deadline by milliseconds was
+        silently DISCARDED and the append-only ledger ended up holding both
+        "approval delivered" and "timed out, no verdict" for the same item
+        (reproduced against the time-skipping test server). The re-check runs
+        BEFORE the first write, so no timeout that did not happen ever reaches the
+        ledger; a verdict arriving after this point loses the race honestly, with
+        `escalated` — a state a human owns — as the outcome.
+
+        No self-approval (absence of an answer is never consent — P1/P3) and no
+        silent failure: the item lands on the `escalated` terminal state.
+
+        The gate projection goes to 'blocked' rather than a new 'expired' because
+        migration 0009 CHECK-constrains plan_approval_gate.status to
+        pending/approved/rejected/blocked; the `justification` carries the
+        distinction until that enum grows. ONE audit row, written at a real state
+        transition — never one per timer tick (a stuck item once produced ~2,900
+        rows that way)."""
+        if gate_decided():
+            await self._audit(
+                "plan_approval_verdict_raced_deadline",
+                {"risk_class": effective_risk, "approvers": approvers,
+                 "timeout_hours": self._input.plan_approval_timeout_hours},
+            )
+            return
+
+        hours = self._input.plan_approval_timeout_hours
+        reason = f"plan_approval_timeout_after_{hours:g}h"
+        reminder_delta, _, reminder_overridden = _approval_windows(
+            self._input.plan_approval_reminder_hours, hours
+        )
+        await self._record_gate(
+            status="blocked", auto_approved=False, approvers=approvers,
+            decided_by=None,
+            justification=(f"{reason}: no verdict from "
+                           f"{', '.join(approvers) or 'no resolvable approver'}"),
+        )
+        await self._audit(
+            "plan_approval_timed_out",
+            {"risk_class": effective_risk, "approvers": approvers,
+             "timeout_hours": hours,
+             "reminder_hours": self._input.plan_approval_reminder_hours,
+             # When the two knobs contradict each other the reminder is moved
+             # (see `_approval_windows`); the row records what actually happened,
+             # not what was configured.
+             "reminder_hours_effective": reminder_delta.total_seconds() / 3600.0,
+             "reminder_hours_overridden": reminder_overridden},
+        )
+        raise _EscalateNow(reason)
 
     async def _record_gate(self, *, status: str, auto_approved: bool, approvers: list[str],
                            decided_by: str | None, route: str | None = None,
