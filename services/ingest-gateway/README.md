@@ -386,3 +386,87 @@ foundation+wsa merge validates.
 - **Real multi-tenancy**: `resolve_tenant` is ready; what is missing is
   populating `tenant_platform_bindings` with the real
   workspaces/installations/sites (operational data, not engineering).
+
+## Recovery sweeps — lost replies (`reconcile.py`) and lost workflows (`stranded.py`)
+
+Two different silent failures, two different layers.
+
+**A lost REPLY** (`reconcile.pending_reply_work_items`): the task is healthy, the
+human answered, the webhook never landed. The sweep re-reads the thread of items
+sitting in `needs_clarification`/`awaiting_repo_selection` — never
+`awaiting_plan_approval`, because re-reading is exactly what the TOCTOU defense
+forbids for a decision.
+
+The query used to be `ORDER BY last_transition_at ASC LIMIT 50` and had a
+permanent blind spot: recovery does not change `last_transition_at` (re-reading a
+thread is not a state transition, and forging one would corrupt both the ordering
+and every "stuck for how long" reading in the console), so every cycle re-read the
+same oldest 50 threads and item 51 was never fetched — not late, never. It now
+pages through the ordering with a keyset cursor (process-local, advisory) and
+wraps at the tail, so every pending item is visited within
+`ceil(total / limit)` cycles while `limit` still caps the platform API calls per
+cycle. `reset_reply_sweep_cursor()` forces the next pass to start at the oldest.
+
+The cursor is process-local and advisory. The lock around it is held only for
+dict access, never across the query (holding it over a database round-trip in an
+HTTP handler would let one slow connection block every tenant's sweep), so two
+overlapping calls can serve the same page — harmless, since re-ingestion dedupes
+on `event_id`. What the lock does give is that a sweep may only replace the
+position it read: a slow call finishing late cannot rewind the rotation over a
+newer position, nor re-seat a position that the tail wrap has dropped in the
+meantime (the wrap goes through the same check instead of clearing the key on its
+own — that gap made a late advance undo the wrap and re-serve an old page).
+
+**A lost WORKFLOW** (`stranded.stranded_work_items`): the task itself is gone.
+Four items were found in `implementing` (x2), `queued` and `new` two days old, with
+no audit event for ~40 hours and no workflow in Temporal — not open, and not
+closed either, since the 24h namespace retention had purged the history. The
+detector therefore keys on audit silence, not on a Temporal probe: after
+retention, "completed fine" and "never existed" both answer NOT_FOUND.
+
+The detector keys on "silent AND nobody is legitimately waiting on a human", so
+every status where a live workflow parks on a `wait_condition` is excluded:
+`needs_clarification`, `awaiting_repo_selection`, `awaiting_plan_approval`
+(intake gates) and `review_ready`, `merge_pending`, `pr_ready` (the review and
+merge parks — `_set_status(review_ready, "awaiting_human_review")` and
+`_set_status(merge_pending, "approved_awaiting_merge")` each write ONE row and
+then wait, untimed, for a person). `pr_ready` is on the list because it is the
+pre-patch alias of `pr_open`/`review_ready`/`merge_pending` and such executions
+are still in flight. Without those three the sweep would escalate every open PR
+under review. `pr_open`, `ci_pending` and `review_feedback` are NOT excluded: what
+they wait for is the engine, so silence there is the symptom.
+
+Detection is read-only and writes no audit row (a timer narrating non-events into
+an append-only ledger is how one stuck item once produced ~2,900 rows).
+`escalate_stranded` is the only action offered: it moves the item to `escalated`
+(terminal — "handed to a human", not "retried"), bumps `state_version` and
+`last_transition_at` exactly as the canonical writer does, and writes exactly one
+`work_item_escalated_stranded` row. Two guards in the statement make a second call
+a no-op: the status guard, and a ledger guard ("our escalation row is the newest
+thing in this item's audit_log"). The second one is what survives an un-guarded
+write to `work_items.status` un-escalating the item — the status is mutable, the
+ledger is not — while still allowing a genuine second stranding to be reported
+once, because any other audit row lifts the suppression. Resuming is deliberately
+not offered: a workflow whose history is gone cannot be re-run without risking a
+repeated coder turn or a reopened PR.
+
+**Not wired yet**: nothing calls `stranded_work_items`/`escalate_stranded`. The
+timer/endpoint that runs the sweep (and the threshold it uses) lives with the
+operator surfaces, not in this package. Whatever wires it MUST probe Temporal
+between the two halves: an operator `pause` parks the workflow on an untimed
+`wait_condition` and is recorded only in workflow state (no column, no audit row),
+so a paused item is indistinguishable from a stranded one in SQL. An OPEN
+execution is unambiguous proof of life; it is only NOT_FOUND that is ambiguous.
+
+The escalation surfaces in the console as an `error` timeline event
+(`console-projector`'s `AUDIT_EVENT_MAP`), not the `note` that unclassified
+actions fall through to — the same type as the orchestrator's own `escalated`,
+because it is the same outcome. The action name is a cross-service string
+contract (the map has the literal typed out, this package owns the constant), so
+`test_stranded.py` reads that map from source and fails if the two drift.
+
+The `idle_for_seconds` guard only refuses a non-positive threshold, which would
+select every in-flight item in the tenant. It cannot tell too-short from
+long-enough: the longest gap the engine legitimately leaves between audit rows is
+made of another service's activity timeouts, retry budgets and
+`DSE_CI_POLL_INTERVAL_SECONDS`, so whoever wires the sweep owns that number.

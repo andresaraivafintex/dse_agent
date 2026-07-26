@@ -26,15 +26,35 @@ from .task_class import classify_task_class, TASK_CLASSES
 from .reconcile import (
     recorded_work_item_id,
     pending_reply_work_items,
+    reset_reply_sweep_cursor,
     RECOVERABLE_STATUSES,
     NON_RECOVERABLE_STATUSES,
+)
+# The status tuples keep their `STRANDED_` prefix at package level: `correlate`
+# has its own, incompatible notion of "terminal" (done/failed — "can this still
+# receive a signal?") and a bare `TERMINAL_STATUSES` in this namespace would let
+# a caller import one while meaning the other.
+from .stranded import (
+    stranded_work_items,
+    escalate_stranded,
+    STRANDED_TERMINAL_STATUSES,
+    STRANDED_HUMAN_WAIT_STATUSES,
+    STRANDED_ESCALATION_ACTION,
+    STRANDED_ESCALATION_REASON,
 )
 
 __all__ = [
     "recorded_work_item_id",
     "pending_reply_work_items",
+    "reset_reply_sweep_cursor",
     "RECOVERABLE_STATUSES",
     "NON_RECOVERABLE_STATUSES",
+    "stranded_work_items",
+    "escalate_stranded",
+    "STRANDED_TERMINAL_STATUSES",
+    "STRANDED_HUMAN_WAIT_STATUSES",
+    "STRANDED_ESCALATION_ACTION",
+    "STRANDED_ESCALATION_REASON",
     "get_connection",
     "is_channel_killed",
     "admit_work_item",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from dse_audit import emit as audit_emit
 from dse_contracts import mutable_comment
@@ -48,10 +49,34 @@ from .events import (
     build_repo_select_signal_event,
     parse_slack_approval,
 )
+from .ratelimit import SlackRateLimited
 
 logger = logging.getLogger("adapter_slack")
 
 app = FastAPI(title="dse-adapter-slack")
+
+# How long each endpoint may keep ITS OWN caller waiting on Slack, counted from
+# the start of the request. These are the callers' limits, not Slack's — the
+# whole point of `adapter_slack.ratelimit` taking a deadline is that only the
+# call site knows them.
+#
+# `/internal/reconcile` is invoked by the reply-reconciler CronJob, which abandons
+# the request after 120s (infra/helm/dse/templates/reply-reconciler.yaml). The
+# deadline stops the sweep from STARTING another thread, not from finishing the one
+# it is in, and one thread is a single `conversations.replies` bounded by
+# `backend.HTTP_TIMEOUT_S`. So the worst case is 60s of budget (the listing query
+# and the per-item ingest writes included) plus that last call, which lands inside
+# the 120s.
+RECONCILE_BUDGET_S = 60.0
+
+# `/internal/status-comment` is called by the orchestrator best-effort with an 8s
+# HTTP timeout (services/orchestrator .../local_activities.py). Waiting LONGER
+# than the caller will is how the "exactly 1 status message per task" invariant
+# broke: the orchestrator gave up at 8s, `MutableCommentWriter` never reached
+# `save_ref`, and the next transition found no ref and posted a SECOND message.
+# Small enough to fit inside the 8s together with the post itself; large enough
+# that Slack's short per-channel hints are still absorbed.
+STATUS_COMMENT_BUDGET_S = 3.0
 
 
 @app.get("/health")
@@ -281,11 +306,22 @@ def _notify_ephemeral(channel: str, user_id: str, text: str) -> None:
     because the message was re-rendered — fails in ABSOLUTE silence: the human
     clicks, nothing happens, and there is no hint whatsoever as to why.
     Best-effort on purpose: a Slack failure here must not take down the
-    interaction nor undo the signal that was already recorded."""
+    interaction nor undo the signal that was already recorded.
+
+    It NEVER WAITS on a throttle. The deadline is `now`, so a `ratelimited`
+    answer raises immediately instead of sleeping. Two reasons, and either alone
+    would be enough: `chat.postEphemeral` allows roughly one call per second per
+    channel, so a burst of Confirm clicks throttles routinely; and this runs
+    inside the `/slack/interactions` COROUTINE, where the blocking `time.sleep`
+    of a retry parks the uvicorn event loop — `/slack/events` deliveries stall
+    (Slack times out at 3s and redelivers), `/internal/status-comment` stalls,
+    and `/health` stops answering until the liveness probe restarts the pod.
+    Retrying a notice for a human who already moved on is not worth any of
+    that."""
     try:
-        build_real_slack_client(get_slack_bot_token()).chat_postEphemeral(
-            channel=channel, user=user_id, text=text
-        )
+        build_real_slack_client(
+            get_slack_bot_token(), deadline=time.monotonic()
+        ).chat_postEphemeral(channel=channel, user=user_id, text=text)
     except Exception:  # noqa: BLE001 — feedback is ancillary, never fatal
         logger.warning("chat_postEphemeral failed (repo selector feedback)", exc_info=True)
 
@@ -430,8 +466,14 @@ def upsert_status_comment(req: StatusCommentRequest) -> dict:
     Phase B (report 07): on status `awaiting_plan_approval` the message goes
     out with Block Kit (Approve/Reject buttons) — the same mutable message,
     only interactive. The clicks come back via /slack/interactions (verdict via
-    C1)."""
-    client = build_real_slack_client(get_slack_bot_token())
+    C1).
+
+    The Slack client is bounded by `STATUS_COMMENT_BUDGET_S`, which is what keeps
+    a throttled post from outliving the orchestrator's 8s timeout and reappearing
+    as a SECOND status message on the next transition."""
+    client = build_real_slack_client(
+        get_slack_bot_token(), deadline=time.monotonic() + STATUS_COMMENT_BUDGET_S
+    )
     backend = SlackCommentBackend(client)
     store = PgCommentStateStore()
     writer = mutable_comment.MutableCommentWriter(backend, store, SURFACE)
@@ -588,9 +630,18 @@ def reconcile_missed_replies(req: ReconcileRequest | None = None) -> dict:
     sweep. Nothing here answers 5xx either — a caller on a timer would only
     retry into the same failure, and `ok: False` says more than a stack trace at
     the other end. Same contract as the GitHub adapter's reconciler, so one
-    scheduled caller can read both the same way."""
+    scheduled caller can read both the same way.
+
+    ONE budget for the WHOLE sweep (`RECONCILE_BUDGET_S`), not one per item: the
+    Slack client is built once with a single deadline, and the loop below refuses
+    to start another thread once that deadline has passed. Without both halves,
+    a workspace being throttled turned this endpoint into ~50 minutes of sleeping
+    inside a request the CronJob abandons after 120s. Stopping early loses
+    nothing: `pending_reply_work_items` rotates through the pending set, so the
+    next cycle continues from where this one gave up."""
     tenant_id = (req.tenant_id if req else None) or get_tenant_id()
     limit = req.limit if req else 50
+    deadline = time.monotonic() + RECONCILE_BUDGET_S
 
     try:
         conn = get_connection()
@@ -609,19 +660,41 @@ def reconcile_missed_replies(req: ReconcileRequest | None = None) -> dict:
         return {"ok": True, "checked": 0, "recovered": 0}
 
     try:
-        client = build_real_slack_client(get_slack_bot_token())
+        client = build_real_slack_client(get_slack_bot_token(), deadline=deadline)
     except Exception:  # noqa: BLE001
         logger.exception("reconcile: could not build the Slack client")
         return {"ok": False, "checked": 0, "recovered": 0}
 
     recovered = 0
+    checked = 0
     for item in items:
+        if time.monotonic() >= deadline:
+            # The client would no longer sleep on a throttle, but it would still
+            # spend a request per remaining item. Starting no new thread past the
+            # deadline is what makes the sweep fit inside the CronJob's 120s.
+            logger.warning(
+                "reconcile: out of budget after %d/%d items; the next cycle continues",
+                checked, len(items),
+            )
+            break
+        checked += 1
         try:
             recovered += _recover_missed_replies(client, item, tenant_id=tenant_id)
+        except SlackRateLimited:
+            # Slack throttles per method per workspace, so every remaining item
+            # faces the same limit on the same `conversations.replies`. Marching
+            # on would spend the rest of the request failing identically — and
+            # this used to be swallowed by the `except Exception` below, which is
+            # how the sweep kept going for 50 throttled items in a row.
+            logger.warning(
+                "reconcile: slack is throttling this workspace; stopping after %d/%d items",
+                checked, len(items),
+            )
+            break
         except Exception:  # noqa: BLE001 — one bad item must not abort the sweep
             logger.exception(
                 "reconcile: could not recover %s; continuing the sweep",
                 item.get("work_item_id"),
             )
 
-    return {"ok": True, "checked": len(items), "recovered": recovered}
+    return {"ok": True, "checked": checked, "recovered": recovered}

@@ -247,6 +247,106 @@ The workflow now orchestrates, within the implementation phase:
   `plan_approval_gate` (idempotent upsert per work item; it does **not** replace the
   audit ledger — P8: `audit_log` remains the immutable source).
 
+#### The gate has a deadline (it is not an unbounded park)
+
+The wait is bounded by two Temporal timers carried in the workflow input
+(never wall-clock arithmetic inside the sandbox):
+
+| Input field | Value in production | Meaning |
+| --- | --- | --- |
+| `plan_approval_reminder_hours` | `24` (literal in `models.py`) | rewrites the body of the gate message on the originating surface + audit `plan_approval_reminder_sent` |
+| `plan_approval_timeout_hours` | `72` (literal in `models.py`) | total deadline; `<= 0` disables it (unbounded wait) |
+
+72h is the smallest window that survives a weekend: an approver offline from
+Friday evening is reminded on Saturday and still has Monday to decide.
+
+A reminder that does not fit inside the deadline (say `reminder=24`,
+`timeout=12`) is moved to **half the deadline**, logged, and reported in the
+timeout audit row as `reminder_hours_effective`. The earlier version clamped it
+to the deadline, which fired the ping and the escalation in the same instant —
+formally "pinged", useless in practice.
+
+**There is no env var for the window, on purpose.** A `DSE_PLAN_APPROVAL_*` pair
+was added to `config.py` and removed again: the only bridge from that config into
+a workflow is `config.apply_to_input`, and it has **no production caller** — the
+only starter is `ingest_gateway.dispatcher._dispatch_row`, which calls
+`start_workflow(WORKFLOW_TYPE, work_item_id)` with a bare string, so
+`_coerce_input` builds the input from the dataclass defaults. The same is true of
+every remaining knob in `config.py` (`activity_heartbeat_seconds`,
+`plan_round_cap`, `evidence_debounce_seconds`, …), but a knob that appears to
+widen a deadline which **escalates work items** and in fact does nothing is worth
+not shipping. Changing the deployed window means changing the literal in
+`models.py` and redeploying. Making env config real is one change in that
+dispatcher call — build a `WorkItemLifecycleInput`, pass it through
+`apply_to_input`, start the workflow with it — which turns every knob live at
+once; it belongs to WS-A, not here.
+
+#### What the reminder can and cannot do
+
+It rewrites the body of the **single mutable status message**, keeping
+`status == "awaiting_plan_approval"`. That status is load-bearing: adapter-slack
+attaches the Approve/Reject Block Kit only for that exact string, so a reminder
+travelling under any other status makes Slack `chat_update` the message with no
+blocks and **deletes the only control a Slack approver has**. There is
+deliberately no `awaiting_plan_approval_reminder` entry in `_STATUS_BODIES`.
+
+It also **does not notify anyone**. Every outbound path the orchestrator owns
+ends in `MutableCommentWriter`, i.e. Slack `chat_update` or a GitHub comment
+`PATCH`, both silent by design (a mention added by an edit does not notify
+either). Ringing a phone needs a NEW message, which needs an endpoint no adapter
+exposes today — a `POST /internal/nudge` doing a Slack thread reply
+(`chat_postMessage(thread_ts=…)`, which leaves the approval message and its
+buttons intact), a GitHub `issues.create_comment`, a Jira `add_comment` — plus a
+local activity here behind its own patch marker. That spans three adapters and
+the contracts package, so it is not part of this change: today the reminder pays
+off for a human who comes back to the thread, and the 72h window is sized for
+that.
+
+On expiry the workflow **never self-approves and never fails silently**: audit
+`plan_approval_timed_out`, gate projection back to `blocked` (migration 0009
+CHECK-constrains the column to `pending|approved|rejected|blocked`, so the
+`justification` carries the "expired" nuance), and the work item goes to the
+**`escalated`** terminal state — the state that means a human owns it.
+
+The verdict is re-read **before** anything is written on expiry: a timer firing
+is not proof that nobody answered (the signal can be delivered in the same
+workflow task that carries the fired timer), and without the re-check a decision
+that beat the deadline by milliseconds was discarded while the append-only ledger
+recorded both "approval delivered" and "timed out, no verdict". A verdict that
+wins that race is audited as `plan_approval_verdict_raced_deadline` and handled
+as an ordinary decision.
+
+The change is guarded by the `plan-approval-timeout-v1` patch marker: runs
+already parked at the gate replay down the untimed branch, so adding the timer
+does not corrupt in-flight executions. The guard is enforced by
+`test_plan_approval_timeout.py::test_pre_patch_history_replays_only_because_of_the_guard`,
+which records a history with the marker suppressed (a genuine pre-deploy command
+sequence) and asserts that it replays with the guard and FAILS with the guard
+bypassed.
+
+#### `update_work_item_status` writes the status unconditionally
+
+`local_activities.update_work_item_status` is the single status write path in the
+system and it does an unconditional `status = COALESCE(%s, status)`, out of a
+terminal status included. A guard refusing to leave
+`done|failed|blocked|escalated` was tried and **reverted**, because an ordinary
+retry reuses the same work item row: the requester comments `@dse-bot` on the
+issue of an `escalated` item, adapter-github promotes the comment to
+`kind=task_request`, and `ingest_gateway.correlate` matches the existing row
+(its terminal set is only `done|failed`). The guard therefore froze the
+projection of the entire retry at `escalated`, and
+`ingest_gateway.dispatcher._route_signal` chooses the plan-approval signal by
+reading that column — so the dispatcher **declined the human's approval** of the
+retry while the agent kept working. Enforced by
+`test_status_writer_projection.py`.
+
+What the guard was meant to prevent — a stranded-item escalation being silently
+undone — is handled where it cannot be undone: `ingest_gateway.stranded` keys
+both its detection and its `escalate_stranded` on
+`max(ts) FILTER (WHERE action = 'work_item_escalated_stranded')` versus the
+newest audit row, so re-escalation is suppressed by the append-only ledger and
+never by the mutable status column.
+
 ### Rejection path (WSB-E3-T3)
 
 3 deterministic routes, always audited with **identity + justification**,

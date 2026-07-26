@@ -201,7 +201,7 @@ def fake_slack(monkeypatch):
     """Only the Slack transport is faked — signature, database and authorization
     stay real."""
     fake = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake)
     return fake
 
 

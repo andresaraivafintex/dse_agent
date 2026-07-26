@@ -229,7 +229,7 @@ egressProxy:
       purpose: "GitHub App API (PR finalizer, status comments)"
     - host: "github.com"
       port: 443
-      purpose: "clone do repo alvo dentro do sandbox (git via proxy)"
+      purpose: "clone the target repository inside the sandbox (git through the proxy)"
     - host: "slack.com"
       port: 443
       purpose: "Slack Web API (mensagem de status)"

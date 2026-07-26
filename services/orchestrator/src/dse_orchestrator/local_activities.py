@@ -81,6 +81,24 @@ async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
     pr_number) plus optional new fields. Plan/hash/expected_files are derived
     here, outside the workflow's deterministic sandbox. Redelivering the same
     Activity does not bump ``state_version`` when the state did not change.
+
+    THE STATUS WRITE IS UNCONDITIONAL, INCLUDING OUT OF A TERMINAL STATUS, and
+    that is not an oversight. A guard that refused to leave
+    ``done|failed|blocked|escalated`` was tried here and had to be removed: an
+    ordinary retry REUSES the work item row (the requester comments
+    ``@dse-bot`` on the same issue of an ``escalated`` item, adapter-github
+    promotes it to ``kind=task_request``, and `ingest_gateway.correlate` matches
+    the existing row because its own terminal set is only done/failed), so the
+    guard froze the projection of the whole retry at ``escalated``. That is not
+    cosmetic: `ingest_gateway.dispatcher._route_signal` picks the plan-approval
+    signal by reading this very column, so a frozen row made the dispatcher
+    DECLINE the human's approval of the retry while the agent kept running.
+    Re-escalation of an item this Activity moves back out of ``escalated`` is
+    suppressed on the append-only ledger instead — `ingest_gateway.stranded`
+    keys both its detection and its escalation on
+    ``max(ts) FILTER (WHERE action = 'work_item_escalated_stranded')`` versus the
+    newest audit row, which is why it does not depend on the status column
+    staying terminal.
     """
     inp = PersistWorkItemStateInput(**payload)
     work_item_id = inp.work_item_id
@@ -603,6 +621,14 @@ async def emit_audit_event(payload: dict[str, Any]) -> None:
 _STATUS_BODIES = {
     "needs_clarification": "🔎 The DSE needs clarification before it can start:\n\n{detail}",
     "awaiting_plan_approval": "📋 Plan ready — awaiting human approval (risk: {detail}).",
+    # DELIBERATELY NO `awaiting_plan_approval_reminder` ENTRY. A reminder for the
+    # gate must NOT travel as its own status: adapter-slack attaches the
+    # Approve/Reject Block Kit only for the exact string `awaiting_plan_approval`,
+    # so any other status re-renders the same mutable message WITHOUT the buttons
+    # and the approver is left with no way to answer. The reminder therefore keeps
+    # the real status and overrides `body` instead — see
+    # `workflows._post_plan_approval_reminder`. Any future "louder" variant of a
+    # gate message has to do the same.
     "awaiting_repo_selection": "🔎 Which repository should I use?\n\n{detail}",
     "implementing": "⚙️ The DSE is implementing the change in an isolated sandbox.",
     "validating": "🧪 Implementation ready — running validation (L1/L2) in the sandbox.",

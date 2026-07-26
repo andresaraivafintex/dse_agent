@@ -173,9 +173,13 @@ and cost still goes to the Phase 2 `model_call_ledger`).
   `docker stop` on the primary container and the next call is served by B.
 - **Native proxy fallback** (`router_settings.fallbacks` in
   `litellm_config.yaml`): `eco/echo-model -> [eco/echo-model-b]`, with
-  `num_retries: 1`, `cooldown_time: 1` and, on the echo deployments, `timeout: 5` +
-  `max_retries: 0` (a local connection failure is detected fast — deterministic
-  failover). Declarative, outside the agent code (P1).
+  `num_retries: 1`, `cooldown_time: 1`, `allowed_fails: 1` and, on the echo
+  deployments, `timeout: 5` + `max_retries: 0` (a local connection failure is
+  detected fast — deterministic failover). Declarative, outside the agent code
+  (P1). The fallback is a **runtime** decision and does not depend on the primary
+  being "cooled down"; §"Cooldowns and the failover flake" below explains why the
+  cooldown pair is deliberately a near-no-op and what
+  `tests/test_router_calibration.py` locks in.
 - **Strictly intra-tier (NFR-07/P2)**: no fallback route crosses the contracted
   tier. Automated negative test
   (`test_no_fallback_route_crosses_tier`) parses the proxy's real config and
@@ -211,6 +215,105 @@ and cost still goes to the Phase 2 `model_call_ledger`).
   non-bypassable setup the same Phase 2 open item applies: mirror the enforcement
   as a proxy pre-call hook (see "What is missing for production" #6).
 
+#### Cooldowns and the failover flake (2026-07-26)
+
+`test_failover_intra_tier.py` was intermittently red on main with
+`fallback never took over within 60.0s (last api_base='http://model-gateway-echo:9000')`.
+The cause was the **harness**, not the router:
+
+- with the primary container stopped, one probe costs two dead attempts
+  (`timeout: 5` each) plus LiteLLM's retry back-off before `eco/echo-model-b`
+  answers — ~11-13s, and more on a contended runner;
+- the probe's client timeout was 15s, so on a loaded runner the probe was cut off
+  mid-flight;
+- the old poll loop assigned `last = resp.headers.get(...)` **inside** the `try`
+  and before the status check, so an `httpx.ReadTimeout` left `last` at whatever
+  an earlier probe had observed — including the endpoint LiteLLM names on the
+  error response it returns when a model group is exhausted. That is how the
+  message could name the primary although no probe was ever *served* by it, and
+  why the red run read like "the router keeps announcing a dead deployment".
+
+The fix is in `tests/chaos_helpers.py`: the takeover probe's timeout is now derived
+from the config (20s, against the 11.25s the proxy spends on the stopped primary
+group before the fallback group answers — `(1 + num_retries)` attempts x the
+deployment's `timeout`, plus the back-off, which is what the 11-13s measurement
+shows), and every probe is recorded (latency, status, serving endpoint,
+`attempted-fallbacks`, or the transport error) so a red run says which hypothesis
+it was. `tests/test_chaos_helpers_wait.py` covers that with the gateway
+faked out; `tests/test_router_calibration.py` derives the invariants from the real
+config and needs no infra.
+
+**A router recalibration was tried here first and reverted** — `allowed_fails: 0`
++ `cooldown_time: 30`. Do not bring it back: `router_settings` is router-WIDE,
+and `anthropic/claude*` / `bedrock/*` are single-deployment model groups with no
+fallback route. In LiteLLM 1.93.0:
+
+- `allowed_fails: 0` cools a deployment down on the **first** coolable failure
+  (`should_cooldown_based_on_allowed_fails_policy`: `updated_fails > allowed_fails`
+  with `updated_fails = 1`). It does not wait for `num_retries` to be exhausted —
+  on the contrary, once the only deployment of the group is cooled down,
+  `should_retry_this_error` raises immediately ("no healthy deployments") and the
+  retry never runs;
+- a plain timeout is coolable (`_is_cooldown_required` returns True for 408) and
+  `litellm_settings.request_timeout: 30` is the **per-attempt** cap for those two
+  groups, which declare no `timeout` of their own
+  (`litellm_core_utils/completion_timeout.py`). One long generation crossing 30s
+  was therefore enough;
+- while a group is in cooldown the proxy answers `No deployments available`, which
+  `litellm/proxy/_types.py` maps to **HTTP 429**, for every tenant, for the whole
+  window.
+
+So the "fix" would have turned one slow generation into a 30s outage of the
+production model group. `test_router_calibration.py::test_no_model_group_can_be_taken_out_of_service_by_a_single_failure`
+fails if `allowed_fails: 0` comes back while any group has nowhere to fall back to.
+
+Two related notes, both verified against the 1.93.0 source:
+
+- `BadRequestErrorAllowedFails` / `ContentPolicyViolationErrorAllowedFails` are
+  **inert**: `_is_cooldown_required` returns True in the 4xx range only for
+  429/401/408/404, so a 400 (which is what `ContentPolicyViolationError` is) never
+  reaches the allowed-fails policy. A test asserts they stay out of the config.
+- The current `cooldown_time: 1` + `allowed_fails: 1` pair means cooldowns
+  practically never fire (the failure counter lives in `Router.failed_calls` with
+  `ttl=cooldown_time`, so it needs 2 coolable failures inside 1s while a single
+  attempt against a dead endpoint already burns `timeout: 5`). That is the intended
+  posture: the intra-tier failover is a runtime decision and needs no cooldown, and
+  no single failure can take a production group out of service.
+
+The same file also fixes the harness' **budget arithmetic**. The suite runs under
+`--timeout=180 --timeout-method=thread` (`scripts/test_matrix.py`), and that method
+does not raise inside the test: pytest-timeout dumps the stacks and calls
+`os._exit(1)`, so `finally: start_container(...)` never runs and the primary echo
+stays stopped for every later run. Therefore:
+
+- a wait's budget is the window during which it keeps *starting* probes — what its
+  failure message quotes — and a probe that has started always runs to completion,
+  because throwing away the observation is what made the wait blind in the first
+  place. Refusing to start a probe that could not finish inside the window was
+  tried and reverted: it left `window - probe_timeout - poll_interval` of real
+  polling (4s of a 30s budget, a single probe) while the message still promised the
+  whole window;
+- each wait's probe timeout is sized for the answer THAT wait is waiting for:
+  ~11-13s for the fallback taking over (the stopped primary group has to be burnt
+  first, model and measurement agree at ~11.25s), a much cheaper 8s for the primary
+  coming back (a healthy primary is tried first and answers in milliseconds), which
+  is what lets the recovery wait poll several times inside its window. Both are
+  asserted against the real config, as is "the window affords more than one probe";
+- the waits (window + the one probe that may still be in flight) and the call
+  timeouts of one test are named constants whose sum
+  (`WORST_CASE_SINGLE_ECHO_DOWN_SECONDS`, `WORST_CASE_BOTH_ECHOES_DOWN_SECONDS`,
+  156s each) is asserted against the ceiling parsed out of `scripts/test_matrix.py`.
+  The ceiling for the both-echoes-down call follows the ~53s **measurement**, not
+  the per-group model: that model predicts 22.5s for the same state, so it is a
+  lower bound once every group is dead and is not used to size anything;
+- `stop_container` records the container on disk before stopping it and
+  `start_container` clears the record, so a session killed mid-chaos is repaired
+  at the start of a later one (`restore_containers_from_aborted_run`, wired as a
+  session fixture in `tests/conftest.py`). The record is a file named after the
+  pytest process that wrote it and is only acted on once that process is **gone**:
+  a machine-wide record made a starting session restart the container another,
+  still-running session had deliberately stopped.
+
 ### WSD-E4-T3 — Model-path chaos battery (extension)
 
 The egress-fail-closed / key-expiry / gateway-oscillation scenarios ALREADY EXIST
@@ -219,8 +322,10 @@ duplicated**. `tests/test_chaos_gateway.py` adds, against REAL infra:
 
 - **Total provider outage** (docker stop on BOTH echoes): typed refusal at the
   boundary + audit `gateway.call_failed_upstream` + ZERO ledger rows (no phantom
-  cost, no truncated output). Measured: ~50s until LiteLLM's final error with
-  both down (connect-timeouts × retries × fallback).
+  cost, no truncated output). Measured: ~53s until LiteLLM's final error with
+  both down (connect-timeouts × retries × fallback) — the number
+  `MEASURED_BOTH_ECHOES_DOWN_ANSWER_SECONDS` records, and the reason that call's
+  client timeout is 70s.
 - **Quota exhaustion (429 end-to-end)**: the echo returns a deterministic 429
   (marker `[[SIMULATE_QUOTA_EXHAUSTED]]` in the last user message — OpenAI error
   shape, see `echo_provider/server.py`); LiteLLM propagates RateLimitError; the
@@ -518,7 +623,9 @@ services/model-gateway/
     test_kill_switch_reassign.py                  # Phase 2 WSD-E4-T2
     test_ledger_durable.py                        # Phase 2 WSD-E3-T4
     test_eval_suite.py                            # Phase 2 WSD-E5-T1
-    chaos_helpers.py                              # Phase 3: docker stop/start + recovery wait
+    chaos_helpers.py                              # Phase 3: docker stop/start, waits, timing budgets
     test_failover_intra_tier.py                   # Phase 3 WSD-E4-T1
     test_chaos_gateway.py                         # Phase 3 WSD-E4-T3
+    test_chaos_helpers_wait.py                    # the waits + the stop record, docker/gateway faked out
+    test_router_calibration.py                    # failover config and timing-budget invariants
 ```

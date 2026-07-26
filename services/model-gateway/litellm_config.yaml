@@ -120,10 +120,42 @@ model_list:
 # x-litellm-attempted-fallbacks header (>0) + x-litellm-model-api-base, and
 # emits the degradation audit row (P8) — see model_gateway_client/failover.py.
 router_settings:
+  # One retry inside the model group before the router moves on to the declared
+  # fallback. The fallback itself is a RUNTIME decision (async_function_with_
+  # fallbacks) — it does not need the primary deployment to be "cooled down".
   num_retries: 1
-  # short cooldown: after a failure the primary deployment is retried almost
-  # immediately — the chaos tests bring the primary up/down and need fast,
-  # deterministic recovery.
+  # This pair deliberately amounts to "practically never take a deployment out
+  # of the pool", and that is the SAFE setting here — not an oversight.
+  #
+  # How LiteLLM 1.93.0 reads it (router_utils/cooldown_handlers.py):
+  # `_should_cooldown_deployment` switches to the LEGACY counting path as soon as
+  # `allowed_fails` differs from the library default (litellm.allowed_fails = 3)
+  # or an `allowed_fails_policy` is set. That path
+  # (`should_cooldown_based_on_allowed_fails_policy`) keeps the per-deployment
+  # failure counter in `Router.failed_calls` with `ttl=cooldown_time` and cools
+  # the deployment down only once `fails > allowed_fails`. With ttl=1s that means
+  # 2 coolable failures inside one second, while a single attempt against a dead
+  # endpoint already burns that deployment's own `timeout` — so no deployment is
+  # ever cooled down in practice, and the intra-tier failover below is served by
+  # the runtime fallback instead.
+  #
+  # 2026-07-26 — DO NOT set `allowed_fails: 0` here (it was tried and reverted).
+  # `router_settings` is ROUTER-WIDE, and `anthropic/claude*` and `bedrock/*` are
+  # single-deployment model groups with NO fallback route: the first coolable
+  # failure would take the whole group out of service for the cooldown window,
+  # and the proxy turns "No deployments available" into HTTP 429 for EVERY tenant
+  # (litellm/proxy/_types.py). A plain timeout is coolable (`_is_cooldown_required`
+  # returns True for 408) and `litellm_settings.request_timeout: 30` below is the
+  # PER-ATTEMPT cap for those two groups — they declare no `timeout` of their own,
+  # so litellm_core_utils/completion_timeout.py resolves the global one. One long
+  # generation crossing 30s would therefore have taken the production model group
+  # down for 30s. Making a chaos test deterministic is not worth that: the test
+  # harness was fixed instead (tests/chaos_helpers.py).
+  #
+  # Also do NOT add `BadRequestErrorAllowedFails` / `ContentPolicyViolationError-
+  # AllowedFails` leniency entries here: `_is_cooldown_required` returns True in
+  # the 4xx range only for 429/401/408/404, so a 400 never reaches the
+  # allowed-fails policy at all and such entries are inert.
   cooldown_time: 1
   allowed_fails: 1
   fallbacks:

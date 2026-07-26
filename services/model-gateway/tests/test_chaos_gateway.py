@@ -47,6 +47,7 @@ from .chaos_helpers import (
     ECHO_MODEL,
     FALLBACK_ECHO_CONTAINER,
     PRIMARY_ECHO_CONTAINER,
+    TOTAL_OUTAGE_CALL_TIMEOUT_SECONDS,
     ensure_primary_serving,
     start_container,
     stop_container,
@@ -92,8 +93,10 @@ def test_total_provider_outage_clean_refusal_audited(unique_ids):
                     messages=[{"role": "user", "content": "total-outage"}],
                     # measured in this session: with both containers stopped
                     # LiteLLM takes ~53s to burn through connect-timeouts ×
-                    # retries × fallback before returning the final 500.
-                    timeout=90.0,
+                    # retries × fallback before returning the final 500. The
+                    # ceiling is part of this test's 180s budget together with the
+                    # two ensure_primary_serving waits — see chaos_helpers.
+                    timeout=TOTAL_OUTAGE_CALL_TIMEOUT_SECONDS,
                 )
         finally:
             start_container(PRIMARY_ECHO_CONTAINER)

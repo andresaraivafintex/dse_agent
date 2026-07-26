@@ -56,6 +56,17 @@ class OrchestratorConfig:
     require_approval_risk_classes: tuple[str, ...] = ("high",)
     plan_round_cap: int = 3   # capped re_plan (rejection path)
     l2_retry_cap: int = 2     # L2 objections -> Coder, capped
+    # DELIBERATELY NO plan_approval_reminder_hours/plan_approval_timeout_hours
+    # HERE. They were added with `DSE_PLAN_APPROVAL_*` env vars and removed again:
+    # `apply_to_input` (below) is the only bridge from this class into a workflow
+    # and it has no production caller — `ingest_gateway.dispatcher._dispatch_row`
+    # starts the workflow with a bare work_item_id, so `_coerce_input` builds the
+    # input from its dataclass defaults. Every knob above is inert for the same
+    # reason, but those two govern a deadline that ESCALATES a work item, so an
+    # env var an operator would set to widen the window and that silently does
+    # nothing is the worst of the set. The deployed window is the literal on
+    # `WorkItemLifecycleInput` (see the field docs there); making these live means
+    # changing that one dispatcher call, which turns every knob here live at once.
 
     # Phase 3 — WSB-E4-T2 (ADR-26): iteration caps + evidence refresh debounce.
     # Configurable via env (no redeploy — the dispatcher fills the workflow

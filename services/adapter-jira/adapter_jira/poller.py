@@ -12,6 +12,12 @@ Overlap window (`grace_seconds`): each project's cursor is rewound by
 the previous window — that way no update that landed exactly on the boundary is
 lost (the `event_id` dedup absorbs the overlap at no cost).
 
+The sweep also carries the RETRY label (`config.get_retry_label`), which is the
+one action here that is not a reconciliation: it restarts a work item that ended
+terminally. Because it is a real side effect driven by a timer, its "already done
+this" evidence lives in Postgres and never in Jira — see `_reconcile_retry` and
+`ingest.ingest_retry_trigger`.
+
 Documented attribution limitation: the poller sees only the issue's current
 STATE, not the changelog, so it does NOT know WHO made a status transition. An
 approval reconstructed by the poller (dropped webhook) is attributed to the
@@ -30,9 +36,11 @@ from dse_identity import resolve_principal
 from ingest_gateway import pending_reply_work_items
 from ingest_gateway.db import get_connection
 
+from dse_audit import emit as audit_emit
+
 from . import events
 from .backend import JiraClientLike
-from .ingest import ingest_comment, ingest_status_approval, ingest_task_trigger
+from .ingest import ingest_comment, ingest_retry_trigger, ingest_status_approval, ingest_task_trigger
 
 logger = logging.getLogger("adapter_jira.poller")
 
@@ -74,6 +82,7 @@ class JiraPoller:
         trigger_label: str,
         approved_status: str,
         rejected_status: str,
+        retry_label: str | None = None,
         grace_seconds: int = 120,
         reconcile_comments: bool = True,
     ):
@@ -81,6 +90,9 @@ class JiraPoller:
         self._tenant_id = tenant_id
         self._projects = projects
         self._trigger_label = trigger_label
+        # None disables the retry path entirely — a board that never configured
+        # the label must not have the DSE reacting to a word it did not choose.
+        self._retry_label = retry_label
         self._approved_status = approved_status
         self._rejected_status = rejected_status
         self._grace = timedelta(seconds=grace_seconds)
@@ -124,26 +136,41 @@ class JiraPoller:
         reconciled += self._recover_pending_replies()
         return reconciled
 
+    def _reporter_identity(self, issue: dict) -> tuple[str, str, str | None]:
+        """`(account_id, resolved_principal, display_name)` of the issue reporter.
+
+        The reporter is MANDATORY for anything that creates a work item (BD-39):
+        admitting one with `requester=system:adapter-jira-poller` means the
+        ticket's own author is not authorized to answer its clarification, and the
+        task sits in `needs_clarification` forever.
+        """
+        reporter = issue.get("fields", {}).get("reporter") or {}
+        account_id = reporter.get("accountId")
+        if not account_id:
+            return _POLLER_PRINCIPAL, _POLLER_PRINCIPAL, reporter.get("displayName")
+        return (
+            account_id,
+            resolve_principal("jira", account_id, reporter.get("displayName")),
+            reporter.get("displayName"),
+        )
+
     def _reconcile_issue(self, issue: dict, *, now: datetime) -> int:
         count = 0
         key = events.ticket_key(issue)
 
         if events.has_trigger_label(issue, self._trigger_label):
-            reporter = (issue.get("fields", {}).get("reporter") or {})
-            account_id = reporter.get("accountId") or _POLLER_PRINCIPAL
-            principal = (
-                resolve_principal("jira", account_id, reporter.get("displayName"))
-                if reporter.get("accountId")
-                else _POLLER_PRINCIPAL
-            )
+            account_id, principal, display_name = self._reporter_identity(issue)
             ingest_task_trigger(
                 issue,
                 tenant_id=self._tenant_id,
                 actor_account_id=account_id,
                 resolved_principal=principal,
-                display_name=reporter.get("displayName"),
+                display_name=display_name,
             )
             count += 1
+
+        if self._retry_label and events.has_trigger_label(issue, self._retry_label):
+            count += self._reconcile_retry(issue)
 
         status = events.issue_status_name(issue)
         if status in (self._approved_status, self._rejected_status):
@@ -162,6 +189,84 @@ class JiraPoller:
         if self._reconcile_comments:
             count += self._ingest_comments(key)
         return count
+
+    def _reconcile_retry(self, issue: dict) -> int:
+        """Acts on the retry label, and NEVER acts twice.
+
+        The sweep runs every minute and the label does not go away by itself, so
+        the naive version of this restarts the task forever. Taking the label off
+        is NOT the guard — removing a Jira label needs the *Edit Issues*
+        permission, which the service account may not have, so the guard cannot
+        depend on it. The guard is entirely inside Postgres:
+        `ingest_retry_trigger` admits at most one retry per ticket for the
+        lifetime of the ticket (`ingest_events.event_id`, UNIQUE, committed with
+        the work item), and answers every other case exactly once.
+
+        So this method only mirrors that decision onto the ticket, and only on
+        the sweep that made it — `recorded` (or `retried`) is True exactly once
+        per decision, so a stuck label cannot produce a request-per-minute of
+        any kind: no admission, no audit row, not even an HTTP call.
+
+        Removal comes after the decision, not before: if it went first and the
+        admission then failed, the human's request would be gone from the ticket
+        with nothing to show for it, and nobody would know to ask again.
+        """
+        account_id, principal, display_name = self._reporter_identity(issue)
+        result = ingest_retry_trigger(
+            issue,
+            tenant_id=self._tenant_id,
+            actor_account_id=account_id,
+            resolved_principal=principal,
+            display_name=display_name,
+        )
+        path = result.get("path")
+        key = events.ticket_key(issue)
+
+        if path == "retried":
+            logger.info(
+                "retry admitted for %s: work_item=%s previous=%s",
+                key,
+                result.get("work_item_id"),
+                result.get("previous_work_item_id"),
+            )
+            self._consume_retry_label(key, path=path, work_item_id=result.get("work_item_id"))
+            return 1
+
+        # A paused channel is not a decision: the label stays, nothing is
+        # written, and the retry happens when the operator resumes the channel.
+        if path == "blocked_kill_switch":
+            return 0
+
+        if result.get("recorded"):
+            # The ledger now carries the answer (`jira_retry_declined`). Taking
+            # the label off is the human-visible half of it: the request has been
+            # answered and the DSE will not act on it, so it must not look
+            # pending. To ask again for something that has become retryable in
+            # the meantime, a human adds the label again.
+            logger.info("retry label on %s not acted on (%s); taking the label off", key, path)
+            self._consume_retry_label(key, path=path, work_item_id=result.get("work_item_id"))
+        return 0
+
+    def _consume_retry_label(self, key: str, *, path: str, work_item_id: str | None) -> None:
+        """Best-effort removal of a retry label the DSE has finished with.
+
+        Audited when it fails because the operator needs to know the ticket still
+        carries a label the DSE has already answered — and because the likely
+        cause is a missing *Edit Issues* permission, which no log line will
+        explain a week later. Bounded by construction: the callers reach this at
+        most once per decision, so this can never become a per-sweep row.
+        """
+        try:
+            self._client.remove_label(key, self._retry_label)
+        except Exception:  # noqa: BLE001 — the decision is already durable; this is the mirror
+            logger.exception("could not remove the retry label from %s", key)
+            audit_emit(
+                actor=_POLLER_PRINCIPAL,
+                action="jira_retry_label_removal_failed",
+                tenant_id=self._tenant_id,
+                work_item_id=work_item_id,
+                details={"ticket_key": key, "label": self._retry_label, "after": path},
+            )
 
     def _ingest_comments(self, key: str) -> int:
         """Feed every comment on the ticket through the idempotent ingest path.

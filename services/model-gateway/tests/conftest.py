@@ -28,6 +28,37 @@ os.environ.setdefault(
 ECHO_MODEL = "eco/echo-model"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _repair_containers_left_stopped_by_an_aborted_run():
+    """Restarts an echo container stopped by a pytest process that is no longer
+    running.
+
+    The chaos tests restore their containers in `finally`, which covers an
+    assertion failure but NOT the suite's own per-test ceiling: scripts/
+    test_matrix.py runs pytest with `--timeout=180 --timeout-method=thread`, and
+    that method dumps the stacks and calls `os._exit(1)` — no `finally`, no
+    `atexit`. One test blowing the ceiling while the primary echo is stopped used
+    to leave the gateway degraded for every later run on this machine. The stop is
+    recorded on disk (chaos_helpers), so the repair happens here, at the start of
+    the next session.
+
+    It only ever repairs after a process that is GONE: the record is a file named
+    after the pytest process that wrote it, and one belonging to a live pid is
+    skipped. Restarting a container that a still-running session deliberately
+    stopped would make that session's failover assertions a coin flip, which is
+    worse than leaving a container stopped. No docker command runs when no dead
+    session's record exists."""
+    from .chaos_helpers import restore_containers_from_aborted_run
+
+    restored = restore_containers_from_aborted_run()
+    if restored:
+        print(
+            "[chaos] restarted container(s) left stopped by an aborted run: "
+            + ", ".join(restored)
+        )
+    yield
+
+
 @pytest.fixture
 def unique_ids():
     """Unique IDs per test — the tests run against real, shared

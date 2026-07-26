@@ -35,7 +35,7 @@ def _make_work_item(tenant_id: str) -> str:
 
 def test_first_status_update_posts_a_single_message(tenant_id, monkeypatch):
     fake_client = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake_client)
 
     work_item_id = _make_work_item(tenant_id)
 
@@ -56,7 +56,7 @@ def test_first_status_update_posts_a_single_message(tenant_id, monkeypatch):
 
 def test_subsequent_updates_edit_in_place_never_post_new_message(tenant_id, monkeypatch):
     fake_client = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake_client)
 
     work_item_id = _make_work_item(tenant_id)
 
@@ -83,7 +83,7 @@ def test_status_comment_ref_persisted_across_process_restart_simulation(tenant_i
     PgCommentStateStore) for the SAME work_item_id; it must keep editing the
     comment_ref already persisted in Postgres, not post again."""
     shared_client = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: shared_client)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: shared_client)
 
     work_item_id = _make_work_item(tenant_id)
 
@@ -119,7 +119,7 @@ def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
     that parse_slack_approval (C1) reads. This closes the loop: without posting
     the buttons, the human had no way to approve/reject from Slack."""
     fake_client = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake_client)
     work_item_id = _make_work_item(tenant_id)
 
     resp = client.post(
@@ -144,7 +144,7 @@ def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
 
 def test_non_approval_status_stays_plain_text(tenant_id, monkeypatch):
     fake_client = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake_client)
     work_item_id = _make_work_item(tenant_id)
     client.post(
         "/internal/status-comment",

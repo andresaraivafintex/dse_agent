@@ -31,6 +31,7 @@ a human re-approves. That is the correct failure mode.
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 # Blocked on a human REPLY — safe to recover, because what comes back is content
@@ -39,6 +40,67 @@ RECOVERABLE_STATUSES = ("needs_clarification", "awaiting_repo_selection")
 
 # Blocked on a human DECISION — never recovered. See the module docstring.
 NON_RECOVERABLE_STATUSES = ("awaiting_plan_approval",)
+
+# Where the last sweep stopped, per (tenant_id, source): the sort key of the
+# final row handed out, so the next call resumes AFTER it instead of restarting
+# at the oldest item. See `pending_reply_work_items` for why this exists.
+_SWEEP_CURSOR: dict[tuple[str, str], tuple[Any, str]] = {}
+
+# The sweep endpoint is an HTTP handler, so two timers (or a human curl) can
+# overlap.
+#
+# WHAT THIS LOCK DOES AND DOES NOT GIVE. It is held only around dict access,
+# never across the query — holding it over a database round-trip in an HTTP
+# handler would let one slow connection block every other tenant's sweep. So it
+# does NOT make a sweep exclusive: two overlapping calls can read the same
+# position and serve the same page. What it does give is that a call may only
+# replace THE POSITION IT READ (`_store_sweep_cursor`): a slow call whose
+# position has since been moved on by a newer sweep, or dropped by a tail wrap,
+# loses its write. Without that, the slow call would put the rotation back where
+# it began and pages already passed would be re-served indefinitely under load.
+#
+# Duplicate pages are harmless by design: re-reading a thread is idempotent and
+# re-ingestion dedupes on `event_id` (see `recorded_work_item_id`). Skipping is
+# the failure that matters, and losing a write can only make a page be re-served,
+# never skipped — a page is always the rows immediately after the position it was
+# read with, and the position only moves to the end of a page that was handed out.
+_SWEEP_CURSOR_LOCK = threading.Lock()
+
+# Sentinels for the row-comparison keyset. `-infinity` starts a rotation (every
+# row sorts after it); `infinity` stands for a NULL `last_transition_at`, which
+# sorts LAST under `NULLS LAST` and must compare that way in the predicate too.
+# Both are passed to Postgres as `%s::timestamptz`, where they are real values.
+#
+# `_SCAN_START` is also what an ABSENT entry means, so the compare below can
+# treat "no cursor" and "at the start" as one value.
+_SCAN_START = ("-infinity", "")
+_NULL_TRANSITION_KEY = "infinity"
+
+
+def _store_sweep_cursor(
+    key: tuple[str, str], *, expected: tuple[Any, str], new_cursor: tuple[Any, str] | None
+) -> None:
+    """Move the rotation from `expected` to `new_cursor`, or drop it if None.
+
+    Nothing happens unless the stored position is still the one the caller read.
+    An overlapping sweep that started earlier and finished later therefore cannot
+    rewind the rotation, and — the hole an earlier version of this file had — it
+    cannot re-seat a position that a tail wrap has since dropped either, because
+    the wrap goes through this same check instead of popping the key on its own.
+    Losing the write is correct: the rows this call served were served, and the
+    rotation is at or beyond them.
+
+    Equality, not an ordering, on purpose: a stored key mixes a `datetime` with
+    the string sentinels above, `<` between those raises TypeError, and there is
+    nothing this function has to decide that ordering them would answer.
+    """
+    with _SWEEP_CURSOR_LOCK:
+        if _SWEEP_CURSOR.get(key, _SCAN_START) != expected:
+            return
+        if new_cursor is None:
+            _SWEEP_CURSOR.pop(key, None)
+        else:
+            _SWEEP_CURSOR[key] = new_cursor
 
 
 def recorded_work_item_id(conn, event_id: str) -> str | None:
@@ -69,6 +131,28 @@ def recorded_work_item_id(conn, event_id: str) -> str | None:
         return row[0] if row else None
 
 
+def reset_reply_sweep_cursor(*, tenant_id: str | None = None, source: str | None = None) -> None:
+    """Forget where the sweep stopped, so the next call starts at the oldest item.
+
+    Exists for tests and for an operator who wants a deterministic pass right
+    now (the rotation is an optimisation, never a correctness requirement).
+    Without arguments it clears every (tenant, source) rotation.
+
+    A sweep that is ALREADY running cannot put back the position this call just
+    cleared: a sweep may only replace the position it read, and this is a write
+    (see `_store_sweep_cursor`). What it can still do is store the end of the page
+    it is serving if the rotation happened to be at its start already — which is
+    where a fresh rotation would leave it anyway.
+    """
+    with _SWEEP_CURSOR_LOCK:
+        if tenant_id is None and source is None:
+            _SWEEP_CURSOR.clear()
+        elif tenant_id is not None and source is not None:
+            _SWEEP_CURSOR.pop((tenant_id, source), None)
+        else:
+            raise ValueError("pass both tenant_id and source, or neither")
+
+
 def pending_reply_work_items(
     conn, *, tenant_id: str, source: str, limit: int = 50
 ) -> list[dict[str, Any]]:
@@ -82,16 +166,78 @@ def pending_reply_work_items(
     wrong upstream and thousands of items pile up in a blocked state, a
     reconciler should crawl rather than stampede the platform's API and get the
     whole installation rate-limited.
+
+    STARVATION, AND THE ROTATION THAT FIXES IT
+    ------------------------------------------
+    `ORDER BY last_transition_at ASC ... LIMIT 50` gives the right priority
+    (oldest silence first) and, on its own, a permanent blind spot: the recovery
+    action does not touch `last_transition_at` — deliberately, since re-reading a
+    thread is not a state transition and forging one would corrupt both the
+    ordering and every "how long has this been stuck" read in the console. So
+    the ranking never changes, every cycle selects the SAME oldest 50, and item
+    51 is never fetched from the platform API. Not late: never. Recovery is
+    exactly the feature whose failure nobody notices.
+
+    The fix is to page through the ordered list instead of re-reading its head: a
+    keyset cursor holds the sort key of the last row handed out, the next call
+    resumes after it, and reaching the tail (a short page) drops the cursor so
+    the following call starts over at the oldest. Every pending item is therefore
+    visited within ceil(total / limit) cycles, `limit` still caps the API calls
+    per cycle, no schema changes, and nothing is written anywhere.
+
+    The cursor is process-local and advisory on purpose. Persisting it would mean
+    a new table (a second source of truth to keep consistent with work_items) for
+    something whose worst case is already harmless: a restart, or a second
+    replica with its own cursor, just re-visits items sooner than needed, and
+    re-ingestion dedupes on `event_id` — see `recorded_work_item_id`. Under- and
+    over-visiting are not symmetric failures here; only under-visiting loses a
+    human's answer.
     """
+    key = (tenant_id, source)
+    with _SWEEP_CURSOR_LOCK:
+        position = _SWEEP_CURSOR.get(key, _SCAN_START)
+    cursor_transition_at, cursor_id = position
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, source_ref, status FROM work_items "
+            "SELECT id, source_ref, status, last_transition_at FROM work_items "
             "WHERE tenant_id = %s AND source = %s AND status = ANY(%s) "
-            "ORDER BY last_transition_at ASC NULLS LAST "
+            "  AND (COALESCE(last_transition_at, 'infinity'::timestamptz), id) "
+            "      > (%s::timestamptz, %s) "
+            # COALESCE(..., 'infinity') in the ORDER BY is the same thing
+            # `NULLS LAST` used to say, written so the keyset predicate above can
+            # be a single row comparison over the identical expression.
+            "ORDER BY COALESCE(last_transition_at, 'infinity'::timestamptz) ASC, id ASC "
             "LIMIT %s",
-            (tenant_id, source, list(RECOVERABLE_STATUSES), limit),
+            (
+                tenant_id,
+                source,
+                list(RECOVERABLE_STATUSES),
+                cursor_transition_at,
+                cursor_id,
+                limit,
+            ),
         )
         rows = cur.fetchall()
+
+    if len(rows) < limit:
+        # Tail of the rotation (including an empty page, which is also what a
+        # cursor left pointing past deleted or answered items looks like): the
+        # next cycle must start at the oldest item again, never dead-end.
+        #
+        # It goes through the same check as an advance, which is what stops a
+        # slower overlapping call from undoing the wrap: popping the key here
+        # unconditionally left the map empty, and that call's late advance then
+        # found no position to compare against and re-seated its stale one.
+        _store_sweep_cursor(key, expected=position, new_cursor=None)
+    else:
+        last_id, _, _, last_transition_at = rows[-1]
+        _store_sweep_cursor(
+            key,
+            expected=position,
+            new_cursor=(last_transition_at or _NULL_TRANSITION_KEY, last_id),
+        )
+
     return [
         {
             "work_item_id": r[0],

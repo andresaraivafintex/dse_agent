@@ -21,8 +21,11 @@ from dse_contracts import EventKind
 from fastapi.testclient import TestClient
 
 import adapter_github.app as app_module
-from adapter_github.app import app
+from adapter_github.app import RECONCILE_BUDGET_S, app
 from adapter_github.backend import FakeGithubClient
+from adapter_github.ratelimit import GithubRateLimited
+
+from .helpers import Clock
 
 client = TestClient(app)
 
@@ -89,7 +92,9 @@ def _wire(monkeypatch, *, pending: list[dict], fake: FakeGithubClient,
 
     monkeypatch.setattr(app_module, "get_connection", lambda: _FakeConn())
     monkeypatch.setattr(app_module, "pending_reply_work_items", _pending_reply_work_items)
-    monkeypatch.setattr(app_module, "build_real_github_client", lambda: fake)
+    # `deadline` is required in production (see `build_real_github_client`); the
+    # fake never throttles, so it only has to accept it.
+    monkeypatch.setattr(app_module, "build_real_github_client", lambda *, deadline: fake)
     monkeypatch.setattr(app_module, "resolve_principal", lambda platform, uid, name=None: f"usr_{uid}")
     monkeypatch.setattr(app_module, "_handle_task_creating_event", issue_handler or _IngestSpy())
     monkeypatch.setattr(app_module, "_handle_pr_comment_event", pr_handler or _IngestSpy())
@@ -276,6 +281,56 @@ def test_one_unreadable_thread_does_not_cost_the_others_their_recovery(monkeypat
     assert [e.content_snapshot for e in spy.events] == ["the answer"]
 
 
+def test_a_throttled_installation_stops_the_sweep_instead_of_walking_into_it_again(monkeypatch):
+    """BLOCKER: the sweep shares ONE wait budget, so `GithubRateLimited` means the
+    installation is throttling — the very quota every remaining thread is about to
+    spend. Continuing was the bug: the per-item `except Exception` swallowed the
+    throttle and marched on, so each thread burned its own budget (and up to five
+    pages of it) inside a request the CronJob abandons after 120s."""
+    fake = FakeGithubClient()
+    for number in (101, 102, 103):
+        fake.seed_issue(REPO, number, comments=[_comment(9500 + number, "the answer", "alice")])
+    _wire(monkeypatch, pending=[_pending(f"wi_{n}", n) for n in (101, 102, 103)], fake=fake)
+
+    def _throttled(repo: str, number: int) -> dict:
+        fake.get_issue_calls.append({"repo": repo, "number": number})
+        raise GithubRateLimited("github still rate limiting get_issue")
+
+    monkeypatch.setattr(fake, "get_issue", _throttled)
+
+    data = client.post("/internal/reconcile").json()
+
+    assert data == {"ok": True, "checked": 1, "recovered": 0}
+    assert len(fake.get_issue_calls) == 1  # threads 102 and 103 were never read
+
+
+def test_no_new_thread_is_started_once_the_sweep_is_out_of_budget(monkeypatch):
+    """The other half of the bound. Once the deadline passes the client will not
+    sleep any more — but it would still spend `get_issue` plus up to five comment
+    pages per remaining thread, and that is what has to fit inside the CronJob's
+    120s. Here reading the first thread eats the whole budget, so the second is
+    never started."""
+    clock = Clock()
+    monkeypatch.setattr(app_module, "time", clock)
+    fake = FakeGithubClient()
+    for number in (111, 112):
+        fake.seed_issue(REPO, number, comments=[_comment(9600 + number, "the answer", "alice")])
+    _wire(monkeypatch, pending=[_pending(f"wi_{n}", n) for n in (111, 112)], fake=fake)
+
+    original = fake.get_issue
+
+    def _slow(repo: str, number: int) -> dict:
+        clock.t += RECONCILE_BUDGET_S + 1.0  # this one thread outlasted the budget
+        return original(repo, number)
+
+    monkeypatch.setattr(fake, "get_issue", _slow)
+
+    data = client.post("/internal/reconcile").json()
+
+    assert data == {"ok": True, "checked": 1, "recovered": 1}
+    assert len(fake.get_issue_calls) == 1
+
+
 def test_malformed_source_ref_is_skipped_without_5xx(monkeypatch):
     fake = FakeGithubClient()
     _wire(monkeypatch, pending=[{"work_item_id": "wi_bad", "source_ref": {}, "status": "needs_clarification"}],
@@ -293,7 +348,7 @@ def test_nothing_pending_does_not_touch_github(monkeypatch):
     exchange on every tick of the timer."""
     built: list[int] = []
 
-    def _build():
+    def _build(*, deadline):
         built.append(1)
         return FakeGithubClient()
 

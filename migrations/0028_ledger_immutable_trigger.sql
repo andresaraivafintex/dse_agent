@@ -27,10 +27,10 @@ BEGIN
         RETURN COALESCE(NEW, OLD);  -- break-glass: DR/controlled retention/test
     END IF;
     RAISE EXCEPTION
-        'ledger % é append-only (plano 08 §F F3): % negado para %',
+        'ledger % is append-only (plan 08 §F F3): % denied for %',
         TG_TABLE_NAME, TG_OP, current_user
         USING ERRCODE = 'raise_exception',
-              HINT = 'ledgers de compliance não sofrem UPDATE/DELETE pela role de app';
+              HINT = 'compliance ledgers are never UPDATEd or DELETEd by the application role';
 END;
 $$;
 

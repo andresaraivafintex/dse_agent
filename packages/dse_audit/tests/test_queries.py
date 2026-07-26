@@ -15,7 +15,7 @@ from dse_audit import emit, export_audit_range, export_audit_range_csv, reconstr
 # technical proposal §9.3 (Fase 1 core loop).
 LIFECYCLE: list[tuple[str, str, dict[str, object]]] = [
     ("system:ingest-gateway", "admitted", {"channel": "#eng-payments"}),
-    ("usr_requester", "clarified", {"answer": "use tabela orders"}),
+    ("usr_requester", "clarified", {"answer": "use the orders table"}),
     ("system:orchestrator", "plan", {"risk_class": "low", "files": ["svc/orders.py"]}),
     ("system:orchestrator", "implementing", {"sandbox_id": "sbx_1"}),
     ("system:validation", "l1_passed", {"lint": "ok", "tests": "ok"}),

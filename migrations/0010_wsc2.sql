@@ -77,30 +77,30 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dse_app;
 -- ---------------------------------------------------------------------------
 INSERT INTO skill_registry (tenant_id, skill_key, title, body, category, applies_to, status, created_by) VALUES
   ('dev', 'pci-dss-logging',
-   'Nunca logar PAN/CVV em claro',
-   'Ao mexer em código que toca dados de cartão: nunca logar PAN completo (mascare para 6+4), '
-   'nunca logar CVV/CVC em nenhuma circunstância, nunca persistir CVV. Use o tokenizador do '
-   'módulo payments. Referência: PCI-DSS 3.4/3.2.',
+   'Never log a PAN or CVV in the clear',
+   'When touching code that handles card data: never log a full PAN (mask it to first 6 + last 4), '
+   'never log a CVV/CVC under any circumstance, and never persist a CVV. Use the tokenizer in the '
+   'payments module. Reference: PCI-DSS 3.4/3.2.',
    'security', '["payments", "default"]'::jsonb, 'approved', 'principal:human:curator-ana'),
   ('dev', 'migrations-reversible',
-   'Migrações Postgres precisam ser reversíveis e aditivas',
-   'Toda migração deve ser aditiva (nunca DROP COLUMN/TABLE numa release online); use '
-   'expand/contract em duas releases. Adicione índices com CONCURRENTLY fora de transação. '
-   'Nunca faça backfill síncrono numa migração — use job em batch.',
+   'Postgres migrations must be additive and reversible',
+   'Every migration must be additive (never DROP COLUMN/TABLE in an online release); use '
+   'expand/contract across two releases. Create indexes with CONCURRENTLY, outside a transaction. '
+   'Never backfill synchronously in a migration — use a batch job.',
    'database', '["database", "default"]'::jsonb, 'approved', 'principal:human:curator-bruno'),
   ('dev', 'idempotent-webhooks',
-   'Handlers de webhook devem ser idempotentes',
-   'Deduplique por event_id persistido; use SELECT ... FOR UPDATE SKIP LOCKED para o dispatcher; '
-   'nunca confie na ordem de entrega. Retorne 2xx só após persistir o outbox.',
+   'Webhook handlers must be idempotent',
+   'Deduplicate on a persisted event_id; use SELECT ... FOR UPDATE SKIP LOCKED in the dispatcher; '
+   'never rely on delivery order. Return 2xx only after the outbox row is persisted.',
    'reliability', '["ingest", "default"]'::jsonb, 'approved', 'principal:human:curator-ana'),
   ('dev', 'draft-not-ready',
-   'Skill em rascunho (NÃO deve ser lida pelo Planner)',
-   'Esta skill está em draft e serve ao teste de que o Planner só lê status=approved.',
+   'Draft skill (the Planner must NOT read this)',
+   'This skill is a draft. It exists so the suite can prove the Planner reads only status=approved.',
    'general', '["default"]'::jsonb, 'draft', 'principal:human:curator-bruno'),
   ('acme-bank', 'acme-naming',
-   'Convenção de nomes do acme-bank',
-   'Módulos internos do acme-bank usam prefixo acme_; nunca exponha IDs internos em respostas '
-   'de API públicas. Esta skill pertence ao tenant acme-bank e NÃO deve vazar para o tenant dev.',
+   'acme-bank naming convention',
+   'Internal acme-bank modules use the acme_ prefix; never expose internal IDs in public API '
+   'responses. This skill belongs to tenant acme-bank and must NOT leak into tenant dev.',
    'style', '["default"]'::jsonb, 'approved', 'principal:human:curator-acme')
 ON CONFLICT (tenant_id, skill_key) DO NOTHING;
 
