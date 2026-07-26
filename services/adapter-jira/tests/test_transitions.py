@@ -1,5 +1,5 @@
-"""WSA-E5-T3 — transições serializadas por ticket + dedup de enfileiramento
-(contra Postgres real; Jira via FakeJiraClient)."""
+"""WSA-E5-T3 — per-ticket serialized transitions + enqueue dedup (against a
+real Postgres; Jira via FakeJiraClient)."""
 from __future__ import annotations
 
 import psycopg2
@@ -52,7 +52,7 @@ def test_transitions_applied_in_order_per_ticket():
     processed = TransitionWorker(client).drain_once()
     assert processed == 2
 
-    # aplicadas na ordem de enfileiramento (id crescente).
+    # applied in enqueue order (increasing id).
     assert [c["to_status"] for c in client.transition_calls] == ["In Progress", "In Review"]
     assert client.status_by_ticket["DSE-100"] == "In Review"
 
@@ -67,13 +67,13 @@ def test_transition_to_unavailable_status_is_retried_not_lost():
     _enqueue("DSE-101", "Nonexistent Status", "dk-x")
     client = FakeJiraClient(transitions_by_ticket={"DSE-101": [{"id": "1", "name": "X", "to_status": "Done"}]})
     processed = TransitionWorker(client).drain_once()
-    assert processed == 0  # nenhuma aplicada
+    assert processed == 0  # none applied
 
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
         cur.execute("SELECT processed, attempts, last_error FROM jira_transition_queue WHERE dedup_key='dk-x'")
         processed_flag, attempts, last_error = cur.fetchone()
     conn.close()
-    assert processed_flag is False  # não perdida — fica para retry
+    assert processed_flag is False  # not lost — kept for retry
     assert attempts == 1
-    assert last_error  # registrado (P8/P6: falha visível, nunca silenciosa)
+    assert last_error  # recorded (P8/P6: failure is visible, never silent)

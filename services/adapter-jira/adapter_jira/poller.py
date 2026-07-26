@@ -1,31 +1,33 @@
-"""WSA-E5-T2 — poller de fallback (OBRIGATÓRIO: o webhook do Jira é
-best-effort e pode ser descartado silenciosamente).
+"""WSA-E5-T2 — fallback poller (MANDATORY: the Jira webhook is best-effort and
+can be dropped silently).
 
-O poller varre periodicamente os issues recentemente atualizados de cada
-projeto configurado e RECONCILIA cada um pela MESMA via idempotente do
-webhook (`adapter_jira.ingest`) — como os `message_id`/`event_id` são
-derivados do ESTADO do issue (ver `events.py`), webhook e poller convergem no
-mesmo `event_id` e a segunda via a chegar deduplica. Nunca duplicam.
+The poller periodically sweeps the recently updated issues of each configured
+project and RECONCILES each one through the SAME idempotent path as the webhook
+(`adapter_jira.ingest`) — since the `message_id`/`event_id` are derived from the
+issue STATE (see `events.py`), webhook and poller converge on the same
+`event_id` and whichever path arrives second dedupes. They never duplicate.
 
-Janela de sobreposição (`grace_seconds`): o cursor de cada projeto recua
-`grace_seconds` a cada rodada, de modo que a próxima varredura re-inclui a
-borda da janela anterior — assim nenhuma atualização que caiu exatamente no
-limite é perdida (o dedup por `event_id` absorve a sobreposição sem custo).
+Overlap window (`grace_seconds`): each project's cursor is rewound by
+`grace_seconds` on every round, so that the next sweep re-includes the edge of
+the previous window — that way no update that landed exactly on the boundary is
+lost (the `event_id` dedup absorbs the overlap at no cost).
 
-Limitação documentada de atribuição: o poller vê apenas o ESTADO atual do
-issue, não o changelog, então NÃO sabe QUEM fez uma transição de status. Uma
-aprovação reconstruída pelo poller (webhook descartado) é atribuída ao
-principal de sistema `system:adapter-jira-poller`; quando o webhook NÃO foi
-descartado (caminho normal), ele chega com o ator real e, por ser idempotente,
-o registro do ator real prevalece se chegar primeiro. Para tarefas, a
-atribuição é estável (o reporter do issue), sem essa limitação.
+Documented attribution limitation: the poller sees only the issue's current
+STATE, not the changelog, so it does NOT know WHO made a status transition. An
+approval reconstructed by the poller (dropped webhook) is attributed to the
+system principal `system:adapter-jira-poller`; when the webhook was NOT dropped
+(the normal path), it arrives with the real actor and, being idempotent, the
+real actor's record prevails if it arrives first. For tasks, attribution is
+stable (the issue reporter), without this limitation.
 """
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
 from dse_identity import resolve_principal
+from ingest_gateway import pending_reply_work_items
 from ingest_gateway.db import get_connection
 
 from . import events
@@ -35,6 +37,31 @@ from .ingest import ingest_comment, ingest_status_approval, ingest_task_trigger
 logger = logging.getLogger("adapter_jira.poller")
 
 _POLLER_PRINCIPAL = "system:adapter-jira-poller"
+
+
+def _relative_bound(since: datetime | None, now: datetime) -> str | None:
+    """JQL time bound as RELATIVE minutes (`-90m`) instead of a timestamp.
+
+    JQL interprets an absolute literal like `"2026-07-25 19:40"` in the Jira
+    ACCOUNT's timezone, never in UTC. The cursor is UTC, so on an account set to
+    America/New_York the poller was asking for issues updated four hours in the
+    FUTURE and matched nothing.
+
+    That break was invisible for the worst possible reason: the very first sweep
+    runs with no cursor and therefore no date filter at all, so it succeeded and
+    ingested a ticket. Every sweep after it silently returned zero, and the
+    poller looked healthy the whole time — cursor advancing, no errors, no
+    issues.
+
+    A relative bound carries no timezone, so there is nothing left to get wrong.
+    Returns None when there is no cursor yet (first sweep sees everything).
+    """
+    if since is None:
+        return None
+    # Round UP so the window never ends before the cursor: losing an update is
+    # unrecoverable, re-reading one is free (event_id dedup absorbs it).
+    minutes = max(1, math.ceil((now - since).total_seconds() / 60))
+    return f"-{minutes}m"
 
 
 class JiraPoller:
@@ -59,29 +86,42 @@ class JiraPoller:
         self._grace = timedelta(seconds=grace_seconds)
         self._reconcile_comments = reconcile_comments
 
+    def _self_account_id(self) -> str | None:
+        """accountId the DSE posts as, when the client can tell us.
+
+        Optional on the client protocol so a fixture without it still works —
+        the filter then goes inert rather than raising.
+        """
+        getter = getattr(self._client, "self_account_id", None)
+        return getter() if callable(getter) else None
+
     def poll_once(self, *, now: datetime | None = None) -> int:
         now = now or datetime.now(timezone.utc)
         reconciled = 0
         for project in self._projects:
             since = self._get_cursor(project)
-            since_iso = since.strftime("%Y-%m-%d %H:%M") if since else None
-            issues = self._client.search_updated(project, since_iso)
+            issues = self._client.search_updated(project, _relative_bound(since, now))
             for issue in issues:
-                # Resiliência por issue (achado do disparo real BD-39,
-                # 2026-07-23): search_updated devolve o lote em ORDER BY updated
-                # ASC, então um issue recém-marcado ordena por ÚLTIMO. Se um
-                # issue anterior estourar no reconcile (comentário malformado,
-                # ADF inesperado, etc.), a falha NÃO pode abortar o lote e deixar
-                # o recém-marcado para trás — isola cada issue e segue.
+                # Per-issue resilience (finding from the real run BD-39,
+                # 2026-07-23): search_updated returns the batch in ORDER BY
+                # updated ASC, so a freshly labeled issue sorts LAST. If an
+                # earlier issue blows up during reconcile (malformed comment,
+                # unexpected ADF, etc.), the failure must NOT abort the batch and
+                # leave the freshly labeled one behind — isolate each issue and
+                # carry on.
                 try:
                     reconciled += self._reconcile_issue(issue, now=now)
-                except Exception:  # noqa: BLE001 — um issue ruim não trava o projeto
+                except Exception:  # noqa: BLE001 — one bad issue must not stall the project
                     logger.exception(
-                        "reconcile falhou para %s; segue o lote", issue.get("key", "?")
+                        "reconcile failed for %s; continuing the batch", issue.get("key", "?")
                     )
-            # Cursor recua a janela de graça para não "perder" atualizações
-            # que ainda estavam dentro da janela nesta rodada.
+            # The cursor rewinds by the grace window so as not to "lose" updates
+            # that were still inside the window in this round.
             self._set_cursor(project, now - self._grace)
+        # Independent of the window and of the cursor: whatever is blocked
+        # waiting on a human gets its ticket re-read every cycle. This is the
+        # only path that can rescue an answer the window has already passed.
+        reconciled += self._recover_pending_replies()
         return reconciled
 
     def _reconcile_issue(self, issue: dict, *, now: datetime) -> int:
@@ -120,27 +160,78 @@ class JiraPoller:
             count += 1
 
         if self._reconcile_comments:
-            for c in self._client.get_comments(key):
-                author = c.get("author") or {}
-                account_id = author.get("accountId") or _POLLER_PRINCIPAL
-                principal = (
-                    resolve_principal("jira", account_id, author.get("displayName"))
-                    if author.get("accountId")
-                    else _POLLER_PRINCIPAL
-                )
-                ingest_comment(
-                    tenant_id=self._tenant_id,
-                    key=key,
-                    comment_id=str(c["id"]),
-                    body=c.get("body", ""),
-                    actor_account_id=account_id,
-                    resolved_principal=principal,
-                    display_name=author.get("displayName"),
-                )
-                count += 1
+            count += self._ingest_comments(key)
         return count
 
-    # --- cursor persistido (jira_poll_state) ---
+    def _ingest_comments(self, key: str) -> int:
+        """Feed every comment on the ticket through the idempotent ingest path.
+
+        Re-reading a comment already seen is free — it dedupes on `event_id` —
+        which is what lets this be called both from the windowed sweep and from
+        the pending-reply recovery below.
+        """
+        count = 0
+        for c in self._client.get_comments(key):
+            author = c.get("author") or {}
+            account_id = author.get("accountId") or _POLLER_PRINCIPAL
+            principal = (
+                resolve_principal("jira", account_id, author.get("displayName"))
+                if author.get("accountId")
+                else _POLLER_PRINCIPAL
+            )
+            ingest_comment(
+                tenant_id=self._tenant_id,
+                key=key,
+                comment_id=str(c["id"]),
+                body=c.get("body", ""),
+                actor_account_id=account_id,
+                resolved_principal=principal,
+                display_name=author.get("displayName"),
+                self_account_id=self._self_account_id(),
+            )
+            count += 1
+        return count
+
+    def _recover_pending_replies(self) -> int:
+        """Re-read the tickets of work items that are BLOCKED waiting on a human.
+
+        The windowed sweep only ever sees issues updated in the last few
+        minutes, so an answer that lands while the poller is down — or that is
+        simply read late — falls out of the window and is never picked up again.
+        The task then waits forever on a reply the platform already shows,
+        silently, and only a hand-written database update unblocks it. That
+        happened twice on BD-40 and BD-41 before this existed.
+
+        These tickets are re-read regardless of the window. The set is tiny by
+        construction (a task only sits here between question and answer), and
+        `pending_reply_work_items` excludes `awaiting_plan_approval` — an
+        approval is a decision, never recovered from re-read text.
+        """
+        try:
+            conn = get_connection()
+        except Exception:  # noqa: BLE001 — recovery must never break the sweep
+            logger.exception("could not open a connection to recover pending replies")
+            return 0
+        try:
+            pending = pending_reply_work_items(conn, tenant_id=self._tenant_id, source="jira")
+        except Exception:  # noqa: BLE001
+            logger.exception("could not list work items awaiting a reply")
+            return 0
+        finally:
+            conn.close()
+
+        count = 0
+        for row in pending:
+            key = (row.get("source_ref") or {}).get("ticket_key")
+            if not key:
+                continue
+            try:
+                count += self._ingest_comments(key)
+            except Exception:  # noqa: BLE001 — one bad ticket must not stall the rest
+                logger.exception("could not recover replies for %s; continuing", key)
+        return count
+
+    # --- persisted cursor (jira_poll_state) ---
     def _get_cursor(self, project: str) -> datetime | None:
         conn = get_connection()
         try:

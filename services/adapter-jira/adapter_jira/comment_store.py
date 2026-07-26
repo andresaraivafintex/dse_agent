@@ -1,7 +1,7 @@
-"""`CommentStateStore` (dse_contracts.mutable_comment) persistido em Postgres
-(`comment_state`, migrations/0002_wsa.sql, surface='jira') — mesma tabela
-compartilhada com adapter-slack/adapter-github (chave é
-`(work_item_id, surface)`, então não colide)."""
+"""`CommentStateStore` (dse_contracts.mutable_comment) persisted in Postgres
+(`comment_state`, migrations/0002_wsa.sql, surface='jira') — the same table
+shared with adapter-slack/adapter-github (the key is
+`(work_item_id, surface)`, so it does not collide)."""
 from __future__ import annotations
 
 from ingest_gateway.db import get_connection

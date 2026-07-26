@@ -1,30 +1,34 @@
-"""WSA-E5-T3 — cliente Jira (transporte real via `requests` + fixture
-in-memory `FakeJiraClient`) e `JiraCommentBackend` (implementa
-`dse_contracts.mutable_comment.CommentBackend`, terceiro backend da mesma
-`MutableCommentWriter` já usada por Slack e GitHub).
+"""WSA-E5-T3 — Jira client (real transport via `requests` + in-memory
+`FakeJiraClient` fixture) and `JiraCommentBackend` (implements
+`dse_contracts.mutable_comment.CommentBackend`, the third backend of the same
+`MutableCommentWriter` already used by Slack and GitHub).
 
-Autenticação: Basic auth com email da service account + API token escopado
-(project-level), lidos do Vault (`adapter_jira.config`). Sem site Jira real
-nesta sessão, `FakeJiraClient` substitui o transporte nos testes — a lógica de
-`JiraCommentBackend`/serialização de transição/poller é 100% real.
+Authentication: Basic auth with the service account email + a scoped
+(project-level) API token, read from Vault (`adapter_jira.config`). With no
+real Jira site in this session, `FakeJiraClient` replaces the transport in the
+tests — the `JiraCommentBackend`/transition-serialization/poller logic is 100%
+real.
 
-REST API v3 (atual do Jira Cloud). Corpo de comentário em ADF (Atlassian
-Document Format) — `_adf()` embrulha o texto simples no doc mínimo aceito.
+REST API v3 (the current one for Jira Cloud). Comment body in ADF (Atlassian
+Document Format) — `_adf()` wraps plain text in the minimal accepted doc.
 """
 from __future__ import annotations
 
 import base64
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import requests
 
+logger = logging.getLogger("adapter_jira.backend")
+
 
 def _adf(text: str) -> dict[str, Any]:
-    """Doc ADF mínimo (um parágrafo) — formato exigido pelo endpoint de
-    comentário da API v3. O `FakeJiraClient` ignora o formato e guarda o texto
-    como veio."""
+    """Minimal ADF doc (a single paragraph) — the format required by the v3 API
+    comment endpoint. `FakeJiraClient` ignores the format and stores the text
+    exactly as it came in."""
     return {
         "type": "doc",
         "version": 1,
@@ -42,8 +46,8 @@ class JiraClientLike(Protocol):
 
 
 class JiraCommentBackend:
-    """`CommentBackend` para a `MutableCommentWriter` (surface='jira').
-    `surface_ref` = `{"ticket_key": "DSE-123"}`; `comment_ref` opaco =
+    """`CommentBackend` for the `MutableCommentWriter` (surface='jira').
+    `surface_ref` = `{"ticket_key": "DSE-123"}`; opaque `comment_ref` =
     JSON `{"ticket_key", "comment_id"}`."""
 
     def __init__(self, client: JiraClientLike):
@@ -60,12 +64,31 @@ class JiraCommentBackend:
 
 
 class RealJiraClient:
-    """Transporte real contra a REST API v3 do Jira Cloud."""
+    """Real transport against the Jira Cloud REST API v3."""
 
     def __init__(self, base_url: str, email: str, api_token: str, *, session: requests.Session | None = None):
         self._base = base_url.rstrip("/")
         self._auth = base64.b64encode(f"{email}:{api_token}".encode()).decode()
         self._http = session or requests.Session()
+        self._account_id: str | None = None
+
+    def self_account_id(self) -> str | None:
+        """accountId of the account the DSE posts as, cached after the first call.
+
+        Needed to recognise the DSE's OWN comments: Jira attributes them to the
+        token owner, so without this the poller reads the bot's question back as
+        the human's answer (see `ingest.ingest_comment`). Best-effort — if the
+        lookup fails, returning None only means the filter is inert, never that
+        the flow breaks.
+        """
+        if self._account_id is None:
+            try:
+                resp = self._http.get(f"{self._base}/rest/api/3/myself", headers=self._headers(), timeout=10)
+                resp.raise_for_status()
+                self._account_id = resp.json().get("accountId")
+            except Exception:  # noqa: BLE001 — identity lookup must never break ingestion
+                logger.warning("could not resolve the DSE's own Jira accountId", exc_info=True)
+        return self._account_id
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -117,17 +140,21 @@ class RealJiraClient:
     def search_updated(self, project_key: str, since_iso: str | None) -> list[dict[str, Any]]:
         jql = f'project = "{project_key}"'
         if since_iso:
-            # Jira JQL usa 'updated >= "yyyy-MM-dd HH:mm"' — o caller formata.
+            # The caller passes a RELATIVE bound (`-90m`), not a timestamp. An
+            # absolute JQL literal is read in the Jira account's timezone, so a
+            # UTC cursor queried into the future and matched nothing — see
+            # `poller._relative_bound`. Relative bounds have no timezone.
             jql += f' AND updated >= "{since_iso}"'
         jql += " ORDER BY updated ASC"
-        # Endpoint novo /search/jql: o antigo /rest/api/3/search foi REMOVIDO
-        # pela Atlassian (410 Gone, 2025). Paginação por nextPageToken (não mais
-        # startAt/total); itera até isLast para não perder issues além da página.
-        # `reporter` é OBRIGATÓRIO (achado BD-39, 2026-07-23): sem ele o poller
-        # cria o WorkItem com requester=system:adapter-jira-poller, e aí a
-        # resposta de clarificação do PRÓPRIO autor do ticket não autoriza
-        # (principal do autor != system principal) — o fluxo trava em
-        # needs_clarification para sempre.
+        # New /search/jql endpoint: the old /rest/api/3/search was REMOVED by
+        # Atlassian (410 Gone, 2025). Pagination by nextPageToken (no longer
+        # startAt/total); iterates until isLast so no issues beyond the first
+        # page are lost.
+        # `reporter` is MANDATORY (BD-39 finding, 2026-07-23): without it the
+        # poller creates the WorkItem with requester=system:adapter-jira-poller,
+        # and then a clarification answer from the ticket's OWN author does not
+        # authorize (the author's principal != the system principal) — the flow
+        # gets stuck in needs_clarification forever.
         fields = ["summary", "description", "labels", "status", "project", "reporter"]
         issues: list[dict[str, Any]] = []
         next_token: str | None = None
@@ -158,7 +185,7 @@ class RealJiraClient:
         resp.raise_for_status()
         out = []
         for c in resp.json().get("comments", []):
-            # `renderedBody`/`body` ADF -> texto: melhor esforço para o poller.
+            # `renderedBody`/`body` ADF -> text: best effort for the poller.
             body = c.get("body")
             text = body if isinstance(body, str) else _flatten_adf(body)
             out.append({"id": str(c["id"]), "body": text, "author": c.get("author") or {}})
@@ -166,8 +193,9 @@ class RealJiraClient:
 
 
 def _flatten_adf(node: Any) -> str:
-    """Extrai texto de um doc ADF (best-effort) para o poller reconstruir o
-    content_snapshot igual ao do webhook quando este trouxe texto simples."""
+    """Extracts text from an ADF doc (best-effort) so the poller can rebuild
+    the same content_snapshot as the webhook produced when it carried plain
+    text."""
     if node is None:
         return ""
     if isinstance(node, str):
@@ -183,20 +211,27 @@ def _flatten_adf(node: Any) -> str:
 
 @dataclass
 class FakeJiraClient:
-    """Fixture in-memory (documentado — não é a API real). Simula transições
-    disponíveis, comentários e busca. Usado nos testes no lugar do transporte
-    HTTP; a lógica ao redor (backend/serialização/poller) é a real."""
+    """In-memory fixture (documented — this is not the real API). Simulates the
+    available transitions, comments and search. Used in the tests in place of
+    the HTTP transport; the logic around it (backend/serialization/poller) is
+    the real one."""
 
-    # ticket_key -> lista de {id, name, to_status}
+    # ticket_key -> list of {id, name, to_status}
     transitions_by_ticket: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
-    # ticket_key -> status atual (atualizado por transition_issue)
+    # ticket_key -> current status (updated by transition_issue)
     status_by_ticket: dict[str, str] = field(default_factory=dict)
     # ticket_key -> {comment_id: body}
     comments: dict[str, dict[str, str]] = field(default_factory=dict)
-    # issues indexáveis por busca do poller: project_key -> list[issue]
+    # issues indexable by the poller's search: project_key -> list[issue]
     issues_by_project: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     transition_calls: list[dict[str, Any]] = field(default_factory=list)
+    # accountId the fixture claims to post as; tests set it to exercise the
+    # self-authored comment filter.
+    account_id: str | None = None
     _next_comment_id: int = 9000
+
+    def self_account_id(self) -> str | None:
+        return self.account_id
 
     def add_comment(self, key: str, body: str) -> str:
         self._next_comment_id += 1
@@ -206,7 +241,7 @@ class FakeJiraClient:
 
     def update_comment(self, key: str, comment_id: str, body: str) -> None:
         if comment_id not in self.comments.get(key, {}):
-            raise KeyError(f"update_comment em comment_id inexistente: {key}/{comment_id}")
+            raise KeyError(f"update_comment on nonexistent comment_id: {key}/{comment_id}")
         self.comments[key][comment_id] = body
 
     def get_transitions(self, key: str) -> list[dict[str, Any]]:
@@ -216,7 +251,7 @@ class FakeJiraClient:
         avail = self.transitions_by_ticket.get(key, [])
         match = next((t for t in avail if str(t["id"]) == str(transition_id)), None)
         if match is None:
-            raise ValueError(f"transição inexistente {transition_id} para {key}")
+            raise ValueError(f"nonexistent transition {transition_id} for {key}")
         self.status_by_ticket[key] = match["to_status"]
         self.transition_calls.append({"key": key, "transition_id": transition_id, "to_status": match["to_status"]})
 

@@ -1,16 +1,16 @@
-"""Núcleo de ingestão do adapter Jira, COMPARTILHADO entre o webhook
-(`app.py`) e o poller de fallback (`poller.py`) — WSA-E5-T1/T2.
+"""Ingestion core of the Jira adapter, SHARED between the webhook (`app.py`)
+and the fallback poller (`poller.py`) — WSA-E5-T1/T2.
 
-Ambas as vias chamam exatamente estas funções, que constroem o mesmo
-`ConversationEvent` (com `message_id` derivado do estado do issue, ver
-`events.py`) e passam pela mesma via idempotente de `ingest_gateway`
-(`admit_work_item`/`record_signal_event`, dedup por `event_id`). É isso que
-garante "webhook + poller nunca duplicam": os dois produzem o mesmo
-`event_id`, e o segundo a chegar deduplica.
+Both paths call exactly these functions, which build the same
+`ConversationEvent` (with `message_id` derived from the issue state, see
+`events.py`) and go through the same idempotent `ingest_gateway` path
+(`admit_work_item`/`record_signal_event`, dedup by `event_id`). That is what
+guarantees "webhook + poller never duplicate": the two produce the same
+`event_id`, and whichever arrives second dedupes.
 
-Transação: cada função abre sua própria conexão e delega o commit para
-`admit_work_item`/`record_signal_event` (que comitam quando recebem `conn`),
-mesma convenção dos handlers do adapter-github.
+Transaction: each function opens its own connection and delegates the commit to
+`admit_work_item`/`record_signal_event` (which commit when they are handed a
+`conn`), the same convention as the adapter-github handlers.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from ingest_gateway import (
 )
 
 from . import events
+from .comment_store import SURFACE as _SURFACE
 
 
 def ingest_task_trigger(
@@ -39,9 +40,9 @@ def ingest_task_trigger(
     resolved_principal: str,
     display_name: str | None = None,
 ) -> dict:
-    """Issue com a trigger label -> task_request (Path A) ou signal
-    idempotente se já houver WorkItem ativo para o ticket. Mirror do
-    `_handle_task_creating_event` do adapter-github."""
+    """Issue with the trigger label -> task_request (Path A) or an idempotent
+    signal if there is already an active WorkItem for the ticket. Mirror of
+    adapter-github's `_handle_task_creating_event`."""
     ev = events.build_task_event(
         issue, actor_account_id=actor_account_id, resolved_principal=resolved_principal, display_name=display_name
     )
@@ -66,9 +67,10 @@ def ingest_task_trigger(
             )
             return {"ok": True, "path": "signal", "work_item_id": result.work_item_id}
 
-        # C2 (relatório 07): resolve o repo pela cascata — override explícito no
-        # texto → Component (mais fino) → Project → default do tenant. Sem
-        # resolução, repo=None e o gate de clarificação pergunta (nunca adivinha).
+        # C2 (report 07): resolves the repo through the cascade — explicit
+        # override in the text → Component (finest) → Project → tenant default.
+        # With no resolution, repo=None and the clarification gate asks (it
+        # never guesses).
         repo, base_branch = resolve_repo(
             conn, tenant_id=tenant_id, platform="jira",
             signals={"text": sanitized, "component": events.first_component(issue),
@@ -83,8 +85,8 @@ def ingest_task_trigger(
                 repo=repo,
                 base_branch=base_branch,
                 requester_principal=resolved_principal,
-                # Plano 08 §A: task_class determinística no intake — labels do
-                # ticket + issue type do Jira (Bug→bug_fix, Story→feature_small…).
+                # Plan 08 §A: deterministic task_class at intake — ticket labels
+                # + Jira issue type (Bug→bug_fix, Story→feature_small…).
                 task_class=classify_task_class(
                     labels=events.issue_labels(issue),
                     issue_type=events.issue_type(issue),
@@ -108,6 +110,39 @@ def ingest_task_trigger(
         conn.close()
 
 
+def _is_dse_authored(ticket_key: str, comment_id: str) -> bool:
+    """True when this comment is the one the DSE itself wrote on the ticket.
+
+    `comment_state` holds the ref the MutableCommentWriter created — exactly one
+    status comment per work item, edited in place — so its id is the DSE's own
+    signature. Comparing ids is precise where comparing authors is not: with a
+    personal API token the bot and the human share an account.
+
+    Best-effort: a database hiccup returns False, which restores the old
+    (looping) behaviour rather than dropping a human's answer. Of the two
+    failure modes, silently swallowing the reply is the worse one.
+    """
+    try:
+        conn = get_connection()
+    except Exception:  # noqa: BLE001 — never block ingestion on this lookup
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM comment_state "
+                "WHERE surface = %s "
+                "AND (comment_ref::jsonb->>'comment_id') = %s "
+                "AND (comment_ref::jsonb->>'ticket_key') = %s "
+                "LIMIT 1",
+                (_SURFACE, str(comment_id), ticket_key),
+            )
+            return cur.fetchone() is not None
+    except Exception:  # noqa: BLE001 — malformed ref must not stall the flow
+        return False
+    finally:
+        conn.close()
+
+
 def ingest_comment(
     *,
     tenant_id: str,
@@ -117,9 +152,35 @@ def ingest_comment(
     actor_account_id: str,
     resolved_principal: str,
     display_name: str | None = None,
+    self_account_id: str | None = None,
 ) -> dict:
-    """Comentário no issue -> signal (clarificação) para um WorkItem ativo;
-    sem WorkItem ativo, ignorado (comentário em issue que não é tarefa DSE)."""
+    """Comment on the issue -> signal (clarification) for an active WorkItem;
+    with no active WorkItem, ignored (a comment on an issue that is not a DSE
+    task).
+
+    Breaks a FEEDBACK LOOP without ever silencing a human. The DSE posts its
+    status and clarification comments through the Jira REST API, and Jira
+    attributes them to whichever account owns the API token — so unlike Slack,
+    where the bot's own messages carry a `bot_id`, a DSE comment is
+    indistinguishable from a person's.
+
+    Observed on BD-40: the DSE asked "I need acceptance criteria", the poller
+    read that very comment back as the human's ANSWER, the criteria became the
+    question itself, the Coder changed nothing, the Tester correctly failed a
+    test asserting the change, and the run died at the retry cap.
+
+    Filtering by AUTHOR looks like the fix and is a trap: when the token belongs
+    to a real person — the normal setup — the bot and that person are the same
+    account, so an author filter blocks their answers too and the task can never
+    be unblocked by the one human who cares about it. Observed on BD-41.
+
+    So the test is IDENTITY, not authorship: the writer records the id of the
+    comment it created (`comment_state.comment_ref`), so the DSE can recognise
+    its own words exactly, with no guessing and no collateral damage. Works the
+    same whether the token belongs to a person or to a dedicated bot account.
+    """
+    if _is_dse_authored(key, comment_id):
+        return {"ok": True, "path": "ignored_self_authored"}
     ev = events.build_comment_event(
         key=key,
         comment_id=comment_id,
@@ -171,10 +232,10 @@ def ingest_status_approval(
     resolved_principal: str,
     display_name: str | None = None,
 ) -> dict:
-    """Transição para a coluna de aprovação/rejeição configurada -> kind=
-    approval (UC5). Marca `approval_verdict`/`approval_route` no payload
-    (marcadores determinísticos lidos pelo dispatcher em WSA-E6-T3). Sem
-    WorkItem ativo para o ticket, ignorado."""
+    """Transition into the configured approval/rejection column -> kind=
+    approval (UC5). Marks `approval_verdict`/`approval_route` on the payload
+    (deterministic markers read by the dispatcher in WSA-E6-T3). With no active
+    WorkItem for the ticket, ignored."""
     ev = events.build_status_approval_event(
         issue,
         target_status=target_status,

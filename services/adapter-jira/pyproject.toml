@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-adapter-jira"
 version = "0.1.0"
-description = "WS-A Fase 2: adapter Jira (webhook + poller fallback inbound; transições serializadas + status comment via MutableCommentWriter, sob service account escopada)"
+description = "WS-A Phase 2: Jira adapter (inbound webhook + fallback poller; serialized transitions + status comment via MutableCommentWriter, under a scoped service account)"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",

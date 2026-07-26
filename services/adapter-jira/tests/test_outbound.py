@@ -1,6 +1,6 @@
-"""WSA-E5-T3 — outbound: status comment único por ticket, editado in-place,
-via a MESMA MutableCommentWriter (backend Jira novo). Jira via FakeJiraClient;
-comment_state persistido em Postgres real."""
+"""WSA-E5-T3 — outbound: a single status comment per ticket, edited in-place,
+via the SAME MutableCommentWriter (new Jira backend). Jira via FakeJiraClient;
+comment_state persisted in a real Postgres."""
 from __future__ import annotations
 
 import json
@@ -37,10 +37,10 @@ def test_single_status_comment_edited_in_place():
     ref1 = writer.upsert(work_item_id, {"ticket_key": "DSE-500"}, "Status: implementing")
     ref2 = writer.upsert(work_item_id, {"ticket_key": "DSE-500"}, "Status: pr_ready")
 
-    # mesmo comment_ref -> foi editado, não recriado.
+    # same comment_ref -> it was edited, not recreated.
     assert ref1 == ref2
     comment_id = json.loads(ref1)["comment_id"]
-    # exatamente 1 comentário existe no ticket, com o corpo final.
+    # exactly 1 comment exists on the ticket, with the final body.
     assert client.comments["DSE-500"] == {comment_id: "Status: pr_ready"}
 
     conn = psycopg2.connect(SUPERUSER_DSN)

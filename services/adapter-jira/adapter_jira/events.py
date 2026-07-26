@@ -1,19 +1,19 @@
-"""Normalização Jira -> `ConversationEvent` (WSA-E5-T1).
+"""Jira -> `ConversationEvent` normalization (WSA-E5-T1).
 
-`source_ref` normalizado como `{"ticket_key": "DSE-123"}` — correlação por
-ticket key (o mesmo issue serve para task, clarificação, aprovação de plano).
+`source_ref` normalized as `{"ticket_key": "DSE-123"}` — correlation by ticket
+key (the same issue serves for task, clarification and plan approval).
 
-Defesa TOCTOU (WSA-E2-T2): `content_snapshot` vem direto do payload recebido
-(webhook) ou do estado do issue retornado pela busca (poller) — nunca é
-re-buscado depois.
+TOCTOU defense (WSA-E2-T2): `content_snapshot` comes straight from the received
+payload (webhook) or from the issue state returned by the search (poller) — it
+is never re-fetched afterwards.
 
-IMPORTANTE — idempotência webhook×poller (WSA-E5-T2): os `message_id` são
-derivados do ESTADO do issue (id do issue + status/coluna, id do comentário),
-NUNCA do id do changelog do webhook. Assim o webhook (best-effort) e o poller
-(que só vê o estado atual, sem changelog) produzem o MESMO `event_id`
-determinístico para o mesmo fato — reentrega por qualquer das duas vias
-deduplica via a UNIQUE constraint de `ingest_events.event_id`, nunca
-duplicando.
+IMPORTANT — webhook×poller idempotency (WSA-E5-T2): the `message_id`s are
+derived from the issue STATE (issue id + status/column, comment id), NEVER from
+the webhook changelog id. That way the webhook (best-effort) and the poller
+(which only sees the current state, with no changelog) produce the SAME
+deterministic `event_id` for the same fact — redelivery through either of the
+two paths dedupes via the UNIQUE constraint on `ingest_events.event_id`, never
+duplicating.
 """
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ def ticket_key(issue: dict[str, Any]) -> str:
 
 
 def project_key(issue: dict[str, Any]) -> str:
-    """Usado como `channel` do kill switch/admissão (granularidade por projeto
-    Jira). Deriva de `fields.project.key` ou do prefixo da ticket key."""
+    """Used as the kill switch/admission `channel` (granularity per Jira
+    project). Derived from `fields.project.key` or from the ticket key prefix."""
     proj = (issue.get("fields", {}).get("project") or {}).get("key")
     if proj:
         return proj
@@ -41,15 +41,15 @@ def issue_labels(issue: dict[str, Any]) -> list[str]:
 
 
 def issue_type(issue: dict[str, Any]) -> str | None:
-    """Nome do issue type do Jira (Bug/Story/Task/...) — plano 08 §A: alimenta
-    a classificação determinística de task_class na admissão."""
+    """Name of the Jira issue type (Bug/Story/Task/...) — plan 08 §A: feeds the
+    deterministic task_class classification at admission."""
     return (issue.get("fields", {}).get("issuetype") or {}).get("name")
 
 
 def first_component(issue: dict[str, Any]) -> str | None:
-    """Nome do 1º Component do Jira (C2/relatório 07): Components mapeiam issues
-    a subsistemas/serviços — o sinal de repo de granularidade mais fina do Jira.
-    None se o ticket não tem component."""
+    """Name of the 1st Jira Component (C2/report 07): Components map issues to
+    subsystems/services — the finest-grained repo signal Jira has. None if the
+    ticket has no component."""
     comps = issue.get("fields", {}).get("components") or []
     for c in comps:
         name = (c or {}).get("name")
@@ -74,18 +74,27 @@ def _issue_content(issue: dict[str, Any]) -> str:
     fields = issue.get("fields", {})
     summary = fields.get("summary", "") or ""
     description = fields.get("description")
-    # API v3 devolve description como ADF (dict); poller/webhook podem trazer
-    # texto simples. Só concatena quando é string (o texto real do usuário).
-    desc_text = description if isinstance(description, str) else ""
+    # API v3 returns the description as ADF (a dict); the webhook may carry
+    # plain text. Flatten instead of dropping: the description is where people
+    # write the acceptance criteria, so discarding it left the DSE with nothing
+    # but the summary and it asked for clarification on a ticket that already
+    # answered the question. On BD-40 that question then came back as its own
+    # answer and took the whole task down with it.
+    if isinstance(description, str):
+        desc_text = description
+    else:
+        from .backend import _flatten_adf
+
+        desc_text = _flatten_adf(description) if description else ""
     return f"{summary}\n\n{desc_text}".strip()
 
 
 def build_task_event(
     issue: dict[str, Any], *, actor_account_id: str, resolved_principal: str, display_name: str | None = None
 ) -> ConversationEvent:
-    """Issue marcado com a trigger label -> task_request. `message_id`
-    derivado do id do issue (estado), então criar+rotular+poller convergem no
-    mesmo event_id."""
+    """Issue marked with the trigger label -> task_request. `message_id`
+    derived from the issue id (state), so create+label+poller converge on the
+    same event_id."""
     return ConversationEvent.build(
         platform=Platform.jira,
         thread_key=ticket_key(issue),
@@ -107,10 +116,10 @@ def build_comment_event(
     resolved_principal: str,
     display_name: str | None = None,
 ) -> ConversationEvent:
-    """Comentário no issue -> clarification_answer por padrão (mesma
-    convenção do adapter-slack para mensagem comum em thread; `correlate`
-    decide Path A/B, e o gate de steering trata review/steering). `message_id`
-    é o id do comentário — o poller busca comentários e vê o mesmo id."""
+    """Comment on the issue -> clarification_answer by default (same convention
+    as adapter-slack for an ordinary in-thread message; `correlate` decides
+    Path A/B, and the steering gate handles review/steering). `message_id` is
+    the comment id — the poller fetches comments and sees the same id."""
     return ConversationEvent.build(
         platform=Platform.jira,
         thread_key=key,
@@ -131,10 +140,10 @@ def build_status_approval_event(
     resolved_principal: str,
     display_name: str | None = None,
 ) -> ConversationEvent:
-    """Transição de status para a coluna de aprovação configurada -> kind=
-    approval (UC5 na superfície Jira, WSA-E5-T1). `message_id` derivado de
-    (issue id, status alvo) — estado, não changelog — para o poller reconstruir
-    o mesmo event_id."""
+    """Status transition into the configured approval column -> kind=approval
+    (UC5 on the Jira surface, WSA-E5-T1). `message_id` derived from
+    (issue id, target status) — state, not changelog — so the poller rebuilds
+    the same event_id."""
     return ConversationEvent.build(
         platform=Platform.jira,
         thread_key=ticket_key(issue),

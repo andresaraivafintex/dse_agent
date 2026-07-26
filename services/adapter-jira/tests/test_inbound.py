@@ -1,6 +1,6 @@
-"""WSA-E5-T1 — inbound do adapter Jira: label -> task_request, transição de
-status -> aprovação (UC5), comentário -> clarificação; 4 defesas (assinatura,
-TOCTOU/dedup, sanitização) e resolução de tenant por site."""
+"""WSA-E5-T1 — Jira adapter inbound: label -> task_request, status transition
+-> approval (UC5), comment -> clarification; the 4 defenses (signature,
+TOCTOU/dedup, sanitization) and per-site tenant resolution."""
 from __future__ import annotations
 
 import json
@@ -70,8 +70,8 @@ def test_issue_created_with_trigger_label_creates_task():
 
 
 def test_issue_type_bug_classifies_task_class(unique_suffix=None):
-    """Plano 08 §A (fechado na auditoria): issue type Bug do Jira → task_class
-    bug_fix na admissão (mapa determinístico _JIRA_TYPE_MAP)."""
+    """Plan 08 §A (closed in the audit): Jira issue type Bug → task_class
+    bug_fix at admission (deterministic _JIRA_TYPE_MAP map)."""
     data = _post(
         {
             "webhookEvent": "jira:issue_created",
@@ -100,7 +100,7 @@ def test_issue_created_without_label_is_ignored():
 
 
 def test_status_transition_to_approved_column_signals_approval():
-    # cria a tarefa primeiro
+    # create the task first
     created = _post(
         {
             "webhookEvent": "jira:issue_created",
@@ -129,7 +129,7 @@ def test_status_transition_to_approved_column_signals_approval():
             (work_item_id,),
         )
         payload = cur.fetchone()[0]
-        # ator resolvido é quem transicionou (Bob), não o reporter.
+        # the resolved actor is whoever transitioned it (Bob), not the reporter.
         cur.execute("SELECT display_name FROM principals WHERE id=%s", (payload["actor"]["resolved_principal"],))
         assert cur.fetchone()[0] == "Bob Boss"
     conn.close()
@@ -219,7 +219,7 @@ def test_redelivered_issue_created_is_deduped_toctou_snapshot_frozen():
 
     edited = dict(payload)
     edited["issue"] = _issue("DSE-16", "10016", labels=["dse"], summary="EDITED summary")
-    _post(edited)  # reentrega: mesmo issue id -> mesmo event_id -> dedup
+    _post(edited)  # redelivery: same issue id -> same event_id -> dedup
 
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:

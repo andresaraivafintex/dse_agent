@@ -1,8 +1,9 @@
-"""WSA-E5-T2 — poller de fallback + idempotência webhook×poller.
+"""WSA-E5-T2 — fallback poller + webhook×poller idempotency.
 
-Prova (contra Postgres real): reconciliar um issue pelo poller e depois
-receber o webhook do MESMO issue (ou vice-versa) NÃO duplica — os dois derivam
-o mesmo `event_id` do estado do issue, e o segundo deduplica."""
+Proof (against a real Postgres): reconciling an issue via the poller and then
+receiving the webhook for the SAME issue (or vice versa) does NOT duplicate —
+both derive the same `event_id` from the issue state, and the second one
+dedupes."""
 from __future__ import annotations
 
 import json
@@ -81,7 +82,7 @@ def test_poller_creates_task_then_webhook_does_not_duplicate():
     assert reconciled >= 1
     assert _count_task_events("DSE-700") == 1
 
-    # webhook chega depois para o MESMO issue -> dedup, nada de novo.
+    # the webhook arrives afterwards for the SAME issue -> dedup, nothing new.
     _webhook_issue_created(issue)
     assert _count_task_events("DSE-700") == 1
 
@@ -93,7 +94,7 @@ def test_webhook_creates_task_then_poller_does_not_duplicate():
 
     fake = FakeJiraClient(issues_by_project={"DSE": [issue]})
     _poller(fake).poll_once()
-    assert _count_task_events("DSE-701") == 1  # poller reconciliou o mesmo fato, sem duplicar
+    assert _count_task_events("DSE-701") == 1  # the poller reconciled the same fact, without duplicating
 
 
 def test_poller_advances_cursor():

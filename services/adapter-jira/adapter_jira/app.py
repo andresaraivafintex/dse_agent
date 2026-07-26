@@ -1,21 +1,22 @@
-"""WSA-E5-T1/T3 — adapter Jira: inbound (webhook, com as 4 defesas de intake)
-e outbound (status comment único via MutableCommentWriter + enfileiramento de
-transições serializadas por ticket).
+"""WSA-E5-T1/T3 — Jira adapter: inbound (webhook, with the 4 intake defenses)
+and outbound (single status comment via MutableCommentWriter + enqueueing of
+per-ticket serialized transitions).
 
-Inbound cobre (UC2/UC5):
-  - `jira:issue_created` / `jira:issue_updated` com a trigger label -> task_request
-  - transição de status para a coluna de aprovação configurada -> kind=approval
-    (UC5 na superfície Jira) com verdict approved/rejected marcado no payload
-  - `comment_created` -> clarificação (correlacionada por ticket key)
+Inbound covers (UC2/UC5):
+  - `jira:issue_created` / `jira:issue_updated` with the trigger label -> task_request
+  - status transition into the configured approval column -> kind=approval
+    (UC5 on the Jira surface) with an approved/rejected verdict marked on the payload
+  - `comment_created` -> clarification (correlated by ticket key)
 
-Adapter 100% stateless — mesma convenção dos adapters Slack/GitHub. Toda a
-lógica de admissão/correlação/defesas vem de `ingest_gateway`; a ingestão em
-si é compartilhada com o poller em `adapter_jira.ingest`.
+100% stateless adapter — same convention as the Slack/GitHub adapters. All of
+the admission/correlation/defense logic comes from `ingest_gateway`; the
+ingestion itself is shared with the poller in `adapter_jira.ingest`.
 """
 from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from urllib.parse import urlsplit
 
 from dse_audit import emit as audit_emit
@@ -43,6 +44,17 @@ logger = logging.getLogger("adapter_jira")
 app = FastAPI(title="dse-adapter-jira")
 
 
+@lru_cache(maxsize=1)
+def _dse_account_id() -> str | None:
+    """accountId the DSE posts as — resolved once per process.
+
+    Cached here rather than on the client because `build_real_jira_client()`
+    returns a fresh instance each call, so a per-instance cache would issue one
+    `/myself` request per webhook delivery.
+    """
+    return build_real_jira_client().self_account_id()
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "adapter-jira"}
@@ -59,9 +71,9 @@ def _reject(reason: str) -> None:
 
 
 def _site_from_payload(payload: dict) -> str | None:
-    """Extrai o site Jira (scheme://host) do `issue.self` para resolver o
-    tenant (WSA-E1-T5). Ex.: `https://acme.atlassian.net/rest/...` ->
-    `https://acme.atlassian.net`."""
+    """Extracts the Jira site (scheme://host) from `issue.self` in order to
+    resolve the tenant (WSA-E1-T5). E.g.: `https://acme.atlassian.net/rest/...`
+    -> `https://acme.atlassian.net`."""
     self_url = (payload.get("issue") or {}).get("self", "")
     if not self_url:
         return None
@@ -82,8 +94,8 @@ def _resolve_tenant_for(payload: dict) -> str:
 
 
 def _actor_of(user: dict) -> tuple[str, str, str | None]:
-    """(account_id, resolved_principal, display_name) a partir de um objeto
-    user/author do Jira."""
+    """(account_id, resolved_principal, display_name) out of a Jira
+    user/author object."""
     account_id = user.get("accountId", "")
     display = user.get("displayName")
     principal = resolve_principal("jira", account_id, display) if account_id else account_id
@@ -130,7 +142,7 @@ async def jira_webhook(request: Request) -> dict:
         issue = payload["issue"]
         results = []
 
-        # Trigger de tarefa: criado com a label OU label adicionada agora.
+        # Task trigger: created with the label OR label added right now.
         trigger_now = events.has_trigger_label(issue, trigger_label)
         if webhook_event == "jira:issue_created" and trigger_now:
             should_trigger = True
@@ -151,7 +163,7 @@ async def jira_webhook(request: Request) -> dict:
                 )
             )
 
-        # Transição de status -> aprovação de plano (UC5).
+        # Status transition -> plan approval (UC5).
         for target in _status_targets_in_changelog(payload, approved_status, rejected_status):
             account_id, principal, display = _actor_of(payload.get("user") or {})
             verdict = "approved" if target == approved_status else "rejected"
@@ -189,6 +201,9 @@ async def jira_webhook(request: Request) -> dict:
             actor_account_id=account_id,
             resolved_principal=principal,
             display_name=display,
+            # The webhook fires on the DSE's own comments too — same feedback
+            # loop as the poller's, arriving by a different door.
+            self_account_id=_dse_account_id(),
         )
         return {"ok": True, **result}
 
@@ -204,8 +219,8 @@ class StatusCommentRequest(BaseModel):
 
 @app.post("/internal/status-comment")
 def upsert_status_comment(req: StatusCommentRequest) -> dict:
-    """WSA-E5-T3: exatamente 1 status comment por ticket, editado in-place,
-    via a MESMA MutableCommentWriter dos outros adapters (backend Jira novo)."""
+    """WSA-E5-T3: exactly 1 status comment per ticket, edited in-place, via the
+    SAME MutableCommentWriter as the other adapters (new Jira backend)."""
     client = build_real_jira_client()
     backend = JiraCommentBackend(client)
     store = PgCommentStateStore()
@@ -234,8 +249,8 @@ class TransitionRequest(BaseModel):
 
 @app.post("/internal/transition")
 def enqueue_transition_endpoint(req: TransitionRequest) -> dict:
-    """WSA-E5-T3: enfileira uma transição de status (serializada por ticket
-    pelo TransitionWorker). Idempotente por `dedup_key`."""
+    """WSA-E5-T3: enqueues a status transition (serialized per ticket by the
+    TransitionWorker). Idempotent by `dedup_key`."""
     tenant_id = req.tenant_id or get_tenant_id()
     conn = get_connection()
     try:

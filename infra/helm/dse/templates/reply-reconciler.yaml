@@ -1,0 +1,105 @@
+{{/*
+Scheduled caller for the reply reconcilers.
+
+The Jira poller already runs its own loop, so this covers the two webhook-driven
+adapters. Without it the `/internal/reconcile` endpoints exist and nothing ever
+invokes them — the recovery is written, tested, deployed and inert, which is
+worse than absent because the runbook would claim the failure mode is handled.
+
+Cadence is deliberately unhurried. This is a safety net for a delivery that was
+already lost, not a delivery path: a reply recovered two minutes late is a
+success, and a tight loop would just spend the platform's rate limit on sweeps
+that find nothing.
+*/}}
+{{- if .Values.replyReconciler.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dse.fullname" . }}-reply-reconciler
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.replyReconciler.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "dse.labels" . | nindent 12 }}
+            # Selected by the NetworkPolicy below. Without a label a policy
+            # matches, this pod sits under default-deny egress and cannot reach
+            # the adapters at all.
+            app.kubernetes.io/component: reply-reconciler
+        spec:
+          restartPolicy: Never
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: reconciler
+              image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag "digest" .Values.orchestrator.image.digest) }}
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import json, urllib.request
+
+                  # No proxy: these are in-cluster Services. The pod inherits
+                  # HTTP(S)_PROXY from the shared config, and the egress proxy
+                  # answers 403 for internal hosts that are not on its allowlist.
+                  opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                  targets = json.loads({{ .Values.replyReconciler.targets | toJson | quote }})
+                  for name, url in targets.items():
+                      try:
+                          req = urllib.request.Request(url, data=b"{}", method="POST",
+                                                       headers={"Content-Type": "application/json"})
+                          with opener.open(req, timeout=120) as resp:
+                              print(name, resp.status, resp.read().decode()[:300])
+                      except Exception as exc:  # one adapter down must not skip the others
+                          print(name, "FAILED", type(exc).__name__, str(exc)[:200])
+              resources:
+                requests: { cpu: "20m", memory: "64Mi" }
+                limits: { cpu: "200m", memory: "192Mi" }
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+The reconciler only talks to the adapters' internal endpoints — no database, no
+external network. Enumerated, not wildcard, like every other policy here.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-reply-reconciler-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: reply-reconciler
+  policyTypes: ["Egress"]
+  egress:
+    {{- if .Values.adapters.slack.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adapter-slack
+      ports:
+        - { protocol: TCP, port: {{ .Values.adapters.slack.port }} }
+    {{- end }}
+    {{- if .Values.adapters.github.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adapter-github
+      ports:
+        - { protocol: TCP, port: {{ .Values.adapters.github.port }} }
+    {{- end }}
+{{- end }}
+{{- end }}

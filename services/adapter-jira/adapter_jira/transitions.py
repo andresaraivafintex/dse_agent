@@ -1,12 +1,12 @@
-"""WSA-E5-T3 — transições de status SERIALIZADAS por ticket.
+"""WSA-E5-T3 — status transitions SERIALIZED per ticket.
 
-Jira Cloud rejeita transições concorrentes no mesmo issue. As transições são
-enfileiradas em `jira_transition_queue` (migrations/0008_wsa2.sql) e drenadas
-por um worker que garante, via advisory lock por ticket, que só UMA transição
-por ticket roda de cada vez — tickets diferentes seguem em paralelo.
+Jira Cloud rejects concurrent transitions on the same issue. Transitions are
+enqueued in `jira_transition_queue` (migrations/0008_wsa2.sql) and drained by a
+worker that guarantees, via a per-ticket advisory lock, that only ONE transition
+per ticket runs at a time — different tickets proceed in parallel.
 
-`enqueue_transition` é idempotente por `dedup_key` (ON CONFLICT DO NOTHING):
-o mesmo pedido de transição (mesma origem/estado) nunca enfileira duas vezes.
+`enqueue_transition` is idempotent by `dedup_key` (ON CONFLICT DO NOTHING): the
+same transition request (same origin/state) never enqueues twice.
 """
 from __future__ import annotations
 
@@ -31,8 +31,9 @@ def enqueue_transition(
     dedup_key: str,
     work_item_id: str | None = None,
 ) -> bool:
-    """Enfileira uma transição. Retorna True se enfileirou (novo), False se já
-    existia (dedup por `dedup_key`). Não comita — caller controla a transação."""
+    """Enqueues a transition. Returns True if it enqueued (new), False if it
+    already existed (dedup by `dedup_key`). Does not commit — the caller
+    controls the transaction."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -48,11 +49,11 @@ def enqueue_transition(
 
 
 class TransitionWorker:
-    """Drena `jira_transition_queue` serializando por ticket. Uso:
-    `TransitionWorker(client).drain_once()` em loop (processo separado do
-    FastAPI, mesma ideia do `dispatcher_main` do ingest-gateway). Síncrono:
-    o transporte Jira é `requests` (bloqueante), e este worker não roda no
-    event loop do app."""
+    """Drains `jira_transition_queue`, serializing per ticket. Usage:
+    `TransitionWorker(client).drain_once()` in a loop (process separate from
+    FastAPI, same idea as ingest-gateway's `dispatcher_main`). Synchronous: the
+    Jira transport is `requests` (blocking), and this worker does not run on the
+    app's event loop."""
 
     def __init__(self, client: JiraClientLike, *, batch_tickets: int = 50, conn_factory=get_connection):
         self._client = client
@@ -61,7 +62,7 @@ class TransitionWorker:
 
     def drain_once(self) -> int:
         conn = self._conn_factory()
-        conn.autocommit = True  # advisory locks são de sessão; controlamos commits manuais por ticket
+        conn.autocommit = True  # advisory locks are session-scoped; we control manual commits per ticket
         processed = 0
         try:
             with conn.cursor() as cur:
@@ -82,7 +83,7 @@ class TransitionWorker:
             cur.execute("SELECT pg_try_advisory_lock(hashtext(%s))", (ticket_key,))
             got_lock = cur.fetchone()[0]
         if not got_lock:
-            # Outro worker está transicionando este ticket — pula (serialização).
+            # Another worker is transitioning this ticket — skip (serialization).
             return 0
 
         processed = 0
@@ -102,7 +103,7 @@ class TransitionWorker:
             for row_id, target_status, work_item_id, tenant_id in rows:
                 ok = self._apply_transition(conn, ticket_key, row_id, target_status, work_item_id, tenant_id)
                 if not ok:
-                    # Ordem importa — não pula transições à frente deste ticket.
+                    # Order matters — do not skip transitions ahead in this ticket.
                     break
                 processed += 1
             return processed
@@ -115,10 +116,10 @@ class TransitionWorker:
             transitions = self._client.get_transitions(ticket_key)
             match = next((t for t in transitions if t.get("to_status") == target_status or t.get("name") == target_status), None)
             if match is None:
-                raise ValueError(f"nenhuma transição disponível para status '{target_status}' em {ticket_key}")
+                raise ValueError(f"no transition available for status '{target_status}' on {ticket_key}")
             self._client.transition_issue(ticket_key, match["id"])
-        except Exception as exc:  # noqa: BLE001 — captura para registrar e retentar
-            logger.exception("transição falhou ticket=%s target=%s", ticket_key, target_status)
+        except Exception as exc:  # noqa: BLE001 — caught in order to record and retry
+            logger.exception("transition failed ticket=%s target=%s", ticket_key, target_status)
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE jira_transition_queue SET attempts = attempts + 1, last_error = %s WHERE id = %s",

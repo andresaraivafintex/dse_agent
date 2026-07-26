@@ -7,7 +7,7 @@ WEBHOOK_SECRET = "jira_webhook_secret_test"
 
 
 def sign(body: bytes) -> str:
-    """Assinatura X-Hub-Signature do Jira Cloud (HMAC-SHA256, formato
-    `sha256=<hex>`, o mesmo esquema do GitHub)."""
+    """Jira Cloud X-Hub-Signature signature (HMAC-SHA256, `sha256=<hex>`
+    format, the same scheme as GitHub's)."""
     digest = hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
     return f"sha256={digest}"

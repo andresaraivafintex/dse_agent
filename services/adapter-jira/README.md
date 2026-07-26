@@ -1,53 +1,53 @@
-# adapter-jira (WS-A, Fase 2 — WSA-E5)
+# adapter-jira (WS-A, Phase 2 — WSA-E5)
 
-Terceira superfície de intake do DSE (§10.1, UC2/UC5), espelhando a estrutura
-do `adapter-github`. Toda a lógica compartilhada (admissão, correlação, 4
-defesas de intake, tenant binding) vem de `ingest_gateway` — o adapter é 100%
-stateless. A documentação geral do WS-A está em
-[`../ingest-gateway/README.md`](../ingest-gateway/README.md); este arquivo
-cobre só o que é específico do Jira.
+The DSE's third intake surface (§10.1, UC2/UC5), mirroring the structure of
+`adapter-github`. All shared logic (admission, correlation, the 4
+intake defenses, tenant binding) comes from `ingest_gateway` — the adapter is 100%
+stateless. General WS-A documentation lives in
+[`../ingest-gateway/README.md`](../ingest-gateway/README.md); this file
+covers only what is Jira-specific.
 
-## O que faz
+## What it does
 
 - **Inbound webhook** (`POST /jira/webhook`, `adapter_jira/app.py`):
-  - `jira:issue_created` / `jira:issue_updated` com a trigger label (`dse`) ->
+  - `jira:issue_created` / `jira:issue_updated` carrying the trigger label (`dse`) ->
     `task_request`.
-  - Transição de status para a coluna de aprovação configurada
-    (`JIRA_PLAN_APPROVED_STATUS`, ex. "Plano aprovado") -> `kind=approval`
-    com `approval_verdict=approved` (UC5 na superfície Jira). Coluna de
-    rejeição (`JIRA_PLAN_REJECTED_STATUS`) -> `approval_verdict=rejected` +
-    `approval_route=re_plan`. O dispatcher (WSA-E6-T3) roteia isso para
-    `SIGNAL_PLAN_APPROVAL` quando o WorkItem está em `awaiting_plan_approval`.
-  - `comment_created` -> `clarification_answer`, correlacionado por ticket key.
-  - Correlação por **ticket key** (`source_ref = {"ticket_key": "DSE-123"}`).
-  - As 4 defesas: assinatura (`X-Hub-Signature` HMAC-SHA256,
-    `ingest_gateway.verify_jira_signature`), snapshot TOCTOU (conteúdo lido do
-    payload, nunca re-buscado), sanitização (`sanitize_content`), idempotência
-    (`event_id` determinístico).
+  - A status transition into the configured approval column
+    (`JIRA_PLAN_APPROVED_STATUS`, e.g. "Plan approved") -> `kind=approval`
+    with `approval_verdict=approved` (UC5 on the Jira surface). The rejection
+    column (`JIRA_PLAN_REJECTED_STATUS`) -> `approval_verdict=rejected` +
+    `approval_route=re_plan`. The dispatcher (WSA-E6-T3) routes this to
+    `SIGNAL_PLAN_APPROVAL` when the WorkItem is in `awaiting_plan_approval`.
+  - `comment_created` -> `clarification_answer`, correlated by ticket key.
+  - Correlation by **ticket key** (`source_ref = {"ticket_key": "DSE-123"}`).
+  - The 4 defenses: signature (`X-Hub-Signature` HMAC-SHA256,
+    `ingest_gateway.verify_jira_signature`), TOCTOU snapshot (content read from the
+    payload, never re-fetched), sanitization (`sanitize_content`), idempotency
+    (deterministic `event_id`).
 
-- **Poller de fallback OBRIGATÓRIO** (`adapter_jira/poller.py`,
-  `python -m adapter_jira.poller_main`): o webhook Jira é best-effort. O poller
-  varre os projetos configurados e reconcilia cada issue pela **mesma via
-  idempotente** do webhook (`adapter_jira/ingest.py`). Como os `event_id` são
-  derivados do **estado** do issue (id do issue + status + id do comentário —
-  nunca do changelog do webhook), webhook e poller convergem no mesmo
-  `event_id` e a segunda via a chegar deduplica. **Nunca duplicam** (provado em
-  `tests/test_poller_webhook_idempotency.py`, nos dois sentidos).
+- **MANDATORY fallback poller** (`adapter_jira/poller.py`,
+  `python -m adapter_jira.poller_main`): the Jira webhook is best-effort. The poller
+  sweeps the configured projects and reconciles each issue through the **same
+  idempotent path** as the webhook (`adapter_jira/ingest.py`). Because the `event_id`s are
+  derived from the issue's **state** (issue id + status + comment id —
+  never from the webhook's changelog), webhook and poller converge on the same
+  `event_id` and whichever path arrives second dedups. **They never duplicate** (proven in
+  `tests/test_poller_webhook_idempotency.py`, in both directions).
 
 - **Outbound**:
-  - **Transições serializadas por ticket** (`adapter_jira/transitions.py`,
-    `POST /internal/transition` enfileira; `python -m
-    adapter_jira.transition_main` drena). Jira Cloud rejeita transições
-    concorrentes no mesmo issue; o worker garante, via advisory lock por
-    ticket (`pg_try_advisory_lock(hashtext(ticket_key))`), que só uma transição
-    por ticket roda de cada vez — tickets diferentes seguem em paralelo.
-    Enfileiramento idempotente por `dedup_key`.
-  - **Status comment único** (`POST /internal/status-comment`): a MESMA
-    `dse_contracts.mutable_comment.MutableCommentWriter` dos adapters
-    Slack/GitHub, com um `JiraCommentBackend` novo (surface `jira`, mesma
-    tabela `comment_state`).
+  - **Per-ticket serialized transitions** (`adapter_jira/transitions.py`,
+    `POST /internal/transition` enqueues; `python -m
+    adapter_jira.transition_main` drains). Jira Cloud rejects concurrent
+    transitions on the same issue; the worker guarantees, via a per-ticket
+    advisory lock (`pg_try_advisory_lock(hashtext(ticket_key))`), that only one transition
+    per ticket runs at a time — different tickets proceed in parallel.
+    Idempotent enqueue by `dedup_key`.
+  - **Single status comment** (`POST /internal/status-comment`): the SAME
+    `dse_contracts.mutable_comment.MutableCommentWriter` as the
+    Slack/GitHub adapters, with a new `JiraCommentBackend` (surface `jira`, same
+    `comment_state` table).
 
-## Rodando localmente
+## Running locally
 
 ```bash
 source /Users/saraiva/Documents/DSE/fase1/.venv-wsa/bin/activate
@@ -61,46 +61,46 @@ JIRA_WEBHOOK_SECRET=dev_only_fixture JIRA_TRIGGER_LABEL=dse \
 Endpoints: `POST /jira/webhook`, `POST /internal/status-comment`,
 `POST /internal/transition`, `GET /health`.
 
-## Testes
+## Tests
 
 ```bash
 cd /Users/saraiva/Documents/DSE/fase1/services/adapter-jira && pytest -q
 ```
 
-Resultado desta sessão: **17 passed**. Requer Postgres real (`localhost:5432`,
-migrações `0002_wsa.sql` + `0008_wsa2.sql` aplicadas) — sem mocks de DB. Jira em
-si é 100% fixture (`FakeJiraClient`); a lógica de negócio (backend, serialização
-de transição, poller, ingestão) é a real.
+Result from this session: **17 passed**. Requires a real Postgres (`localhost:5432`,
+migrations `0002_wsa.sql` + `0008_wsa2.sql` applied) — no DB mocks. Jira itself
+is 100% fixture (`FakeJiraClient`); the business logic (backend, transition
+serialization, poller, ingestion) is the real thing.
 
-## O que é fixture/mock local (não é produção)
+## What is a local fixture/mock (not production)
 
-- `FakeJiraClient` (`adapter_jira/backend.py`): in-memory, substitui o
-  transporte HTTP nos testes. `RealJiraClient` (REST API v3 do Jira Cloud,
-  `requests` + Basic auth com service account) é o que roda em produção.
-- Segredos (`JIRA_WEBHOOK_SECRET`, `JIRA_BASE_URL`, `JIRA_ACCOUNT_EMAIL`,
-  `JIRA_API_TOKEN`): lidos do Vault (`dse/jira/service_account`) via
-  `dse_secrets`, com fallback para env var — nenhum site Jira real foi
-  registrado nesta sessão.
+- `FakeJiraClient` (`adapter_jira/backend.py`): in-memory, replaces the
+  HTTP transport in the tests. `RealJiraClient` (Jira Cloud REST API v3,
+  `requests` + Basic auth with a service account) is what runs in production.
+- Secrets (`JIRA_WEBHOOK_SECRET`, `JIRA_BASE_URL`, `JIRA_ACCOUNT_EMAIL`,
+  `JIRA_API_TOKEN`): read from Vault (`dse/jira/service_account`) via
+  `dse_secrets`, with a fallback to env vars — no real Jira site was
+  registered in this session.
 
-## Gaps / o que precisa de infra real (documentado, não escondido)
+## Gaps / what needs real infra (documented, not hidden)
 
-1. **Site Jira Cloud real**: registrar a service account com token escopado
-   (project-level), criar o webhook dinâmico com secret (para o
-   `X-Hub-Signature`), e gravar `base_url`/`email`/`api_token`/`webhook_secret`
-   no Vault em `dse/jira/service_account`. Sem isso, `RealJiraClient` não é
-   exercitado ponta a ponta.
-2. **Atribuição de aprovação pelo poller**: o poller vê só o estado atual do
-   issue, não o changelog, então NÃO sabe QUEM fez uma transição. Uma aprovação
-   reconstruída pelo poller (webhook descartado) é atribuída ao principal de
-   sistema `system:adapter-jira-poller`; o webhook, quando não é descartado,
-   carrega o ator real e prevalece por chegar primeiro (dedup por `event_id`).
-   Tarefas não têm essa limitação (atribuídas ao reporter, estável).
-3. **Ordem de transições entre workers**: o advisory lock garante a invariante
-   dura do Jira (nunca concorrente no mesmo ticket). A ordem estrita de
-   transições enfileiradas quase-simultaneamente é preservada dentro de um
-   worker (por `id`); entre workers distintos é best-effort — em produção roda
-   um único worker de transição por padrão.
-4. **`SIGNAL_PLAN_APPROVAL` handler**: o dispatcher roteia para o nome de signal
-   correto (`dse_contracts.SIGNAL_PLAN_APPROVAL`); o `@workflow.signal`
-   correspondente é construído por WS-B (WSB-E3-T2) em paralelo. Até existir, um
-   approval roteado é entregue ao Temporal e (sem handler) descartado — sem erro.
+1. **A real Jira Cloud site**: register the service account with a scoped
+   (project-level) token, create the dynamic webhook with a secret (for the
+   `X-Hub-Signature`), and store `base_url`/`email`/`api_token`/`webhook_secret`
+   in Vault under `dse/jira/service_account`. Without that, `RealJiraClient` is not
+   exercised end to end.
+2. **Approval attribution by the poller**: the poller only sees the issue's current
+   state, not the changelog, so it does NOT know WHO made a transition. An approval
+   reconstructed by the poller (webhook dropped) is attributed to the system
+   principal `system:adapter-jira-poller`; the webhook, when it is not dropped,
+   carries the real actor and wins because it arrives first (dedup by `event_id`).
+   Tasks do not have this limitation (attributed to the reporter, which is stable).
+3. **Transition ordering across workers**: the advisory lock guarantees Jira's hard
+   invariant (never concurrent on the same ticket). Strict ordering of
+   near-simultaneously enqueued transitions is preserved within a
+   worker (by `id`); across distinct workers it is best-effort — in production
+   a single transition worker runs by default.
+4. **`SIGNAL_PLAN_APPROVAL` handler**: the dispatcher routes to the correct signal
+   name (`dse_contracts.SIGNAL_PLAN_APPROVAL`); the corresponding
+   `@workflow.signal` is being built by WS-B (WSB-E3-T2) in parallel. Until it exists, a
+   routed approval is delivered to Temporal and (with no handler) dropped — with no error.
