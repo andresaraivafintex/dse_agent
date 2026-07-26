@@ -78,9 +78,9 @@ egressProxy:
   # + github (clone/PR). Without anthropic the turn dies on its first model call.
   allowlist:
     - { host: "api.github.com", port: 443, purpose: "GitHub API (finalize PR)" }
-    - { host: "github.com", port: 443, purpose: "clone do repo alvo" }
-    - { host: "api.anthropic.com", port: 443, purpose: "provider de modelo (Coder)" }
-    - { host: "slack.com", port: 443, purpose: "Slack Web API (status-comment / dropdown de repo)" }
+    - { host: "github.com", port: 443, purpose: "clone the target repository" }
+    - { host: "api.anthropic.com", port: 443, purpose: "model provider (Coder)" }
+    - { host: "slack.com", port: 443, purpose: "Slack Web API (status comment / repo picker)" }
     # Exact host, not a wildcard: Allowlist.is_allowed compares hosts by string
     # equality, so "*.atlassian.net" would never match anything.
     - { host: "fintexinc.atlassian.net", port: 443, purpose: "Jira REST API (poller, comments, transitions)" }
@@ -170,9 +170,9 @@ consoleProjector:
 console:
   enabled: true
   ui:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.2" }
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.3" }
   api:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.2" }
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.3" }
   ingress:
     enabled: true
     className: "traefik"
@@ -300,4 +300,4 @@ temporal:
 # Teams/model-server off (topology A, POC)
 modelServer:
   enabled: false
-adapters_teams_note: "adapter-jira/teams não estão no chart adapters.yaml — fast-follow"
+adapters_teams_note: "adapter-teams is not in the chart's adapters.yaml yet — fast-follow"

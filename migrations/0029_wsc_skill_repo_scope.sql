@@ -16,4 +16,4 @@
 ALTER TABLE skill_registry ADD COLUMN IF NOT EXISTS repo_scope JSONB DEFAULT NULL;
 
 COMMENT ON COLUMN skill_registry.repo_scope IS
-    'Ticks por repo do console: NULL=global, ["*"]=todos, ["owner/name",...]=esses, []=nenhum';
+    'Per-repo ticks from the console: NULL=global, ["*"]=all, ["owner/name",...]=those, []=none';
