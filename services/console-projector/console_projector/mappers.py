@@ -60,6 +60,15 @@ AUDIT_EVENT_MAP: dict[str, str] = {
     "tracking_comment_posted": "comment",
     "merged_by_human": "status_changed",
     "escalated": "error",
+    # ingest-gateway's stranded sweep (`stranded.STRANDED_ESCALATION_ACTION`, and
+    # that side's test_stranded.py fails if this entry stops matching it): the work
+    # item's workflow no longer exists and a human now owns it. The outcome is the
+    # same as the orchestrator's own `escalated` above — item terminal, work handed
+    # over — so it gets the same event type. Left out of this map it fell through
+    # to `note`, the fallback for actions nobody classified, which reads as a
+    # remark; the console prints the event type as the timeline entry's label, so
+    # this is the word next to the message an on-call reader sees.
+    "work_item_escalated_stranded": "error",
     "cancelled_by_operator": "error",
     "coder_retry_cap_exhausted": "error",
     "activity_retries_exhausted": "error",
@@ -67,7 +76,14 @@ AUDIT_EVENT_MAP: dict[str, str] = {
     "budget_exhausted": "error",
 }
 
-_DETAIL_KEYS = ("reason", "pr_number", "url", "cost_usd", "status", "risk_class", "passed")
+# Whitelist, so an arbitrary details payload can never dump itself into a
+# timeline message. `status_before`/`idle_seconds` are here for the stranded
+# escalation: "no_live_workflow" alone does not tell the reader that the item had
+# been silent for 40 hours in `implementing`, which is the whole story.
+_DETAIL_KEYS = (
+    "reason", "pr_number", "url", "cost_usd", "status", "risk_class", "passed",
+    "status_before", "idle_seconds",
+)
 
 
 def map_status(fase1_status: str) -> tuple[str, str | None]:

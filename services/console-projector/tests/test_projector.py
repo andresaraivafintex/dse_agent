@@ -15,7 +15,13 @@ import pytest
 
 from dse_contracts.work_item import WorkItemStatus
 
-from console_projector.mappers import AUDIT_EVENT_MAP, STATUS_MAP, map_status, split_title
+from console_projector.mappers import (
+    AUDIT_EVENT_MAP,
+    STATUS_MAP,
+    map_audit_event,
+    map_status,
+    split_title,
+)
 from console_projector.projector import drain
 
 from conftest import DSN
@@ -75,6 +81,24 @@ def test_audit_event_map_targets_console_event_types():
     assert set(AUDIT_EVENT_MAP.values()) <= _CONSOLE_EVENT_TYPES
 
 
+def test_a_stranded_escalation_projects_as_an_error_and_explains_itself():
+    """ingest-gateway's stranded sweep hands an item to a human because its
+    workflow no longer exists. Unmapped, it landed on the timeline as a `note` —
+    the fallback for actions nobody classified — while the item went terminal, so
+    the label a reader saw read as a remark. The message also has to carry the
+    cause and the silence, or the timeline shows a hand-over with no reason
+    attached."""
+    ev_type, message = map_audit_event(
+        "work_item_escalated_stranded",
+        {"reason": "no_live_workflow", "status_before": "implementing", "idle_seconds": 144000},
+    )
+
+    assert ev_type == "error"
+    assert "no_live_workflow" in message
+    assert "implementing" in message
+    assert "144000" in message
+
+
 def test_split_title():
     t, d = split_title("Account\n\nMake a function that shows balance", fallback="x")
     assert t == "Account" and "balance" in d
@@ -104,7 +128,7 @@ def _seed(conn, wi_id: str) -> None:
             VALUES (%s, %s, 'task_request', %s::jsonb, true)
             """,
             (wi_id, f"ev-{wi_id}",
-             json.dumps({"content_snapshot": "Titulo da tarefa\n\nCorpo detalhado."})),
+             json.dumps({"content_snapshot": "Task title\n\nDetailed body."})),
         )
         cur.execute(
             "INSERT INTO audit_log (work_item_id, tenant_id, actor, action, details) "
@@ -136,7 +160,7 @@ def test_projects_work_item_timeline_and_runs_idempotently():
             wi = cur.fetchone()
             assert wi is not None
             assert wi["status"] == "running" and wi["current_phase"] == "coding"
-            assert wi["title"] == "Titulo da tarefa"
+            assert wi["title"] == "Task title"
             assert wi["source_id"] == "acme/repo#42"
             assert float(wi["budget_usd"]) == 5.0
             # last_event came from the most recent audit row
