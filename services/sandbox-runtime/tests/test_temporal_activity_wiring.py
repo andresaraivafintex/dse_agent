@@ -1,22 +1,22 @@
-"""WSC-E1-T3: prova que `provision_sandbox`/`checkpoint_sandbox`/
-`rebuild_sandbox`/`teardown_sandbox`/`run_coder_turn` são Activities de
-verdade do Temporal Python SDK — não só funções assíncronas coincidentemente
-com a mesma assinatura.
+"""WSC-E1-T3: proves that `provision_sandbox`/`checkpoint_sandbox`/
+`rebuild_sandbox`/`teardown_sandbox`/`run_coder_turn` are real Temporal Python
+SDK Activities — not just async functions that happen to share the same
+signature.
 
-Usa `temporalio.testing.ActivityEnvironment`, o harness OFICIAL do SDK para
-executar uma Activity isoladamente (fora de um Workflow/Worker completo) —
-não é um mock: é o mesmo código de execução de Activity do SDK real, só sem
-precisar de um servidor Temporal de pé. Nota de ambiente: o container
-`dse_temporal` desta sessão de desenvolvimento paralela está com o schema
-dynamic config ausente na imagem (`temporalio/auto-setup:1.24`) e saiu
-(`docker ps -a` mostra `Exited (1)`); isso é um problema de infra da
-fundação (docker-compose.yml, fora do escopo de edição do WS-C) — não afeta
-a validade deste teste, que não depende do servidor Temporal, só do SDK.
+Uses `temporalio.testing.ActivityEnvironment`, the SDK's OFFICIAL harness for
+running an Activity in isolation (outside a full Workflow/Worker) — it is not a
+mock: it is the real SDK's own Activity execution code, just without needing a
+Temporal server up. Environment note: the `dse_temporal` container of this
+parallel development session is missing the dynamic config schema in the image
+(`temporalio/auto-setup:1.24`) and exited (`docker ps -a` shows `Exited (1)`);
+that is a foundation infra problem (docker-compose.yml, outside WS-C's editing
+scope) — it does not affect the validity of this test, which does not depend on
+the Temporal server, only on the SDK.
 
-Os testes de idempotência/chaos/scoped-git já chamam essas mesmas funções
-diretamente via `asyncio.run(...)` contra Docker/Postgres/git reais — este
-arquivo cobre especificamente a integração com o SDK do Temporal em si
-(registro via `@activity.defn(name=...)`, execução via `ActivityEnvironment`).
+The idempotency/chaos/scoped-git tests already call these same functions
+directly via `asyncio.run(...)` against real Docker/Postgres/git — this file
+specifically covers the integration with the Temporal SDK itself (registration
+via `@activity.defn(name=...)`, execution via `ActivityEnvironment`).
 """
 from __future__ import annotations
 
@@ -51,8 +51,8 @@ def test_activity_names_match_the_contract():
 
 
 def test_provision_and_teardown_run_through_real_temporal_activity_environment(work_item_id, state_dir):
-    """Executa a Activity através do harness real do Temporal SDK
-    (`ActivityEnvironment.run`), não só como função Python solta."""
+    """Runs the Activity through the real Temporal SDK harness
+    (`ActivityEnvironment.run`), not just as a loose Python function."""
     env = ActivityEnvironment()
 
     handle = asyncio.run(

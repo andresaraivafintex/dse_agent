@@ -1,27 +1,28 @@
-"""WSD-E4-T3 (Fase 3): bateria de chaos do caminho de modelo — EXTENSÃO.
+"""WSD-E4-T3 (Phase 3): model-path chaos battery — EXTENSION.
 
-Os cenários egress-fail-closed / key-expiry / gateway-oscillation JÁ EXISTEM
-em `services/orchestrator/tests/test_chaos.py` (WSB-E5-T3b, Fase 2) e provam
-o comportamento do ORQUESTRADOR na fronteira de Activity. Este arquivo NÃO os
-duplica — adiciona os cenários que faltavam, provados contra a infra REAL
-(LiteLLM + 2 ecos em Docker, egress-proxy real na :8806, Postgres real):
+The egress-fail-closed / key-expiry / gateway-oscillation scenarios ALREADY
+EXIST in `services/orchestrator/tests/test_chaos.py` (WSB-E5-T3b, Phase 2) and
+prove the ORCHESTRATOR's behavior at the Activity boundary. This file does NOT
+duplicate them — it adds the missing scenarios, proven against REAL infra
+(LiteLLM + 2 echoes in Docker, the real egress-proxy on :8806, real Postgres):
 
-  1. outage TOTAL de provider (ambos os ecos fora, docker stop de verdade)
-     -> recusa limpa na fronteira (P6) + audit (P8), zero linha no ledger;
-  2. exaustão de quota (429 real do provider, simulado deterministicamente
-     pelo eco via marcador) -> 429 propagado como fronteira limpa + audit;
-  3. failover intra-tier sob falha -> coberto em test_failover_intra_tier.py
-     (WSD-E4-T1 — mesmo conjunto de mudanças, liga com este arquivo);
-  4. exaustão de budget MID-TASK -> a chamada N completa INTEIRA, a chamada
-     N+1 é recusada na fronteira (nunca truncamento no meio de uma resposta);
-  5. egress a endpoint de modelo não-allowlisted -> negado pelo egress-proxy
-     REAL da porta 8806 (default-deny), com controle positivo provando que a
-     ÚNICA rota de modelo permitida (model-gateway:4000) funciona através do
-     MESMO proxy.
+  1. TOTAL provider outage (both echoes down, a genuine docker stop)
+     -> clean refusal at the boundary (P6) + audit (P8), zero ledger rows;
+  2. quota exhaustion (a real provider 429, simulated deterministically by the
+     echo via a marker) -> 429 propagated as a clean boundary + audit;
+  3. intra-tier failover under failure -> covered in
+     test_failover_intra_tier.py (WSD-E4-T1 — same change set, pairs with this
+     file);
+  4. MID-TASK budget exhaustion -> call N completes IN FULL, call N+1 is
+     refused at the boundary (never truncation in the middle of a response);
+  5. egress to a non-allowlisted model endpoint -> denied by the REAL
+     egress-proxy on port 8806 (default-deny), with a positive control proving
+     that the ONLY permitted model route (model-gateway:4000) works through the
+     SAME proxy.
 
-Aceitação (plano WSD-E4-T3): todos os cenários terminam em retry automático
-(camada do WS-B — Temporal), Failed com mensagem clara, ou deny auditado —
-zero truncamento silencioso.
+Acceptance (WSD-E4-T3 plan): every scenario ends in an automatic retry (the
+WS-B layer — Temporal), a Failed with a clear message, or an audited deny —
+zero silent truncation.
 """
 from __future__ import annotations
 
@@ -68,15 +69,15 @@ def _audit_rows(work_item_id):
 
 
 # ---------------------------------------------------------------------------
-# Cenário 1 — outage TOTAL de provider (ambos os ecos fora).
+# Scenario 1 — TOTAL provider outage (both echoes down).
 # ---------------------------------------------------------------------------
 
 
 def test_total_provider_outage_clean_refusal_audited(unique_ids):
-    """Primário E fallback fora (docker stop nos dois) -> a chamada falha
-    LIMPA na fronteira (GatewayCallError com mensagem clara, que o workflow do
-    WS-B converte em retry de Activity/Failed), com audit row (P8) e ZERO
-    linha no ledger (nenhum custo fantasma, nenhum output truncado)."""
+    """Primary AND fallback down (docker stop on both) -> the call fails CLEAN
+    at the boundary (GatewayCallError with a clear message, which the WS-B
+    workflow turns into an Activity retry/Failed), with an audit row (P8) and
+    ZERO ledger rows (no phantom cost, no truncated output)."""
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
     key = mint_virtual_key(t, wi, Stage.coder, models=intra_tier_failover_set(ECHO_MODEL))
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
@@ -89,30 +90,30 @@ def test_total_provider_outage_clean_refusal_audited(unique_ids):
                 chat_completion(
                     headers=headers, virtual_key=key, model=ECHO_MODEL,
                     messages=[{"role": "user", "content": "total-outage"}],
-                    # medido nesta sessão: com ambos os containers parados o
-                    # LiteLLM leva ~53s para esgotar connect-timeouts ×
-                    # retries × fallback antes de devolver o 500 final.
+                    # measured in this session: with both containers stopped
+                    # LiteLLM takes ~53s to burn through connect-timeouts ×
+                    # retries × fallback before returning the final 500.
                     timeout=90.0,
                 )
         finally:
             start_container(PRIMARY_ECHO_CONTAINER)
             start_container(FALLBACK_ECHO_CONTAINER)
 
-        # fronteira limpa com mensagem clara (não um crash opaco). Dependendo
-        # de quão rápido o Docker derruba a rede do container, o LiteLLM
-        # devolve 408 (litellm.Timeout, connect timeout de 5s por tentativa)
-        # ou 5xx (connection refused) — ambos são recusas tipadas na fronteira.
+        # clean boundary with a clear message (not an opaque crash). Depending
+        # on how fast Docker tears down the container's network, LiteLLM
+        # returns 408 (litellm.Timeout, 5s connect timeout per attempt) or 5xx
+        # (connection refused) — both are typed refusals at the boundary.
         assert ei.value.status_code == 408 or ei.value.status_code >= 500
         assert "error" in ei.value.body
 
-        # deny/failure AUDITADO (P8)
+        # AUDITED deny/failure (P8)
         rows = _audit_rows(wi)
         upstream_failures = [d for a, d in rows if a == "gateway.call_failed_upstream"]
         assert len(upstream_failures) == 1
         assert upstream_failures[0]["model"] == ECHO_MODEL
         assert upstream_failures[0]["status_code"] >= 400
 
-        # zero truncamento / zero custo fantasma: nada no ledger
+        # zero truncation / zero phantom cost: nothing in the ledger
         assert ledger.aggregate(tenant_id=t) == []
     finally:
         revoke_virtual_key(key)
@@ -120,16 +121,16 @@ def test_total_provider_outage_clean_refusal_audited(unique_ids):
 
 
 # ---------------------------------------------------------------------------
-# Cenário 2 — exaustão de quota do provider (429 real fim-a-fim).
+# Scenario 2 — provider quota exhaustion (a real end-to-end 429).
 # ---------------------------------------------------------------------------
 
 
 def test_provider_quota_exhaustion_429_clean_boundary(unique_ids):
-    """O eco responde 429 (shape OpenAI, determinístico via marcador) ->
-    o LiteLLM propaga RateLimitError -> o cliente levanta GatewayCallError
-    (429) na fronteira, auditado. O retry automático é responsabilidade da
-    Activity do WS-B (Temporal) — aqui provamos que a fronteira é limpa e
-    tipada, nunca um output parcial."""
+    """The echo answers 429 (OpenAI shape, deterministic via the marker) ->
+    LiteLLM propagates RateLimitError -> the client raises GatewayCallError
+    (429) at the boundary, audited. The automatic retry is the WS-B Activity's
+    responsibility (Temporal) — here we prove the boundary is clean and typed,
+    never a partial output."""
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
     key = mint_virtual_key(t, wi, Stage.coder, models=intra_tier_failover_set(ECHO_MODEL))
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
@@ -139,11 +140,11 @@ def test_provider_quota_exhaustion_429_clean_boundary(unique_ids):
             chat_completion(
                 headers=headers, virtual_key=key, model=ECHO_MODEL,
                 messages=[{"role": "user", "content": "[[SIMULATE_QUOTA_EXHAUSTED]] do work"}],
-                timeout=60.0,  # o router retenta/faz fallback antes de desistir
+                timeout=60.0,  # the router retries/falls back before giving up
             )
 
         assert ei.value.status_code == 429
-        # mensagem clara vinda do provider, não engolida
+        # clear message coming from the provider, not swallowed
         assert "quota" in json.dumps(ei.value.body).lower()
 
         rows = _audit_rows(wi)
@@ -151,50 +152,50 @@ def test_provider_quota_exhaustion_429_clean_boundary(unique_ids):
         assert len(upstream_failures) == 1
         assert upstream_failures[0]["status_code"] == 429
 
-        assert ledger.aggregate(tenant_id=t) == []  # 429 não vira custo
+        assert ledger.aggregate(tenant_id=t) == []  # a 429 does not become cost
     finally:
         revoke_virtual_key(key)
 
 
 # ---------------------------------------------------------------------------
-# Cenário 4 — exaustão de budget MID-TASK (fronteira, nunca truncamento).
+# Scenario 4 — MID-TASK budget exhaustion (boundary, never truncation).
 # ---------------------------------------------------------------------------
 
 
 def test_budget_exhaustion_mid_task_boundary_never_truncates(unique_ids):
-    """Simula uma tarefa em andamento: cap de $1.00; com $0.40 gastos a
-    chamada seguinte COMPLETA inteira (o gasto só é checado na fronteira,
-    nunca corta uma geração em curso); o gasto passa do cap ($1.10) e a
-    chamada seguinte é recusada LIMPA (402 budget_exhausted) + audit. Zero
-    truncamento em qualquer ponto (P6)."""
+    """Simulates a task in progress: a $1.00 cap; with $0.40 spent the next
+    call COMPLETES in full (spend is only checked at the boundary, it never
+    cuts a generation in progress); spend then passes the cap ($1.10) and the
+    following call is refused CLEAN (402 budget_exhausted) + audit. Zero
+    truncation at any point (P6)."""
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
     set_work_item_budget(wi, t, 1.00)
     key = mint_virtual_key(t, wi, Stage.coder, models=intra_tier_failover_set(ECHO_MODEL))
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
         ensure_primary_serving()
-        # gasto acumulado "da tarefa até aqui" (simula chamadas pagas
-        # anteriores — o eco custa $0, então o custo é injetado no MESMO
-        # ledger durável que o enforcement lê).
+        # accumulated spend "for the task so far" (simulates earlier paid calls
+        # — the echo costs $0, so the cost is injected into the SAME durable
+        # ledger that enforcement reads).
         ledger.record_call(
             tenant_id=t, work_item_id=wi, stage="coder", task_class="default",
             model=ECHO_MODEL, cost_usd=0.40, tokens_in=100, tokens_out=50,
         )
 
-        # abaixo do cap -> a chamada passa e vem COMPLETA (determinística)
+        # under the cap -> the call passes and comes back COMPLETE (deterministic)
         result = chat_completion(
             headers=headers, virtual_key=key, model=ECHO_MODEL,
             messages=[{"role": "user", "content": "mid-task"}],
         )
-        assert result.content == "ECHO[ksat-dim]"  # inteira, nunca cortada
+        assert result.content == "ECHO[ksat-dim]"  # whole, never cut
 
-        # a tarefa "gasta" mais e estoura o cap ($0.40 + $0.70 = $1.10 > $1.00)
+        # the task "spends" more and blows past the cap ($0.40 + $0.70 = $1.10 > $1.00)
         ledger.record_call(
             tenant_id=t, work_item_id=wi, stage="coder", task_class="default",
             model=ECHO_MODEL, cost_usd=0.70, tokens_in=100, tokens_out=50,
         )
 
-        # próxima FRONTEIRA -> recusa limpa tipada + audit; nada foi truncado
+        # next BOUNDARY -> clean typed refusal + audit; nothing was truncated
         with pytest.raises(GatewayCallError) as ei:
             chat_completion(
                 headers=headers, virtual_key=key, model=ECHO_MODEL,
@@ -203,7 +204,7 @@ def test_budget_exhaustion_mid_task_boundary_never_truncates(unique_ids):
         assert ei.value.status_code == 402
         assert ei.value.body["error"] == "budget_exhausted"
         assert ei.value.body["kind"] == "work_item"
-        # mensagem clara: gasto e cap explícitos para o humano que vai ler o Failed
+        # clear message: spend and cap spelled out for the human who reads the Failed
         assert "$" in ei.value.body["message"]
 
         actions = [a for a, _ in _audit_rows(wi)]
@@ -213,7 +214,7 @@ def test_budget_exhaustion_mid_task_boundary_never_truncates(unique_ids):
 
 
 # ---------------------------------------------------------------------------
-# Cenário 5 — egress a endpoint de modelo NÃO-allowlisted (proxy real :8806).
+# Scenario 5 — egress to a NON-allowlisted model endpoint (real proxy on :8806).
 # ---------------------------------------------------------------------------
 
 
@@ -231,15 +232,16 @@ def _egress_proxy_up() -> bool:
 
 needs_egress_proxy = pytest.mark.skipif(
     not _egress_proxy_up(),
-    reason="egress-proxy real (WS-C) não está no ar na :8806 — suba docker-compose.wsc.yml",
+    reason="the real egress-proxy (WS-C) is not up on :8806 — bring up docker-compose.wsc.yml",
 )
 
 
 @needs_egress_proxy
 def test_egress_denies_non_allowlisted_model_endpoint_plain_http():
-    """failure mode 12: tentativa de falar com um endpoint de modelo público
-    (api.openai.com) através do egress-proxy REAL -> 403 default-deny, sem a
-    requisição jamais sair (o proxy nem tenta conectar no host negado)."""
+    """failure mode 12: attempt to talk to a public model endpoint
+    (api.openai.com) through the REAL egress-proxy -> 403 default-deny, with
+    the request never leaving (the proxy does not even try to connect to the
+    denied host)."""
     with httpx.Client(proxy=EGRESS_PROXY_URL, timeout=10.0) as client:
         resp = client.get("http://api.openai.com/v1/models")
     assert resp.status_code == 403
@@ -247,8 +249,9 @@ def test_egress_denies_non_allowlisted_model_endpoint_plain_http():
 
 @needs_egress_proxy
 def test_egress_denies_non_allowlisted_model_endpoint_https_connect():
-    """Mesmo failure mode via túnel HTTPS (CONNECT): o proxy recusa o túnel
-    para api.anthropic.com — o cliente vê erro de proxy, nunca um handshake."""
+    """Same failure mode over an HTTPS tunnel (CONNECT): the proxy refuses the
+    tunnel to api.anthropic.com — the client sees a proxy error, never a
+    handshake."""
     with httpx.Client(proxy=EGRESS_PROXY_URL, timeout=10.0) as client:
         with pytest.raises(httpx.ProxyError):
             client.get("https://api.anthropic.com/v1/models")
@@ -256,10 +259,10 @@ def test_egress_denies_non_allowlisted_model_endpoint_https_connect():
 
 @needs_egress_proxy
 def test_egress_allows_only_the_model_gateway_route():
-    """Controle positivo: a ÚNICA rota de modelo permitida (model-gateway:4000,
-    resolvida DENTRO da rede Docker pelo próprio proxy) funciona através do
-    MESMO proxy que negou os endpoints públicos acima — prova que o deny não é
-    um proxy quebrado, é política default-deny funcionando."""
+    """Positive control: the ONLY permitted model route (model-gateway:4000,
+    resolved INSIDE the Docker network by the proxy itself) works through the
+    SAME proxy that denied the public endpoints above — proving the deny is not
+    a broken proxy, it is default-deny policy working."""
     ensure_primary_serving()
     master = os.environ.get("DSE_LITELLM_MASTER_KEY", "sk-dse-local-dev-master-key")
     with httpx.Client(proxy=EGRESS_PROXY_URL, timeout=15.0) as client:

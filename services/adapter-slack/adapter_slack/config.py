@@ -1,30 +1,31 @@
-"""Configuração do adapter Slack — leitura de credenciais.
+"""Slack adapter configuration — credential lookup.
 
-Ordem de resolução (WSA-E2-T1): backend de secrets do WS-F
-(`dse_secrets`, WSF-E2-T3a) PRIMEIRO se disponível e responder; senão cai
-para env var local (`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`). O import de
-`dse_secrets` é opcional/defensivo — funciona mesmo se `services/platform`
-não estiver instalado neste ambiente (ex.: CI rodando só o WS-A isolado).
+Resolution order (WSA-E2-T1): the WS-F secrets backend (`dse_secrets`,
+WSF-E2-T3a) FIRST if it is available and responds; otherwise it falls back
+to a local env var (`SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`). The
+`dse_secrets` import is optional/defensive — this works even if
+`services/platform` is not installed in this environment (e.g. CI running
+only WS-A in isolation).
 
-Nesta sessão de desenvolvimento `services/platform/dse_secrets` (WSF-E2-T3a)
-já existe e é usado de verdade — mas nenhum Slack App real foi registrado,
-então o path `dse/slack/webhook` no Vault dev não tem uma versão gravada; a
-leitura cai (de propósito, via `VaultUnavailableError`) para as env vars
-abaixo, que devem ser preenchidas com um valor de teste local para rodar os
-testes/fixtures deste serviço.
+In this development session `services/platform/dse_secrets` (WSF-E2-T3a)
+already exists and is genuinely used — but no real Slack App was registered,
+so the `dse/slack/webhook` path in the dev Vault has no version written; the
+read falls through (on purpose, via `VaultUnavailableError`) to the env vars
+below, which must be filled with a local test value to run this service's
+tests/fixtures.
 """
 from __future__ import annotations
 
 import os
 
 def get_tenant_id() -> str:
-    """Fase 1: single-tenant de desenvolvimento (lido a cada chamada, não
-    fixado no import — permite overrides em teste via env var mesmo depois
-    do módulo já ter sido importado). `ConversationEvent` não carrega
-    `tenant_id` (é um conceito de plataforma/workspace->tenant mapping) —
-    mapear múltiplos workspaces Slack para tenants distintos é escopo de
-    WS-F/Fase 2 (identity map completo). Documentado como limitação
-    conhecida no README."""
+    """Phase 1: development single-tenant (read on every call, not frozen at
+    import time — this allows test overrides via env var even after the
+    module has already been imported). `ConversationEvent` does not carry
+    `tenant_id` (that is a platform/workspace->tenant mapping concept) —
+    mapping multiple Slack workspaces to distinct tenants is WS-F/Phase 2
+    scope (the full identity map). Documented as a known limitation in the
+    README."""
     return os.environ.get("DSE_TENANT_ID", "tenant_dev")
 
 

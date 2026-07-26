@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-console-projector"
 version = "0.1.0"
-description = "Plano 06: projeta o system of record (work_items/audit_log/model_call_ledger) no read model console_rm consumido pelo dse_console_pane — cursores idempotentes, replay determinístico"
+description = "Plan 06: projects the system of record (work_items/audit_log/model_call_ledger) into the console_rm read model consumed by dse_console_pane — idempotent cursors, deterministic replay"
 requires-python = ">=3.11"
 dependencies = [
     "psycopg2-binary>=2.9",

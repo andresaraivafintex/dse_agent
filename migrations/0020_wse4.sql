@@ -1,23 +1,23 @@
--- Fintex DSE — Fase 4 ("Loop hardening & learning") — WS-E (services/validation).
--- Migração reservada 0020 para WS-E na Fase 4 (adendo 03 §4; enunciado do WS-E).
--- Não editar 0001-0019 (fundação/Fases 1-3, e a 0019 é do WS-C). Este arquivo só
--- cria tabela de WS-E. Aditiva e idempotente.
+-- Fintex DSE — Phase 4 ("Loop hardening & learning") — WS-E (services/validation).
+-- Migration 0020 reserved for WS-E in Phase 4 (addendum 03 §4; WS-E statement).
+-- Do not edit 0001-0019 (foundation/Phases 1-3, and 0019 belongs to WS-C). This
+-- file only creates a WS-E table. Additive and idempotent.
 --
--- Adições:
---   wse_base_updates — WSE-E6-T16 (merge-base, nunca rebase durante review):
---                      1 linha de EVIDÊNCIA (P8) por execução de update_base_branch.
---                      Registra a estratégia escolhida (merge_base / rebase_prefirst_review
---                      / noop_no_drift), se houve conflito não-resolvível (escalado a
---                      humano — o agente NUNCA resolve à força) e a asserção de exit da
---                      Fase 4: `orphaned_threads` — DEVE ser 0 no caminho merge-base
---                      (as threads de review ancoradas em commits são preservadas; o
---                      rebase+force-push as órfã — failure mode 11).
+-- Additions:
+--   wse_base_updates — WSE-E6-T16 (merge-base, never rebase during review):
+--                      1 EVIDENCE row (P8) per run of update_base_branch.
+--                      Records the chosen strategy (merge_base / rebase_prefirst_review
+--                      / noop_no_drift), whether there was an unresolvable conflict
+--                      (escalated to a human — the agent NEVER force-resolves) and the
+--                      Phase 4 exit assertion: `orphaned_threads` — MUST be 0 on the
+--                      merge-base path (review threads anchored to commits are
+--                      preserved; a rebase+force-push orphans them — failure mode 11).
 --
--- Episódios de skill-learning de REVIEW FEEDBACK (WSE-E6-T18) NÃO ganham tabela
--- nova: usam `skill_episode` (source='review_feedback') da migração 0019 (WS-C) —
--- a fronteira "só episódio, nenhuma skill criada/ativada" é a mesma dos episódios
--- de CI-repair (wse_ci_repair_episodes, Fase 3). WS-C consome os episódios no
--- pipeline de promoção (WSC-E4-T2/T3).
+-- REVIEW FEEDBACK skill-learning episodes (WSE-E6-T18) do NOT get a new table:
+-- they use `skill_episode` (source='review_feedback') from migration 0019 (WS-C) —
+-- the "episode only, no skill created/activated" boundary is the same as for the
+-- CI-repair episodes (wse_ci_repair_episodes, Phase 3). WS-C consumes the episodes
+-- in the promotion pipeline (WSC-E4-T2/T3).
 
 CREATE TABLE IF NOT EXISTS wse_base_updates (
     id                       BIGSERIAL PRIMARY KEY,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS wse_base_updates (
                                  ('merge_base', 'rebase_prefirst_review', 'noop_no_drift')),
     conflict                 BOOLEAN NOT NULL DEFAULT FALSE,
     orphaned_threads         INTEGER NOT NULL DEFAULT 0,
-    anchored_threads         INTEGER NOT NULL DEFAULT 0,  -- nº de threads de review ancoradas observadas
+    anchored_threads         INTEGER NOT NULL DEFAULT 0,  -- number of anchored review threads observed
     first_human_review_done  BOOLEAN NOT NULL DEFAULT TRUE,
     old_tip_sha              TEXT NOT NULL DEFAULT '',
     new_tip_sha              TEXT NOT NULL DEFAULT '',

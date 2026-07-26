@@ -1,14 +1,14 @@
-"""Fase 2 (plano 09) — classificação ESTRUTURADA de falha fail-closed.
+"""Phase 2 (plano 09) — STRUCTURED classification of fail-closed failures.
 
-Antes o workflow decidia por substring da mensagem (_FAIL_CLOSED_MARKERS);
-agora decide pelo `type` do ApplicationError (dse.failure.* + legados). Estes
-testes provam as três células:
-  1. type canônico com mensagem NEUTRA (nenhuma palavra-marcador) → fail-closed
-     limpo — a prova de que a mensagem não decide mais nada;
-  2. type legado (EgressFailClosed/ProviderBillingError) → mesma classificação
-     (replay/raisers antigos);
-  3. type desconhecido e mensagem neutra → exaustão normal (NÃO fail-closed) —
-     um erro comum nunca vira recusa de política por acidente.
+The workflow used to decide by message substring (_FAIL_CLOSED_MARKERS); it now
+decides by the ApplicationError `type` (dse.failure.* + legacy). These tests
+prove the three cells:
+  1. canonical type with a NEUTRAL message (no marker word) → clean fail-closed
+     — proof that the message no longer decides anything;
+  2. legacy type (EgressFailClosed/ProviderBillingError) → same classification
+     (old replays/raisers);
+  3. unknown type and neutral message → normal exhaustion (NOT fail-closed) — a
+     common error never accidentally becomes a policy refusal.
 """
 from __future__ import annotations
 
@@ -43,14 +43,14 @@ async def _run_to_result(env, state, work_item_id):
 
 @pytest.mark.asyncio
 async def test_canonical_type_with_neutral_message_fails_closed(time_skipping_env):
-    """A mensagem NÃO contém nenhum marcador de substring — só o type decide."""
+    """The message contains NO substring marker — only the type decides."""
     work_item_id = new_work_item_id("sfc")
     insert_work_item(work_item_id)
     state = FakeControlPlane(
         plan_risk_class="low",
         fail_closed_on={"run_coder_turn": {
             "times": 999,
-            "marker": "model path refused by server-side gate",  # zero marcadores
+            "marker": "model path refused by server-side gate",  # zero markers
             "type": failure_type(FailureClass.policy_fail_closed),
         }},
     )
@@ -64,15 +64,15 @@ async def test_canonical_type_with_neutral_message_fails_closed(time_skipping_en
 
 @pytest.mark.asyncio
 async def test_unknown_type_neutral_message_is_not_fail_closed(time_skipping_env):
-    """Erro comum (type fora do vocabulário, mensagem neutra) segue o caminho
-    de exaustão/escalação — nunca é promovido a recusa de política."""
+    """A common error (type outside the vocabulary, neutral message) follows the
+    exhaustion/escalation path — it is never promoted to a policy refusal."""
     work_item_id = new_work_item_id("sfx")
     insert_work_item(work_item_id)
     state = FakeControlPlane(
         plan_risk_class="low",
         fail_closed_on={"run_coder_turn": {
             "times": 999,
-            "marker": "unexpected null pointer in adapter",  # neutro
+            "marker": "unexpected null pointer in adapter",  # neutral
             "type": "SomeRandomBug",
         }},
     )

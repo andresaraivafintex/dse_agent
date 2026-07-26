@@ -1,12 +1,12 @@
-"""Execução de chamadas síncronas longas com heartbeat Temporal real.
+"""Running long synchronous calls with real Temporal heartbeats.
 
-Os SDKs de agente expõem hoje uma superfície síncrona. Chamá-los diretamente
-dentro de uma Activity ``async`` bloqueia o event loop e impede heartbeats.
-Este helper desloca somente a chamada bloqueante para uma thread e mantém o
-loop da Activity livre para emitir progresso periódico.
+Agent SDKs currently expose a synchronous surface. Calling them directly inside
+an ``async`` Activity blocks the event loop and prevents heartbeats. This helper
+offloads only the blocking call to a thread and keeps the Activity's loop free
+to emit periodic progress.
 
-Fora de uma Activity Temporal o mesmo helper continua funcionando e nunca
-tenta acessar o contexto inexistente de ``temporalio.activity``.
+Outside a Temporal Activity the same helper keeps working and never tries to
+reach the non-existent ``temporalio.activity`` context.
 """
 from __future__ import annotations
 
@@ -36,17 +36,17 @@ def _configured_interval(override: float | None = None) -> float:
         interval = float(raw)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"{HEARTBEAT_INTERVAL_ENV_VAR}={raw!r} precisa ser um número positivo"
+            f"{HEARTBEAT_INTERVAL_ENV_VAR}={raw!r} must be a positive number"
         ) from exc
     if interval < _MIN_HEARTBEAT_INTERVAL_SECONDS:
         raise ValueError(
-            f"{HEARTBEAT_INTERVAL_ENV_VAR} precisa ser >= {_MIN_HEARTBEAT_INTERVAL_SECONDS}s"
+            f"{HEARTBEAT_INTERVAL_ENV_VAR} must be >= {_MIN_HEARTBEAT_INTERVAL_SECONDS}s"
         )
     return interval
 
 
 def _effective_interval(configured: float) -> float:
-    """Mantém pelo menos três oportunidades dentro do heartbeat timeout."""
+    """Keep at least three chances to beat within the heartbeat timeout."""
     if not activity.in_activity():
         return configured
     timeout = activity.info().heartbeat_timeout
@@ -70,8 +70,8 @@ def _details(
     started_at: float,
     sequence: int,
 ) -> dict[str, Any]:
-    # Deliberadamente sem instruction, prompt, virtual key ou output do
-    # modelo: heartbeat vai para a história operacional do Temporal.
+    # Deliberately no instruction, prompt, virtual key or model output: the
+    # heartbeat goes into Temporal's operational history.
     return {
         "schema_version": 1,
         "component": "sandbox-runtime",
@@ -94,12 +94,13 @@ async def run_sync_with_heartbeat(
     interval_seconds: float | None = None,
     **kwargs: Any,
 ) -> _T:
-    """Executa ``fn`` sem bloquear heartbeats da Activity.
+    """Run ``fn`` without blocking the Activity's heartbeats.
 
-    A primeira batida é emitida antes da chamada, as seguintes em intervalo
-    regular e uma última após retorno. Exceções da função ou do heartbeat não
-    são escondidas. Quando chamado fora do Temporal, apenas executa ``fn`` na
-    thread de trabalho e devolve/propaga o mesmo resultado.
+    The first beat is emitted before the call, the following ones at a regular
+    interval, and a final one after it returns. Exceptions from the function or
+    from the heartbeat are not swallowed. When called outside Temporal, it
+    simply runs ``fn`` on the worker thread and returns/propagates the same
+    result.
     """
     configured_interval = _configured_interval(interval_seconds)
     in_activity = activity.in_activity()

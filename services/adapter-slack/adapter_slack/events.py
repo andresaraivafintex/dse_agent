@@ -1,12 +1,13 @@
-"""Normalização Slack Events API / Interactivity -> `ConversationEvent`
-(WSA-E3-T1). Passa pelas 4 defesas de intake ANTES de chegar aqui (a
-verificação de assinatura acontece em `app.py`, que só chama estas funções
-depois de `signature_verified=True`).
+"""Slack Events API / Interactivity normalization -> `ConversationEvent`
+(WSA-E3-T1). The 4 intake defenses run BEFORE anything reaches here
+(signature verification happens in `app.py`, which only calls these
+functions once `signature_verified=True`).
 
-Defesa TOCTOU (WSA-E2-T2): `content_snapshot` é o texto exatamente como
-veio no corpo do webhook — nunca re-buscamos a mensagem via
-`conversations.history`/`conversations.replies` depois. Isso é, por
-construção, automático aqui: só lemos `event["text"]` do payload recebido.
+TOCTOU defense (WSA-E2-T2): `content_snapshot` is the text exactly as it
+arrived in the webhook body — we never re-fetch the message via
+`conversations.history`/`conversations.replies` afterwards. That is
+automatic here by construction: we only read `event["text"]` from the
+received payload.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ def _actor_from_user_id(user_id: str, resolved_principal: str, display_name: str
 def build_event_from_app_mention(event: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
     channel = event["channel"]
     ts = event["ts"]
-    thread_ts = event.get("thread_ts", ts)  # sem thread_ts -> esta msg é a raiz de uma thread nova
+    thread_ts = event.get("thread_ts", ts)  # no thread_ts -> this msg is the root of a new thread
     return ConversationEvent.build(
         platform=Platform.slack,
         thread_key=f"{channel}:{thread_ts}",
@@ -36,14 +37,14 @@ def build_event_from_app_mention(event: dict[str, Any], *, resolved_principal: s
 
 
 def build_event_from_thread_message(event: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
-    """Mensagem comum (sem menção) dentro de uma thread existente. Fase 1:
-    tratada como `clarification_answer` por padrão — desambiguar
-    clarification vs. steering exigiria saber se o bot está aguardando
-    resposta, estado que vive no workflow do WS-B, não no adapter
-    (documentado como limitação conhecida no README)."""
+    """Ordinary message (no mention) inside an existing thread. Phase 1:
+    treated as `clarification_answer` by default — telling clarification
+    apart from steering would require knowing whether the bot is waiting for
+    an answer, and that state lives in the WS-B workflow, not in the adapter
+    (documented as a known limitation in the README)."""
     channel = event["channel"]
     ts = event["ts"]
-    thread_ts = event["thread_ts"]  # só chamado quando thread_ts está presente (ver app.py)
+    thread_ts = event["thread_ts"]  # only called when thread_ts is present (see app.py)
     return ConversationEvent.build(
         platform=Platform.slack,
         thread_key=f"{channel}:{thread_ts}",
@@ -60,23 +61,23 @@ _REJECT_TOKENS = ("reject", "rejected", "deny", "denied", "changes", "re_plan", 
 
 
 def parse_slack_approval(action_id: str, value: str) -> tuple[str, str | None]:
-    """C1 (relatório 07): deriva verdict/route DETERMINÍSTICO do clique de botão.
-    O verdict NÃO pode ficar só no texto — tem que virar marcador
-    (`approval_verdict`/`approval_route`) que o dispatcher lê, senão o default
-    é `approved` e um "reject" aprovaria silenciosamente (bug de segurança do
-    gate). Espelha o caminho do Jira (`ingest_status_approval`).
+    """C1 (report 07): derives a DETERMINISTIC verdict/route from the button
+    click. The verdict must NOT live in the text alone — it has to become a
+    marker (`approval_verdict`/`approval_route`) that the dispatcher reads,
+    otherwise the default is `approved` and a "reject" would silently approve
+    (gate security bug). Mirrors the Jira path (`ingest_status_approval`).
 
-    Convenção dos botões (postados no Block Kit de aprovação): `action_id` ou
-    `value` contendo 'reject'/'deny'/'re_plan' => rejected; o `value` pode
-    carregar a rota após ':' (ex.: 'reject:re_plan'). Qualquer outra coisa =>
-    approved (fail-safe: uma rejeição jamais é lida como aprovação, mas um
-    clique ambíguo NÃO auto-aprova algo destrutivo — só segue o fluxo de
-    aprovação normal, que ainda exige o gate)."""
+    Button convention (as posted in the approval Block Kit): `action_id` or
+    `value` containing 'reject'/'deny'/'re_plan' => rejected; the `value` may
+    carry the route after ':' (e.g. 'reject:re_plan'). Anything else =>
+    approved (fail-safe: a rejection is never read as an approval, and an
+    ambiguous click does NOT auto-approve something destructive — it just
+    follows the normal approval flow, which still requires the gate)."""
     haystack = f"{action_id}|{value}".lower()
     is_reject = any(tok in haystack for tok in _REJECT_TOKENS)
     if not is_reject:
         return "approved", None
-    # rota da rejeição: parte após ':' no value, senão default re_plan.
+    # rejection route: the part after ':' in the value, else default re_plan.
     route = "re_plan"
     if ":" in value:
         candidate = value.split(":", 1)[1].strip()
@@ -86,9 +87,9 @@ def parse_slack_approval(action_id: str, value: str) -> tuple[str, str | None]:
 
 
 def build_event_from_block_action(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
-    """Interação de botão (`block_actions`) -> kind=approval. `source_ref`
-    usa o canal+thread_ts da mensagem original de status (onde o botão
-    apareceu) para correlacionar de volta ao WorkItem certo."""
+    """Button interaction (`block_actions`) -> kind=approval. `source_ref`
+    uses the channel+thread_ts of the original status message (where the
+    button showed up) to correlate back to the right WorkItem."""
     channel = payload["channel"]["id"]
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts", message.get("ts"))
@@ -114,10 +115,10 @@ def build_event_from_block_action(payload: dict[str, Any], *, resolved_principal
 def build_repo_select_signal_event(
     payload: dict[str, Any], action: dict[str, Any], *, resolved_principal: str, content: str
 ) -> ConversationEvent:
-    """Escolha do static_select de repo -> ConversationEvent kind=clarification_answer.
-    `content` (ex.: 'repo=org/x branch=main') é o marcador que o dispatcher extrai
-    (mesma regex do C4). message_id = action_ts (único por clique -> dedup por
-    event_id; re-seleção gera evento novo)."""
+    """Repo static_select choice -> ConversationEvent kind=clarification_answer.
+    `content` (e.g. 'repo=org/x branch=main') is the marker the dispatcher
+    extracts (same regex as C4). message_id = action_ts (unique per click ->
+    dedup by event_id; re-selecting produces a new event)."""
     channel = payload["channel"]["id"]
     message = payload.get("message", {})
     thread_ts = message.get("thread_ts", message.get("ts", "0"))

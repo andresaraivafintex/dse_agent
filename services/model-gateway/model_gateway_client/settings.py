@@ -1,14 +1,14 @@
-"""Configuração do `model_gateway_client` — tudo por env var, com um único
-ponto de leitura opcional no Vault dev da fundação para o master key do
-LiteLLM (WSD-E1-T3).
+"""`model_gateway_client` configuration — everything via env var, with a
+single optional read from the foundation's dev Vault for the LiteLLM master
+key (WSD-E1-T3).
 
-Por que Vault é "opcional com fallback" e não obrigatório: `services/platform/`
-(WS-F) ainda não publicou um client de leitura de Vault compartilhado no
-momento em que este código foi escrito (workstreams rodam em paralelo). Este
-módulo já fala com o Vault dev real da fundação (`localhost:8200`, KV v2 em
-`secret/`) via HTTP puro — não é fixture — mas se Vault não estiver acessível
-(ou o secret não existir) cai para a env var local `DSE_LITELLM_MASTER_KEY`,
-documentado explicitamente como temporário. Ver README.md.
+Why Vault is "optional with fallback" and not mandatory: `services/platform/`
+(WS-F) had not yet published a shared Vault read client when this code was
+written (workstreams run in parallel). This module already talks to the
+foundation's real dev Vault (`localhost:8200`, KV v2 under `secret/`) over
+plain HTTP — it is not a fixture — but if Vault is unreachable (or the secret
+does not exist) it falls back to the local `DSE_LITELLM_MASTER_KEY` env var,
+explicitly documented as temporary. See README.md.
 """
 from __future__ import annotations
 
@@ -21,22 +21,22 @@ DEFAULT_VAULT_SECRET_PATH = "secret/data/model-gateway/master-key"
 
 
 def gateway_base_url() -> str:
-    """Base URL única do model-gateway (dse_contracts.gateway_contract). Todo
-    consumo de modelo passa por aqui — nunca um SDK de provider direto."""
+    """The single model-gateway base URL (dse_contracts.gateway_contract). All
+    model consumption goes through here — never a direct provider SDK."""
     return os.environ.get("DSE_MODEL_GATEWAY_BASE_URL", DEFAULT_GATEWAY_BASE_URL)
 
 
 def litellm_admin_master_key() -> str:
-    """Master key admin do LiteLLM — usada SÓ para /key/generate e /key/delete
-    (nunca para chamadas de modelo em si, que usam a virtual key emitida).
+    """LiteLLM admin master key — used ONLY for /key/generate and /key/delete
+    (never for model calls themselves, which use the issued virtual key).
 
-    Ordem de resolução:
-      1. Vault dev real (`VAULT_ADDR`/`VAULT_TOKEN`, path configurável via
-         `DSE_LITELLM_MASTER_KEY_VAULT_PATH`) — caminho de produção.
-      2. Env var `DSE_LITELLM_MASTER_KEY` — fallback local/dev, TEMPORÁRIO
-         (ver README: "o que falta para produção").
-      3. Default hardcoded de dev (mesmo valor usado no docker-compose.wsd.yml)
-         — só para não quebrar `pytest` em uma máquina sem nada configurado.
+    Resolution order:
+      1. Real dev Vault (`VAULT_ADDR`/`VAULT_TOKEN`, path configurable via
+         `DSE_LITELLM_MASTER_KEY_VAULT_PATH`) — the production path.
+      2. `DSE_LITELLM_MASTER_KEY` env var — local/dev fallback, TEMPORARY
+         (see README: "what is still missing for production").
+      3. Hardcoded dev default (same value used in docker-compose.wsd.yml) —
+         only so `pytest` does not break on a machine with nothing configured.
     """
     from_vault = _read_master_key_from_vault()
     if from_vault:
@@ -63,21 +63,21 @@ def _read_master_key_from_vault() -> str | None:
         payload = resp.json()
         return payload.get("data", {}).get("data", {}).get("value")
     except Exception:
-        # Vault indisponível não deve quebrar o processo — cai para o
-        # fallback de env var (ver docstring acima).
+        # An unavailable Vault must not break the process — fall back to the
+        # env var (see docstring above).
         return None
 
 
 def virtual_keys_database_url() -> str:
-    """Postgres do control-plane DSE (schema_migrations 0005_wsd.sql,
-    tabela `virtual_keys`) — reaproveita a mesma convenção de
-    `DSE_DATABASE_URL` usada no resto do monorepo (ver CONVENTIONS.md)."""
+    """DSE control-plane Postgres (schema_migrations 0005_wsd.sql,
+    `virtual_keys` table) — reuses the same `DSE_DATABASE_URL` convention used
+    across the rest of the monorepo (see CONVENTIONS.md)."""
     return os.environ.get(
         "DSE_DATABASE_URL", "postgresql://dse:dse_dev_only@localhost:5432/dse"
     )
 
 
 def otlp_exporter_endpoint() -> str | None:
-    """Endpoint do OTel collector do WS-F (produção). Sem valor -> spans só
-    ficam no recorder em memória (usado por testes e pelo cost_export local)."""
+    """WS-F OTel collector endpoint (production). Unset -> spans stay only in
+    the in-memory recorder (used by tests and by the local cost_export)."""
     return os.environ.get("DSE_OTEL_EXPORTER_OTLP_ENDPOINT")

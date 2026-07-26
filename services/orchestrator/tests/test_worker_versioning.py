@@ -1,9 +1,9 @@
-"""Plano 08 §F (F5) — Worker Deployment Versioning operacional (não decorativo).
+"""Plano 08 §F (F5) — operational (not decorative) Worker Deployment Versioning.
 
-Prova que a wiring MODERNA (não a version-set clássica deprecada) é montada
-corretamente: versão = (deployment_name, build_id), versioning ligado, e
-comportamento PINNED (workflows em voo drenam na versão antiga → cutover seguro).
-A ativação/cutover ao vivo é passo de operação (CLI) — fora do escopo do teste.
+Proves the MODERN wiring (not the deprecated classic version-set) is assembled
+correctly: version = (deployment_name, build_id), versioning enabled, and PINNED
+behavior (in-flight workflows drain on the old version → safe cutover).
+Live activation/cutover is an ops step (CLI) — out of scope for this test.
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def test_deployment_config_is_pinned_and_versioned():
     assert cfg.version.deployment_name == "dse-orchestrator"
     assert cfg.version.build_id == "git-abc123"
     assert cfg.use_worker_versioning is True
-    # PINNED = workflow fica na versão em que começou → drain-and-cutover seguro
+    # PINNED = workflow stays on the version it started on → safe drain-and-cutover
     assert cfg.default_versioning_behavior == VersioningBehavior.PINNED
 
 
@@ -30,7 +30,7 @@ def test_build_id_is_pinnable_via_args_and_env():
 
 
 def test_versioning_off_by_default():
-    # default seguro: sem a flag/env, versioning fica desligado (ativação exige
-    # server habilitado + cutover de operação).
+    # Safe default: without the flag/env, versioning stays off (enabling it
+    # requires a versioning-enabled server + an ops cutover).
     args = _parse_args([])
     assert args.use_worker_versioning is False

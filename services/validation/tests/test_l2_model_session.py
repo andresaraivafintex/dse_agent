@@ -1,6 +1,6 @@
-"""L2 REAL (ModelL2ReviewSession) — 3º fixture eliminado no disparo real:
-o import do builder apontava para módulo inexistente e todo deployment caía
-no fake que aprova sempre. Unit com gateway falso (sem rede)."""
+"""REAL L2 (ModelL2ReviewSession) — 3rd fixture removed during the real run:
+the builder's import pointed at a nonexistent module, so every deployment fell
+back to the fake that always approves. Unit test with a fake gateway (no network)."""
 from __future__ import annotations
 
 import json

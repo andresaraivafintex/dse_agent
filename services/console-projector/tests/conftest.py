@@ -17,4 +17,4 @@ def _require_postgres():
         conn = psycopg2.connect(DSN, connect_timeout=3)
         conn.close()
     except Exception as exc:  # pragma: no cover
-        pytest.skip(f"Postgres indisponível em {DSN}: {exc}")
+        pytest.skip(f"Postgres unavailable at {DSN}: {exc}")

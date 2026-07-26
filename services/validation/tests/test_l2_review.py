@@ -1,10 +1,10 @@
-"""WSE-E2-T4 — orquestração da revisão L2 (contexto fresco).
+"""WSE-E2-T4 — L2 review orchestration (fresh context).
 
-Postgres é REAL (nunca mockamos a garantia de evidência/idempotência, P8). A
-SESSÃO L2 é um `FakeL2ReviewSession` determinístico porque a sessão real é do
-WS-C, construída em paralelo (ver README) — só a chamada de modelo é fake, a
-orquestração (recording de veredito+custo, guard cheapest-first, P3) é a de
-produção."""
+Postgres is REAL (we never mock the evidence/idempotency guarantee, P8). The L2
+SESSION is a deterministic `FakeL2ReviewSession` because the real session belongs
+to WS-C and is being built in parallel (see README) — only the model call is
+fake, the orchestration (verdict+cost recording, cheapest-first guard, P3) is the
+production one."""
 from __future__ import annotations
 
 
@@ -21,8 +21,9 @@ def _plan(work_item_id: str) -> PlanArtifact:
 
 
 def test_l2_input_carries_only_plan_and_diff_p3(work_item_id, tenant_id):
-    """P3 estrutural: `L2ReviewInput` não tem NENHUM campo de histórico do Coder;
-    a sessão L2 só pode ver plan+diff. Prova pelo schema + pelo que a sessão recebe."""
+    """Structural P3: `L2ReviewInput` has NO Coder-history field whatsoever;
+    the L2 session can only see plan+diff. Proven via the schema + what the
+    session actually receives."""
     fields = set(L2ReviewInput.model_fields.keys())
     assert fields == {"work_item_id", "tenant_id", "plan", "diff", "iteration"}
     assert not any("coder" in f or "history" in f or "transcript" in f for f in fields)
@@ -54,14 +55,14 @@ def test_run_l2_review_records_verdict_and_cost(work_item_id, tenant_id):
 
 
 def test_run_l2_review_records_objections_when_failed(work_item_id, tenant_id):
-    session = FakeL2ReviewSession(scripted=[(False, ["app.py:12 divide sem checar zero"])])
+    session = FakeL2ReviewSession(scripted=[(False, ["app.py:12 divides without a zero check"])])
     inp = L2ReviewInput(work_item_id=work_item_id, tenant_id=tenant_id, plan=_plan(work_item_id), diff="d")
     verdict = run_l2_review(session, work_item_id=work_item_id, tenant_id=tenant_id, inp=inp, iteration=1)
 
     assert verdict.passed is False
     assert "app.py:12" in verdict.objections[0]
     rows = db.get_l2_reviews(work_item_id)
-    assert rows[0]["objections"] == ["app.py:12 divide sem checar zero"]
+    assert rows[0]["objections"] == ["app.py:12 divides without a zero check"]
     assert rows[0]["iteration"] == 1
 
 
@@ -93,4 +94,4 @@ def test_guard_l2_after_l1_allows_when_l1_green(work_item_id):
         passed=True,
         findings=[L1Finding(check="test", passed=True)],
     )
-    guard_l2_after_l1(green)  # não levanta
+    guard_l2_after_l1(green)  # does not raise

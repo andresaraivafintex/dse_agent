@@ -1,12 +1,12 @@
-"""WSC-E2-T2: credenciais efêmeras injetadas pelo proxy — NUNCA dentro do
-container do sandbox — e revogação com SLO de até 60s.
+"""WSC-E2-T2: ephemeral credentials injected by the proxy — NEVER inside the
+sandbox container — and revocation with a 60s SLO.
 
-`test_no_token_reaches_sandbox_container` roda um container Docker de
-verdade que faz uma requisição via proxy com o header placeholder
-`X-Dse-Inject-Credential: github`, e então vasculha env/filesystem/processo
-do PRÓPRIO container para provar que o token real nunca apareceu lá dentro —
-só o placeholder saiu do container; o valor real foi injetado depois, do
-lado do proxy.
+`test_no_token_reaches_sandbox_container` runs a real Docker container that
+makes a request through the proxy carrying only the placeholder header
+`X-Dse-Inject-Credential: github`, and then combs the env/filesystem/processes
+of THAT SAME container to prove the real token never appeared inside — only the
+placeholder left the container; the real value was injected afterwards, on the
+proxy side.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def test_credential_broker_mints_scoped_token(credential_broker, work_item_id):
     cred = credential_broker.mint(work_item_id=work_item_id, repo="acme/widgets", branch="dse/task-1")
     assert cred.token
     assert cred.allowed_actions == frozenset({"contents:write"})
-    assert cred.fixture is True  # nenhum GITHUB_APP_ID configurado nesta sessão de dev
+    assert cred.fixture is True  # no GITHUB_APP_ID configured in this dev session
 
 
 def test_credential_scope_rejects_pull_request_creation(credential_broker, work_item_id):
@@ -64,9 +64,10 @@ def test_revocation_completes_within_slo_and_is_recorded(credential_broker, work
 
 
 def test_credential_placeholder_header_is_replaced_before_egress(running_proxy_factory, upstream_server):
-    """A requisição que SAI do sandbox tem só o placeholder; quem a recebe
-    do outro lado (o `upstream_server`, simulando o GitHub) vê o token real
-    já injetado — prova que a troca acontece no proxy, não no container."""
+    """The request LEAVING the sandbox carries only the placeholder; whoever
+    receives it on the other side (the `upstream_server`, standing in for
+    GitHub) sees the real token already injected — proof that the swap happens
+    in the proxy, not in the container."""
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
@@ -87,25 +88,25 @@ def test_credential_placeholder_header_is_replaced_before_egress(running_proxy_f
     assert resp.status == 200
     resp.read()
 
-    # o broker do proxy mintou exatamente 1 credencial para essa chamada
+    # the proxy's broker minted exactly 1 credential for this call
     assert len(rp.proxy.credential_broker._issued) == 1
     minted = next(iter(rp.proxy.credential_broker._issued.values()))
     assert minted.repo == "acme/widgets"
-    assert "fixture-ghtoken-" in minted.token  # nunca visível dentro do container que originou a chamada
+    assert "fixture-ghtoken-" in minted.token  # never visible inside the container that originated the call
 
 
 @pytest.mark.skipif(
     os.environ.get("DSE_RUN_EGRESS_CONTAINER_TEST") != "1",
     reason=(
-        "exige roteamento container→host (host.docker.internal) — funciona no "
-        "Docker Desktop (dev) mas não no docker nativo do runner CI; opt-in "
-        "com DSE_RUN_EGRESS_CONTAINER_TEST=1"
+        "requires container→host routing (host.docker.internal) — works on "
+        "Docker Desktop (dev) but not on the CI runner's native docker; opt-in "
+        "with DSE_RUN_EGRESS_CONTAINER_TEST=1"
     ),
 )
 def test_no_token_reaches_sandbox_container_env_fs_or_proc(running_proxy_factory, upstream_server):
-    """Roda um container Docker de verdade que faz a chamada via proxy com
-    só o header placeholder, depois vasculha env/filesystem/proc do MESMO
-    container para provar que o token real nunca apareceu lá dentro."""
+    """Runs a real Docker container that makes the call through the proxy with
+    only the placeholder header, then combs the env/filesystem/proc of THAT SAME
+    container to prove the real token never appeared inside."""
     import docker
     from egress_proxy.allowlist import AllowlistEntry
 
@@ -144,15 +145,15 @@ def test_no_token_reaches_sandbox_container_env_fs_or_proc(running_proxy_factory
         real_token = minted.token
 
         exit_code, out = container.exec_run(["env"])
-        assert real_token.encode() not in out, "token real vazou para env do container"
+        assert real_token.encode() not in out, "the real token leaked into the container env"
 
         exit_code, out = container.exec_run(["sh", "-c", "grep -r -a -l . /tmp 2>/dev/null || true"])
         exit_code, tmp_grep = container.exec_run(["sh", "-c", f"grep -r -a '{real_token}' /tmp 2>/dev/null || true"])
-        assert real_token.encode() not in tmp_grep, "token real vazou para arquivo em /tmp do container"
+        assert real_token.encode() not in tmp_grep, "the real token leaked into a file in the container's /tmp"
 
         exit_code, proc_grep = container.exec_run(
             ["sh", "-c", "for f in /proc/[0-9]*/environ; do tr '\\0' '\\n' < \"$f\" 2>/dev/null; done"]
         )
-        assert real_token.encode() not in proc_grep, "token real vazou para env de algum processo do container"
+        assert real_token.encode() not in proc_grep, "the real token leaked into the env of some container process"
     finally:
         container.remove(force=True)

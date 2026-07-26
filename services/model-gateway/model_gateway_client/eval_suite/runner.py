@@ -1,10 +1,10 @@
-"""Harness da suite de avaliação Tier-2 (WSD-E5-T1). Dono: WS-D.
+"""Tier-2 evaluation suite harness (WSD-E5-T1). Owner: WS-D.
 
-Roda `cases.yaml` contra os modelos configurados no gateway. Para cada caso:
-mint de uma virtual key escopada ao modelo, chamada real via `chat_completion`
-(mesmo caminho de produção — passa por enforcement e observabilidade), avaliação
-das asserções, coleta de custo/latência. Modelos indisponíveis na infra atual
-(ex.: `bedrock/*` sem AWS) viram SKIPPED, não falha.
+Runs `cases.yaml` against the models configured in the gateway. For each case:
+mint a virtual key scoped to the model, make a real call via `chat_completion`
+(the same production path — it goes through enforcement and observability),
+evaluate the assertions, collect cost/latency. Models unavailable on the
+current infra (e.g. `bedrock/*` with no AWS) become SKIPPED, not failures.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ class EvalReport:
 
     @property
     def ok(self) -> bool:
-        """A suite "passa" se nenhum caso FALHOU (skips não reprovam a suite)."""
+        """The suite "passes" if no case FAILED (skips do not fail the suite)."""
         return self.failed == 0
 
     def as_dict(self) -> dict:
@@ -83,22 +83,22 @@ def _content_of(result) -> str:
 
 
 def _eval_assertions(assertions: list[dict], first, second) -> list[str]:
-    """Retorna a lista de descrições de asserções que FALHARAM (vazia = tudo ok).
-    `first`/`second` são dois ChatCompletionResult (segundo é a repetição para
-    checar determinismo)."""
+    """Returns the list of descriptions of assertions that FAILED (empty = all
+    ok). `first`/`second` are two ChatCompletionResult (the second is the repeat
+    call used to check determinism)."""
     failures: list[str] = []
     content = _content_of(first)
     for a in assertions:
         kind = a.get("type")
         if kind == "equals":
             if content != a["value"]:
-                failures.append(f"equals: esperado {a['value']!r}, veio {content!r}")
+                failures.append(f"equals: expected {a['value']!r}, got {content!r}")
         elif kind == "contains":
             if a["value"] not in content:
-                failures.append(f"contains: {a['value']!r} não está em {content!r}")
+                failures.append(f"contains: {a['value']!r} is not in {content!r}")
         elif kind == "deterministic":
             if _content_of(second) != content:
-                failures.append("deterministic: segunda chamada divergiu da primeira")
+                failures.append("deterministic: the second call diverged from the first")
         elif kind == "tokens_positive":
             if not (first.tokens_in > 0 and first.tokens_out > 0):
                 failures.append(f"tokens_positive: in={first.tokens_in} out={first.tokens_out}")
@@ -106,7 +106,7 @@ def _eval_assertions(assertions: list[dict], first, second) -> list[str]:
             if first.cost_usd > float(a["value"]):
                 failures.append(f"max_cost_usd: {first.cost_usd} > {a['value']}")
         else:
-            failures.append(f"tipo de asserção desconhecido: {kind!r}")
+            failures.append(f"unknown assertion type: {kind!r}")
     return failures
 
 
@@ -128,12 +128,12 @@ def run_case(case: dict, *, tenant_id: str, work_item_id: str) -> EvalCaseResult
         try:
             first = chat_completion(headers=headers, virtual_key=key, model=model, messages=messages)
         except GatewayCallError as exc:
-            # 4xx/5xx do provider (ex.: bedrock sem AWS) -> skip, não falha.
+            # Provider 4xx/5xx (e.g. bedrock with no AWS) -> skip, not a failure.
             return EvalCaseResult(
                 case_id=case["id"],
                 model=model,
                 status="skipped",
-                detail=f"modelo indisponível/erro do provider: HTTP {exc.status_code}",
+                detail=f"model unavailable/provider error: HTTP {exc.status_code}",
             )
         latency_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -156,8 +156,8 @@ def run_case(case: dict, *, tenant_id: str, work_item_id: str) -> EvalCaseResult
 
 
 def run_suite(*, models: list[str] | None = None, cases_path: str | None = None) -> EvalReport:
-    """Roda a suite. `models`, se passado, filtra os casos aos modelos
-    listados. Cada caso usa IDs de tenant/work_item próprios (isolamento)."""
+    """Runs the suite. `models`, if passed, filters the cases down to the listed
+    models. Each case uses its own tenant/work_item IDs (isolation)."""
     import uuid
 
     cases = _load_cases(cases_path or _CASES_PATH)

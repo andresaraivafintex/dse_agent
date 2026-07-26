@@ -1,9 +1,9 @@
-"""Persistência (best-effort) de `sandbox_leases` — bookkeeping durável do
-lifecycle do sandbox, complementar aos labels do Docker (que são a fonte de
-verdade de estado do container em si). Import de `psycopg2` é opcional: as
-Activities continuam funcionando mesmo sem Postgres alcançável — só perdem
-esta bookkeeping extra (o `dse_audit.emit` continua sendo o registro
-obrigatório via P8, esta tabela é evidência adicional operacional)."""
+"""Best-effort persistence of `sandbox_leases` — durable bookkeeping of the
+sandbox lifecycle, complementary to the Docker labels (which are the source of
+truth for the container's own state). The `psycopg2` import is optional: the
+Activities keep working even with Postgres unreachable — they just lose this
+extra bookkeeping (`dse_audit.emit` remains the mandatory record via P8; this
+table is additional operational evidence)."""
 from __future__ import annotations
 
 import logging
@@ -28,7 +28,7 @@ def _connect():
     try:
         return psycopg2.connect(_DSN)
     except Exception:  # noqa: BLE001
-        logger.warning("sandbox_leases: Postgres indisponível, seguindo sem persistência extra")
+        logger.warning("sandbox_leases: Postgres unavailable, continuing without extra persistence")
         return None
 
 

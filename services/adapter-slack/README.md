@@ -1,11 +1,11 @@
 # adapter-slack (WS-A)
 
-Documentação completa do workstream (o que está implementado, fixtures,
-o que falta para produção, pedidos ao arquiteto) está em
-[`../ingest-gateway/README.md`](../ingest-gateway/README.md) — este arquivo
-cobre só o que é específico deste serviço.
+The full workstream documentation (what is implemented, fixtures,
+what is missing for production, requests to the architect) lives in
+[`../ingest-gateway/README.md`](../ingest-gateway/README.md) — this file
+covers only what is specific to this service.
 
-## Rodando localmente
+## Running locally
 
 ```bash
 source /Users/saraiva/Documents/DSE/fase1/.venv-wsa/bin/activate
@@ -17,23 +17,30 @@ SLACK_SIGNING_SECRET=dev_only_fixture SLACK_BOT_TOKEN=xoxb-dev-fixture \
 ```
 
 Endpoints:
-- `POST /slack/events` — Slack Events API (`app_mention`, `message` em
+- `POST /slack/events` — Slack Events API (`app_mention`, `message` in a
   thread).
-- `POST /slack/interactions` — Interactivity (`block_actions`, botões de
-  approval).
-- `POST /internal/status-comment` — outbound, chamado pelo orchestrator
-  (WS-B) a cada transição de estado relevante.
+- `POST /slack/interactions` — Interactivity (`block_actions`, approval
+  buttons).
+- `POST /internal/status-comment` — outbound, called by the orchestrator
+  (WS-B) on every relevant state transition.
+- `POST /internal/reconcile` — recovers clarification replies whose webhook
+  delivery was lost (re-reads the threads of the work items blocked waiting on
+  a human reply and feeds them through the same intake). Never recovers plan
+  approvals — see the endpoint docstring. Body optional:
+  `{"tenant_id": ..., "limit": ...}`. Answers `{"ok", "checked", "recovered"}`
+  and never 5xx, so a scheduled caller can read it the same way as the GitHub
+  adapter's reconciler.
 - `GET /health`.
 
-## Testes
+## Tests
 
 ```bash
 cd /Users/saraiva/Documents/DSE/fase1/services/adapter-slack
 pytest -q
 ```
 
-Resultado desta sessão: **14 passed**. Requer Postgres real
-(`localhost:5432`, migração `0002_wsa.sql` aplicada) — sem mocks de DB.
-Slack em si é 100% fixture (`FakeSlackClient`) nos testes de outbound; os
-testes de inbound exercitam o pipeline de assinatura/sanitização/
-correlação real.
+Result from this session: **14 passed**. Requires a real Postgres
+(`localhost:5432`, migration `0002_wsa.sql` applied) — no DB mocks.
+Slack itself is 100% fixture (`FakeSlackClient`) in the outbound tests; the
+inbound tests exercise the real signature/sanitization/correlation
+pipeline.

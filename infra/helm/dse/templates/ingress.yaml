@@ -6,12 +6,23 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   labels:
     {{- include "dse.labels" . | nindent 4 }}
+  {{- if .Values.ingress.tls.certResolver }}
+  annotations:
+    # Traefik issues and renews the certificate itself through this resolver.
+    # The alternative is pre-provisioning a Secret, which for a webhook endpoint
+    # means someone has to remember to rotate it before Slack and GitHub start
+    # refusing to deliver.
+    traefik.ingress.kubernetes.io/router.tls.certresolver: {{ .Values.ingress.tls.certResolver | quote }}
+    traefik.ingress.kubernetes.io/router.entrypoints: "websecure"
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   {{- if .Values.ingress.tls.enabled }}
   tls:
     - hosts: [{{ .Values.ingress.host | quote }}]
+      {{- if not .Values.ingress.tls.certResolver }}
       secretName: {{ .Values.ingress.tls.secretName }}
+      {{- end }}
   {{- end }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
@@ -29,4 +40,12 @@ spec:
               service:
                 name: {{ include "dse.fullname" . }}-adapter-github
                 port: { number: {{ .Values.adapters.github.port }} }
+          {{- if .Values.adapters.jira.enabled }}
+          - path: /jira
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dse.fullname" . }}-adapter-jira
+                port: { number: {{ .Values.adapters.jira.port }} }
+          {{- end }}
 {{- end }}

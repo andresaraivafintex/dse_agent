@@ -1,19 +1,19 @@
-"""Fase 3 — wiring do pipeline de evidencia (WS-B chama as Activities do
-CONTRATO depois de finalize_pr):
+"""Phase 3 — evidence pipeline wiring (WS-B calls the CONTRACT Activities after
+finalize_pr):
 
-  trigger_preview (files_changed do CoderTurnResult, paths-filter FR-20)
-    -> se created: run_demo_evidence (base_url do preview; publish interno)
-    -> run_visual_diff quando ha midia/screenshot.
+  trigger_preview (files_changed from CoderTurnResult, paths-filter FR-20)
+    -> if created: run_demo_evidence (preview base_url; publish is internal)
+    -> run_visual_diff when there is media/a screenshot.
 
-Failure mode 9: preview degradado (status "degraded" OU a Activity caindo
-inteira) NUNCA bloqueia o PR — evidencia degradada e registrada (audit +
-projecao work_item_evidence, migracao 0014) e o fluxo segue para review
-humano.
+Failure mode 9: a degraded preview (status "degraded" OR the Activity failing
+outright) NEVER blocks the PR — degraded evidence is recorded (audit +
+work_item_evidence projection, migration 0014) and the flow moves on to human
+review.
 
-As fakes de WS-E (tests/fakes.py) decodificam cada payload com os models
-REAIS do contrato (TriggerPreviewInput/RunDemoEvidenceInput/
-RunVisualDiffInput) — payload derivado do contrato quebra AQUI, nao no wire
-(licao do adendo 02). Postgres/Temporal reais, nunca mockados.
+The WS-E fakes (tests/fakes.py) decode every payload with the REAL contract
+models (TriggerPreviewInput/RunDemoEvidenceInput/RunVisualDiffInput) — a payload
+that drifts from the contract breaks HERE, not on the wire (lesson from addendum
+02). Real Postgres/Temporal, never mocked.
 """
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ def _wf_input(work_item_id: str, **kw) -> WorkItemLifecycleInput:
 
 @pytest.mark.asyncio
 async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
-    """PR que toca UI: trigger_preview -> created -> run_demo_evidence com o
-    base_url do preview -> run_visual_diff (1o run cria baseline). Payloads
-    validados pelos models reais dentro das fakes E re-validados aqui."""
+    """PR that touches UI: trigger_preview -> created -> run_demo_evidence with
+    the preview base_url -> run_visual_diff (1st run creates the baseline).
+    Payloads validated by the real models inside the fakes AND re-validated here."""
     work_item_id = new_work_item_id("evid")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -76,20 +76,20 @@ async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
     assert state.demo_evidence_calls == 1
     assert state.visual_diff_calls == 1
 
-    # ordem: evidencia SO depois do PR finalizado (nunca bloqueia o finalize)
+    # order: evidence ONLY after the PR is finalized (never blocks the finalize)
     log = state.calls_log
     assert log.index("finalize_pr") < log.index("trigger_preview")
     assert log.index("trigger_preview") < log.index("run_demo_evidence")
     assert log.index("run_demo_evidence") < log.index("run_visual_diff")
 
-    # payloads exatos re-validados com os MODELS DO CONTRATO (nao dict leniente)
+    # exact payloads re-validated with the CONTRACT MODELS (not a lenient dict)
     prev = TriggerPreviewInput(**state.last_preview_payload)
     assert prev.files_changed == ["frontend/App.tsx", "api/handler.py"]
     assert prev.pr_number == 1000
     demo = RunDemoEvidenceInput(**state.last_demo_payload)
-    assert demo.base_url == f"http://preview-{work_item_id}.local"  # URL do preview criado
+    assert demo.base_url == f"http://preview-{work_item_id}.local"  # URL of the created preview
     vd = RunVisualDiffInput(**state.last_visual_diff_payload)
-    assert vd.base_screenshot_key is None  # 1o run -> baseline
+    assert vd.base_screenshot_key is None  # 1st run -> baseline
     assert vd.candidate_screenshot_path == f"demos/{work_item_id}/screenshot.png"
 
     actions = read_audit_actions(work_item_id)
@@ -108,9 +108,9 @@ async def test_ui_touching_pr_runs_full_evidence_pipeline(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_docs_only_pr_skips_preview_deterministically(time_skipping_env):
-    """FR-20 + §D: PR só de docs (nem UI nem serviço deployável) ->
-    skipped_backend_only (paths-filter puro, P1), conta como sucesso, NAO roda
-    demo/visual diff e nao bloqueia nada."""
+    """FR-20 + §D: a docs-only PR (neither UI nor a deployable service) ->
+    skipped_backend_only (pure paths-filter, P1), counts as success, does NOT
+    run demo/visual diff and blocks nothing."""
     work_item_id = new_work_item_id("evidskip")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -140,9 +140,10 @@ async def test_docs_only_pr_skips_preview_deterministically(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_backend_service_pr_now_previews_and_posts_link(time_skipping_env):
-    """Plano 08 §D (D1+D2): um PR de serviço backend (.py) NÃO é mais pulado —
-    ganha preview (kind=deployable) e o LINK é postado (preview_link_posted no
-    ledger). Sem binding no tenant o gate deploys_preview é fail-open."""
+    """Plano 08 §D (D1+D2): a backend service PR (.py) is NO LONGER skipped — it
+    gets a preview (kind=deployable) and the LINK is posted
+    (preview_link_posted in the ledger). With no binding on the tenant, the
+    deploys_preview gate is fail-open."""
     work_item_id = new_work_item_id("evidback")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -161,18 +162,19 @@ async def test_backend_service_pr_now_previews_and_posts_link(time_skipping_env)
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    assert state.demo_evidence_calls == 1  # backend agora roda o pipeline
+    assert state.demo_evidence_calls == 1  # backend now runs the pipeline
     actions = read_audit_actions(work_item_id)
     assert "preview_triggered" in actions
-    assert "preview_link_posted" in actions  # D1 — link postado no PR
+    assert "preview_link_posted" in actions  # D1 — link posted on the PR
     row = read_evidence_row(work_item_id)
     assert row is not None and row[0] == "created"
 
 
 @pytest.mark.asyncio
 async def test_degraded_preview_does_not_block_pr(time_skipping_env):
-    """Failure mode 9: preview degradado -> evidencia degradada REGISTRADA e o
-    fluxo segue para review humano ate Done. O PR nunca e bloqueado."""
+    """Failure mode 9: a degraded preview -> degraded evidence is RECORDED and
+    the flow moves on to human review all the way to Done. The PR is never
+    blocked."""
     work_item_id = new_work_item_id("eviddeg")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -185,14 +187,14 @@ async def test_degraded_preview_does_not_block_pr(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
-        # chega em pr_ready MESMO com preview degradado
+        # reaches pr_ready EVEN with a degraded preview
         await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
-    assert result.status == WorkItemStatus.done.value  # nunca Failed por evidencia
-    assert state.demo_evidence_calls == 0  # degradado nao tenta demo
+    assert result.status == WorkItemStatus.done.value  # never Failed because of evidence
+    assert state.demo_evidence_calls == 0  # degraded does not attempt the demo
     actions = read_audit_actions(work_item_id)
     assert "evidence_degraded" in actions
     assert "pr_finalized" in actions
@@ -202,9 +204,9 @@ async def test_degraded_preview_does_not_block_pr(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_preview_activity_crash_degrades_not_blocks(time_skipping_env):
-    """A Activity de preview caindo INTEIRA (ex.: Argo CD fora do ar) tambem e
-    failure mode 9: audita evidence_degraded e segue — nunca propaga a falha
-    para o lifecycle do PR."""
+    """The preview Activity failing OUTRIGHT (e.g. Argo CD down) is also failure
+    mode 9: it audits evidence_degraded and moves on — it never propagates the
+    failure into the PR lifecycle."""
     work_item_id = new_work_item_id("evidcrash")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"

@@ -6,7 +6,7 @@ import os
 import psycopg2
 import pytest
 
-# Secret Base64 do outgoing webhook (mesma convenção do gateway/test_security).
+# Base64 secret of the outgoing webhook (same convention as gateway/test_security).
 _TEAMS_SECRET = base64.b64encode(b"teams_outgoing_webhook_secret_test").decode()
 os.environ.setdefault("TEAMS_OUTGOING_SECRET", _TEAMS_SECRET)
 os.environ["DSE_TENANT_ID"] = "test_tenant_teams_adapter"

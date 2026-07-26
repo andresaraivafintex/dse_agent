@@ -1,6 +1,6 @@
-"""WSA-E2-T1 no adapter: corpus de forgery contra o endpoint real
-`/slack/events` — 100% deve ser rejeitado com 401 + audit row, nada
-downstream (nenhum WorkItem) deve ser criado."""
+"""WSA-E2-T1 at the adapter: a forgery corpus against the real `/slack/events`
+endpoint — 100% must be rejected with 401 + audit row, and nothing downstream
+(no WorkItem) may be created."""
 from __future__ import annotations
 
 import json
@@ -69,7 +69,7 @@ def test_replay_of_captured_valid_request_rejected():
 
 def test_forgery_corpus_creates_no_work_item_and_audits_rejection():
     body = _event_body()
-    client.post("/slack/events", content=body, headers={})  # sem assinatura
+    client.post("/slack/events", content=body, headers={})  # no signature
 
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:

@@ -1,28 +1,28 @@
-"""Injeção de credenciais efêmeras (WSC-E2-T2).
+"""Ephemeral credential injection (WSC-E2-T2).
 
-Modelo: o container do sandbox NUNCA recebe o token real (nem em env, nem em
-arquivo, nem em argumento de processo). Ele envia, através do proxy, um
-header placeholder (`X-Dse-Inject-Credential: github`) numa requisição HTTP
-comum; o proxy troca esse placeholder pelo token real antes de encaminhar a
-requisição para fora — o processo dentro do sandbox nunca vê o valor do
-token, só sabe que "algo" foi injetado a jusante.
+Model: the sandbox container NEVER receives the real token (not in env, not in
+a file, not in a process argument). It sends, through the proxy, a placeholder
+header (`X-Dse-Inject-Credential: github`) on an ordinary HTTP request; the
+proxy swaps that placeholder for the real token before forwarding the request
+outbound — the process inside the sandbox never sees the token value, it only
+knows that "something" was injected downstream.
 
-Duas implementações de `CredentialBroker`:
-  - `mint()` tenta mintar um installation access token REAL de GitHub App
-    (JWT assinado com a chave privada do App + troca por
-    `POST /app/installations/{id}/access_tokens`) SE
+Two `CredentialBroker` implementations:
+  - `mint()` tries to mint a REAL GitHub App installation access token (a JWT
+    signed with the App private key + exchange via
+    `POST /app/installations/{id}/access_tokens`) IF
     `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY_PATH`/`GITHUB_APP_INSTALLATION_ID`
-    estiverem configurados via env (produção, via Vault/ESO — WS-F).
-  - Caso contrário (nenhum destes está presente nesta sessão de
-    desenvolvimento paralelo — não há GitHub App registrado), cai para um
-    token opaco de fixture, guardado só em memória do processo do proxy.
-    Documentado explicitamente — ver README "o que falta para produção".
+    are configured via env (production, via Vault/ESO — WS-F).
+  - Otherwise (none of these is present in this parallel development session —
+    there is no registered GitHub App), it falls back to an opaque fixture
+    token, kept only in the proxy process memory. Explicitly documented — see
+    the README "what is missing for production".
 
-SLO de revogação: `revoke()` documenta e mede o tempo entre a chamada e a
-marcação de `revoked_at` — o teste (`test_credential_injection_and_revocation
-.py`) prova que fica abaixo de 60s (no modo fixture isso é imediato; no modo
-real depende da latência da API do GitHub, que tipicamente responde em bem
-menos de 1s para DELETE /installation/token).
+Revocation SLO: `revoke()` documents and measures the time between the call and
+the `revoked_at` marking — the test (`test_credential_injection_and_revocation
+.py`) proves it stays under 60s (in fixture mode this is immediate; in real mode
+it depends on the GitHub API latency, which typically answers well under 1s for
+DELETE /installation/token).
 """
 from __future__ import annotations
 
@@ -37,8 +37,8 @@ REVOCATION_SLO_SECONDS = 60.0
 
 
 class GitHubScopeError(Exception):
-    """Levantado quando uma ação fora do escopo do token é tentada (ex.:
-    abrir PR com um token que só tem `contents:write`)."""
+    """Raised when an action outside the token's scope is attempted (e.g.
+    opening a PR with a token that only has `contents:write`)."""
 
 
 @dataclass
@@ -57,21 +57,21 @@ class ScopedCredential:
         return self.revoked_at is not None
 
     def create_pull_request(self, *_args, **_kwargs) -> None:
-        """Nunca deveria ser chamado por um Coder da Fase 1 (P1: nenhuma
-        decisão de fluxo por LLM/sandbox) — existe só para provar, no teste
-        adversarial, que MESMO SE algo tentasse, o próprio escopo do token
-        recusa (segunda camada de enforcement, independente do toolset)."""
+        """Should never be called by a Phase 1 Coder (P1: no flow decision made
+        by an LLM/sandbox) — it exists only to prove, in the adversarial test,
+        that EVEN IF something tried, the token scope itself refuses (a second
+        enforcement layer, independent of the toolset)."""
         if "pull_requests:write" not in self.allowed_actions:
             raise GitHubScopeError(
-                f"credential {self.credential_id} tem escopo {sorted(self.allowed_actions)} "
-                "— pull_requests:write não incluído; abrir PR é sempre feito pelo "
-                "PR finalizer humano-acionado do WS-E, nunca pelo sandbox"
+                f"credential {self.credential_id} has scope {sorted(self.allowed_actions)} "
+                "— pull_requests:write not included; opening a PR is always done by "
+                "WS-E's human-triggered PR finalizer, never by the sandbox"
             )
 
     def force_push(self, *_args, **_kwargs) -> None:
         raise GitHubScopeError(
-            f"credential {self.credential_id} não tem escopo para force-push "
-            "(allowed_actions não inclui 'contents:force-write')"
+            f"credential {self.credential_id} has no scope for force-push "
+            "(allowed_actions does not include 'contents:force-write')"
         )
 
 
@@ -86,7 +86,7 @@ class CredentialBroker:
         if not (app_id and private_key_path and installation_id):
             return None
 
-        import jwt  # PyJWT — só importado quando realmente configurado
+        import jwt  # PyJWT — only imported when actually configured
         import httpx
 
         with open(private_key_path, "rb") as f:
@@ -111,7 +111,7 @@ class CredentialBroker:
         real_token = None
         try:
             real_token = self._mint_real_github_app_token(repo=repo)
-        except Exception:  # noqa: BLE001 - degrada pro fixture, nunca quebra a tarefa por isso
+        except Exception:  # noqa: BLE001 - degrade to the fixture, never fail the task over this
             real_token = None
 
         fixture = real_token is None
@@ -123,7 +123,7 @@ class CredentialBroker:
             work_item_id=work_item_id,
             repo=repo,
             branch=branch,
-            allowed_actions=frozenset({"contents:write"}),  # nunca pull_requests:write, nunca force
+            allowed_actions=frozenset({"contents:write"}),  # never pull_requests:write, never force
             issued_at=time.time(),
             fixture=fixture,
         )
@@ -140,8 +140,8 @@ class CredentialBroker:
         return cred
 
     def revoke(self, credential_id: str) -> float:
-        """Retorna a latência de revogação em segundos. Lança se o SLO de
-        60s for excedido (P6: falha limpa e visível, nunca silenciosa)."""
+        """Returns the revocation latency in seconds. Raises if the 60s SLO is
+        exceeded (P6: clean, visible failure, never a silent one)."""
         cred = self._issued.get(credential_id)
         if cred is None:
             return 0.0
@@ -161,7 +161,7 @@ class CredentialBroker:
         leases_store.record_revoked(credential_id=credential_id, latency_s=latency)
         if latency > REVOCATION_SLO_SECONDS:
             raise TimeoutError(
-                f"revogação de {credential_id} levou {latency:.1f}s, acima do SLO de "
+                f"revocation of {credential_id} took {latency:.1f}s, above the SLO of "
                 f"{REVOCATION_SLO_SECONDS}s"
             )
         return latency

@@ -1,12 +1,12 @@
-"""Canário NOTURNO de turno real (plano 09, Fase 4) — a resposta estrutural à
-série de commits "achado do disparo real": todo bug da classe "só aparece com
-o modelo de verdade" passa a aparecer aqui, à noite, com budget capado — não
-no disparo com cliente.
+"""NIGHTLY canary for a real turn (plano 09, Fase 4) — the structural answer to
+the series of "found on a real run" commits: every bug of the "only shows up
+with the real model" class now shows up here, at night, under a capped budget —
+not on a customer run.
 
-NUNCA roda na matriz normal (custa dinheiro): exige DSE_CANARY=1 + o
-model-gateway de pé com provider real (compose wsd + secrets). O workflow
-.github/workflows/canary-real-turn.yml agenda isto diariamente quando o repo
-tiver remoto + secrets configurados.
+NEVER runs in the normal matrix (it costs money): requires DSE_CANARY=1 plus the
+model-gateway up with a real provider (compose wsd + secrets). The
+.github/workflows/canary-real-turn.yml workflow schedules this daily once the
+repo has a remote + secrets configured.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from dse_contracts import ProvisionSandboxInput, RunCoderTurnInput, TeardownSand
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("DSE_CANARY") != "1",
-    reason="canário de turno real: só com DSE_CANARY=1 (gateway real + custo)",
+    reason="real-turn canary: only with DSE_CANARY=1 (real gateway + cost)",
 )
 
 CANARY_BUDGET_USD = float(os.environ.get("DSE_CANARY_BUDGET_USD", "0.50"))
@@ -47,11 +47,11 @@ def test_one_real_coder_turn_produces_a_diff_within_budget(work_item_id, state_d
                 )
             )
         )
-        # o turno REAL produziu diff, custou dinheiro e ficou dentro do cap
-        assert result.files_changed, "turno real não produziu diff nenhum"
-        assert result.cost_usd > 0, "custo zero: o gateway não foi exercitado de verdade"
+        # the REAL turn produced a diff, cost money and stayed within the cap
+        assert result.files_changed, "the real turn produced no diff at all"
+        assert result.cost_usd > 0, "zero cost: the gateway was not really exercised"
         assert result.cost_usd <= CANARY_BUDGET_USD, (
-            f"canário estourou o budget: ${result.cost_usd:.4f} > ${CANARY_BUDGET_USD:.2f}"
+            f"canary blew the budget: ${result.cost_usd:.4f} > ${CANARY_BUDGET_USD:.2f}"
         )
     finally:
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))

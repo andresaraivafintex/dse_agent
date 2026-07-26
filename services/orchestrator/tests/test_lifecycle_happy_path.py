@@ -1,8 +1,8 @@
-"""WSB-E2-T1/T3 — prova a maquina de estados feliz de ponta a ponta: new ->
-ready -> queued -> implementing -> validating -> pr_ready -> (CI verde) ->
-aprovado -> merged -> done. Usa Activities FAKE para as fronteiras de WS-C/
-WS-E (ainda em construcao em paralelo) e as Activities REAIS de audit/status
-do WS-B contra o Postgres real da infra — nunca mocka Postgres/Temporal.
+"""WSB-E2-T1/T3 — proves the happy-path state machine end to end: new ->
+ready -> queued -> implementing -> validating -> pr_ready -> (CI green) ->
+approved -> merged -> done. Uses FAKE Activities for the WS-C/WS-E boundaries
+(still being built in parallel) and the REAL WS-B audit/status Activities
+against the infra's real Postgres — it never mocks Postgres/Temporal.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ async def test_happy_path_reaches_done(time_skipping_env):
             requester="usr_test",
             repo="acme/repo",
             base_branch="main",
-            acceptance_criteria="deve fazer X e passar os testes",
+            acceptance_criteria="must do X and pass the tests",
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run,
@@ -50,14 +50,14 @@ async def test_happy_path_reaches_done(time_skipping_env):
             task_queue=task_queue,
         )
 
-        # workflow deve chegar em pr_ready e ficar esperando review humano —
-        # fazemos polling curto via query ate ver o status esperado.
+        # the workflow must reach pr_ready and wait for human review — we do a
+        # short poll via query until we see the expected status.
         await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
-        # estados finos (spec §2): apos aprovar, o workflow estaciona em
-        # merge_pending esperando o merge humano; `pr_ready` cobre o fallback
-        # coarse de runs sem o patch de estados finos.
+        # fine-grained states (spec §2): after approval the workflow parks on
+        # merge_pending waiting for the human merge; `pr_ready` covers the
+        # coarse fallback for runs without the fine-states patch.
         await wait_for_status(handle, {"merge_pending", "pr_ready"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
 
@@ -80,7 +80,7 @@ async def test_happy_path_reaches_done(time_skipping_env):
 
     assert state.provision_calls == 1
     assert state.finalize_calls == 1
-    assert state.teardown_calls == 1  # teardown ao final (done)
+    assert state.teardown_calls == 1  # teardown at the end (done)
 
 
 @pytest.mark.asyncio
@@ -89,7 +89,7 @@ async def test_l1_failure_triggers_fix_loop_then_passes(time_skipping_env):
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
 
-    state = FakeControlPlane(l1_fail_times=2)  # falha 2x, passa na 3a tentativa
+    state = FakeControlPlane(l1_fail_times=2)  # fails twice, passes on the 3rd attempt
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(
@@ -119,7 +119,7 @@ async def test_l1_failure_triggers_fix_loop_then_passes(time_skipping_env):
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    assert state.coder_turn_calls == 3  # 1 inicial + 2 apos falha de L1
+    assert state.coder_turn_calls == 3  # 1 initial + 2 after L1 failures
     assert state.l1_calls == 3
 
 
@@ -129,7 +129,7 @@ async def test_l1_failure_exhausts_retry_cap_and_fails(time_skipping_env):
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
 
-    # sempre falha — mais que o cap de retries
+    # always fails — more than the retry cap
     state = FakeControlPlane(l1_fail_times=999)
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 

@@ -1,6 +1,6 @@
-"""WSD-E5-T1: suite de avaliação Tier-2 (dono: WS-D). Roda de verdade contra o
-modelo eco real; prova que o harness reporta pass e trata modelo indisponível
-como SKIP (não falha)."""
+"""WSD-E5-T1: Tier-2 evaluation suite (owner: WS-D). Really runs against the
+real echo model; proves the harness reports pass and treats an unavailable
+model as SKIP (not a failure)."""
 from __future__ import annotations
 
 from model_gateway_client.eval_suite import run_suite
@@ -15,13 +15,13 @@ def test_echo_cases_pass():
     by_id = {r.case_id: r for r in report.results}
     assert by_id["echo-known-transform"].status == "passed"
     assert by_id["echo-determinism"].status == "passed"
-    # custo/latência são coletados
+    # cost/latency are collected
     assert by_id["echo-known-transform"].latency_ms >= 0.0
 
 
 def test_unreachable_model_is_skipped_not_failed():
     report = run_suite(models=["bedrock/anthropic.claude-3-5-sonnet"])
-    # sem AWS nesta sessão -> o caso é SKIPPED, não FAILED (a suite continua ok)
+    # no AWS in this session -> the case is SKIPPED, not FAILED (the suite stays ok)
     assert report.failed == 0
     assert report.skipped == 1
     assert report.ok

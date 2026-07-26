@@ -1,19 +1,20 @@
-"""Outbound Teams — `CommentBackend` (dse_contracts.mutable_comment): quarto
-backend da MESMA `MutableCommentWriter` já usada por Slack/GitHub/Jira — logo
-"exatamente 1 mensagem de status por WorkItem, editada in-place" vale de graça
-para Teams (a lógica comum vive no writer compartilhado).
+"""Teams outbound — `CommentBackend` (dse_contracts.mutable_comment): the fourth
+backend of the SAME `MutableCommentWriter` already used by Slack/GitHub/Jira — so
+"exactly 1 status message per WorkItem, edited in-place" comes for free on Teams
+(the common logic lives in the shared writer).
 
-Transporte real: Bot Framework Connector REST (o mesmo que a Azure Bot Service
-usa), autenticado por bearer token de client_credentials do AAD:
+Real transport: Bot Framework Connector REST (the same one Azure Bot Service
+uses), authenticated with an AAD client_credentials bearer token:
   - post   -> POST {serviceUrl}/v3/conversations/{conversationId}/activities
-              (cria a mensagem de status; devolve o `activity id`)
+              (creates the status message; returns the `activity id`)
   - edit   -> PUT  {serviceUrl}/v3/conversations/{conversationId}/activities/{activityId}
-              (edita a mensagem in-place)
+              (edits the message in-place)
 
-PROVISÃO: sem app registration / tenant Teams real nesta sessão, `FakeTeamsClient`
-substitui o transporte nos testes — a lógica de `TeamsCommentBackend` (serialização
-do comment_ref, escolha post-vs-edit via o writer) é 100% real. `build_real_teams_client`
-constrói o cliente HTTP real (via `requests`), exercitado em produção após ativação.
+PROVISIONED: with no app registration / real Teams tenant in this session,
+`FakeTeamsClient` replaces the transport in the tests — the `TeamsCommentBackend`
+logic (comment_ref serialization, post-vs-edit choice via the writer) is 100% real.
+`build_real_teams_client` builds the real HTTP client (via `requests`), exercised
+in production after activation.
 """
 from __future__ import annotations
 
@@ -25,22 +26,22 @@ from typing import Protocol
 
 class TeamsClientLike(Protocol):
     def send_activity(self, *, service_url: str, conversation_id: str, text: str) -> str:
-        """Cria uma activity de mensagem na conversa. Retorna o `activity id`."""
+        """Creates a message activity in the conversation. Returns the `activity id`."""
         ...
 
     def update_activity(
         self, *, service_url: str, conversation_id: str, activity_id: str, text: str
     ) -> None:
-        """Edita in-place a activity existente."""
+        """Edits the existing activity in-place."""
         ...
 
 
 class TeamsCommentBackend:
-    """Implementa `dse_contracts.mutable_comment.CommentBackend`.
+    """Implements `dse_contracts.mutable_comment.CommentBackend`.
 
-    `surface_ref` esperado: `{"conversation_id": ..., "service_url": ...}`.
-    O `comment_ref` opaco serializa o suficiente para uma edição futura
-    (conversation_id + activity_id + service_url), igual aos outros backends.
+    Expected `surface_ref`: `{"conversation_id": ..., "service_url": ...}`.
+    The opaque `comment_ref` serializes enough for a future edit
+    (conversation_id + activity_id + service_url), same as the other backends.
     """
 
     def __init__(self, client: TeamsClientLike):
@@ -72,12 +73,12 @@ class TeamsCommentBackend:
 
 @dataclass
 class FakeTeamsClient:
-    """Fixture in-memory usada nos testes (documentado — NÃO é a API real).
-    Registra cada send/update para os testes afirmarem 'exatamente 1 send +
-    N updates, nunca N sends' (a invariante de 1-mensagem-por-tarefa)."""
+    """In-memory fixture used in the tests (documented — this is NOT the real API).
+    Records every send/update so the tests can assert 'exactly 1 send + N updates,
+    never N sends' (the one-message-per-task invariant)."""
 
     _next_id: int = 1000
-    activities: dict[str, str] = field(default_factory=dict)  # activity_id -> texto atual
+    activities: dict[str, str] = field(default_factory=dict)  # activity_id -> current text
     send_calls: list[dict] = field(default_factory=list)
     update_calls: list[dict] = field(default_factory=list)
 
@@ -94,7 +95,7 @@ class FakeTeamsClient:
         self, *, service_url: str, conversation_id: str, activity_id: str, text: str
     ) -> None:
         if activity_id not in self.activities:
-            raise KeyError(f"update_activity em activity inexistente: {activity_id}")
+            raise KeyError(f"update_activity on a nonexistent activity: {activity_id}")
         self.activities[activity_id] = text
         self.update_calls.append(
             {"service_url": service_url, "conversation_id": conversation_id, "activity_id": activity_id, "text": text}
@@ -102,10 +103,10 @@ class FakeTeamsClient:
 
 
 class RealTeamsClient:
-    """Cliente real do Bot Framework Connector (transporte `requests`). Obtém e
-    cacheia o bearer token de client_credentials do AAD e faz POST/PUT de
-    activities. Exercitado em produção após ativação; nos testes é substituído
-    pelo `FakeTeamsClient`."""
+    """Real Bot Framework Connector client (`requests` transport). Fetches and
+    caches the AAD client_credentials bearer token and POSTs/PUTs activities.
+    Exercised in production after activation; in the tests it is replaced by
+    `FakeTeamsClient`."""
 
     _TOKEN_URL = "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
     _SCOPE = "https://api.botframework.com/.default"

@@ -1,5 +1,5 @@
-"""WSA-E2-T1 no adapter GitHub: corpus de forgery — 100% rejeitado com 401
-+ audit row, nada downstream criado."""
+"""WSA-E2-T1 on the GitHub adapter: forgery corpus — 100% rejected with 401
++ an audit row, nothing created downstream."""
 from __future__ import annotations
 
 import json

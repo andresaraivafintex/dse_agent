@@ -1,21 +1,22 @@
-"""Higiene determinística pós-turno do workspace (P1) — módulo VENDORÁVEL.
+"""Deterministic post-turn workspace hygiene (P1) — VENDORABLE module.
 
-Extraído de `activities.py` (Fase 1, plano 09) para poder rodar em DOIS
-lugares com uma única fonte de verdade: no worker (runtime Docker, git pelo
-bind mount) e dentro do agent-runner (runtime K8s, git in-pod via
-`--op post_turn`). Por isso as dependências são só stdlib + `dse_contracts`
-(ambos presentes na imagem do runner) — nada de docker/temporal/audit aqui;
-quem audita é o chamador, com as listas retornadas.
+Extracted from `activities.py` (Fase 1, plano 09) so it can run in TWO places
+from a single source of truth: in the worker (Docker runtime, git over the bind
+mount) and inside the agent-runner (K8s runtime, git in-pod via
+`--op post_turn`). That is why the dependencies are stdlib + `dse_contracts`
+only (both present in the runner image) — no docker/temporal/audit here; the
+caller is the one that audits, using the returned lists.
 
-As três operações e as histórias reais que as originaram:
-  - `prune_disposable_artifacts`: CLI cria relatórios espontâneos
-    (BUG_FIX_REPORT.md) — apaga SÓ lixo descartável novo; fonte nova legítima
-    fora do plano sobrevive (expected_files é advisory desde 2026-07-22).
-  - `restore_lockfile_churn`: npm reescreveu 16 linhas de package-lock.json
-    sem mudança no manifesto par e o diff_budget reprovou a tarefa.
-  - `revert_test_edits`: o Coder editou seed compartilhado de teste e quebrou
-    teste irmão — testes são do Tester; qualquer edição de teste do Coder é
-    revertida ao estado do início do turno.
+The three operations and the real incidents that produced them:
+  - `prune_disposable_artifacts`: the CLI creates unsolicited reports
+    (BUG_FIX_REPORT.md) — deletes ONLY new disposable junk; legitimate new
+    source outside the plan survives (expected_files is advisory since
+    2026-07-22).
+  - `restore_lockfile_churn`: npm rewrote 16 lines of package-lock.json with no
+    change to the paired manifest, and diff_budget failed the task.
+  - `revert_test_edits`: the Coder edited a shared test seed and broke a sibling
+    test — tests belong to the Tester; any test edit by the Coder is reverted to
+    the state at the start of the turn.
 """
 from __future__ import annotations
 
@@ -31,18 +32,18 @@ logger = logging.getLogger("sandbox_runtime.workspace_hygiene")
 def prune_disposable_artifacts(
     workspace_dir: str, expected_files: list[str], work_item_id: str
 ) -> tuple[list[str], list[str]]:
-    """Apaga arquivos NOVOS (untracked) que são LIXO óbvio do CLI antes do
-    commit. Nunca toca: o que o plano pediu, testes, ou o demo do work item.
-    Best-effort (o L1 é o gate duro). Retorna `(pruned, kept_out_of_plan)`."""
+    """Delete NEW (untracked) files that are obvious CLI JUNK before the commit.
+    Never touches: what the plan asked for, tests, or the work item's demo.
+    Best-effort (L1 is the hard gate). Returns `(pruned, kept_out_of_plan)`."""
     try:
-        # `-uall`: lista CADA untracked individualmente (sem colapsar diretório
-        # novo em `?? src/`); .gitignore continua respeitado.
+        # `-uall`: list EVERY untracked path individually (without collapsing a
+        # new directory into `?? src/`); .gitignore is still respected.
         porcelain = subprocess.run(
             ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
             capture_output=True, text=True, timeout=30,
         ).stdout
-    except Exception:  # noqa: BLE001 — prune é best-effort; o L1 é o gate duro
-        logger.warning("prune pós-coder falhou (git status); o L1 segue como gate")
+    except Exception:  # noqa: BLE001 — prune is best-effort; L1 is the hard gate
+        logger.warning("post-coder prune failed (git status); L1 remains the gate")
         return [], []
 
     expected = set(expected_files)
@@ -55,7 +56,7 @@ def prune_disposable_artifacts(
         if rel in expected or is_test_path(rel) or rel.startswith(f"demos/{work_item_id}"):
             continue
         if not is_disposable_artifact(rel):
-            kept_out_of_plan.append(rel)  # fonte nova legítima fora do plano — FICA
+            kept_out_of_plan.append(rel)  # legitimate new source outside the plan — STAYS
             continue
         try:
             os.remove(os.path.join(workspace_dir, rel))
@@ -66,14 +67,14 @@ def prune_disposable_artifacts(
 
 
 def restore_lockfile_churn(workspace_dir: str) -> list[str]:
-    """Lockfile mudou mas o manifesto par (package.json…) NÃO mudou →
-    restaura (modificado) ou remove (novo). Retorna os paths tratados."""
+    """The lockfile changed but the paired manifest (package.json…) did NOT →
+    restore (if modified) or remove (if new). Returns the paths handled."""
     try:
         porcelain = subprocess.run(
             ["git", "status", "--porcelain"], cwd=workspace_dir,
             capture_output=True, text=True, timeout=30,
         ).stdout
-    except Exception:  # noqa: BLE001 — best-effort; o L1 tem a mesma isenção
+    except Exception:  # noqa: BLE001 — best-effort; L1 has the same exemption
         return []
     status_by_path: dict[str, str] = {}
     for line in porcelain.splitlines():
@@ -101,16 +102,16 @@ def restore_lockfile_churn(workspace_dir: str) -> list[str]:
 
 
 def revert_test_edits(workspace_dir: str, turn_start_sha: str) -> list[str]:
-    """Reverte QUALQUER mudança do Coder em test paths ao estado do início do
-    turno: edição/remoção → `git checkout <sha>`; novo (untracked) → remove.
-    Best-effort. Retorna os paths revertidos."""
+    """Revert ANY Coder change under test paths to the state at the start of the
+    turn: edit/removal → `git checkout <sha>`; new (untracked) → remove.
+    Best-effort. Returns the reverted paths."""
     try:
         porcelain = subprocess.run(
             ["git", "status", "--porcelain", "-uall"], cwd=workspace_dir,
             capture_output=True, text=True, timeout=30,
         ).stdout
     except Exception:  # noqa: BLE001 — best-effort
-        logger.warning("revert de testes do coder falhou (git status)")
+        logger.warning("revert of the coder's tests failed (git status)")
         return []
 
     reverted: list[str] = []
@@ -118,7 +119,7 @@ def revert_test_edits(workspace_dir: str, turn_start_sha: str) -> list[str]:
         if len(line) < 4:
             continue
         status, rel = line[:2], line[3:].strip().strip('"')
-        if "->" in rel:  # rename: "old -> new" — pega o destino
+        if "->" in rel:  # rename: "old -> new" — take the destination
             rel = rel.split("->")[-1].strip()
         if not is_test_path(rel):
             continue

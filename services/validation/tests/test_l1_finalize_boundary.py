@@ -1,13 +1,14 @@
-"""S7 (Fase 5) — boundary test do par workflow -> L1 / finalize_pr.
+"""S7 (Phase 5) — boundary test for the workflow -> L1 / finalize_pr pair.
 
-Mesma classe de bug do checkpoint/rebuild: os call sites vivem no workflow
-(WS-B) e os modelos de input aqui (WS-E). Os fakes de teste do WS-B eram
-lenientes e escondiam divergências — o workflow chamava `run_l1_pipeline` com
-`{work_item_id, sandbox_id}` (faltando `sandbox`, `plan`, `tenant_id`,
-`base_branch`) e `finalize_pr` sem `summary`; só falhava no DECODE real da
-Activity (`Failed decoding arguments`). Estes testes validam o PAYLOAD LITERAL
-que o workflow monta contra o modelo pydantic, para a classe de bug falhar no
-CI e não em produção. Se o workflow mudar o shape, ATUALIZE os literais aqui.
+Same bug class as checkpoint/rebuild: the call sites live in the workflow (WS-B)
+and the input models here (WS-E). WS-B's test fakes were lenient and hid the
+divergence — the workflow called `run_l1_pipeline` with
+`{work_item_id, sandbox_id}` (missing `sandbox`, `plan`, `tenant_id`,
+`base_branch`) and `finalize_pr` without `summary`; it only failed at the real
+Activity DECODE (`Failed decoding arguments`). These tests validate the LITERAL
+PAYLOAD the workflow assembles against the pydantic model, so that this bug class
+fails in CI and not in production. If the workflow changes the shape, UPDATE the
+literals here.
 """
 from __future__ import annotations
 
@@ -50,8 +51,8 @@ def test_finalize_input_accepts_exact_workflow_payload():
         "repo": "andre2654/fintex-wallet",
         "base_branch": "main",
         "branch": "dse/wi-1",
-        "summary": "DSE: corrige exclusão de transação",
-        # back-link da issue ("Closes #N") + evidência L1 no corpo do PR.
+        "summary": "DSE: fix transaction deletion",
+        # issue back-link ("Closes #N") + L1 evidence in the PR body.
         "issue_ref": {"issue_number": 2},
         "evidence_url": "L1 green (test ✓, secret_scan ✓)",
     }
@@ -63,9 +64,9 @@ def test_finalize_input_accepts_exact_workflow_payload():
 
 
 def test_finalize_input_tolerates_absent_issue_and_evidence():
-    # work item sem issue de origem (ex.: origem Slack/Jira sem numero) —
-    # o workflow manda issue_ref=None e evidence vazio; o finalizer usa os
-    # fallbacks "(sem ...)" no corpo.
+    # work item with no originating issue (e.g. Slack/Jira origin with no number) —
+    # the workflow sends issue_ref=None and empty evidence; the finalizer uses the
+    # "(sem ...)" fallbacks in the body.
     inp = FinalizePrInput(
         work_item_id="wi-1", tenant_id="tnt-1", sandbox=_handle_payload(),
         repo="a/b", base_branch="main", branch="dse/wi-1", summary="s",
@@ -75,9 +76,9 @@ def test_finalize_input_tolerates_absent_issue_and_evidence():
 
 
 def test_consume_ci_input_accepts_exact_workflow_payload():
-    # Auditoria pós-S7: o call site do loop de review mandava só
-    # {work_item_id, pr_number} — faltavam tenant_id/repo/ref (obrigatorios).
-    # Todo ciclo de review com CI quebrava no decode. Literal corrigido:
+    # Post-S7 audit: the review loop's call site sent only
+    # {work_item_id, pr_number} — tenant_id/repo/ref (required) were missing.
+    # Every review cycle involving CI broke at decode. Corrected literal:
     inp = ConsumeCiStatusInput(
         **{"work_item_id": "wi-1", "tenant_id": "tnt-1",
            "repo": "andre2654/fintex-wallet", "ref": "dse/wi-1", "pr_number": 6}

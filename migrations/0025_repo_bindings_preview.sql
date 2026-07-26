@@ -1,7 +1,7 @@
--- Fintex DSE — Plano 08 §D — flag de preview efêmero por binding.
--- Marca quais repos são "aplicáveis a preview" (front/back que sobem uma URL);
--- o finalizer só posta o link de preview no PR quando o repo resolvido tem
--- deploys_preview = true. Administrado pelo painel Repos & ROI do console.
--- Migração aditiva e idempotente.
+-- Fintex DSE — Plan 08 §D — ephemeral preview flag per binding.
+-- Marks which repos are "preview-applicable" (front/back that bring up a URL);
+-- the finalizer only posts the preview link on the PR when the resolved repo has
+-- deploys_preview = true. Managed from the console's Repos & ROI panel.
+-- Additive and idempotent migration.
 
 ALTER TABLE repo_bindings ADD COLUMN IF NOT EXISTS deploys_preview BOOLEAN NOT NULL DEFAULT false;

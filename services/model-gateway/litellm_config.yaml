@@ -1,33 +1,33 @@
-# Fintex DSE — WS-D — Config do LiteLLM proxy (model-gateway).
+# Fintex DSE — WS-D — LiteLLM proxy config (model-gateway).
 #
-# Version pinning: ver docker-compose.wsd.yml na raiz do repo — a imagem é
-# fixada por DIGEST (não por tag "main-latest"), para que "upgrade" seja um
-# ato explícito (trocar o digest + rodar scripts/smoke_test.py antes de subir
-# em qualquer ambiente compartilhado). Ver README.md §"Version pinning e
-# upgrade simulado" para o procedimento completo.
+# Version pinning: see docker-compose.wsd.yml at the repo root — the image is
+# pinned by DIGEST (not by a "main-latest" tag), so that an "upgrade" is an
+# explicit act (swap the digest + run scripts/smoke_test.py before bringing it
+# up in any shared environment). See README.md §"Version pinning e upgrade
+# simulado" for the full procedure.
 #
-# Dois tiers de model registrados:
-#   1. `bedrock/*`  — tier de produção via AWS Bedrock por VPC PrivateLink.
-#      Não há conta AWS disponível nesta sessão de desenvolvimento — os
-#      valores abaixo são PLACEHOLDERS documentando exatamente a forma
-#      esperada da config real (ver README).
-#   2. `eco/echo-model` — tier local/dev: um provider "custom" real, apontando
-#      para o echo_provider/server.py (processo HTTP próprio, sem custo, sem
-#      dependência externa), registrado como um provider OpenAI-compatível
-#      qualquer (o mesmo mecanismo usado para vLLM/Ollama/etc. em produção).
-#      Permite testar o gateway fim-a-fim sem nenhuma credencial paga.
+# Two model tiers registered:
+#   1. `bedrock/*`  — production tier via AWS Bedrock over VPC PrivateLink.
+#      There is no AWS account available in this development session — the
+#      values below are PLACEHOLDERS documenting exactly the expected shape
+#      of the real config (see README).
+#   2. `eco/echo-model` — local/dev tier: a real "custom" provider, pointing at
+#      echo_provider/server.py (its own HTTP process, no cost, no external
+#      dependency), registered like any other OpenAI-compatible provider (the
+#      same mechanism used for vLLM/Ollama/etc. in production).
+#      Lets the gateway be tested end-to-end without any paid credential.
 
 model_list:
-  # --- Tier 1: Bedrock / PrivateLink (produção — placeholders, ver README) ---
+  # --- Tier 1: Bedrock / PrivateLink (production — placeholders, see README) ---
   - model_name: bedrock/anthropic.claude-3-5-sonnet
     litellm_params:
       model: bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0
       aws_region_name: os.environ/DSE_AWS_REGION
-      # VPC endpoint da PrivateLink para bedrock-runtime — substituir pelo ID
-      # real provisionado pelo time de infra (WS-F/plataforma AWS do cliente).
+      # PrivateLink VPC endpoint for bedrock-runtime — replace with the real ID
+      # provisioned by the infra team (WS-F / the customer's AWS platform).
       aws_bedrock_runtime_endpoint: os.environ/DSE_BEDROCK_PRIVATELINK_ENDPOINT
-      # IAM role assumida pelo gateway (via IRSA/web-identity se em EKS, ou
-      # instance profile se em EC2) — nunca uma access key estática.
+      # IAM role assumed by the gateway (via IRSA/web-identity on EKS, or an
+      # instance profile on EC2) — never a static access key.
       aws_role_name: os.environ/DSE_BEDROCK_IAM_ROLE_ARN
       aws_web_identity_token: os.environ/AWS_WEB_IDENTITY_TOKEN_FILE
     model_info:
@@ -45,34 +45,34 @@ model_list:
       dse_tier: 1
       dse_requires_infra: "aws_bedrock_privatelink"
 
-  # --- Tier local/dev: modelo eco, funcional agora, sem custo ---
+  # --- Local/dev tier: echo model, working right now, at no cost ---
   - model_name: eco/echo-model
     litellm_params:
       model: openai/echo-model
       api_base: os.environ/DSE_ECHO_PROVIDER_URL
-      # Achado da integração da Fase 1 (scanner do WS-F,
-      # scripts/scan_for_plaintext_secrets.py): esta era a única entrada do
-      # arquivo com valor literal em vez de indireção `os.environ/...` — o
-      # echo provider não exige credencial real (não é um secret de
-      # verdade), mas por consistência com o resto do arquivo e para o
-      # scanner não precisar de uma exceção especial, movida para env var
-      # com default não-sensível.
+      # Phase 1 integration finding (WS-F scanner,
+      # scripts/scan_for_plaintext_secrets.py): this was the only entry in the
+      # file with a literal value instead of an `os.environ/...` indirection —
+      # the echo provider does not require a real credential (it is not a real
+      # secret), but for consistency with the rest of the file and so the
+      # scanner does not need a special exception, it was moved to an env var
+      # with a non-sensitive default.
       api_key: os.environ/DSE_ECHO_PROVIDER_API_KEY
-      # Fase 3 (WSD-E4-T1): endpoints locais — falha de conexão deve ser
-      # detectada RÁPIDO para o failover intra-tier ser determinístico
-      # (sem isso, connect-timeouts default de ~10s × retries internos do SDK
-      # empurram o failover para além do timeout do cliente).
+      # Phase 3 (WSD-E4-T1): local endpoints — a connection failure must be
+      # detected FAST for the intra-tier failover to be deterministic
+      # (without this, the default ~10s connect timeouts × the SDK's internal
+      # retries push the failover past the client's own timeout).
       timeout: 5
       max_retries: 0
     model_info:
       dse_tier: "local-dev"
       dse_requires_infra: "none"
 
-  # Fase 3 (WSD-E4-T1): segunda instância eco — alvo do failover INTRA-TIER.
-  # MESMO dse_tier ("local-dev") do primário, por construção: o teste negativo
-  # test_failover_intra_tier.py::test_no_fallback_route_crosses_tier parseia
-  # este arquivo e falha o CI se qualquer rota de fallback apontar para um
-  # model de tier diferente (NFR-07/P2 — nunca fallback silencioso entre tiers).
+  # Phase 3 (WSD-E4-T1): second echo instance — target of the INTRA-TIER
+  # failover. SAME dse_tier ("local-dev") as the primary, by construction: the
+  # negative test test_failover_intra_tier.py::test_no_fallback_route_crosses_tier
+  # parses this file and fails CI if any fallback route points at a model in a
+  # different tier (NFR-07/P2 — never a silent fallback across tiers).
   - model_name: eco/echo-model-b
     litellm_params:
       model: openai/echo-model-b
@@ -84,13 +84,13 @@ model_list:
       dse_tier: "local-dev"
       dse_requires_infra: "none"
 
-  # PoC (2026-07-21): Anthropic API direta para o teste end-to-end real —
-  # o Coder/Planner escrevem código de verdade. A key vem do Vault
-  # (secret/dse/model-gateway/providers → anthropic_api_key), injetada como
-  # ANTHROPIC_API_KEY no container do gateway no boot (NUNCA em arquivo/git).
-  # NOTA DE POSTURA: este é o atalho de PoC — chama a API pública da Anthropic,
-  # não o Bedrock/PrivateLink in-VPC (Tier 1 do proposal). Para produção,
-  # trocar por bedrock/* (já registrado acima). Documentado, não silencioso.
+  # PoC (2026-07-21): the Anthropic API directly, for the real end-to-end test —
+  # Coder/Planner write actual code. The key comes from Vault
+  # (secret/dse/model-gateway/providers → anthropic_api_key), injected as
+  # ANTHROPIC_API_KEY into the gateway container at boot (NEVER in a file/git).
+  # POSTURE NOTE: this is the PoC shortcut — it calls Anthropic's public API,
+  # not in-VPC Bedrock/PrivateLink (Tier 1 of the proposal). For production,
+  # swap to bedrock/* (already registered above). Documented, not silent.
   - model_name: anthropic/claude
     litellm_params:
       model: anthropic/claude-sonnet-5
@@ -99,10 +99,10 @@ model_list:
       dse_tier: "poc-direct-api"
       dse_requires_infra: "anthropic_public_api"
 
-  # Modo econômico (pedido do operador, 2026-07-22): Haiku 4.5 (~3× mais
-  # barato: $1/$5 vs $3/$15 por MTok). É o DEFAULT atual do fluxo
-  # (DSE_CODER_MODEL no compose); o Sonnet segue registrado acima — voltar é
-  # trocar 1 env, nada mais.
+  # Economy mode (operator request, 2026-07-22): Haiku 4.5 (~3× cheaper:
+  # $1/$5 vs $3/$15 per MTok). It is the current DEFAULT for the flow
+  # (DSE_CODER_MODEL in compose); Sonnet stays registered above — going back is
+  # changing 1 env var, nothing more.
   - model_name: anthropic/claude-haiku
     litellm_params:
       model: anthropic/claude-haiku-4-5-20251001
@@ -111,19 +111,19 @@ model_list:
       dse_tier: "poc-direct-api"
       dse_requires_infra: "anthropic_public_api"
 
-# Fase 3 (WSD-E4-T1): failover intra-tier NATIVO do proxy (router do LiteLLM).
-# Declarativo, fora do código dos agentes (P1): se o deployment do primário
-# falhar (connection refused / 5xx / timeout), o router tenta o fallback DA
-# MESMA LINHA — e somente ele. Não há rota de fallback para bedrock/* aqui
-# (cruzaria o tier contratado) nem haverá: ver teste negativo citado acima.
-# O cliente detecta a degradação pelo header x-litellm-attempted-fallbacks
-# (>0) + x-litellm-model-api-base, e emite o audit row de degradação (P8) —
-# ver model_gateway_client/failover.py.
+# Phase 3 (WSD-E4-T1): intra-tier failover NATIVE to the proxy (LiteLLM router).
+# Declarative, outside the agents' code (P1): if the primary deployment fails
+# (connection refused / 5xx / timeout), the router tries the fallback ON THE
+# SAME LINE — and only that one. There is no fallback route to bedrock/* here
+# (it would cross the contracted tier) and there never will be: see the negative
+# test cited above. The client detects the degradation via the
+# x-litellm-attempted-fallbacks header (>0) + x-litellm-model-api-base, and
+# emits the degradation audit row (P8) — see model_gateway_client/failover.py.
 router_settings:
   num_retries: 1
-  # cooldown curto: depois de uma falha o deployment primário volta a ser
-  # tentado quase imediatamente — os testes de chaos sobem/derrubam o
-  # primário e precisam de recuperação rápida e determinística.
+  # short cooldown: after a failure the primary deployment is retried almost
+  # immediately — the chaos tests bring the primary up/down and need fast,
+  # deterministic recovery.
   cooldown_time: 1
   allowed_fails: 1
   fallbacks:
@@ -131,20 +131,20 @@ router_settings:
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
-  # Sem `database_url`: o LiteLLM guarda virtual keys em memória do processo
-  # (perdidas em restart do container). Aceitável para Fase 1 local — ver
-  # README para o plano de produção (Postgres dedicado, NUNCA o schema
-  # compartilhado `dse` usado pelo control-plane).
+  # No `database_url`: LiteLLM keeps virtual keys in process memory (lost on a
+  # container restart). Acceptable for local Phase 1 — see the README for the
+  # production plan (a dedicated Postgres, NEVER the shared `dse` schema used
+  # by the control-plane).
   allow_requests_on_db_unavailable: true
 
 litellm_settings:
   drop_params: true
   set_verbose: false
   request_timeout: 30
-  # Plano 08 §F (F2) — pre-call hook SERVER-SIDE de budget + kill-switch. Roda
-  # DENTRO do proxy (não-bypassável): toda chamada passa por
-  # DseBudgetKillSwitchHook.async_pre_call_hook, que lê X-Dse-Tenant-Id/
-  # X-Dse-Work-Item-Id e recusa (402 budget / 403 kill-switch) contra o Postgres
-  # do control-plane (DSE_DATABASE_URL). Espelha o enforce_call do client (defesa
-  # em profundidade). O módulo é montado em /app/dse_budget_hook.py (compose).
+  # Plan 08 §F (F2) — SERVER-SIDE budget + kill-switch pre-call hook. Runs
+  # INSIDE the proxy (non-bypassable): every call goes through
+  # DseBudgetKillSwitchHook.async_pre_call_hook, which reads X-Dse-Tenant-Id/
+  # X-Dse-Work-Item-Id and refuses (402 budget / 403 kill-switch) against the
+  # control-plane Postgres (DSE_DATABASE_URL). Mirrors the client's enforce_call
+  # (defence in depth). The module is mounted at /app/dse_budget_hook.py (compose).
   callbacks: ["dse_budget_hook.proxy_handler_instance"]

@@ -1,6 +1,6 @@
-"""WSC-E2-T3: o model-gateway (WS-D, porta 4000)/LiteLLM é a ÚNICA allowlist
-entry para chamadas de modelo — uma chamada direta a um provider externo de
-dentro do sandbox deve ser bloqueada e auditada."""
+"""WSC-E2-T3: the model-gateway (WS-D, port 4000)/LiteLLM is the ONLY allowlist
+entry for model calls — a direct call to an external provider from inside the
+sandbox must be blocked and audited."""
 from __future__ import annotations
 
 import http.client
@@ -33,7 +33,7 @@ def test_model_gateway_is_the_only_model_call_allowlist_entry():
 
     for provider_host in KNOWN_PROVIDER_HOSTS:
         assert not allowlist.is_allowed(provider_host, 443), (
-            f"{provider_host} não deveria estar na allowlist — só o model-gateway pode ser chamado para inferência"
+            f"{provider_host} should not be on the allowlist — only the model-gateway may be called for inference"
         )
 
 
@@ -60,15 +60,15 @@ def test_direct_provider_call_is_blocked_and_audited(running_proxy_factory, work
     finally:
         conn.close()
 
-    assert set(KNOWN_PROVIDER_HOSTS) <= denied_hosts, "esperava auditoria de negação para cada provider externo tentado"
+    assert set(KNOWN_PROVIDER_HOSTS) <= denied_hosts, "expected a denial audit row for every external provider attempted"
 
 
 def test_model_gateway_host_itself_is_allowed(running_proxy_factory):
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
-    # substitui a entry de model-gateway padrão por uma que realmente aponta
-    # para um servidor de verdade neste teste.
+    # replace the default model-gateway entry with one that actually points at a
+    # real server in this test.
     allowlist.entries = [e for e in allowlist.entries if e.category != "model_gateway"]
 
     import http.server

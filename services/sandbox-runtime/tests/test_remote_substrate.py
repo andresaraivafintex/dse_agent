@@ -1,13 +1,14 @@
-"""Fase 1 (plano 09): RemoteSubstrate — o worker despacha o contrato tipado.
+"""Fase 1 (plano 09): RemoteSubstrate — the worker dispatches the typed contract.
 
-Prova, sem docker/k8s (StubDriver), as propriedades da fronteira:
-  - nenhum path do host atravessa (workspace do request é /workspace);
-  - só a virtual key efêmera viaja (nunca master key);
-  - falha do runner vira RemoteTurnError com kind fechado (sem substring);
-  - a seleção in-process ↔ isolado é config de deployment
-    (`DSE_SANDBOX_INPROCESS`), sem mudar código de workflow;
-  - o pipeline determinístico completo do Coder (prune → revert de testes →
-    commit/push escopado) funciona com o turno executado "à distância".
+Proves, without docker/k8s (StubDriver), the boundary's properties:
+  - no host path crosses over (the request's workspace is /workspace);
+  - only the ephemeral virtual key travels (never the master key);
+  - a runner failure becomes a RemoteTurnError with a closed kind (no substring
+    matching);
+  - the in-process ↔ isolated selection is deployment config
+    (`DSE_SANDBOX_INPROCESS`), with no workflow code change;
+  - the Coder's full deterministic pipeline (prune → revert test edits → scoped
+    commit/push) works with the turn executed "remotely".
 """
 from __future__ import annotations
 
@@ -35,9 +36,9 @@ from dse_contracts import GatewayCallHeaders
 
 @dataclass
 class StubDriver:
-    """SandboxDriver mínimo: grava o request e devolve um resultado roteirizado.
-    `write_into` simula o efeito do bind mount: o runner editou /workspace e o
-    worker enxerga a edição no path do host."""
+    """Minimal SandboxDriver: records the request and returns a scripted result.
+    `write_into` simulates the bind mount's effect: the runner edited /workspace
+    and the worker sees the edit on the host path."""
 
     result: dict[str, Any] = field(default_factory=lambda: AgentTurnResult(done=True).model_dump())
     write_into: str | None = None
@@ -92,12 +93,12 @@ def test_request_never_carries_host_paths_or_master_key(tmp_path):
 
     assert len(driver.requests) == 1
     payload = driver.requests[0].input_payload
-    assert payload["workspace_dir"] == "/workspace"  # nunca o path do host
+    assert payload["workspace_dir"] == "/workspace"  # never the host path
     assert str(tmp_path) not in str(payload)
     assert payload["gateway"]["virtual_key"] == "vk-ephemeral"
     assert payload["fake_script"] == [{"done": True}]
     assert "X-Dse-Work-Item-Id" in payload["gateway"]["headers"]
-    # margem de exec: timeout do request > timeout do turno
+    # exec slack: the request timeout > the turn timeout
     assert driver.requests[0].timeout_seconds > payload["timeout_seconds"]
 
 
@@ -148,9 +149,10 @@ def test_build_substrate_mode_is_deployment_config(monkeypatch):
 
 
 def test_coder_turn_pipeline_with_remote_substrate(work_item_id, state_dir):
-    """E2E sem docker exec: o turno roda 'no sandbox' (StubDriver simula o
-    bind mount) e TODO o pós-turno determinístico (prune, revert de testes,
-    commit/push escopado, files_changed) permanece no worker, intacto."""
+    """E2E without docker exec: the turn runs 'in the sandbox' (StubDriver
+    simulates the bind mount) and ALL of the deterministic post-turn (prune,
+    revert test edits, scoped commit/push, files_changed) stays in the worker,
+    intact."""
     tenant_id = "tenant-a"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
     workspace_dir, _bare = _paths_for(work_item_id)
@@ -171,7 +173,7 @@ def test_coder_turn_pipeline_with_remote_substrate(work_item_id, state_dir):
 
     assert "src/from_sandbox.py" in result.files_changed
     assert result.cost_usd == pytest.approx(0.01)
-    # o request que atravessou a fronteira não carregou o path do host
+    # the request that crossed the boundary did not carry the host path
     assert driver.requests[0].input_payload["workspace_dir"] == "/workspace"
 
     asyncio.run(teardown_sandbox(__import__("dse_contracts").TeardownSandboxInput(

@@ -1,21 +1,20 @@
-"""Configuração do adapter GitHub — leitura de credenciais da GitHub App.
+"""GitHub adapter configuration — reading the GitHub App credentials.
 
-Mesma convenção do adapter-slack (WSA-E2-T1): backend de secrets do WS-F
-(`dse_secrets`, WSF-E2-T3a) PRIMEIRO se disponível/responder; senão cai
-para env var local. Nenhuma GitHub App real foi registrada nesta sessão —
-a leitura do Vault sempre cai (via `VaultUnavailableError`) para as env
-vars abaixo, que devem ser preenchidas com valores de fixture para
-rodar os testes locais (`FakeGithubClient` cobre o outbound sem precisar
-de nenhuma delas)."""
+Same convention as adapter-slack (WSA-E2-T1): the WS-F secrets backend
+(`dse_secrets`, WSF-E2-T3a) FIRST if available/responsive; otherwise fall
+back to a local env var. No real GitHub App was registered in this session —
+the Vault read always falls back (via `VaultUnavailableError`) to the env
+vars below, which must be filled with fixture values to run the local tests
+(`FakeGithubClient` covers the outbound without needing any of them)."""
 from __future__ import annotations
 
 import os
 
 
 def get_tenant_id() -> str:
-    """Fase 1: single-tenant de desenvolvimento — ver mesma nota em
-    `adapter_slack.config.get_tenant_id` (mapear org/repo GitHub -> tenant é
-    escopo de WS-F/Fase 2)."""
+    """Phase 1: development single-tenant — see the same note in
+    `adapter_slack.config.get_tenant_id` (mapping GitHub org/repo -> tenant is
+    WS-F/Phase 2 scope)."""
     return os.environ.get("DSE_TENANT_ID", "tenant_dev")
 
 
@@ -49,8 +48,8 @@ def get_installation_id() -> str:
 
 
 def get_bot_mention_login() -> str:
-    """Login (sem @) que o adapter reconhece como 'menção ao bot' em
-    comentários de issue comuns (não-PR). Fixture de dev: `dse-bot`."""
+    """Login (without the @) that the adapter recognizes as a 'bot mention' in
+    plain (non-PR) issue comments. Dev fixture: `dse-bot`."""
     return os.environ.get("GITHUB_BOT_LOGIN", "dse-bot")
 
 

@@ -1,21 +1,21 @@
-"""Queries de leitura sobre o audit ledger (WSF-E1-T2 — extensão do WS-F sobre
-o pacote da fundação `dse_audit`, conforme CONVENTIONS.md: "packages/dse_audit/
-| Fundação (mínimo) -> WS-F estende [...] queries de reconstrução por WorkItem
+"""Read queries over the audit ledger (WSF-E1-T2 — the WS-F extension on top of
+the foundation package `dse_audit`, per CONVENTIONS.md: "packages/dse_audit/ |
+Foundation (minimum) -> WS-F extends [...] per-WorkItem reconstruction queries
 (dse_audit.queries)").
 
-Este módulo é puramente aditivo: não altera `dse_audit.client` (o único
-caminho de escrita continua sendo `emit`). Duas funções cobrem o exit
-criterion da Fase 1 ("first audit-based reconstruction exercise passes"):
+This module is purely additive: it does not touch `dse_audit.client` (`emit`
+remains the only write path). Two functions cover the Fase 1 exit criterion
+("first audit-based reconstruction exercise passes"):
 
-  - `reconstruct_work_item_history(work_item_id)`: timeline completa de um
-    WorkItem via um único SELECT ordenado por `ts`.
-  - `export_audit_range(tenant_id, start, end)`: export compliance-grade
-    (lista de dicts, serializável para CSV) de todas as linhas de audit de um
-    tenant num período — para auditoria externa/regulador.
+  - `reconstruct_work_item_history(work_item_id)`: a WorkItem's full timeline via
+    a single SELECT ordered by `ts`.
+  - `export_audit_range(tenant_id, start, end)`: compliance-grade export (list of
+    dicts, CSV-serializable) of every audit row for a tenant over a time range —
+    for external auditors/regulators.
 
-P8 (evidence over assertion): estas são as únicas duas formas suportadas de
-"provar" o que aconteceu com um WorkItem — nunca reconstrua a partir de logs
-de aplicação, sempre a partir do audit_log.
+P8 (evidence over assertion): these are the only two supported ways to "prove"
+what happened to a WorkItem — never reconstruct from application logs, always
+from audit_log.
 """
 from __future__ import annotations
 
@@ -28,18 +28,18 @@ from .client import get_connection
 
 
 def reconstruct_work_item_history(work_item_id: str, conn=None) -> list[dict[str, Any]]:
-    """Reconstrói a timeline completa de um WorkItem a partir de UM único
-    SELECT em `audit_log`, ordenado por `ts` (e por `id` como desempate
-    estável quando dois eventos têm o mesmo timestamp).
+    """Reconstructs a WorkItem's full timeline from ONE single SELECT on
+    `audit_log`, ordered by `ts` (with `id` as a stable tiebreaker when two
+    events share the same timestamp).
 
-    Retorna uma lista de dicts na ordem cronológica em que os eventos
-    ocorreram: [{ts, actor, action, details, tenant_id}, ...]. Cada dict
-    representa "quem fez o quê, quando" — o exercício de reconstrução por
-    auditoria exigido pelo exit criterion da Fase 1.
+    Returns a list of dicts in the chronological order the events occurred:
+    [{ts, actor, action, details, tenant_id}, ...]. Each dict represents "who did
+    what, when" — the audit-based reconstruction exercise required by the Fase 1
+    exit criterion.
 
-    Não faz nenhuma suposição sobre quais ações existem (admitted, clarified,
-    plan, implementing, l1_passed, pr_opened, review_approved, merged, ...) —
-    é agnóstico ao vocabulário de ações, apenas devolve o que foi gravado.
+    Makes no assumption about which actions exist (admitted, clarified, plan,
+    implementing, l1_passed, pr_opened, review_approved, merged, ...) — it is
+    agnostic to the action vocabulary and just returns what was recorded.
     """
     owns_conn = conn is None
     if owns_conn:
@@ -78,12 +78,12 @@ def export_audit_range(
     end: dt.datetime,
     conn=None,
 ) -> list[dict[str, Any]]:
-    """Export compliance-grade de todas as linhas de audit de um tenant num
-    período [start, end) — para produção sob demanda de auditoria externa/
-    regulador (NFR-03). Um único SELECT, ordenado por `ts`.
+    """Compliance-grade export of every audit row for a tenant over the range
+    [start, end) — produced on demand for an external auditor/regulator
+    (NFR-03). A single SELECT, ordered by `ts`.
 
-    `start`/`end` devem ser timezone-aware (UTC recomendado); comparação é
-    feita diretamente contra a coluna `ts` (TIMESTAMPTZ).
+    `start`/`end` must be timezone-aware (UTC recommended); the comparison runs
+    directly against the `ts` column (TIMESTAMPTZ).
     """
     owns_conn = conn is None
     if owns_conn:
@@ -118,9 +118,9 @@ def export_audit_range(
 
 
 def export_audit_range_csv(tenant_id: str, start: dt.datetime, end: dt.datetime, conn=None) -> str:
-    """Mesmo export de `export_audit_range`, serializado como CSV (string)
-    pronto para anexar a um relatório de auditoria. `details` (JSONB) é
-    serializado como texto JSON compacto na coluna correspondente.
+    """Same export as `export_audit_range`, serialized as a CSV string ready to
+    attach to an audit report. `details` (JSONB) is serialized as compact JSON
+    text in the matching column.
     """
     import json
 

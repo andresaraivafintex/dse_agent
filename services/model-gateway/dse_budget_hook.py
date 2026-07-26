@@ -1,32 +1,33 @@
-"""Plano 08 §F (F2) + plano 09 Fase 3 — pre-call hook do LiteLLM proxy:
-enforcement de budget + kill-switch SERVER-SIDE (não-bypassável) e FAIL-CLOSED
-com degradação limitada.
+"""Plano 08 §F (F2) + plano 09 Fase 3 — LiteLLM proxy pre-call hook:
+SERVER-SIDE (non-bypassable) budget + kill-switch enforcement, FAIL-CLOSED with
+bounded degradation.
 
-O `enforce_call` do `model_gateway_client` roda no CLIENTE — um caller que fale
-direto com o proxy (com a master key/virtual key) o burlaria. Este hook roda
-DENTRO do proxy LiteLLM (`litellm_settings.callbacks`), então TODA chamada
-passa por ele, venha de onde vier. É defesa em profundidade: o client segue
-checando (fail-fast/UX), o proxy é a autoridade.
+`model_gateway_client`'s `enforce_call` runs on the CLIENT — a caller talking
+straight to the proxy (with the master key / a virtual key) would bypass it.
+This hook runs INSIDE the LiteLLM proxy (`litellm_settings.callbacks`), so
+EVERY call goes through it, wherever it comes from. It is defense in depth: the
+client keeps checking (fail-fast/UX), the proxy is the authority.
 
-Autossuficiente de propósito (só psycopg2, que a imagem do LiteLLM já traz):
-para ser dropado na imagem stock sem instalar o `model_gateway_client`.
-ESPELHA a lógica de `controls.is_killed` + `budget.resolve_caps`/ledger — se
-uma mudar, mude as duas (documentado).
+Deliberately self-contained (only psycopg2, which the LiteLLM image already
+ships): so it can be dropped into the stock image without installing
+`model_gateway_client`. It MIRRORS the logic of `controls.is_killed` +
+`budget.resolve_caps`/ledger — if one changes, change both (documented).
 
-Contexto (tenant/work_item) vem dos headers que o client já envia:
-`X-Dse-Tenant-Id` / `X-Dse-Work-Item-Id`. Sem esses headers a chamada não é do
-orquestrador DSE — deixa passar (as virtual keys já escopam por modelo/budget).
+Context (tenant/work_item) comes from the headers the client already sends:
+`X-Dse-Tenant-Id` / `X-Dse-Work-Item-Id`. Without those headers the call is not
+from the DSE orchestrator — let it through (virtual keys already scope it by
+model/budget).
 
-Postura em falha de Postgres (Fase 3 — antes era fail-OPEN silencioso):
-  1. Toda chamada consulta o DB (com connect_timeout curto — um Postgres
-     PENDURADO não trava mais o pre-call) e o veredito bom mais recente por
-     (tenant, work_item) fica em cache no processo.
-  2. DB inacessível + veredito em cache dentro do HARD TTL → serve o cache,
-     LOGADO como decisão DEGRADADA (visível, contável, com prazo de validade).
-  3. DB inacessível + cache ausente/vencido → BLOQUEIA a chamada DSE com 503
-     retryable ("budget_enforcement_unavailable") — fail-closed de verdade.
-     Chamadas SEM contexto DSE nunca são bloqueadas por indisponibilidade
-     (as virtual keys já as escopam; o cap max_budget segue de backstop).
+Posture on Postgres failure (Phase 3 — it used to be a silent fail-OPEN):
+  1. Every call queries the DB (with a short connect_timeout — a HUNG Postgres
+     no longer stalls the pre-call) and the most recent good verdict per
+     (tenant, work_item) is cached in-process.
+  2. DB unreachable + cached verdict within the HARD TTL -> serve the cache,
+     LOGGED as a DEGRADED decision (visible, counted, with an expiry).
+  3. DB unreachable + cache missing/expired -> BLOCK the DSE call with a
+     retryable 503 ("budget_enforcement_unavailable") — a real fail-closed.
+     Calls with NO DSE context are never blocked by unavailability (virtual
+     keys already scope them; the max_budget cap remains as a backstop).
 """
 from __future__ import annotations
 
@@ -40,27 +41,27 @@ logger = logging.getLogger("dse_budget_hook")
 
 _DSN = os.environ.get("DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse")
 
-# Knobs da degradação (Fase 3). CONNECT_TIMEOUT curto é o que impede um
-# Postgres pendurado de segurar o event loop do proxy.
+# Degradation knobs (Phase 3). The short CONNECT_TIMEOUT is what stops a hung
+# Postgres from holding up the proxy's event loop.
 CONNECT_TIMEOUT_S = int(os.environ.get("DSE_BUDGET_HOOK_CONNECT_TIMEOUT_S", "3"))
 HARD_TTL_S = float(os.environ.get("DSE_BUDGET_HOOK_HARD_TTL_S", "600"))
 
-# Contadores de observabilidade (expostos p/ teste e scrape via logs):
-# toda decisão fora do caminho feliz é CONTADA e LOGADA — fail-open silencioso
-# não existe mais.
-DEGRADED_DECISIONS = 0          # serviu veredito de cache com DB fora
-UNAVAILABLE_BLOCKS = 0          # bloqueou por indisponibilidade sem cache
+# Observability counters (exposed for tests and for log scraping): every
+# decision off the happy path is COUNTED and LOGGED — silent fail-open no
+# longer exists.
+DEGRADED_DECISIONS = 0          # served a cached verdict with the DB down
+UNAVAILABLE_BLOCKS = 0          # blocked due to unavailability with no cache
 
 # (tenant_id, work_item_id) -> ((allowed, error, reason), monotonic_ts)
 _VERDICT_CACHE: dict[tuple[str, str], tuple[tuple[bool, str, str], float]] = {}
 
 
 def _conn():
-    import psycopg2  # presente na imagem do LiteLLM (suporte a Postgres)
+    import psycopg2  # present in the LiteLLM image (Postgres support)
     return psycopg2.connect(_DSN, connect_timeout=CONNECT_TIMEOUT_S)
 
 
-# --- kill-switch (espelha controls.is_killed) --------------------------------
+# --- kill-switch (mirrors controls.is_killed) --------------------------------
 
 def _kill_reason(cur, tenant_id: str, work_item_id: str) -> str | None:
     cur.execute(
@@ -73,7 +74,7 @@ def _kill_reason(cur, tenant_id: str, work_item_id: str) -> str | None:
             return reason or "tenant_kill_switch"
         if scope_type == "work_item" and scope_id == work_item_id:
             return reason or "work_item_kill_switch"
-    # fontes do WS-F
+    # WS-F sources
     cur.execute("SELECT reason FROM dse_kill_switch_global WHERE id='global' AND enabled")
     row = cur.fetchone()
     if row:
@@ -88,7 +89,7 @@ def _kill_reason(cur, tenant_id: str, work_item_id: str) -> str | None:
     return None
 
 
-# --- budget (espelha budget.resolve_caps + ledger spent) ---------------------
+# --- budget (mirrors budget.resolve_caps + ledger spent) ---------------------
 
 def _one(cur, sql: str, params: tuple) -> Any:
     cur.execute(sql, params)
@@ -139,8 +140,8 @@ def _decide(cur, tenant_id: str, work_item_id: str) -> tuple[bool, str, str]:
 def _degraded_verdict(
     key: tuple[str, str], now_ts: float, exc: Exception
 ) -> tuple[bool, str, str]:
-    """Postgres inacessível: serve o último veredito BOM dentro do hard TTL
-    (degradação visível) ou bloqueia (fail-closed). Nunca fail-open cego."""
+    """Postgres unreachable: serve the last GOOD verdict within the hard TTL
+    (visible degradation) or block (fail-closed). Never a blind fail-open."""
     global DEGRADED_DECISIONS, UNAVAILABLE_BLOCKS
     cached = _VERDICT_CACHE.get(key)
     if cached is not None:
@@ -149,15 +150,15 @@ def _degraded_verdict(
         if age <= HARD_TTL_S:
             DEGRADED_DECISIONS += 1
             logger.warning(
-                "dse_budget_hook DEGRADED: postgres inacessível (%s: %s); servindo veredito "
-                "de cache com %.0fs de idade para %s (hard TTL %.0fs)",
+                "dse_budget_hook DEGRADED: postgres unreachable (%s: %s); serving a cached "
+                "verdict %.0fs old for %s (hard TTL %.0fs)",
                 type(exc).__name__, str(exc)[:120], age, key, HARD_TTL_S,
             )
             return verdict
     UNAVAILABLE_BLOCKS += 1
     logger.error(
-        "dse_budget_hook UNAVAILABLE: postgres inacessível (%s: %s) e sem veredito fresco "
-        "para %s — chamada DSE BLOQUEADA (fail-closed)",
+        "dse_budget_hook UNAVAILABLE: postgres unreachable (%s: %s) and no fresh verdict "
+        "for %s — DSE call BLOCKED (fail-closed)",
         type(exc).__name__, str(exc)[:120], key,
     )
     return (
@@ -175,21 +176,21 @@ def evaluate_gate(
     connect: Callable[[], Any] | None = None,
     now: Callable[[], float] | None = None,
 ) -> tuple[bool, str, str]:
-    """Núcleo puro e testável (sem litellm): retorna (allowed, error, reason).
-    Sem contexto DSE → allowed (não é chamada do orquestrador). `connect`/`now`
-    são injeção de dependência para os testes das células de degradação."""
+    """Pure, testable core (no litellm): returns (allowed, error, reason). With
+    no DSE context -> allowed (not an orchestrator call). `connect`/`now` are
+    dependency injection for the degradation-cell tests."""
     if not tenant_id or not work_item_id:
         return True, "", "no_dse_context"
     key = (tenant_id, work_item_id)
     now_ts = (now or time.monotonic)()
     try:
         conn = (connect or _conn)()
-    except Exception as exc:  # noqa: BLE001 — célula "DB fora"
+    except Exception as exc:  # noqa: BLE001 — the "DB down" cell
         return _degraded_verdict(key, now_ts, exc)
     try:
         with conn.cursor() as cur:
             verdict = _decide(cur, tenant_id, work_item_id)
-    except Exception as exc:  # noqa: BLE001 — query falhou mid-flight
+    except Exception as exc:  # noqa: BLE001 — the query failed mid-flight
         return _degraded_verdict(key, now_ts, exc)
     finally:
         try:
@@ -200,11 +201,11 @@ def evaluate_gate(
     return verdict
 
 
-# --- CustomLogger wrapper (import de litellm guardado p/ testabilidade) -------
+# --- CustomLogger wrapper (litellm import guarded for testability) -----------
 
 try:
     from litellm.integrations.custom_logger import CustomLogger as _Base
-except Exception:  # pragma: no cover — venv de dev/teste sem litellm
+except Exception:  # pragma: no cover — dev/test venv without litellm
     class _Base:  # type: ignore
         pass
 
@@ -219,9 +220,9 @@ class DseBudgetKillSwitchHook(_Base):
             return data
         _audit(tenant_id, work_item_id, error, reason)
         from fastapi import HTTPException
-        # 403 kill-switch / 402 budget: recusas de política (P6, não-retryable
-        # no client). 503 indisponibilidade de enforcement: RETRYABLE — o blip
-        # do Postgres passa e a chamada seguinte decide de verdade.
+        # 403 kill-switch / 402 budget: policy refusals (P6, non-retryable on
+        # the client). 503 enforcement unavailability: RETRYABLE — the Postgres
+        # blip passes and the next call decides for real.
         status = {"kill_switch_active": 403, "budget_exhausted": 402}.get(error, 503)
         raise HTTPException(status_code=status, detail={"error": error, "reason": reason,
                                                         "enforced_by": "dse_budget_hook"})

@@ -1,24 +1,23 @@
-"""WSC-E3-T4b (a)+(c) — ACEITAÇÃO REAL: `npx playwright test --grep @demo`
-DENTRO de um container da imagem nova (`dse-sandbox-base:wsc3`) produz vídeo
-real.
+"""WSC-E3-T4b (a)+(c) — REAL ACCEPTANCE: `npx playwright test --grep @demo`
+INSIDE a container of the new image (`dse-sandbox-base:wsc3`) produces a real
+video.
 
-Nada aqui é simulado: o container é provisionado pelo MESMO
-`docker_driver.provision_container` de produção (rootless uid 10001,
-`--read-only`, `--cap-drop ALL`, rede interna `dse_sandbox_net` SEM
-internet), o fixture `@demo` é materializado pela sessão Tester real (via
-toolset — a mesma convenção `demos/<work_item_id>/` do teste de
-conformidade), a página estática é SERVIDA localmente dentro do container
-(`webServer` do Playwright → `python3 -m http.server`), e o chromium
-headless grava o vídeo (.webm — formato nativo do Playwright; transcodificar
-para mp4, se a superfície exigir, é pós-processamento do pipeline do WS-E,
-documentado em `demo_fixture.py`).
+Nothing here is simulated: the container is provisioned by the SAME production
+`docker_driver.provision_container` (rootless uid 10001, `--read-only`,
+`--cap-drop ALL`, internal `dse_sandbox_net` network with NO internet), the
+`@demo` fixture is materialized by the real Tester session (via the toolset —
+the same `demos/<work_item_id>/` convention as the conformance test), the static
+page is SERVED locally inside the container (Playwright's `webServer` →
+`python3 -m http.server`), and headless chromium records the video (.webm —
+Playwright's native format; transcoding to mp4, if the surface requires it, is
+post-processing in the WS-E pipeline, documented in `demo_fixture.py`).
 
-A execução sem internet dentro do sandbox só funciona porque a toolchain
-INTEIRA (node + @playwright/test pinado + chromium headless) já está na
-imagem — que é exatamente o ponto do T4b.
+Running without internet inside the sandbox only works because the ENTIRE
+toolchain (node + pinned @playwright/test + headless chromium) is already in the
+image — which is exactly the point of T4b.
 
-Se a imagem ainda não existe localmente, o teste a builda de verdade
-(uma vez; fica em cache) — nunca skipa silenciosamente.
+If the image does not exist locally yet, the test really builds it (once; it
+stays cached) — it never skips silently.
 """
 from __future__ import annotations
 
@@ -51,14 +50,14 @@ def sandbox_image(docker_client: docker_sdk.DockerClient) -> str:
     try:
         docker_client.images.get(SANDBOX_IMAGE)
     except docker_sdk.errors.ImageNotFound:
-        # A imagem (~2GB, download do chromium) NÃO é buildada por padrão — no
-        # runner CI isso estoura tempo/espaço e o bind mount do /workspace nem
-        # tem permissão. Roda de verdade no dev/VPS onde a imagem existe ou com
-        # DSE_BUILD_SANDBOX_IMAGE=1 para buildar sob demanda.
+        # The image (~2GB, chromium download) is NOT built by default — on the
+        # CI runner that blows up time/space and the /workspace bind mount does
+        # not even have permission. It really runs on dev/VPS where the image
+        # exists, or with DSE_BUILD_SANDBOX_IMAGE=1 to build on demand.
         if os.environ.get("DSE_BUILD_SANDBOX_IMAGE") != "1":
             pytest.skip(
-                f"imagem {SANDBOX_IMAGE} ausente — pré-builde ou "
-                "DSE_BUILD_SANDBOX_IMAGE=1 (build real ~2GB)"
+                f"image {SANDBOX_IMAGE} missing — pre-build it or set "
+                "DSE_BUILD_SANDBOX_IMAGE=1 (real ~2GB build)"
             )
         subprocess.run(
             ["docker", "build", "-f", str(_DOCKERFILE), "-t", SANDBOX_IMAGE, str(_DOCKERFILE.parent)],
@@ -84,15 +83,15 @@ def test_playwright_demo_inside_sandbox_produces_real_video(
                 work_item_id=work_item_id,
                 tenant_id=tenant,
                 image=sandbox_image,
-                # chromium precisa de mais memória/pids/tmp que o default
-                # `small` da Fase 1 — caps continuam FINITOS e derivados do
-                # budget (nunca ilimitados).
+                # chromium needs more memory/pids/tmp than Fase 1's `small`
+                # default — the caps stay FINITE and derived from the budget
+                # (never unlimited).
                 budget={"resource_class": "large", "tmp_mb": 512},
             )
         )
     )
     try:
-        # 1) Tester real autora o fixture @demo na convenção demos/<wi>/.
+        # 1) The real Tester authors the @demo fixture under the demos/<wi>/ convention.
         asyncio.run(
             _run_tester_turn_impl(
                 RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="autora @demo"),
@@ -102,26 +101,26 @@ def test_playwright_demo_inside_sandbox_produces_real_video(
         workspace, _bare = _paths_for(work_item_id)
         demo_dir_in_container = f"/workspace/demos/{work_item_id}"
 
-        # 2) Aceitação literal do T4b: npx playwright test --grep @demo
-        #    DENTRO do container da imagem nova.
+        # 2) T4b's literal acceptance: npx playwright test --grep @demo
+        #    INSIDE the container of the new image.
         rc, out = _exec(
             docker_client,
             handle.container_id,
             ["npx", "playwright", "test", "--grep", "@demo"],
             workdir=demo_dir_in_container,
         )
-        assert rc == 0, f"playwright @demo falhou dentro do sandbox (rc={rc}):\n{out}"
+        assert rc == 0, f"playwright @demo failed inside the sandbox (rc={rc}):\n{out}"
         assert "1 passed" in out
 
-        # 3) Vídeo REAL no workspace (bind mount => visível do host).
+        # 3) REAL video in the workspace (bind mount => visible from the host).
         results_dir = Path(workspace) / "demos" / work_item_id / "test-results"
         videos = list(results_dir.rglob("*.webm"))
-        assert videos, f"nenhum vídeo .webm em {results_dir}"
-        assert videos[0].stat().st_size > 10_000, "vídeo suspeito de vazio"
-        # trace zip também (vira playwright_trace no artifact store do WS-E)
+        assert videos, f"no .webm video in {results_dir}"
+        assert videos[0].stat().st_size > 10_000, "video suspiciously empty"
+        # the trace zip too (becomes playwright_trace in WS-E's artifact store)
         assert list(results_dir.rglob("trace.zip")), "trace.zip ausente"
 
-        # 4) O sandbox continua o de produção: rootless e sem internet.
+        # 4) The sandbox is still the production one: rootless and with no internet.
         rc_uid, uid_out = _exec(docker_client, handle.container_id, ["id", "-u"], workdir="/workspace")
         assert rc_uid == 0 and uid_out.strip() != "0"
         container = docker_client.containers.get(handle.container_id)

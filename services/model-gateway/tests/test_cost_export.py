@@ -1,5 +1,5 @@
-"""WSD-E3-T2: agregação de custo por tenant/task-class/stage a partir dos
-spans emitidos por chamadas reais ao gateway."""
+"""WSD-E3-T2: cost aggregation by tenant/task-class/stage from the spans
+emitted by real calls to the gateway."""
 from __future__ import annotations
 
 from dse_contracts.gateway_contract import GatewayCallHeaders, Stage

@@ -1,6 +1,6 @@
-"""P8: toda emissão/revogação de virtual key grava uma linha no audit ledger
-via `dse_audit.emit` — nunca por fora dele. Consulta o Postgres real
-(audit_log é append-only, sem UPDATE/DELETE grant — ver migrations/0001)."""
+"""P8: every virtual key issue/revoke writes a row on the audit ledger via
+`dse_audit.emit` — never around it. Queries the real Postgres (audit_log is
+append-only, with no UPDATE/DELETE grant — see migrations/0001)."""
 from __future__ import annotations
 
 from dse_audit.client import get_connection
@@ -60,9 +60,9 @@ def test_audit_row_details_carry_tenant_and_stage(unique_ids):
 
 
 def test_revoke_of_untracked_key_does_not_emit_audit_row():
-    """revoke_virtual_key falha limpo (VirtualKeyNotFoundError) ANTES de
-    qualquer decisão consequente — não deve gravar nada no ledger para uma
-    key que não existe no nosso rastreamento."""
+    """revoke_virtual_key fails clean (VirtualKeyNotFoundError) BEFORE any
+    consequential decision — it must write nothing on the ledger for a key that
+    does not exist in our tracking."""
     import pytest
     from model_gateway_client.errors import VirtualKeyNotFoundError
 

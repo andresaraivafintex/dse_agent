@@ -1,16 +1,17 @@
-"""API de controle de operador do gateway (WSD-E4-T2). FastAPI fina sobre
-`controls.py` / `budget.py` / `policy.py` — é o "signal/endpoint" que os
-controles de operador do WS-B/WS-F chamam para acionar kill switch, reassignar
-modelo de uma tarefa em voo, e inspecionar budget/política.
+"""Gateway operator control API (WSD-E4-T2). A thin FastAPI over
+`controls.py` / `budget.py` / `policy.py` — it is the "signal/endpoint" that
+the WS-B/WS-F operator controls call to trip the kill switch, reassign the
+model of an in-flight task, and inspect budget/policy.
 
-NÃO faz parte do caminho de chamada de modelo (não é o Coder que chama isto) —
-é plano de controle. Roda como processo separado:
+NOT part of the model call path (the Coder does not call this) — it is control
+plane. Runs as a separate process:
 
     uvicorn model_gateway_client.control_api:app --port 4010
 
-Toda mutação já emite audit (P8) via as funções de `controls.py`. Autenticação
-do endpoint em si é responsabilidade do WS-F (mesh/mTLS/authz do admin console)
-— documentado no README; aqui expomos a superfície funcional.
+Every mutation already emits audit (P8) through the `controls.py` functions.
+Authentication of the endpoint itself is WS-F's responsibility (admin console
+mesh/mTLS/authz) — documented in the README; here we expose the functional
+surface.
 """
 from __future__ import annotations
 

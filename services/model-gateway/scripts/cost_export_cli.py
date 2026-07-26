@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""CLI de conveniência para WSD-E3-T2: imprime a agregação de custo por
-tenant/task-class/stage dos spans registrados NO PROCESSO ATUAL.
+"""Convenience CLI for WSD-E3-T2: prints the cost aggregation by
+tenant/task-class/stage from the spans recorded IN THE CURRENT PROCESS.
 
-Nota importante: como o recorder de spans é em memória por processo, rodar
-este script como um processo separado depois que outro processo já fez as
-chamadas de modelo NÃO mostrará nada (o buffer está vazio aqui). Isto é
-só para demonstração/teste manual (ex.: rodar dentro do mesmo processo que
-fez as chamadas, ou usar via `model_gateway_client.export_api` como um
-endpoint HTTP acoplado ao processo que efetivamente serve as chamadas).
+Important note: because the span recorder is in memory per process, running
+this script as a separate process after another process already made the model
+calls will show NOTHING (the buffer is empty here). This is only for
+demonstration/manual testing (e.g. running inside the same process that made
+the calls, or using `model_gateway_client.export_api` as an HTTP endpoint
+attached to the process that actually serves the calls).
 
-Produção: troca `cost_export._iter_spans()` para ler do backend do OTel
-collector do WS-F (ver docstring de cost_export.py) — aí sim funciona como
-processo/CLI standalone de verdade, porque a fonte de dados deixa de ser
-o buffer em memória de um processo específico.
+Production: swap `cost_export._iter_spans()` to read from WS-F's OTel collector
+backend (see cost_export.py's docstring) — then it really works as a standalone
+process/CLI, because the data source stops being one specific process's
+in-memory buffer.
 """
 from __future__ import annotations
 

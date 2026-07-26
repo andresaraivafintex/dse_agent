@@ -1,22 +1,22 @@
--- Fintex DSE — Fase 1 — WS-A (Ingestão e adaptadores)
--- Dono: WS-A. Arquivo reservado (ver CONVENTIONS.md) — não editar fora do WS-A.
+-- Fintex DSE — Phase 1 — WS-A (Ingestion and adapters)
+-- Owner: WS-A. Reserved file (see CONVENTIONS.md) — do not edit outside WS-A.
 --
--- Três tabelas próprias do WS-A:
---   1. channel_kill_switches — kill switch por (tenant, canal) consultado pelo
---      gateway ANTES de admit_work_item (WSA-E1-T3). Granularidade mais fina
---      que `tenant_config.kill_switch_enabled` (WS-F, todo o tenant) — as duas
---      são checadas: tenant-wide primeiro (se existir), depois canal.
---   2. tenant_steering_allowlist — fallback explícito de quem pode "steerar"
---      uma tarefa em andamento via comentário (WSA-E6-T2a). Nunca "qualquer
---      um pode steerar" — ausência de linha = não autorizado.
---   3. comment_state — persistência do comment_ref por (work_item_id, surface)
---      usada pelo `dse_contracts.mutable_comment.MutableCommentWriter` para
---      manter os adapters 100% stateless (crash-consistent).
+-- Three tables owned by WS-A:
+--   1. channel_kill_switches — kill switch per (tenant, channel) checked by the
+--      gateway BEFORE admit_work_item (WSA-E1-T3). Finer grained than
+--      `tenant_config.kill_switch_enabled` (WS-F, the whole tenant) — both are
+--      checked: tenant-wide first (if present), then the channel.
+--   2. tenant_steering_allowlist — explicit fallback for who may "steer" an
+--      in-flight task via comment (WSA-E6-T2a). Never "anyone can steer" —
+--      absence of a row = not authorized.
+--   3. comment_state — persistence of the comment_ref per (work_item_id, surface)
+--      used by `dse_contracts.mutable_comment.MutableCommentWriter` to keep
+--      the adapters 100% stateless (crash-consistent).
 
 CREATE TABLE IF NOT EXISTS channel_kill_switches (
     tenant_id   TEXT NOT NULL,
-    channel     TEXT NOT NULL,   -- ex.: slack channel id, github "owner/repo"
-    active      BOOLEAN NOT NULL DEFAULT false,  -- true = canal DESLIGADO (bloqueia admissão)
+    channel     TEXT NOT NULL,   -- e.g.: slack channel id, github "owner/repo"
+    active      BOOLEAN NOT NULL DEFAULT false,  -- true = channel TURNED OFF (blocks admission)
     reason      TEXT,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (tenant_id, channel)

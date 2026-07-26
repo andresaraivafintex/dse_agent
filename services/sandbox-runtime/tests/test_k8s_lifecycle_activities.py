@@ -1,9 +1,10 @@
-"""Regressão do modo K8s dos lifecycle activities (plano 09, review adversarial).
+"""Regression for the K8s mode of the lifecycle activities (plano 09,
+adversarial review).
 
-Sem cluster: monkeypatcha `activities.select_sandbox_driver` para um driver
-stub com `workspace_is_host_visible=False`, exercitando os RAMOS K8s de
-provision/checkpoint/rebuild/teardown que os testes Docker/Fake nunca tocam.
-Pega, entre outros, o BLOCKER-1 (UnboundLocalError no teardown K8s).
+No cluster needed: monkeypatches `activities.select_sandbox_driver` with a stub
+driver whose `workspace_is_host_visible=False`, exercising the K8s BRANCHES of
+provision/checkpoint/rebuild/teardown that the Docker/Fake tests never touch.
+Catches, among others, BLOCKER-1 (UnboundLocalError in the K8s teardown).
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ from sandbox_runtime.driver import SandboxRebuildResult
 
 
 class _StubK8sDriver:
-    """Mesma interface do KubernetesSandboxDriver, sem cluster. Registra as
-    chamadas e devolve um ProvisionedSandbox com o nome do Pod."""
+    """Same interface as KubernetesSandboxDriver, without a cluster. Records the
+    calls and returns a ProvisionedSandbox carrying the Pod name."""
 
     def __init__(self):
         self.provisioned = []
@@ -73,7 +74,7 @@ class _StubK8sDriver:
 def k8s_driver(monkeypatch):
     stub = _StubK8sDriver()
     monkeypatch.setattr(activities, "select_sandbox_driver", lambda: stub)
-    # o provision faz validate_runtime_startup(); em dev isso é permissivo
+    # provision calls validate_runtime_startup(); in dev that is permissive
     return stub
 
 
@@ -82,7 +83,7 @@ def test_provision_k8s_uses_driver_not_docker(k8s_driver, work_item_id, state_di
         ProvisionSandboxInput(work_item_id=work_item_id, tenant_id="tenant-a",
                               repo="andre2654/fintex-wallet", base_branch="main")))
     assert len(k8s_driver.provisioned) == 1
-    # o repo alvo é repassado ao driver (clone in-pod)
+    # the target repo is forwarded to the driver (in-pod clone)
     assert k8s_driver.provisioned[0].repo == "andre2654/fintex-wallet"
     assert handle.sandbox_id == f"dse-sbx-{work_item_id}"
     assert handle.container_id == f"dse-sbx-{work_item_id}"
@@ -96,7 +97,7 @@ def test_checkpoint_k8s_records_pod_name(k8s_driver, work_item_id, state_dir):
 
 
 def test_teardown_k8s_completes_without_unbound_local(k8s_driver, work_item_id, state_dir):
-    # BLOCKER-1: antes do fix isto levantava UnboundLocalError ('existing').
+    # BLOCKER-1: before the fix this raised UnboundLocalError ('existing').
     asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id="tenant-a")))
     assert k8s_driver.tore_down == [f"dse-sbx-{work_item_id}"]
 

@@ -1,87 +1,87 @@
-# Fase 3 ("Evidence") — Status da implementação
+# Phase 3 ("Evidence") — Implementation status
 
-Data: 2026-07-20. Escopo: implementação real da Fase 3 sobre Fases 1+2 integradas, com os
-ajustes do [adendo 02](../../plano-desenvolvimento/02-ADENDO-FASE3-POS-FASE2.md).
+Date: 2026-07-20. Scope: real implementation of Phase 3 on top of the integrated Phases 1+2, with
+the adjustments from [addendum 02](../../plano-desenvolvimento/02-ADENDO-FASE3-POS-FASE2.md).
 
-## Resumo executivo
+## Executive summary
 
-- **~470 testes passando, 2 pulados, 0 falhando** (Fase 2 fechou em 399; +71 novos na Fase 3):
+- **~470 tests passing, 2 skipped, 0 failing** (Phase 2 closed at 399; +71 new in Phase 3):
   contracts 14 · WS-A 107 · WS-B 47 · WS-C 78 (65 sandbox + 13 egress) · WS-D 51 · WS-E 103 ·
-  WS-F 121 (114 platform + 7 audit). Contra Postgres/Temporal/Docker/Vault/LiteLLM **e um
-  cluster Kubernetes real (k3d) com Argo CD**.
-- **Gate de entrada cumprido antes do build** (a resposta aos 14 bugs de boundary das Fases
-  1-2): models de sessão promovidos a `dse_contracts` com `test_activity_boundaries.py`
-  validando os payloads literais dos call sites; `RunL2ReviewInput` com `extra="forbid"` (P3 no
-  decode); contratos de evidência definidos antes da implementação; cluster k3d + Argo CD.
-- **O gate de boundary pagou na hora**: a Fase 3 adicionou 4 Activities de evidência e
-  **nenhum bug de boundary** apareceu na integração (contra 9 na Fase 1 e 5 na Fase 2) — os 2
-  bugs desta integração foram de outra natureza (ordering e DSN), não de contrato.
-- Worker registra **30 Activities** (8 WS-C + 14 WS-E + 8 WS-B locais), sem colisão de nome.
+  WS-F 121 (114 platform + 7 audit). Against Postgres/Temporal/Docker/Vault/LiteLLM **and a
+  real Kubernetes cluster (k3d) with Argo CD**.
+- **Entry gate satisfied before the build** (the answer to the 14 boundary bugs of Phases
+  1-2): session models promoted to `dse_contracts` with `test_activity_boundaries.py`
+  validating the literal payloads of the call sites; `RunL2ReviewInput` with `extra="forbid"` (P3 at
+  decode time); evidence contracts defined before implementation; k3d cluster + Argo CD.
+- **The boundary gate paid off immediately**: Phase 3 added 4 evidence Activities and
+  **no boundary bug** appeared during integration (against 9 in Phase 1 and 5 in Phase 2) — the 2
+  bugs in this integration were of a different nature (ordering and DSN), not contract drift.
+- The worker registers **30 Activities** (8 WS-C + 14 WS-E + 8 WS-B local), with no name collisions.
 
-## O que foi construído (real, por workstream)
+## What was built (real, per workstream)
 
-| WS | Fase 3 entregue | Prova real |
+| WS | Phase 3 delivered | Real proof |
 |---|---|---|
-| E | Artifact store **Garage v1.1.0** (bucket/tenant, presigned TTL, quarentena integrada à costura do WS-F, log de acesso, multipart), vídeo **@demo Playwright** (webm real), **previews por PR via Argo CD ApplicationSet** no cluster k3d, visual diff (Pillow), L3 completo (reflection + targeted re-runs + episódios de CI-repair) | mp4 10MB round-trip byte-idêntico; URL expirada → negada; namespace de preview criado → **HTTP 200** → TTL reap; quarentena → 404 antes do TTL |
-| C | **Playwright na imagem base** do sandbox (`dse-sandbox-base:wsc3`, 2.35GB, chromium) + convenção `demos/<work_item_id>/`; **segundo substrato Claude Agent SDK** (v0.2.124 real) atrás da mesma interface + suíte de conformidade parametrizada | `npx playwright test --grep @demo` via `docker exec` no sandbox rootless → vídeo webm real |
-| D | **Failover intra-tier nativo** do LiteLLM (2ª instância eco, mesmo tier) + bateria de chaos estendida (outage total, quota 429, egress não-allowlisted) | failover provado derrubando o container primário com `docker stop`; teste negativo que falha o CI se um fallback cruzar tier (NFR-07) |
-| B | **Debounce de evidência (ADR-26)** + iteration caps no review loop + wiring do pipeline de evidência (trigger_preview → demo → visual_diff, degraded não bloqueia) + métrica OTel de tamanho de history | 6 comentários numa janela → ≤1 refresh (time-skipping); fakes que **decodificam com os models reais** do contrato |
-| F | **ADR-28 completo**: rotação agendada de secrets (zero downtime provado) + **ESO 2.8.0 real** no k3d (Secret materializa do Vault, teste negativo de escopo); retenção por classificação; **alerta de history ativado** | leitor concorrente durante 5 rotações → zero erro; ExternalSecret fora de escopo nunca fica Ready |
+| E | **Garage v1.1.0** artifact store (bucket/tenant, presigned TTL, quarantine wired into WS-F's seam, access log, multipart), **@demo Playwright** video (real webm), **per-PR previews via Argo CD ApplicationSet** on the k3d cluster, visual diff (Pillow), full L3 (reflection + targeted re-runs + CI-repair episodes) | 10MB mp4 round-trip byte-identical; expired URL → denied; preview namespace created → **HTTP 200** → TTL reap; quarantine → 404 before the TTL |
+| C | **Playwright in the sandbox base image** (`dse-sandbox-base:wsc3`, 2.35GB, chromium) + the `demos/<work_item_id>/` convention; **second substrate Claude Agent SDK** (real v0.2.124) behind the same interface + parameterized conformance suite | `npx playwright test --grep @demo` via `docker exec` in the rootless sandbox → real webm video |
+| D | LiteLLM's **native intra-tier failover** (2nd echo instance, same tier) + extended chaos battery (total outage, 429 quota, non-allowlisted egress) | failover proven by killing the primary container with `docker stop`; negative test that fails CI if a fallback crosses tiers (NFR-07) |
+| B | **Evidence debounce (ADR-26)** + iteration caps in the review loop + evidence pipeline wiring (trigger_preview → demo → visual_diff, degraded does not block) + OTel history-size metric | 6 comments in one window → ≤1 refresh (time-skipping); fakes that **decode with the contract's real models** |
+| F | **Complete ADR-28**: scheduled secret rotation (zero downtime proven) + **real ESO 2.8.0** on k3d (Secret materializes from Vault, negative scope test); retention by classification; **history alert enabled** | concurrent reader during 5 rotations → zero errors; an out-of-scope ExternalSecret never goes Ready |
 
-## Bugs de integração (2 — nenhum de contrato, graças ao gate de entrada)
+## Integration bugs (2 — none contractual, thanks to the entry gate)
 
-1. **Ordering do gate de plano (WS-B).** A edição do review loop na Fase 3 mudou o timing e
-   expôs uma inversão: o workflow setava `status=awaiting_plan_approval` **antes** de gravar a
-   projeção durável `plan_approval_gate`. Um observador (queue board, ou o roteamento de signal
-   do WS-A que dispara `SIGNAL_PLAN_APPROVAL` com base no status) podia ver o estado com o gate
-   ainda ausente. **Corrigido**: grava o gate antes de flipar o status — a projeção existe
-   quando o estado se torna observável.
-2. **DSN do job de retenção (WS-F) — na verdade uma nota operacional, não bug de código.** O
-   teste `test_artifact_purge_skipped_without_delete_grant` falhou no meu harness de integração
-   porque exportei `DSE_DATABASE_URL` como o **superuser `dse`** (para aplicar migrações); a
-   retenção conecta por esse DSN e `current_user=dse` **tem** DELETE, então purgou em vez de
-   pular. Com o DSN correto (`dse_app`), 16/16 passam. **Nota operacional load-bearing
-   registrada**: o job de retenção (`dse_platform.retention`) DEVE rodar como `dse_app`, nunca
-   como owner do banco — senão a proteção estrutural de DELETE (o mesmo princípio que blinda o
-   `audit_log`) é contornada. O serviço `platform-jobs` no compose já usa o DSN de app; a nota
-   deve entrar no runbook de deploy do WS-F.
+1. **Plan gate ordering (WS-B).** The Phase 3 edit to the review loop changed the timing and
+   exposed an inversion: the workflow set `status=awaiting_plan_approval` **before** writing the
+   durable `plan_approval_gate` projection. An observer (queue board, or WS-A's signal routing
+   that fires `SIGNAL_PLAN_APPROVAL` based on the status) could see the state with the gate
+   still absent. **Fixed**: write the gate before flipping the status — the projection exists
+   by the time the state becomes observable.
+2. **Retention job DSN (WS-F) — actually an operational note, not a code bug.** The
+   `test_artifact_purge_skipped_without_delete_grant` test failed in my integration harness
+   because I exported `DSE_DATABASE_URL` as the **superuser `dse`** (to apply migrations);
+   retention connects through that DSN and `current_user=dse` **does** have DELETE, so it purged
+   instead of skipping. With the correct DSN (`dse_app`), 16/16 pass. **Load-bearing operational
+   note recorded**: the retention job (`dse_platform.retention`) MUST run as `dse_app`, never
+   as the database owner — otherwise the structural DELETE protection (the same principle that
+   armors `audit_log`) is bypassed. The `platform-jobs` service in compose already uses the app
+   DSN; the note must go into WS-F's deploy runbook.
 
-## Exit criteria da Fase 3 (Seção 16) — honestamente
+## Phase 3 exit criteria (Section 16) — honestly
 
-| Critério | Status |
+| Criterion | Status |
 |---|---|
-| UC1 com evidência de vídeo completa (mp4/webm, presigned URL com TTL) | **Atendido** — vídeo real gravado por Playwright, publicado no Garage, URL com TTL; provado por teste |
-| PRs backend-only pulam preview sem bloquear | **Atendido** — paths-filter determinístico (FR-20); `skipped_backend_only` conta como sucesso |
-| Links de evidência expiram por política | **Atendido** — Garage responde negado a presigned expirada; teste real |
-| Suíte multipart/IAM do Garage validada contra workload real | **Atendido** — mp4 de 10MB, multipart explícito, round-trip byte-idêntico |
-| Caps de preview por tenant + debounce comprovados por contagem | **Atendido** — teste de contagem (WS-E) + debounce time-skipping (WS-B) |
+| UC1 with complete video evidence (mp4/webm, presigned URL with TTL) | **Met** — real video recorded by Playwright, published to Garage, URL with TTL; proven by test |
+| Backend-only PRs skip preview without blocking | **Met** — deterministic paths-filter (FR-20); `skipped_backend_only` counts as success |
+| Evidence links expire by policy | **Met** — Garage denies an expired presigned URL; real test |
+| Garage multipart/IAM suite validated against a real workload | **Met** — 10MB mp4, explicit multipart, byte-identical round-trip |
+| Per-tenant preview caps + debounce proven by counting | **Met** — counting test (WS-E) + time-skipping debounce (WS-B) |
 
-## O que falta (não escondido)
+## What is missing (not hidden)
 
-- **GitHub App real**: previews, L3 targeted re-runs e o vídeo `@demo` contra um preview de um
-  PR **real** seguem com `FakeGitHubClient` (a lógica é real contra a API; falta a App
-  registrada). É o mesmo bloqueio administrativo das Fases 1-2 — e a Fase 3 é onde ele mais
-  pesa (preview por PR contra repo fake tem valor limitado). **Disparar já.**
-- **@demo roda no host, não no sandbox do WS-C no fluxo integrado**: o WS-C provou execução
-  DENTRO do sandbox; o pipeline do WS-B ainda executa a Activity de evidência no worker. Unir
-  os dois (rodar `@demo` dentro do sandbox provisionado, contra o preview URL) é integração
-  fina pendente.
-- **URL de preview é in-cluster** (probe via port-forward/NodePort); expor ao reviewer externo
-  precisa de ingress real no cluster do cliente.
-- **Reaper de TTL** é job Python GitOps (decisão documentada — kube-janitor brigaria com o
-  selfHeal do Argo CD); annotation `janitor/ttl` já gravada como upgrade path.
-- Substrato com **inferência real** (Claude Agent SDK / OpenHands): construção, wiring e seleção
-  provados; um turno com modelo real exige gateway + provider pagos (mesma limitação desde a
-  Fase 1).
+- **Real GitHub App**: previews, L3 targeted re-runs and the `@demo` video against a **real** PR's
+  preview still run on `FakeGitHubClient` (the logic is real against the API; the registered App
+  is what is missing). It is the same administrative blocker as Phases 1-2 — and Phase 3 is where
+  it hurts most (a per-PR preview against a fake repo has limited value). **Kick it off now.**
+- **@demo runs on the host, not in WS-C's sandbox in the integrated flow**: WS-C proved execution
+  INSIDE the sandbox; WS-B's pipeline still runs the evidence Activity on the worker. Joining the
+  two (running `@demo` inside the provisioned sandbox, against the preview URL) is pending
+  fine-grained integration.
+- **The preview URL is in-cluster** (probed via port-forward/NodePort); exposing it to an external
+  reviewer requires a real ingress in the customer's cluster.
+- **The TTL reaper** is a Python GitOps job (documented decision — kube-janitor would fight Argo
+  CD's selfHeal); the `janitor/ttl` annotation is already written as an upgrade path.
+- Substrate with **real inference** (Claude Agent SDK / OpenHands): construction, wiring and
+  selection proven; a turn with a real model requires a paid gateway + provider (same limitation
+  as since Phase 1).
 
-## Como rodar
+## How to run
 
 ```
 cd fase1
 make up && make migrate
-./infra/k8s-local/setup-k3d-argocd.sh   # cluster + Argo CD (idempotente)
+./infra/k8s-local/setup-k3d-argocd.sh   # cluster + Argo CD (idempotent)
 ./infra/k8s-local/setup-eso.sh          # External Secrets Operator (WS-F)
-# testes: venv ativado; platform/validation com DSN dse_app (NÃO superuser — ver bug 2):
+# tests: venv activated; platform/validation with the dse_app DSN (NOT superuser — see bug 2):
 #   DSE_DATABASE_URL=postgresql://dse_app:dse_app_dev_only@localhost:5432/dse \
 #     bash -c 'source .venv-wsf/bin/activate && cd services/platform && pytest -q'
 ```

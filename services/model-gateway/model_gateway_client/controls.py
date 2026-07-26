@@ -1,31 +1,33 @@
-"""Kill switch de gateway por escopo + reassign de modelo em voo (WSD-E4-T2).
+"""Scoped gateway kill switch + in-flight model reassign (WSD-E4-T2).
 
-Kill switch — matriz de 4 escopos (global | tenant | work_item | channel):
-  - o gateway ENFORÇA no call time os escopos visíveis nos headers da chamada:
+Kill switch — a 4-scope matrix (global | tenant | work_item | channel):
+  - at call time the gateway ENFORCES the scopes visible in the call headers:
     global, tenant, work_item;
-  - `channel` não é visível no gateway (o header não carrega o canal) — linhas
-    de escopo channel são honradas na ADMISSÃO pelo WS-A/WS-B; ficam nesta
-    tabela para operabilidade unificada, documentado no README.
+  - `channel` is not visible at the gateway (the header does not carry the
+    channel) — channel-scoped rows are honored at ADMISSION by WS-A/WS-B; they
+    live in this table for unified operability, documented in the README.
 
-"Conecta aos controles do WS-B/WS-F": o check lê TAMBÉM as tabelas dos outros
-workstreams, então um operador que aciona o kill switch por qualquer um dos
-caminhos para as chamadas de modelo:
-  - global : `gateway_kill_switches(scope='global')` OU `dse_kill_switch_global`
+"Wires into the WS-B/WS-F controls": the check ALSO reads the other
+workstreams' tables, so an operator who trips the kill switch through any of
+those paths stops model calls:
+  - global : `gateway_kill_switches(scope='global')` OR `dse_kill_switch_global`
              (WS-F, WSF-E6-T2);
-  - tenant : `gateway_kill_switches(scope='tenant')` OU
+  - tenant : `gateway_kill_switches(scope='tenant')` OR
              `tenant_config.kill_switch_enabled` (WS-F);
   - work_item: `gateway_kill_switches(scope='work_item')`.
 
-Efeito <60s: o check lê com cache TTL curto (default 5s), muito abaixo de 60s —
-uma vez acionado, a próxima chamada do escopo (em <=TTL s) já é recusada. Um
-kill NÃO interrompe uma geração já em andamento (não há stream aqui); ele zera
-a EMISSÃO de novas chamadas do escopo, que é o requisito.
+<60s effect: the check reads with a short TTL cache (default 5s), well under
+60s — once tripped, the next call in that scope (within <=TTL s) is already
+refused. A kill does NOT interrupt a generation already in flight (there is no
+stream here); it zeroes out the EMISSION of new calls in that scope, which is
+the requirement.
 
-Reassign de modelo em voo: um operador troca o modelo efetivo de um WorkItem;
-a próxima chamada daquele work_item usa `to_model` no lugar do requisitado. O
-reassign NÃO burla a política (o modelo efetivo ainda passa por `policy.py`).
+In-flight model reassign: an operator swaps a WorkItem's effective model; the
+next call for that work_item uses `to_model` instead of the requested one. The
+reassign does NOT bypass policy (the effective model still goes through
+`policy.py`).
 
-Toda mutação de operador (kill on/off, reassign set/clear) gera linha de audit
+Every operator mutation (kill on/off, reassign set/clear) produces an audit row
 via `dse_audit.emit` (P8).
 """
 from __future__ import annotations
@@ -60,15 +62,15 @@ class KillDecision:
     scope_type: str
     scope_id: str
     reason: str | None
-    source: str  # tabela/coluna de onde veio (auditoria)
+    source: str  # table/column it came from (audit)
 
 
 # ---------------------------------------------------------------------------
-# Kill switch — leitura (call time)
+# Kill switch — read (call time)
 # ---------------------------------------------------------------------------
 def _load_kill_state() -> dict:
-    """Snapshot cacheado de todo o estado de kill relevante (gateway + WS-F).
-    Uma leitura por TTL evita N queries por chamada de modelo."""
+    """Cached snapshot of all relevant kill state (gateway + WS-F). One read
+    per TTL avoids N queries per model call."""
     with _cache_lock:
         hit = _cache.get("kill_state")
         if hit is not None and (_now() - hit[0]) < _CACHE_TTL_SECONDS:
@@ -76,7 +78,7 @@ def _load_kill_state() -> dict:
 
     state = {
         "gateway": {},  # (scope_type, scope_id) -> reason
-        "global_wsf": None,  # reason ou None
+        "global_wsf": None,  # reason or None
         "tenant_wsf": {},  # tenant_id -> reason
     }
     conn = db.get_connection()
@@ -88,7 +90,7 @@ def _load_kill_state() -> dict:
             for scope_type, scope_id, reason in cur.fetchall():
                 state["gateway"][(scope_type, scope_id)] = reason
 
-        # WS-F: global kill switch (defensivo — tabela pode não existir ainda).
+        # WS-F: global kill switch (defensive — the table may not exist yet).
         with conn.cursor() as cur:
             try:
                 cur.execute(
@@ -100,7 +102,7 @@ def _load_kill_state() -> dict:
             except Exception:
                 conn.rollback()
 
-        # WS-F: kill switch por tenant (tenant_config).
+        # WS-F: per-tenant kill switch (tenant_config).
         with conn.cursor() as cur:
             try:
                 cur.execute(
@@ -119,8 +121,8 @@ def _load_kill_state() -> dict:
 
 
 def is_killed(tenant_id: str, work_item_id: str) -> KillDecision | None:
-    """Retorna a primeira decisão de kill aplicável (ou None). Ordem: global,
-    tenant, work_item — a mais ampla primeiro."""
+    """Returns the first applicable kill decision (or None). Order: global,
+    tenant, work_item — broadest first."""
     st = _load_kill_state()
 
     # global
@@ -149,7 +151,7 @@ def is_killed(tenant_id: str, work_item_id: str) -> KillDecision | None:
 
 
 # ---------------------------------------------------------------------------
-# Kill switch — mutação (operador WS-B/WS-F)
+# Kill switch — mutation (WS-B/WS-F operator)
 # ---------------------------------------------------------------------------
 def set_kill_switch(
     scope_type: str,
@@ -160,10 +162,10 @@ def set_kill_switch(
     actor: str = _AUDIT_ACTOR_DEFAULT,
     tenant_id: str | None = None,
 ) -> None:
-    """Liga/desliga o kill switch do gateway para um escopo. Idempotente.
-    Emite audit. `scope_type` in {global, tenant, work_item, channel}."""
+    """Turns the gateway kill switch on/off for a scope. Idempotent. Emits
+    audit. `scope_type` in {global, tenant, work_item, channel}."""
     if scope_type not in ("global", "tenant", "work_item", "channel"):
-        raise ValueError(f"scope_type inválido: {scope_type}")
+        raise ValueError(f"invalid scope_type: {scope_type}")
     if scope_type == "global":
         scope_id = "*"
 
@@ -196,11 +198,11 @@ def set_kill_switch(
 
 
 # ---------------------------------------------------------------------------
-# Reassign de modelo em voo
+# In-flight model reassign
 # ---------------------------------------------------------------------------
 def resolve_reassignment(work_item_id: str) -> str | None:
-    """Modelo para o qual o work_item foi reassignado (ou None). Cacheado por
-    TTL curto (mesma janela <60s do kill switch)."""
+    """The model the work_item was reassigned to (or None). Cached with a short
+    TTL (same <60s window as the kill switch)."""
     key = f"reassign:{work_item_id}"
     with _cache_lock:
         hit = _cache.get(key)
@@ -232,9 +234,9 @@ def reassign_model(
     actor: str = _AUDIT_ACTOR_DEFAULT,
     tenant_id: str = "*",
 ) -> None:
-    """Reassigna o modelo efetivo de um WorkItem em voo. Desativa qualquer
-    reassignment ativo anterior e cria a nova (no máximo uma ativa por
-    work_item). Emite audit."""
+    """Reassigns a WorkItem's effective model in flight. Deactivates any
+    previously active reassignment and creates the new one (at most one active
+    per work_item). Emits audit."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:

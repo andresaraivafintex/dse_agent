@@ -1,16 +1,16 @@
-"""Cliente do model-gateway (WS-D, `services/model-gateway/`, porta 4000)
-para mintar a virtual key de uma sessão Coder (WSC-E3-T1/T2).
+"""model-gateway client (WS-D, `services/model-gateway/`, port 4000) for
+minting the virtual key of a Coder session (WSC-E3-T1/T2).
 
-Cross-workstream (ver instruções do task): `run_coder_turn` chama
-`mint_virtual_key(...)`, que o WS-D está construindo em paralelo agora. Se o
-endpoint real ainda não existir (ou não responder), cai para um modo fixture
-local — CLARAMENTE marcado — que basta para os testes deste workstream
-rodarem sem depender do WS-D estar pronto ao mesmo tempo. A integração real
-acontece na fase de integração entre workstreams.
+Cross-workstream (see the task instructions): `run_coder_turn` calls
+`mint_virtual_key(...)`, which WS-D is building in parallel right now. If the
+real endpoint does not exist yet (or does not respond), it falls back to a
+local fixture mode — CLEARLY flagged — which is enough for this workstream's
+tests to run without depending on WS-D being ready at the same time. The real
+integration happens in the cross-workstream integration phase.
 
-Nunca chame um SDK de provider (OpenAI/Anthropic/Bedrock) diretamente daqui
-— esta é a ÚNICA porta de entrada para conseguir credenciais de modelo; o
-substrato (ver substrate.py) só recebe a virtual key + base_url do gateway.
+Never call a provider SDK (OpenAI/Anthropic/Bedrock) directly from here — this
+is the ONLY entry point for obtaining model credentials; the substrate (see
+substrate.py) only ever receives the gateway's virtual key + base_url.
 """
 from __future__ import annotations
 
@@ -26,13 +26,14 @@ from dse_contracts import GatewayCallHeaders
 from .runtime_profile import model_gateway_fixture_allowed, validate_runtime_profile
 
 DEFAULT_GATEWAY_URL = os.environ.get("DSE_MODEL_GATEWAY_URL", "http://localhost:4000")
-# Master key do LiteLLM — usada SÓ aqui, no control plane (a Activity
-# run_coder_turn roda no orchestrator, confiável), para mintar a virtual key
-# escopada por tarefa via `/key/generate`. NUNCA entra no sandbox: o substrato
-# recebe apenas a virtual key de curta duração + base_url (ver substrate.py).
+# LiteLLM master key — used ONLY here, in the control plane (the
+# run_coder_turn Activity runs in the orchestrator, which is trusted), to mint
+# the per-task scoped virtual key via `/key/generate`. It NEVER enters the
+# sandbox: the substrate only receives the short-lived virtual key + base_url
+# (see substrate.py).
 _MASTER_KEY = os.environ.get("DSE_LITELLM_MASTER_KEY", "sk-dse-local-dev-master-key")
-# Modelo que a virtual key pode acessar (escopo mínimo). Default alinhado ao
-# alias registrado no litellm_config.yaml para o Coder.
+# Model the virtual key is allowed to reach (minimal scope). The default is
+# aligned with the alias registered for the Coder in litellm_config.yaml.
 _CODER_MODEL = os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
 
 
@@ -40,13 +41,13 @@ class VirtualKeyResult(BaseModel):
     virtual_key: str
     expires_at: datetime
     gateway_base_url: str
-    fixture: bool = False  # True quando NÃO veio do model-gateway real
+    fixture: bool = False  # True when it did NOT come from the real model-gateway
 
 
 class ModelGatewayUnavailable(Exception):
-    """Levantado quando o gateway real não responde e o modo fixture está
-    desabilitado (`DSE_MODEL_GATEWAY_ALLOW_FIXTURE=0`) — falha limpa (P6),
-    nunca degrada silenciosamente para uma chamada direta a um provider."""
+    """Raised when the real gateway does not respond and fixture mode is
+    disabled (`DSE_MODEL_GATEWAY_ALLOW_FIXTURE=0`) — clean failure (P6), never
+    a silent downgrade to a direct provider call."""
 
 
 def mint_virtual_key(
@@ -56,15 +57,16 @@ def mint_virtual_key(
     timeout_s: float = 2.0,
     max_budget_usd: float | None = None,
 ) -> VirtualKeyResult:
-    # Em produção, recusa antes de qualquer I/O quando o deployment ainda
-    # permite fixture/in-process. A falha nunca se transforma em chave local.
+    # In production, refuse before any I/O when the deployment still allows
+    # fixture/in-process mode. The failure never turns into a local key.
     validate_runtime_profile(require_real_gateway=True)
     base = gateway_base_url or DEFAULT_GATEWAY_URL
     try:
-        # Via REAL (WS-D): a API nativa do LiteLLM `/key/generate`, autenticada
-        # com a master key (só no control plane), escopada ao modelo do Coder
-        # e ao par tenant/work_item nos metadados (para atribuição de custo).
-        # Duração curta (1h) espelha o padrão dos tokens GitHub por tarefa.
+        # REAL path (WS-D): LiteLLM's native `/key/generate` API, authenticated
+        # with the master key (control plane only), scoped to the Coder model
+        # and to the tenant/work_item pair in the metadata (for cost
+        # attribution). The short lifetime (1h) mirrors the per-task GitHub
+        # token pattern.
         with httpx.Client(timeout=timeout_s) as client:
             resp = client.post(
                 f"{base}/key/generate",
@@ -72,10 +74,11 @@ def mint_virtual_key(
                 json={
                     "models": [_CODER_MODEL],
                     "duration": "1h",
-                    # Plano 08 §F (F2): backstop DURO por-key no proxy. O
-                    # enforcement fino/dinâmico é o pre-call hook (lê o budget
-                    # vivo do control-plane); este cap é a rede de segurança
-                    # estática do LiteLLM, quando um cap é resolvido pelo caller.
+                    # plano 08 §F (F2): HARD per-key backstop in the proxy. The
+                    # fine-grained/dynamic enforcement is the pre-call hook (it
+                    # reads the live control-plane budget); this cap is
+                    # LiteLLM's static safety net, applied when the caller
+                    # resolves a cap.
                     **({"max_budget": max_budget_usd} if max_budget_usd is not None else {}),
                     "metadata": {
                         "tenant_id": headers.tenant_id,
@@ -92,10 +95,10 @@ def mint_virtual_key(
             gateway_base_url=base,
             fixture=False,
         )
-    except Exception as exc:  # noqa: BLE001 - queremos cair pro fixture por qualquer falha de rede/HTTP
+    except Exception as exc:  # noqa: BLE001 - we want to fall back to the fixture on any network/HTTP failure
         if not model_gateway_fixture_allowed():
             raise ModelGatewayUnavailable(
-                f"model-gateway em {base} indisponível e fixture desabilitado: {exc}"
+                f"model-gateway at {base} unavailable and fixture disabled: {exc}"
             ) from exc
         return VirtualKeyResult(
             virtual_key=f"fixture-vk-{headers.work_item_id}-{uuid.uuid4().hex[:8]}",

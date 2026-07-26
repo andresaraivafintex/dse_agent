@@ -1,16 +1,16 @@
-"""Autenticação mínima de GitHub App: assina o JWT do app (RS256) e troca por
-um installation access token — chamada REAL à API do GitHub (não um SDK de
-terceiros pesado), usando `PyJWT` + `httpx`.
+"""Minimal GitHub App authentication: signs the app JWT (RS256) and exchanges it
+for an installation access token — a REAL call to the GitHub API (not a heavy
+third-party SDK), using `PyJWT` + `httpx`.
 
-Se `services/adapter-github` (WS-A) já publicar um helper equivalente quando
-este código for integrado, prefira reusá-lo (mesma lógica, evita duplicar a
-gestão de token entre WS-A e WS-E) — ver README §Cross-workstream.
+If `services/adapter-github` (WS-A) has already published an equivalent helper by
+the time this code is integrated, prefer reusing it (same logic, avoids
+duplicating token management between WS-A and WS-E) — see README §Cross-workstream.
 
-Credenciais: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (conteúdo do PEM,
-não um path — facilita injeção via secret manager/Vault), `GITHUB_APP_INSTALLATION_ID`.
-Sem essas três env vars, `dse_validation.github.client.build_github_client()`
-cai no `FakeGitHubClient` (modo local, ver client.py) em vez de tentar
-autenticar — ver README para o que falta para produção.
+Credentials: `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (the PEM contents, not a
+path — makes injection via secret manager/Vault easier), `GITHUB_APP_INSTALLATION_ID`.
+Without those three env vars, `dse_validation.github.client.build_github_client()`
+falls back to `FakeGitHubClient` (local mode, see client.py) instead of trying to
+authenticate — see README for what is still missing for production.
 """
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ import jwt
 
 
 def build_app_jwt(app_id: str, private_key_pem: str, ttl_seconds: int = 540) -> str:
-    """JWT de app GitHub (válido no máx. 10min — usamos 9min de margem)."""
+    """GitHub app JWT (valid for at most 10min — we use 9min for margin)."""
     now = int(time.time())
     payload = {
-        "iat": now - 30,  # tolerância de clock skew recomendada pela doc do GitHub
+        "iat": now - 30,  # clock skew tolerance recommended by the GitHub docs
         "exp": now + ttl_seconds,
         "iss": app_id,
     }
@@ -34,7 +34,7 @@ def build_app_jwt(app_id: str, private_key_pem: str, ttl_seconds: int = 540) -> 
 def fetch_installation_token(
     app_id: str, private_key_pem: str, installation_id: str, api_base_url: str = "https://api.github.com"
 ) -> str:
-    """Troca o JWT do app por um installation access token (expira em 1h)."""
+    """Exchanges the app JWT for an installation access token (expires in 1h)."""
     app_jwt = build_app_jwt(app_id, private_key_pem)
     resp = httpx.post(
         f"{api_base_url}/app/installations/{installation_id}/access_tokens",

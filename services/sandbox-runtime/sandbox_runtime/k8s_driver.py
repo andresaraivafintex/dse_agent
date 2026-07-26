@@ -1,21 +1,23 @@
-"""Plano 08 §G — driver de sandbox Kubernetes (runtime isolado real).
+"""plano 08 §G — Kubernetes sandbox driver (real isolated runtime).
 
-Hoje o agente roda in-process no orchestrator (com a master key + creds no env)
-→ o modelo de ameaça "nada para roubar no sandbox" NÃO vale. Este driver executa
-cada estágio num Pod efêmero, endurecido e (idealmente) sob um RuntimeClass de
-isolamento forte (gVisor/Kata).
+Today the agent runs in-process in the orchestrator (with the master key + creds
+in the env) → the "nothing to steal inside the sandbox" threat model does NOT
+hold. This driver executes each stage in an ephemeral, hardened Pod, ideally
+under a strong-isolation RuntimeClass (gVisor/Kata).
 
-O que é CÓDIGO (entregue aqui, testável sem cluster):
-  - `build_pod_manifest`: o Pod spec 100% endurecido (o núcleo — a suíte de
-    conformidade valida cada propriedade de segurança sem precisar de cluster).
-  - `KubernetesSandboxDriver`: implementa o mesmo contrato `SandboxDriver`.
+What is CODE (delivered here, testable without a cluster):
+  - `build_pod_manifest`: the fully hardened Pod spec (the core — the
+    conformance suite validates every security property with no cluster).
+  - `KubernetesSandboxDriver`: implements the same `SandboxDriver` contract.
 
-O que precisa de INFRA (prova viva — decisão do cluster do usuário):
-  - um cluster com o RuntimeClass (gvisor/kata) instalado;
-  - a NetworkPolicy default-deny + egress só para o egress-proxy (documentada);
-  - a imagem `agent-runner` publicada no registry do cluster.
-Sem cluster/kubectl, `provision`/`execute_stage` FALHAM LIMPO (fail-closed):
-NUNCA degradam para execução local (a mesma disciplina do DockerSandboxDriver).
+What needs INFRA (live proof — the user's cluster decision):
+  - a cluster with the RuntimeClass (gvisor/kata) installed;
+  - the default-deny NetworkPolicy + egress only to the egress-proxy
+    (documented);
+  - the `agent-runner` image published to the cluster's registry.
+Without a cluster/kubectl, `provision`/`execute_stage` FAIL CLEANLY
+(fail-closed): they NEVER degrade to local execution (the same discipline as
+DockerSandboxDriver).
 """
 from __future__ import annotations
 
@@ -53,20 +55,21 @@ NONROOT_UID = 10001
 class K8sSandboxConfig:
     namespace: str = os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
     image: str = os.environ.get("DSE_AGENT_RUNNER_IMAGE", "dse/agent-runner:local")
-    # RuntimeClass de isolamento forte. VAZIO = runtime default (isolamento
-    # FRACO) — o build_pod_manifest loga/marca isso; produção deve setar.
+    # Strong-isolation RuntimeClass. EMPTY = default runtime (WEAK isolation) —
+    # build_pod_manifest logs/flags that; production must set it.
     runtime_class: str = os.environ.get("DSE_SANDBOX_RUNTIME_CLASS", "gvisor")
     service_account: str = os.environ.get("DSE_SANDBOX_SERVICE_ACCOUNT", "dse-sandbox-runner")
-    # Default FQDN + porta 8806 (o valor real vem do configmap via env; este
-    # default só vale fora do chart e evita o footgun da porta 3128 stale).
+    # Default FQDN + port 8806 (the real value comes from the configmap via env;
+    # this default only applies outside the chart and avoids the stale port 3128
+    # footgun).
     egress_proxy_url: str = os.environ.get("DSE_EGRESS_PROXY_URL", "http://egress-proxy.dse.svc.cluster.local:8806")
     cpu_limit: str = os.environ.get("DSE_SANDBOX_CPU_LIMIT", "1")
     mem_limit: str = os.environ.get("DSE_SANDBOX_MEM_LIMIT", "2Gi")
     kubectl: str = os.environ.get("DSE_KUBECTL", "kubectl")
     kube_context: str = os.environ.get("DSE_SANDBOX_KUBE_CONTEXT", "")
-    # PVC do checkpoint git (/checkpoint.git). Vazio = emptyDir (efêmero —
-    # rebuild pós-morte do Pod recomeça do zero); produção/VPS deve apontar
-    # um PVC para o rebuild do chaos recuperar o último checkpoint.
+    # PVC for the git checkpoint (/checkpoint.git). Empty = emptyDir (ephemeral —
+    # a rebuild after the Pod dies starts from scratch); production/VPS must
+    # point at a PVC so the chaos rebuild can recover the last checkpoint.
     checkpoint_pvc: str = os.environ.get("DSE_SANDBOX_CHECKPOINT_PVC", "")
 
 
@@ -76,28 +79,28 @@ def pod_name_for(work_item_id: str) -> str:
 
 
 def _label_value(v: str) -> str:
-    """Valor de label do K8s: no máximo 63 chars, sem terminar em -/_/.
+    """K8s label value: at most 63 chars, not ending in -/_/.
 
-    O work_item_id real é `wi_` + sha256 (64 hex) = 67 chars, que estoura o
-    limite e faz o `kubectl apply` do Pod falhar (metadata.labels inválido).
-    Truncamos preservando o prefixo reconhecível. Este label é INFORMATIVO —
-    nenhum seletor o usa (os Pods são endereçados por pod_name_for)."""
+    The real work_item_id is `wi_` + sha256 (64 hex) = 67 chars, which blows the
+    limit and makes the Pod's `kubectl apply` fail (invalid metadata.labels). We
+    truncate while preserving the recognizable prefix. This label is
+    INFORMATIONAL — no selector uses it (Pods are addressed via pod_name_for)."""
     return v[:63].rstrip("-_.")
 
 
 def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig | None = None) -> dict[str, Any]:
-    """Pod spec efêmero e ENDURECIDO. Núcleo de segurança do §G (testável).
+    """Ephemeral, HARDENED Pod spec. The security core of §G (testable).
 
-    Endurecimento (cada item é asserido pela suíte de conformidade):
-      - runAsNonRoot + UID não-zero (pod e container);
+    Hardening (every item is asserted by the conformance suite):
+      - runAsNonRoot + non-zero UID (pod and container);
       - allowPrivilegeEscalation=false, privileged=false, cap drop ALL;
-      - readOnlyRootFilesystem=true (workspace/tmp em emptyDir graváveis);
+      - readOnlyRootFilesystem=true (workspace/tmp are writable emptyDirs);
       - seccompProfile=RuntimeDefault;
       - automountServiceAccountToken=false;
-      - SEM hostPath/socket do Docker, SEM hostNetwork/PID/IPC;
-      - egress só via proxy (HTTP(S)_PROXY) — a NetworkPolicy default-deny é
-        cluster-side (documentada);
-      - restartPolicy=Never (efêmero); limites de CPU/mem."""
+      - NO hostPath/Docker socket, NO hostNetwork/PID/IPC;
+      - egress only through the proxy (HTTP(S)_PROXY) — the default-deny
+        NetworkPolicy is cluster-side (documented);
+      - restartPolicy=Never (ephemeral); CPU/mem limits."""
     cfg = cfg or K8sSandboxConfig()
     name = pod_name_for(request.work_item_id)
     container_sec = {
@@ -159,8 +162,8 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
             {"name": "tmp", "emptyDir": {}},
         ],
     }
-    # RuntimeClass de isolamento forte: setado só quando configurado. Vazio =
-    # runtime default (isolamento fraco) — marcamos no annotation p/ o operador.
+    # Strong-isolation RuntimeClass: set only when configured. Empty = default
+    # runtime (weak isolation) — we flag it in an annotation for the operator.
     annotations = {}
     if cfg.runtime_class:
         spec["runtimeClassName"] = cfg.runtime_class
@@ -184,8 +187,8 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
 
 
 class KubernetesSandboxDriver:
-    """Driver K8s: mesmo contrato do DockerSandboxDriver, mas com execução
-    isolada real. Fail-closed sem cluster/kubectl (nunca roda local)."""
+    """K8s driver: same contract as DockerSandboxDriver, but with real isolated
+    execution. Fail-closed without a cluster/kubectl (never runs locally)."""
 
     def __init__(self, cfg: K8sSandboxConfig | None = None) -> None:
         self._cfg = cfg or K8sSandboxConfig()
@@ -196,7 +199,7 @@ class KubernetesSandboxDriver:
 
     @property
     def workspace_is_host_visible(self) -> bool:
-        return False  # workspace vive no volume do Pod — git/higiene via ops
+        return False  # the workspace lives in the Pod volume — git/hygiene via ops
 
     def sandbox_id_for(self, work_item_id: str) -> str:
         return pod_name_for(work_item_id)
@@ -209,8 +212,8 @@ class KubernetesSandboxDriver:
     def _kubectl(self, args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess:
         if shutil.which(self._cfg.kubectl) is None:
             raise IsolatedStageExecutionUnavailable(
-                f"kubectl ({self._cfg.kubectl}) não encontrado — runtime K8s indisponível; "
-                "execução local é proibida como fallback (§G fail-closed)"
+                f"kubectl ({self._cfg.kubectl}) not found — K8s runtime unavailable; "
+                "local execution is forbidden as a fallback (§G fail-closed)"
             )
         ctx = ["--context", self._cfg.kube_context] if self._cfg.kube_context else []
         proc = subprocess.run(
@@ -219,13 +222,13 @@ class KubernetesSandboxDriver:
         )
         if proc.returncode != 0:
             raise IsolatedStageExecutionUnavailable(
-                f"kubectl {' '.join(args)} falhou (exit={proc.returncode}): {proc.stderr.strip()}"
+                f"kubectl {' '.join(args)} failed (exit={proc.returncode}): {proc.stderr.strip()}"
             )
         return proc
 
     def _exec_op(self, pod_name: str, op: str, payload: dict[str, Any], *, timeout: int = 180) -> dict[str, Any]:
-        """Roda uma op de lifecycle do runner DENTRO do Pod (`--op bootstrap|
-        checkpoint`) — o driver K8s nunca opera git em path do host."""
+        """Run a runner lifecycle op INSIDE the Pod (`--op bootstrap|checkpoint`)
+        — the K8s driver never operates git on a host path."""
         proc = self._kubectl(
             ["exec", "-i", pod_name, "-n", self._cfg.namespace, "--",
              "python", "-m", "agent_runner", "--op", op],
@@ -236,7 +239,7 @@ class KubernetesSandboxDriver:
             return json.loads((proc.stdout or "").strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError) as exc:
             raise IsolatedStageExecutionUnavailable(
-                f"agent-runner --op {op} devolveu stdout não-JSON: {(proc.stdout or '')[:200]!r}"
+                f"agent-runner --op {op} returned non-JSON stdout: {(proc.stdout or '')[:200]!r}"
             ) from exc
 
     def _bootstrap(self, request: SandboxProvisionRequest) -> WorkspaceBootstrapResult:
@@ -251,7 +254,7 @@ class KubernetesSandboxDriver:
         result = WorkspaceBootstrapResult.model_validate(out)
         if result.failed:
             raise IsolatedStageExecutionUnavailable(
-                f"bootstrap do workspace falhou no Pod {name}: [{result.error_kind}] {result.error}"
+                f"workspace bootstrap failed in Pod {name}: [{result.error_kind}] {result.error}"
             )
         return result
 
@@ -294,9 +297,9 @@ class KubernetesSandboxDriver:
         )
 
     def checkpoint(self, request: SandboxCheckpointRequest) -> CheckpointRef:
-        # No K8s o workspace vive num volume do Pod — o commit/push acontece
-        # DENTRO dele, contra /checkpoint.git (PVC/emptyDir), com o mesmo
-        # refspec fixo + hook pre-receive do fluxo local.
+        # On K8s the workspace lives in a Pod volume — the commit/push happens
+        # INSIDE it, against /checkpoint.git (PVC/emptyDir), with the same fixed
+        # refspec + pre-receive hook as the local flow.
         pod = pod_name_for(request.work_item_id)
         out = self._exec_op(
             pod, "checkpoint",
@@ -309,17 +312,17 @@ class KubernetesSandboxDriver:
         result = CheckpointOpResult.model_validate(out)
         if result.failed:
             raise IsolatedStageExecutionUnavailable(
-                f"checkpoint falhou no Pod {pod}: [{result.error_kind}] {result.error}"
+                f"checkpoint failed in Pod {pod}: [{result.error_kind}] {result.error}"
             )
         return CheckpointRef(
             work_item_id=request.work_item_id, git_ref=result.sha, phase=result.phase
         )
 
     def rebuild(self, request: SandboxRebuildRequest) -> SandboxRebuildResult:
-        # Pod novo montando o MESMO volume de checkpoint (PVC): o bootstrap
-        # dentro do provision encontra o branch e clona — recuperação do
-        # chaos test sem nenhum git no host. Com emptyDir (dev), o checkpoint
-        # morre com o Pod e o bootstrap recomeça do zero (sha novo).
+        # A fresh Pod mounting the SAME checkpoint volume (PVC): the bootstrap
+        # inside provision finds the branch and clones — chaos-test recovery
+        # with no git on the host at all. With emptyDir (dev), the checkpoint
+        # dies with the Pod and the bootstrap starts from scratch (new sha).
         sandbox = self.provision(request.provision)
         state = self._bootstrap(request.provision)
         return SandboxRebuildResult(sandbox=sandbox, recovered_sha=state.sha)

@@ -1,7 +1,7 @@
-"""WSE-E3-T7 — backend GitHub para `MutableCommentWriter` (já pronto na
-fundação, reutilizado aqui — não reimplementamos comentário mutável). Estado
-de ref é REAL Postgres (`wse_comment_refs`); transporte é `FakeGitHubClient`
-(sem GitHub App real nesta sessão)."""
+"""WSE-E3-T7 — GitHub backend for `MutableCommentWriter` (already available in
+the foundation, reused here — we do not reimplement the mutable comment). Ref
+state is REAL Postgres (`wse_comment_refs`); transport is `FakeGitHubClient`
+(no real GitHub App in this session)."""
 from __future__ import annotations
 
 from dse_contracts import MutableCommentWriter
@@ -32,28 +32,28 @@ def test_second_upsert_edits_in_place_not_a_new_comment(work_item_id):
     ref1 = writer.upsert(work_item_id, surface_ref, "status: implementando")
     ref2 = writer.upsert(work_item_id, surface_ref, "status: L1 verde")
 
-    assert ref1 == ref2, "deve editar o mesmo comentário, nunca criar um segundo"
+    assert ref1 == ref2, "must edit the same comment, never create a second one"
     assert len(github._comments) == 1
     assert github._comments[ref1] == "status: L1 verde"
 
 
 def test_upsert_persists_ref_across_writer_instances(work_item_id):
-    """Prova que o ref sobrevive a um "restart do processo" (nova instância do
-    writer usando o MESMO PostgresCommentStateStore real) — é a garantia de
-    crash-consistency que o MutableCommentWriter documenta."""
+    """Proves the ref survives a "process restart" (a new writer instance using
+    the SAME real PostgresCommentStateStore) — this is the crash-consistency
+    guarantee that MutableCommentWriter documents."""
     github = FakeGitHubClient()
     surface_ref = {"repo": "acme/repo", "issue_number": 3}
 
     writer1 = MutableCommentWriter(
         backend=GitHubCommentBackend(github), store=PostgresCommentStateStore(), surface="github_pr_tracking"
     )
-    ref1 = writer1.upsert(work_item_id, surface_ref, "primeira mensagem")
+    ref1 = writer1.upsert(work_item_id, surface_ref, "first message")
 
     writer2 = MutableCommentWriter(
         backend=GitHubCommentBackend(github), store=PostgresCommentStateStore(), surface="github_pr_tracking"
     )
-    ref2 = writer2.upsert(work_item_id, surface_ref, "segunda mensagem (pós-restart)")
+    ref2 = writer2.upsert(work_item_id, surface_ref, "second message (post-restart)")
 
     assert ref1 == ref2
     assert len(github._comments) == 1
-    assert github._comments[ref1] == "segunda mensagem (pós-restart)"
+    assert github._comments[ref1] == "second message (post-restart)"

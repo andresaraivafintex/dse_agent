@@ -1,10 +1,10 @@
-"""Helpers compartilhados dos testes de chaos/failover do WS-D (Fase 3).
+"""Shared helpers for WS-D's chaos/failover tests (Phase 3).
 
-Chaos REAL: derrubamos containers do próprio WS-D (`docker stop`) — nunca a
-infra compartilhada da fundação (Postgres/Temporal/Redis/Vault) nem serviços
-de outros workstreams. Todo teste que derruba um eco DEVE restaurar em
-`finally` e esperar o primário voltar a servir (`ensure_primary_serving`)
-para não vazar estado degradado para outros testes/agentes em paralelo.
+REAL chaos: we take down WS-D's own containers (`docker stop`) — never the
+foundation's shared infra (Postgres/Temporal/Redis/Vault) nor other
+workstreams' services. Any test that takes an echo down MUST restore it in
+`finally` and wait for the primary to serve again (`ensure_primary_serving`) so
+it does not leak degraded state to other tests/agents running in parallel.
 """
 from __future__ import annotations
 
@@ -44,8 +44,8 @@ def start_container(name: str) -> None:
 
 
 def raw_completion(content: str, *, model: str = ECHO_MODEL, key: str | None = None) -> httpx.Response:
-    """Chamada crua ao gateway (sem passar pelo client instrumentado) — usada
-    pelos helpers de saúde para não poluir ledger/audit dos testes."""
+    """Raw gateway call (bypassing the instrumented client) — used by the health
+    helpers so they do not pollute the tests' ledger/audit."""
     return httpx.post(
         f"{_gateway_base()}/v1/chat/completions",
         headers={"Authorization": f"Bearer {key or _master_key()}"},
@@ -55,9 +55,10 @@ def raw_completion(content: str, *, model: str = ECHO_MODEL, key: str | None = N
 
 
 def ensure_primary_serving(timeout_seconds: float = 60.0) -> None:
-    """Espera o deployment PRIMÁRIO voltar a servir (container de pé + fora do
-    cooldown do router). Falha alto se não voltar — deixar o gateway degradado
-    quebraria os testes seguintes e os outros agentes em paralelo."""
+    """Waits for the PRIMARY deployment to serve again (container up + out of
+    the router's cooldown). Fails loudly if it does not come back — leaving the
+    gateway degraded would break the following tests and the other agents
+    running in parallel."""
     deadline = time.monotonic() + timeout_seconds
     last: str | None = None
     while time.monotonic() < deadline:
@@ -70,18 +71,18 @@ def ensure_primary_serving(timeout_seconds: float = 60.0) -> None:
             pass
         time.sleep(1.0)
     raise AssertionError(
-        f"primário nunca voltou a servir em {timeout_seconds}s (último api_base={last!r})"
+        f"primary never came back to serving within {timeout_seconds}s (last api_base={last!r})"
     )
 
 
 def wait_until_fallback_serves(timeout_seconds: float = 60.0) -> None:
-    """Após derrubar o primário, espera o router ESTABILIZAR servindo pelo
-    FALLBACK (echo-b) — elimina a corrida entre `docker stop` e a chamada
-    instrumentada do teste (o primário podia ainda estar servindo, então não
-    havia degradação nenhuma). Usa raw_completion (master key direta), que NÃO
-    escreve no ledger/audit dos testes. Depois disto o primário está em
-    cooldown, então a chamada instrumentada vai DIRETO ao fallback
-    (attempted_fallbacks=0) — degradação por cooldown, detectada via
+    """After taking the primary down, waits for the router to STABILIZE serving
+    from the FALLBACK (echo-b) — this removes the race between `docker stop` and
+    the test's instrumented call (the primary could still be serving, so there
+    was no degradation at all). Uses raw_completion (master key directly), which
+    does NOT write to the tests' ledger/audit. After this the primary is in
+    cooldown, so the instrumented call goes STRAIGHT to the fallback
+    (attempted_fallbacks=0) — cooldown degradation, detected via
     DSE_FALLBACK_API_BASES."""
     deadline = time.monotonic() + timeout_seconds
     last: str | None = None
@@ -95,5 +96,5 @@ def wait_until_fallback_serves(timeout_seconds: float = 60.0) -> None:
             pass
         time.sleep(0.5)
     raise AssertionError(
-        f"fallback nunca assumiu em {timeout_seconds}s (último api_base={last!r})"
+        f"fallback never took over within {timeout_seconds}s (last api_base={last!r})"
     )

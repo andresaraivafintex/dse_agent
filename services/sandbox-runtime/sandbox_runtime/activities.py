@@ -1,21 +1,21 @@
-"""Temporal Activities do lifecycle do sandbox (WSC-E1-T3) + sessão Coder
-(WSC-E3-T2). Nomes exatos de `dse_contracts.activities` — importado pelo
-worker único do WS-B (`services/orchestrator/worker.py`).
+"""Temporal Activities for the sandbox lifecycle (WSC-E1-T3) + Coder session
+(WSC-E3-T2). Exact names from `dse_contracts.activities` — imported by WS-B's
+single worker (`services/orchestrator/worker.py`).
 
-Import defensivo: este módulo em si nunca deve falhar ao ser importado só
-por dependência pesada ausente no venv de quem importa — mas como
-`docker`/`temporalio`/`dse_contracts`/`dse_audit` são dependências
-DECLARADAS deste pacote (pyproject.toml), aqui dentro fazemos import direto
-normalmente. Quem quer importar este módulo sem ter essas dependências
-instaladas deve fazer isso no PRÓPRIO try/except (responsabilidade do
-integrador, ver docstring de `sandbox_runtime/__init__.py`).
+Defensive import: this module itself must never fail to import merely because a
+heavy dependency is missing from the importer's venv — but since
+`docker`/`temporalio`/`dse_contracts`/`dse_audit` are DECLARED dependencies of
+this package (pyproject.toml), we import them directly here as usual. Anyone
+importing this module without those dependencies installed must do so in THEIR
+OWN try/except (the integrator's responsibility, see the docstring of
+`sandbox_runtime/__init__.py`).
 
-Estado entre chamadas de Activity: Temporal não garante que a mesma Activity
-de um workflow rode sempre no mesmo worker/processo — por isso este módulo
-NUNCA guarda estado em memória de processo entre chamadas. Todo estado vive:
-  - no Docker (o container do sandbox, achado por label `dse.work_item_id`);
-  - no filesystem, em paths determinísticos derivados de `work_item_id`
-    (`_paths_for`) — workspace de trabalho + bare repo de checkpoint.
+State between Activity calls: Temporal does not guarantee that a workflow's
+Activity always runs on the same worker/process — which is why this module NEVER
+keeps state in process memory across calls. All state lives:
+  - in Docker (the sandbox container, found via the `dse.work_item_id` label);
+  - on the filesystem, at deterministic paths derived from `work_item_id`
+    (`_paths_for`) — the working workspace + the checkpoint bare repo.
 """
 from __future__ import annotations
 
@@ -87,9 +87,9 @@ _STATE_DIR = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
 
 
 def _paths_for(work_item_id: str) -> tuple[str, str]:
-    """Paths determinísticos derivados só do work_item_id — permite que
-    qualquer worker, em qualquer chamada, ache o mesmo workspace/bare repo
-    sem depender de estado em memória (ver docstring do módulo)."""
+    """Deterministic paths derived solely from the work_item_id — lets any
+    worker, on any call, find the same workspace/bare repo without relying on
+    in-memory state (see the module docstring)."""
     root = Path(_STATE_DIR) / work_item_id
     workspace_dir = str(root / "workspace")
     bare_repo_path = str(root / "checkpoint.git")
@@ -108,7 +108,7 @@ class ProvisionSandboxInput(BaseModel):
     tenant_id: str
     branch: str | None = None
     base_branch: str = "main"
-    repo: str | None = None  # S4: repo alvo (ex. "andre2654/fintex-wallet") a clonar
+    repo: str | None = None  # S4: target repo (e.g. "andre2654/fintex-wallet") to clone
     budget: dict[str, Any] = Field(default_factory=dict)
     image: str | None = None
 
@@ -121,12 +121,13 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
     workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
     if not driver.workspace_is_host_visible:
-        # === Runtime K8s: o workspace vive num volume do Pod (não visível ao
-        # worker), então NADA é clonado/init no host — o driver sobe o Pod e o
-        # bootstrap clona o repo real DENTRO dele, via egress-proxy; o token do
-        # repo nunca entra no control plane. As skills materializadas no host
-        # (caminho Docker abaixo) NÃO chegam ao Pod — limitação conhecida do
-        # driver K8s (skills in-pod é fast-follow). ===
+        # === K8s runtime: the workspace lives in a Pod volume (not visible to
+        # the worker), so NOTHING is cloned/init'd on the host — the driver
+        # brings up the Pod and the bootstrap clones the real repo INSIDE it,
+        # through the egress-proxy; the repo token never enters the control
+        # plane. Skills materialized on the host (the Docker path below) do NOT
+        # reach the Pod — a known limitation of the K8s driver (in-pod skills is
+        # a fast-follow). ===
         provisioned = driver.provision(
             SandboxProvisionRequest(
                 work_item_id=inp.work_item_id,
@@ -144,10 +145,11 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
         if is_new_checkpoint_repo:
             git_checkpoint.provision_checkpoint_repo(bare_repo_path, branch)
         if not Path(workspace_dir).exists():
-            # S4 (Fase 5): se a tarefa tem um repo alvo (ex.: github.com/andre2654/
-            # fintex-wallet), CLONA o código real (com token minto no control plane
-            # e scrubbado do config) — o Coder trabalha no repo de verdade. Sem
-            # repo/token (testes), cai para o workspace vazio da mecânica original.
+            # S4 (Fase 5): if the task has a target repo (e.g. github.com/andre2654/
+            # fintex-wallet), CLONE the real code (with a token minted in the control
+            # plane and scrubbed from the config) — the Coder works on the real repo.
+            # With no repo/token (tests), fall back to the original empty-workspace
+            # mechanics.
             cloned = False
             if inp.repo:
                 from . import repo_clone
@@ -158,21 +160,21 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
                     bare_repo_path=bare_repo_path, token=token,
                 )
                 if cloned and not repo_clone.token_absent_from_config(workspace_dir):
-                    raise RuntimeError("SEGURANCA: token vazou no git config do workspace")
+                    raise RuntimeError("SECURITY: token leaked into the workspace git config")
                 if not cloned and profile is RuntimeProfile.production:
                     validate_runtime_profile(
                         local_fallback=(
-                            f"clone de {inp.repo!r} falhou/sem credencial e cairia para workspace vazio"
+                            f"clone of {inp.repo!r} failed/no credential and would fall back to an empty workspace"
                         )
                     )
             if not cloned:
                 git_checkpoint.init_task_workspace(workspace_dir, bare_repo_path, branch, inp.base_branch)
 
-        # Skills tickadas para o repo (console → skill_registry.repo_scope, 0029)
-        # materializadas AQUI — depois do clone, workspace garantidamente git.
-        # Guidance é best-effort no provision (o Planner continua falhando limpo
-        # se o registry cair — a leitura mandatória é a dele); qualquer skip fica
-        # auditado (P8).
+        # Skills ticked for this repo (console → skill_registry.repo_scope, 0029)
+        # are materialized HERE — after the clone, when the workspace is
+        # guaranteed to be a git repo. Guidance is best-effort at provision time
+        # (the Planner still fails cleanly if the registry goes down — the
+        # mandatory read is its own); any skip is audited (P8).
         try:
             from .skill_files import materialize_skills as _materialize
             from .skill_registry import read_approved_skills as _read_skills
@@ -185,7 +187,7 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
                     work_item_id=inp.work_item_id,
                     details={"skills": _mat, "repo": inp.repo},
                 )
-        except Exception as exc:  # noqa: BLE001 — guidance não derruba o provision
+        except Exception as exc:  # noqa: BLE001 — guidance never brings down the provision
             audit_emit(
                 actor="system:sandbox-runtime",
                 action="skills_materialization_skipped",
@@ -304,9 +306,10 @@ async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
     old_workspace_dir, bare_repo_path = _paths_for(inp.work_item_id)
 
     if not driver.workspace_is_host_visible:
-        # === Runtime K8s: rebuild = Pod novo montando o mesmo volume de
-        # checkpoint (PVC); o bootstrap recupera o branch do checkpoint. Com
-        # emptyDir (dev) o checkpoint morre com o Pod — o PVC é fast-follow. ===
+        # === K8s runtime: rebuild = a fresh Pod mounting the same checkpoint
+        # volume (PVC); the bootstrap recovers the branch from the checkpoint.
+        # With emptyDir (dev) the checkpoint dies with the Pod — the PVC is a
+        # fast-follow. ===
         rebuild_result = driver.rebuild(
             SandboxRebuildRequest(
                 provision=SandboxProvisionRequest(
@@ -323,18 +326,19 @@ async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
         provisioned = rebuild_result.sandbox
         recovered_sha = rebuild_result.recovered_sha
     else:
-        # Container antigo pode estar morto (chaos) — remove se ainda existir
-        # antes de recriar, para não colidir com o nome/labels do novo.
+        # The old container may be dead (chaos) — remove it if it still exists
+        # before recreating, so it does not collide with the new one's
+        # name/labels.
         existing = docker_driver.find_existing_container(inp.work_item_id)
         if existing is not None:
             try:
                 existing.remove(force=True)
-            except Exception:  # noqa: BLE001 - já pode ter sido removido pelo daemon
+            except Exception:  # noqa: BLE001 - the daemon may already have removed it
                 pass
 
-        # Workspace novo (simula perda do container antigo — não reaproveita o
-        # diretório de trabalho anterior, só o bare repo de checkpoint, que é a
-        # fonte de verdade durável).
+        # Fresh workspace (simulates losing the old container — it does not reuse
+        # the previous working directory, only the checkpoint bare repo, which is
+        # the durable source of truth).
         rebuilt_workspace_dir = old_workspace_dir + "-rebuilt"
         recovered_sha = git_checkpoint.rebuild_from_checkpoint(
             rebuilt_workspace_dir, bare_repo_path, branch, inp.checkpoint_ref
@@ -394,9 +398,10 @@ async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
     resource_class = "small"
     runtime_minutes = 0.0
     if not driver.workspace_is_host_visible:
-        # Runtime K8s: deleta o Pod. O lifetime do Pod não é rastreado ainda
-        # (métrica fica 0.0 — fast-follow); o driver é fail-closed sem cluster.
-        # container_id = nome do Pod (o `existing` do Docker não existe aqui).
+        # K8s runtime: delete the Pod. Pod lifetime is not tracked yet (the
+        # metric stays 0.0 — fast-follow); the driver is fail-closed without a
+        # cluster. container_id = the Pod name (Docker's `existing` does not
+        # exist here).
         driver.teardown(driver.sandbox_id_for(inp.work_item_id))
         container_id = driver.sandbox_id_for(inp.work_item_id)
     else:
@@ -433,24 +438,24 @@ async def teardown_sandbox(inp: TeardownSandboxInput) -> None:
 # ---------------------------------------------------------------------------
 # run_coder_turn
 # ---------------------------------------------------------------------------
-# Contrato CANÔNICO (anti-shadow — mesmo achado do L1: o model local
-# descartava silenciosamente campos que o workflow envia, ex.: model_override
-# e o novo expected_files). Nunca redefina modelos de contrato localmente.
+# CANONICAL contract (anti-shadow — the same finding as in L1: the local model
+# silently dropped fields the workflow sends, e.g. model_override and the new
+# expected_files). Never redefine contract models locally.
 from dse_contracts.activities import RunCoderTurnInput  # noqa: E402
 
 
 def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder") -> AgentSubstrate:
-    """Fábrica de substrato. Fase 3 (WSC-E3-T6): a escolha é CONFIG POR
-    DEPLOYMENT — `DSE_CODER_SUBSTRATE` em {fake|openhands|claude-agent},
-    default `fake` (nenhuma dependência de gateway/SDK precisa estar de pé
-    para os testes). Trocar de substrato nunca muda código de workflow: o
-    WS-B continua chamando `run_coder_turn` por nome, e esta factory resolve
-    o adapter atrás da mesma interface `AgentSubstrate`.
+    """Substrate factory. Fase 3 (WSC-E3-T6): the choice is PER-DEPLOYMENT
+    CONFIG — `DSE_CODER_SUBSTRATE` in {fake|openhands|claude-agent}, default
+    `fake` (no gateway/SDK dependency has to be up for the tests). Swapping
+    substrates never changes workflow code: WS-B keeps calling `run_coder_turn`
+    by name, and this factory resolves the adapter behind the same
+    `AgentSubstrate` interface.
 
-    Fase 1 (plano 09): com `DSE_SANDBOX_INPROCESS=0` (e SEMPRE em produção)
-    o substrato vira `RemoteSubstrate` — mesmo nome de substrato, mas o SDK
-    executa DENTRO do sandbox via `SandboxDriver.execute_stage`; o worker só
-    despacha o contrato tipado (invariante 2 da spec)."""
+    Fase 1 (plano 09): with `DSE_SANDBOX_INPROCESS=0` (and ALWAYS in production)
+    the substrate becomes `RemoteSubstrate` — same substrate name, but the SDK
+    executes INSIDE the sandbox via `SandboxDriver.execute_stage`; the worker
+    only dispatches the typed contract (invariant 2 of the spec)."""
     if sandbox_inprocess_enabled():
         return substrate_from_env(script=script)
     return RemoteSubstrate(
@@ -461,27 +466,27 @@ def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder
     )
 
 
-# Higiene pós-turno extraída para workspace_hygiene.py (Fase 1, plano 09):
-# mesma lógica roda no worker (Docker) e DENTRO do runner (K8s, --op
-# post_turn) — fonte única de verdade; os aliases preservam call sites/testes.
+# Post-turn hygiene extracted to workspace_hygiene.py (Fase 1, plano 09): the
+# same logic runs in the worker (Docker) and INSIDE the runner (K8s, --op
+# post_turn) — single source of truth; the aliases preserve call sites/tests.
 _prune_disposable_artifacts = workspace_hygiene.prune_disposable_artifacts
 _revert_coder_test_edits = workspace_hygiene.revert_test_edits
 
 
 @activity.defn(name=ACTIVITY_RUN_CODER_TURN)
 async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
-    """Wrapper fino registrado como Activity de verdade — Temporal não aceita
-    argumentos extras (nem keyword-only, nem posicionais opcionais) em
-    funções decoradas com `@activity.defn`. A lógica real e os pontos de
-    injeção de dependência para teste (`substrate`/`script`) vivem em
-    `_run_coder_turn_impl`, chamada tanto por aqui (produção, sem overrides)
-    quanto diretamente pelos testes (com `FakeSubstrate` roteirizado)."""
+    """Thin wrapper registered as the actual Activity — Temporal does not accept
+    extra arguments (neither keyword-only nor optional positional) on functions
+    decorated with `@activity.defn`. The real logic and the dependency-injection
+    points for tests (`substrate`/`script`) live in `_run_coder_turn_impl`,
+    called both from here (production, no overrides) and directly by the tests
+    (with a scripted `FakeSubstrate`)."""
     if sandbox_inprocess_enabled():
-        # Caminho legado in-process: proibido em produção (fail-closed).
+        # Legacy in-process path: forbidden in production (fail-closed).
         reject_local_agent_execution("coder")
     else:
-        # Caminho isolado (Fase 1): o SDK roda no agent-runner dentro do
-        # sandbox; aqui só validamos substrato/gateway reais por perfil.
+        # Isolated path (Fase 1): the SDK runs in the agent-runner inside the
+        # sandbox; here we only validate real substrate/gateway per profile.
         validate_runtime_profile(require_real_substrate=True, require_real_gateway=True)
     return await _run_coder_turn_impl(inp)
 
@@ -489,16 +494,16 @@ async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
 async def _run_coder_turn_impl(
     inp: RunCoderTurnInput, substrate: AgentSubstrate | None = None, script: list[dict[str, Any]] | None = None
 ) -> CoderTurnResult:
-    """Executa um turno do Coder dentro do sandbox já provisionado.
+    """Run one Coder turn inside the already-provisioned sandbox.
 
-    P1 (nenhuma decisão de fluxo por LLM): o `substrate` SÓ edita arquivos —
-    o commit/push para o branch da tarefa é feito aqui, por código
-    determinístico (`ScopedGitSession`), nunca pelo LLM. `substrate`/`script`
-    são parâmetros de injeção de dependência usados pelos testes; em
-    produção o worker do WS-B chama a Activity `run_coder_turn` sem eles e
-    recebe o `FakeSubstrate` (documentar override real via env
-    `DSE_CODER_SUBSTRATE=openhands` — ver README) até a integração completa
-    com OpenHands.
+    P1 (no flow decision made by an LLM): the `substrate` ONLY edits files — the
+    commit/push to the task branch happens here, in deterministic code
+    (`ScopedGitSession`), never by the LLM. `substrate`/`script` are
+    dependency-injection parameters used by the tests; in production WS-B's
+    worker calls the `run_coder_turn` Activity without them and gets
+    `FakeSubstrate` (document the real override via the env
+    `DSE_CODER_SUBSTRATE=openhands` — see the README) until the OpenHands
+    integration is complete.
     """
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare_repo_path = _paths_for(inp.work_item_id)
@@ -521,11 +526,11 @@ async def _run_coder_turn_impl(
         gateway_base_url=vk.gateway_base_url,
     )
 
-    # Âncora do plano na instrução (achado do disparo real: o CLI cria
-    # relatórios espontâneos — BUG_FIX_REPORT.md). Camada 1: instrução
-    # explícita; camada 2 (determinística): prune pós-turn SÓ de artefatos
-    # descartáveis (relatório/log/scratch), nunca de fonte nova legítima —
-    # ver _prune_disposable_artifacts.
+    # Anchor the plan into the instruction (found in the real run: the CLI
+    # creates unsolicited reports — BUG_FIX_REPORT.md). Layer 1: an explicit
+    # instruction; layer 2 (deterministic): a post-turn prune of disposable
+    # artifacts ONLY (report/log/scratch), never of legitimate new source — see
+    # _prune_disposable_artifacts.
     if inp.expected_files:
         inp.instruction += (
             "\n\n## Plan constraints (mandatory)\n"
@@ -537,17 +542,17 @@ async def _run_coder_turn_impl(
             "CHANGELOG…) — the change and the tests speak for themselves."
         )
 
-    # Skills do repo (ticks do console materializados no turno do Planner +
-    # skills commitadas no repo alvo): o ClaudeAgentSubstrate as carrega via
-    # setting_sources=["project"]; a nota cobre os demais substratos.
+    # Repo skills (console ticks materialized during the Planner turn + skills
+    # committed in the target repo): ClaudeAgentSubstrate loads them via
+    # setting_sources=["project"]; the note covers the other substrates.
     inp.instruction += workspace_skills_note(workspace_dir)
 
     pod_git = isinstance(agent, RemoteSubstrate) and not getattr(
         agent.driver, "workspace_is_host_visible", True
     )
     if pod_git:
-        # Runtime K8s: o workspace vive no volume do Pod — o sha do início
-        # do turno vem de um checkpoint no-op DENTRO do sandbox.
+        # K8s runtime: the workspace lives in the Pod volume — the turn's start
+        # sha comes from a no-op checkpoint INSIDE the sandbox.
         base_sha = agent.checkpoint_sha(branch=branch, phase="turn-start")
     else:
         base_sha_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
@@ -565,7 +570,7 @@ async def _run_coder_turn_impl(
                 work_item_id=inp.work_item_id,
                 operation=f"substrate_turn_{turns + 1}",
             )
-        except Exception as exc:  # noqa: BLE001 — classificação, não engolimento
+        except Exception as exc:  # noqa: BLE001 — classification, not swallowing
             _raise_if_permanent_provider_error(exc)
             raise
         done = log.done
@@ -574,10 +579,10 @@ async def _run_coder_turn_impl(
     artifacts = agent.collect_artifacts()
 
     if pod_git:
-        # Runtime K8s: TODO o pós-turno determinístico roda DENTRO do Pod
-        # (--op post_turn — mesma sequência/fonte de verdade do bloco abaixo,
-        # via workspace_hygiene + scoped_git vendorados no runner). Os audits
-        # (P8) continuam aqui no worker, com as listas retornadas.
+        # K8s runtime: ALL the deterministic post-turn runs INSIDE the Pod
+        # (--op post_turn — same sequence/source of truth as the block below, via
+        # workspace_hygiene + scoped_git vendored into the runner). The audits
+        # (P8) stay here in the worker, using the returned lists.
         post = agent.run_post_turn(
             branch=branch,
             expected_files=list(inp.expected_files or []),
@@ -600,11 +605,12 @@ async def _run_coder_turn_impl(
                 )
         files_changed = list(post.files_changed)
     else:
-        # Camada 2 (determinística, P1): apaga arquivos NOVOS (untracked) que são
-        # LIXO óbvio do CLI (relatório espontâneo/log/scratch) antes do commit — NÃO
-        # mais "tudo fora do plano" (expected_files virou advisory no L1; um arquivo-
-        # fonte novo legítimo fora do plano SOBREVIVE). Arquivos EXISTENTES
-        # modificados fora do plano ficam — é o L1/orçamento que os julga.
+        # Layer 2 (deterministic, P1): delete NEW (untracked) files that are
+        # obvious CLI JUNK (unsolicited report/log/scratch) before the commit —
+        # NOT "everything outside the plan" anymore (expected_files became
+        # advisory in L1; a legitimate new source file outside the plan
+        # SURVIVES). EXISTING files modified outside the plan stay — it is L1/the
+        # budget that judges them.
         if inp.expected_files:
             pruned, kept_out_of_plan = _prune_disposable_artifacts(
                 workspace_dir, inp.expected_files, inp.work_item_id
@@ -618,9 +624,10 @@ async def _run_coder_turn_impl(
                     details={"pruned": pruned[:20]},
                 )
             if kept_out_of_plan:
-                # Observabilidade da reconciliação (2026-07-22): sob a política antiga
-                # estes NOVOS fora do plano seriam apagados; agora ficam (expected_files
-                # é advisory) e quem julga é o L1 (orçamento de linhas + forbidden_paths).
+                # Reconciliation observability (2026-07-22): under the old policy
+                # these NEW out-of-plan files would be deleted; now they stay
+                # (expected_files is advisory) and L1 is the judge (line budget +
+                # forbidden_paths).
                 audit_emit(
                     actor="system:sandbox-runtime",
                     action="coder_out_of_plan_files_kept",
@@ -631,11 +638,11 @@ async def _run_coder_turn_impl(
 
         _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="coder")
 
-        # O Coder NÃO é dono dos testes — o Tester os autora em arquivos ISOLADOS
-        # (achado do disparo real na issue #1: o Coder editou o seed compartilhado
-        # de test/api.test.js e quebrou um teste IRMÃO pré-existente → o fix cycle
-        # nunca converge, porque consertar summary.js não conserta o teste). Reverte
-        # QUALQUER mudança do Coder em test paths ao estado do início do turno.
+        # The Coder does NOT own the tests — the Tester authors them in ISOLATED
+        # files (found in the real run on issue #1: the Coder edited the shared
+        # seed in test/api.test.js and broke a pre-existing SIBLING test → the fix
+        # cycle never converges, because fixing summary.js does not fix the test).
+        # Revert ANY Coder change under test paths to the turn's starting state.
         reverted_tests = _revert_coder_test_edits(workspace_dir, base_sha)
         if reverted_tests:
             audit_emit(
@@ -643,10 +650,10 @@ async def _run_coder_turn_impl(
                 action="coder_test_edits_reverted",
                 tenant_id=inp.tenant_id,
                 work_item_id=inp.work_item_id,
-                details={"reverted": reverted_tests[:20], "reason": "testes são da etapa Tester"},
+                details={"reverted": reverted_tests[:20], "reason": "tests belong to the Tester stage"},
             )
 
-        # Commit/push determinístico — o substrato nunca tem acesso a git.
+        # Deterministic commit/push — the substrate never has git access.
         git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
         git_session.ensure_identity()
         if git_session.has_changes():
@@ -689,26 +696,26 @@ async def _run_coder_turn_impl(
 
 
 # ===========================================================================
-# Fase 2 — sessões stage-scoped (WSC-E3-T3/T4/T5)
+# Fase 2 — stage-scoped sessions (WSC-E3-T3/T4/T5)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# run_planner_turn (WSC-E3-T3) — sessão read-only, emite PlanArtifact
+# run_planner_turn (WSC-E3-T3) — read-only session, emits a PlanArtifact
 # ---------------------------------------------------------------------------
-# PROMOVIDO ao contrato (adendo 02 §2.3, gate de entrada da Fase 3): a
-# definição canônica vive em `dse_contracts.activities` com testes de
-# regressão de boundary (packages/contracts/tests/test_activity_boundaries.py)
-# validando os payloads exatos do WS-B. Re-import para compatibilidade — todo
-# consumidor local (testes, sessions) continua funcionando sem mudança.
+# PROMOTED to the contract (adendo 02 §2.3, the Fase 3 entry gate): the
+# canonical definition lives in `dse_contracts.activities` with boundary
+# regression tests (packages/contracts/tests/test_activity_boundaries.py)
+# validating WS-B's exact payloads. Re-imported for compatibility — every local
+# consumer (tests, sessions) keeps working unchanged.
 from dse_contracts import RunPlannerTurnInput  # noqa: E402
 
 
 def _default_plan_proposer(ctx: PlannerContext, inp: "RunPlannerTurnInput") -> dict[str, Any]:
-    """Proposta MÍNIMA de plano quando nenhum substrato real está plugado —
-    fixture claramente marcado (mesmo espírito do `FakeSubstrate` do Coder).
-    Com a guarda anti-PR-oco do WS-B (`planner_expected_files_empty_...`), um
-    plano deste fixture ESCALA no gate — comportamento deliberado: sem modelo
-    real, o DSE não finge planejar."""
+    """MINIMAL plan proposal when no real substrate is plugged in — a clearly
+    flagged fixture (same spirit as the Coder's `FakeSubstrate`). With WS-B's
+    anti-empty-PR guard (`planner_expected_files_empty_...`), a plan from this
+    fixture ESCALATES at the gate — deliberate behavior: with no real model, DSE
+    does not pretend to plan."""
     return {
         "steps": [f"Analyze and implement: {inp.instruction[:120]}"],
         "expected_files": [],
@@ -744,18 +751,18 @@ Rules:
 
 
 def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
-    """Árvore REAL do repo no branch base (best-effort, via GitHub API do
-    control plane) — sem ela o Planner adivinha caminhos e o plan_compliance
-    reprova o diff real (achado do disparo real). Falha → lista vazia (o
-    prompt degrada para 'caminhos prováveis')."""
+    """The REAL repo tree on the base branch (best-effort, via the control
+    plane's GitHub API) — without it the Planner guesses paths and
+    plan_compliance rejects the real diff (found in the real run). On failure →
+    empty list (the prompt degrades to 'likely paths')."""
     try:
         from dse_validation.config import GitHubConfig
         from dse_validation.github.client import build_github_client
 
         client = build_github_client(GitHubConfig())
         return client.get_tree_paths(repo, base_branch or "main")
-    except Exception as exc:  # noqa: BLE001 — árvore é contexto, não requisito
-        logger.warning("árvore do repo indisponível p/ o planner (%s: %s)",
+    except Exception as exc:  # noqa: BLE001 — the tree is context, not a requirement
+        logger.warning("repo tree unavailable for the planner (%s: %s)",
                        type(exc).__name__, str(exc)[:120])
         return []
 
@@ -763,17 +770,18 @@ def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
 def _model_plan_proposer(
     ctx: PlannerContext, inp: "RunPlannerTurnInput", headers: Any, virtual_key: str
 ) -> dict[str, Any] | None:
-    """Plano proposto pelo MODELO REAL via gateway (stage=planner, virtual key,
-    enforcement + ledger de custo no caminho — WSD). Retorna None em qualquer
-    falha (import ausente, chamada recusada, JSON inválido) — o caller cai no
-    fixture e a guarda do WS-B escala LIMPO (P6), nunca um plano inventado.
+    """Plan proposed by the REAL MODEL through the gateway (stage=planner,
+    virtual key, enforcement + cost ledger on the path — WSD). Returns None on
+    any failure (missing import, refused call, invalid JSON) — the caller falls
+    back to the fixture and WS-B's guard escalates CLEANLY (P6), never an
+    invented plan.
 
-    P1 preservado: o modelo só PROPÕE steps/expected_files/test_plan; risco e
-    gates continuam derivados deterministicamente (classify_risk_class)."""
+    P1 preserved: the model only PROPOSES steps/expected_files/test_plan; risk
+    and gates remain derived deterministically (classify_risk_class)."""
     try:
         from model_gateway_client.gateway_call import chat_completion
     except ImportError:
-        logger.warning("model_gateway_client indisponível — planner segue no fixture")
+        logger.warning("model_gateway_client unavailable — planner falls back to the fixture")
         return None
 
     model = os.environ.get("DSE_PLANNER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
@@ -784,10 +792,10 @@ def _model_plan_proposer(
     else:
         files_rule = "Propose the most likely paths per the ecosystem's conventions."
         tree_section = ""
-    # A INSTRUÇÃO entra direto no prompt (3º disparo real: PlannerContext não
-    # carrega a instrução — render() só tem AGENTS.md/skills/repo map, todos
-    # vazios neste tenant — e o modelo, sem nunca VER a issue, planejou uma
-    # feature genérica de wallet em vez do bug de DELETE).
+    # The INSTRUCTION goes straight into the prompt (3rd real run: PlannerContext
+    # does not carry the instruction — render() only has AGENTS.md/skills/repo
+    # map, all empty for this tenant — and the model, never having SEEN the
+    # issue, planned a generic wallet feature instead of the DELETE bug).
     prompt = _PLAN_PROMPT.format(
         instruction=(inp.instruction or "").strip()[:6000] or "(instruction missing)",
         context=ctx.render()[:8000],
@@ -804,9 +812,9 @@ def _model_plan_proposer(
             max_tokens=1500,
             temperature=0,
         )
-    except Exception as exc:  # noqa: BLE001 — recusa/erro => fixture (escala limpa)
-        _raise_if_permanent_provider_error(exc)  # billing/auth: mensagem certa na issue
-        logger.warning("planner via modelo falhou (%s: %s) — fixture", type(exc).__name__, str(exc)[:200])
+    except Exception as exc:  # noqa: BLE001 — refusal/error => fixture (clean escalation)
+        _raise_if_permanent_provider_error(exc)  # billing/auth: the right message on the issue
+        logger.warning("planner via model failed (%s: %s) — fixture", type(exc).__name__, str(exc)[:200])
         return None
 
     text = (result.content or "").strip()
@@ -825,14 +833,14 @@ def _model_plan_proposer(
             "test_plan": str(proposal.get("test_plan") or "Cover the change with tests (Tester turn)."),
         }
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning("plano do modelo não parseou (%s) — fixture; resposta: %.200s", exc, text)
+        logger.warning("model plan did not parse (%s) — fixture; response: %.200s", exc, text)
         return None
 
 
 @activity.defn(name=ACTIVITY_RUN_PLANNER_TURN)
 async def run_planner_turn(inp: RunPlannerTurnInput) -> PlanArtifact:
-    """Wrapper fino registrado como Activity Temporal (mesmo padrão de
-    `run_coder_turn`). A lógica e os pontos de injeção para teste vivem em
+    """Thin wrapper registered as the Temporal Activity (same pattern as
+    `run_coder_turn`). The logic and the test injection points live in
     `_run_planner_turn_impl`."""
     reject_local_agent_execution("planner")
     return await _run_planner_turn_impl(inp)
@@ -846,18 +854,18 @@ async def _run_planner_turn_impl(
     exploration_script: list[dict[str, Any]] | None = None,
     skills_conn=None,
 ) -> PlanArtifact:
-    """Sessão Planner READ-ONLY (WSC-E3-T3).
+    """READ-ONLY Planner session (WSC-E3-T3).
 
-    Toolset SÓ leitura: hidrata AGENTS.md + skill registry aprovado do tenant
-    (E4) + CODEOWNERS + tickets relacionados + retrieval/index (E5), e emite um
-    PlanArtifact estruturado. Qualquer tool de ESCRITA falha
-    (`ToolPermissionError`) — a sessão usa `PlannerToolset`. P1: o `risk_class`
-    é DERIVADO por `classify_risk_class` (determinístico), não pela palavra do
-    LLM — é ele que dirige o gate do WS-B.
+    Read-only toolset: hydrates AGENTS.md + the tenant's approved skill registry
+    (E4) + CODEOWNERS + related tickets + retrieval/index (E5), and emits a
+    structured PlanArtifact. Any WRITE tool fails (`ToolPermissionError`) — the
+    session uses `PlannerToolset`. P1: `risk_class` is DERIVED by
+    `classify_risk_class` (deterministic), not by the LLM's word — and it is what
+    drives WS-B's gate.
     """
     workspace_dir, _bare = _paths_for(inp.work_item_id)
 
-    # Chamada de modelo (se houver) sai SÓ via gateway, stage=planner.
+    # The model call (if any) goes out ONLY through the gateway, stage=planner.
     headers = GatewayCallHeaders(
         tenant_id=inp.tenant_id,
         work_item_id=inp.work_item_id,
@@ -880,15 +888,15 @@ async def _run_planner_turn_impl(
         skills_conn=skills_conn,
     )
 
-    # Skills em arquivo (`.claude/skills/`) são materializadas pelo
-    # provision_sandbox (após o clone — o Planner pode rodar ANTES do
-    # provision e o workspace ainda não existir aqui). Este re-materialize é
-    # no-op nesse caso (guard de `.git` no skill_files) e atualiza o workspace
-    # quando o registry mudou entre retries.
+    # File-based skills (`.claude/skills/`) are materialized by
+    # provision_sandbox (after the clone — the Planner may run BEFORE the
+    # provision, with the workspace not yet existing here). This re-materialize
+    # is a no-op in that case (the `.git` guard in skill_files) and refreshes the
+    # workspace when the registry changed between retries.
     skills_materialized = materialize_skills(workspace_dir, ctx.skills)
 
-    # Sessão read-only: qualquer step de escrita no exploration_script FALHA
-    # aqui (toolset planner), o que é o teste de conformidade.
+    # Read-only session: any write step in the exploration_script FAILS here
+    # (the planner toolset), which is exactly the conformance test.
     session = ScriptedAgentSession(
         toolset=PlannerToolset(),
         workspace_dir=workspace_dir,
@@ -910,14 +918,14 @@ async def _run_planner_turn_impl(
             operation="planner_exploration",
         )
 
-    # Seleção do proposer (P1 — por CONFIG, nunca por modelo):
-    #   proposer explícito (testes) > modelo real (substrato != fake) com
-    #   fallback ao fixture > fixture. O fixture tem expected_files vazio e a
-    #   guarda do WS-B escala — deliberado quando não há modelo.
+    # Proposer selection (P1 — by CONFIG, never by a model):
+    #   explicit proposer (tests) > real model (substrate != fake) with a
+    #   fallback to the fixture > fixture. The fixture has empty expected_files
+    #   and WS-B's guard escalates — deliberate when there is no model.
     if proposer is not None:
         proposal_fn = proposer
     elif os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
-        def proposal_fn(c):  # noqa: ANN001 — assinatura do run_sync_with_heartbeat
+        def proposal_fn(c):  # noqa: ANN001 — run_sync_with_heartbeat's signature
             return (
                 _model_plan_proposer(c, inp, headers, vk.virtual_key)
                 or _default_plan_proposer(c, inp)
@@ -966,18 +974,18 @@ async def _run_planner_turn_impl(
 
 
 # ---------------------------------------------------------------------------
-# run_tester_turn (WSC-E3-T4) — test runners + autoria de testes (só test paths)
+# run_tester_turn (WSC-E3-T4) — test runners + test authoring (test paths only)
 # ---------------------------------------------------------------------------
-# PROMOVIDOS ao contrato (adendo 02 §2.3) — definição canônica em
-# `dse_contracts.activities`, testes de boundary na fundação. Re-import para
-# compatibilidade dos consumidores locais.
+# PROMOTED to the contract (adendo 02 §2.3) — canonical definition in
+# `dse_contracts.activities`, boundary tests in the foundation. Re-imported for
+# the local consumers' compatibility.
 from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
 
 
-# Padrões de erro PERMANENTE do provider (achado do disparo real 2026-07-22):
-# créditos esgotados/key inválida não são transitórios — retentar é loop
-# infinito de attempts. Lançados non_retryable; o workflow os converte em
-# _FailClosed → falha limpa comentada na issue (P6).
+# PERMANENT provider error patterns (found in the real 2026-07-22 run): exhausted
+# credits/an invalid key are not transient — retrying is an infinite loop of
+# attempts. Raised non_retryable; the workflow converts them into _FailClosed →
+# a clean failure commented on the issue (P6).
 _PERMANENT_PROVIDER_MARKERS = (
     "credit balance is too low",
     "plans & billing",
@@ -993,9 +1001,10 @@ def _raise_if_permanent_provider_error(exc: Exception) -> None:
         from dse_contracts.failure import FailureClass, failure_type
         from temporalio.exceptions import ApplicationError
 
-        # Fase 2 (plano 09): a classe viaja no TYPE (vocabulário fechado do
-        # contrato) — o workflow não depende mais de substring da mensagem.
-        # ("ProviderBillingError" legado segue reconhecido no parse p/ replay.)
+        # Fase 2 (plano 09): the class travels in the TYPE (the contract's closed
+        # vocabulary) — the workflow no longer depends on a message substring.
+        # (The legacy "ProviderBillingError" is still recognized on parse for
+        # replay.)
         raise ApplicationError(
             f"provider_billing_or_auth: {str(exc)[:200]}",
             type=failure_type(FailureClass.provider_billing),
@@ -1040,10 +1049,10 @@ CRITICAL RULES:
 
 
 def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
-    """Contexto determinístico para a autoria imitar o repo REAL (achado do
-    disparo real: o modelo escreveu Jest num repo node:test sem deps e ainda
-    sobrescreveu o teste original — nada rodava nunca). Retorna
-    (package_json, exemplo_de_teste, paths_de_teste_existentes)."""
+    """Deterministic context so authoring imitates the REAL repo (found in the
+    real run: the model wrote Jest in a node:test repo with no deps and also
+    overwrote the original test — nothing ever ran). Returns
+    (package_json, example_test, existing_test_paths)."""
     from dse_contracts.paths import is_test_path
 
     pkg = ""
@@ -1072,19 +1081,20 @@ def _model_authored_test_script(
     inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str,
     *, error_feedback: str = "",
 ) -> list[dict[str, Any]] | None:
-    """Autoria de testes pelo MODELO REAL (mesmo padrão do planner): 1 chamada
-    stage=tester via gateway → arquivos de teste → script determinístico
-    [write_file..., run_tests]. Guard-rails determinísticos (P1):
-      - contexto de IMITAÇÃO: package.json + um teste existente do repo (o
-        modelo copia o runner real, nunca inventa jest/supertest);
-      - paths fora de test paths OU de testes JÁ EXISTENTES são recusados
-        (sobrescrever teste do repo destruiria a suíte);
-      - `error_feedback` re-injeta o erro de infra da 1ª tentativa (1 retry).
-    Qualquer falha → None → tests_ran=False → o gate do WS-B para limpo."""
+    """Test authoring by the REAL MODEL (same pattern as the planner): 1
+    stage=tester call through the gateway → test files → deterministic script
+    [write_file..., run_tests]. Deterministic guard-rails (P1):
+      - IMITATION context: package.json + one existing test from the repo (the
+        model copies the real runner, it never invents jest/supertest);
+      - paths outside test paths OR pointing at ALREADY EXISTING tests are
+        rejected (overwriting a repo test would destroy the suite);
+      - `error_feedback` re-injects the infra error from the 1st attempt (1
+        retry).
+    Any failure → None → tests_ran=False → WS-B's gate stops cleanly."""
     try:
         from model_gateway_client.gateway_call import chat_completion
     except ImportError:
-        logger.warning("model_gateway_client indisponível — tester sem autoria real")
+        logger.warning("model_gateway_client unavailable — tester without real authoring")
         return None
     from dse_contracts.paths import is_test_path
 
@@ -1094,7 +1104,7 @@ def _model_authored_test_script(
         proc = _sp.run(["git", "show", "--stat", "-p", "HEAD"],
                        cwd=workspace_dir, capture_output=True, text=True, timeout=30)
         diff = proc.stdout[-8000:]
-    except Exception:  # noqa: BLE001 — diff é contexto, não requisito
+    except Exception:  # noqa: BLE001 — the diff is context, not a requirement
         pass
 
     package_json, example_test, existing_tests = _tester_repo_context(workspace_dir)
@@ -1110,20 +1120,21 @@ def _model_authored_test_script(
             f"\n## ERROR FROM THE PREVIOUS ATTEMPT (fix it!)\n{error_feedback}\n" if error_feedback else ""
         ),
     )
-    # Skills do repo (materializadas pelo Planner + commitadas no repo alvo):
-    # o Tester também deve seguir a guidance (estilo de teste, padrões do tenant).
+    # Repo skills (materialized by the Planner + committed in the target repo):
+    # the Tester must follow the guidance too (test style, tenant conventions).
     prompt += workspace_skills_note(workspace_dir)[:2000]
     try:
         result = chat_completion(
             headers=headers, virtual_key=virtual_key, model=model,
             messages=[{"role": "user", "content": prompt}],
-            # 8000: achado do disparo real com Haiku — 4000 truncava o JSON no
-            # meio do content ("Unterminated string") e a autoria inteira caía.
+            # 8000: found in the real run with Haiku — 4000 truncated the JSON in
+            # the middle of the content ("Unterminated string") and the whole
+            # authoring pass fell over.
             timeout=180.0, max_tokens=8000, temperature=0,
         )
     except Exception as exc:  # noqa: BLE001
-        _raise_if_permanent_provider_error(exc)  # billing/auth: mensagem certa na issue
-        logger.warning("tester via modelo falhou (%s: %s)", type(exc).__name__, str(exc)[:200])
+        _raise_if_permanent_provider_error(exc)  # billing/auth: the right message on the issue
+        logger.warning("tester via model failed (%s: %s)", type(exc).__name__, str(exc)[:200])
         return None
 
     text = (result.content or "").strip()
@@ -1134,7 +1145,7 @@ def _model_authored_test_script(
         parsed, _ = json.JSONDecoder().raw_decode(text.strip())
         files = parsed.get("files") or []
     except json.JSONDecodeError as exc:
-        logger.warning("autoria de teste não parseou (%s); resposta: %.200s", exc, text)
+        logger.warning("test authoring did not parse (%s); response: %.200s", exc, text)
         return None
 
     script: list[dict[str, Any]] = []
@@ -1144,9 +1155,9 @@ def _model_authored_test_script(
             logger.warning("path de teste recusado (fora de test paths): %r", path)
             continue
         if path in existing_tests:
-            # Em vez de descartar (deixava o script vazio quando o modelo
-            # insistia no teste existente), RENOMEIA deterministicamente para
-            # um arquivo novo no MESMO diretório — imports relativos intactos.
+            # Instead of discarding it (which left the script empty whenever the
+            # model insisted on the existing test), RENAME deterministically to a
+            # new file in the SAME directory — relative imports stay intact.
             renamed = _dedupe_test_path(path, existing_tests, workspace_dir)
             logger.warning("path de teste JÁ EXISTE — renomeado %r → %r", path, renamed)
             path = renamed
@@ -1158,7 +1169,7 @@ def _model_authored_test_script(
 
 
 def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
-    """Nome novo no mesmo diretório, ainda casando is_test_path:
+    """A new name in the same directory that still matches is_test_path:
     test/api.test.js → test/api-dse.test.js; tests/test_x.py → tests/test_x_dse.py."""
     base, name = os.path.split(path)
     for pattern, repl in ((".test.", "-dse.test."), (".spec.", "-dse.spec.")):
@@ -1194,11 +1205,11 @@ def _restore_lockfile_churn_audited(
 
 
 def _tester_authored_files_in_history(workspace_dir: str) -> list[str]:
-    """Test files de commits `tester(...)` anteriores ainda presentes no
-    workspace. Se existem, o turno RE-RODA esses testes em vez de autorar
-    novos (2º disparo real: cada ciclo de fix autorava MAIS um teste — o
-    diff só crescia, o alvo mudava a cada volta e o loop nunca convergia).
-    O fix cycle só funciona com alvo fixo."""
+    """Test files from previous `tester(...)` commits that are still present in
+    the workspace. If they exist, the turn RE-RUNS those tests instead of
+    authoring new ones (2nd real run: every fix cycle authored ONE MORE test —
+    the diff only grew, the target moved on each lap and the loop never
+    converged). The fix cycle only works with a fixed target."""
     import subprocess as _sp
 
     from dse_contracts.paths import is_test_path as _is_test
@@ -1208,7 +1219,7 @@ def _tester_authored_files_in_history(workspace_dir: str) -> list[str]:
             ["git", "log", "--format=%H %s"], cwd=workspace_dir,
             capture_output=True, text=True, timeout=30,
         ).stdout
-    except Exception:  # noqa: BLE001 — sem histórico legível, autora normalmente
+    except Exception:  # noqa: BLE001 — with no readable history, author as usual
         return []
     files: list[str] = []
     for line in log.splitlines():
@@ -1241,10 +1252,11 @@ _TEST_INFRA_ERROR_MARKERS = (
 
 
 def _authored_test_infra_error(workspace_dir: str, test_paths: list[str]) -> str | None:
-    """Roda SÓ os testes recém-autorados e detecta erro de INFRA (import/
-    sintaxe — teste que nunca executa), distinto de asserção falhando (que é
-    sinal legítimo de fix incompleto → fix cycle do Coder). Retorna o erro
-    para re-autoria, ou None se os testes executam."""
+    """Run ONLY the freshly authored tests and detect an INFRA error
+    (import/syntax — a test that never executes), as distinct from a failing
+    assertion (which is a legitimate signal of an incomplete fix → the Coder's
+    fix cycle). Returns the error for re-authoring, or None if the tests
+    execute."""
     import subprocess as _sp
 
     if not test_paths:
@@ -1276,15 +1288,16 @@ def _tester_pod_sync(
     virtual_key: str,
     push: bool,
 ) -> TesterTurnResult:
-    """Corpo SÍNCRONO da bridge do Tester no runtime K8s (rodado sob heartbeat).
+    """SYNCHRONOUS body of the Tester bridge on the K8s runtime (run under
+    heartbeat).
 
-    Opera DENTRO do Pod de sandbox via `kubectl exec` — o workspace e o
-    toolchain (node/git) vivem no Pod (o Coder já rodou lá), NÃO no worker. A
-    autoria (modelo) precisa do contexto do workspace: `kubectl cp` traz um clone
-    local SÓ de leitura pra alimentar `_model_authored_test_script`; a escrita, a
-    execução da suíte e o commit dos testes acontecem no Pod. Simplificação vs o
-    path Docker/dev: sem loop de infra-error nem idempotência de re-run (1
-    autoria; autoria vazia → tests_ran=False → o gate para limpo)."""
+    It operates INSIDE the sandbox Pod via `kubectl exec` — the workspace and the
+    toolchain (node/git) live in the Pod (the Coder already ran there), NOT in the
+    worker. Authoring (the model) needs the workspace context: `kubectl cp` pulls
+    a READ-ONLY local clone to feed `_model_authored_test_script`; the writes, the
+    suite run and the test commit happen in the Pod. Simplification versus the
+    Docker/dev path: no infra-error loop and no re-run idempotency (1 authoring
+    pass; empty authoring → tests_ran=False → the gate stops cleanly)."""
     import shlex as _shlex
     import shutil as _shutil
     import subprocess as _sp
@@ -1301,15 +1314,17 @@ def _tester_pod_sync(
             capture_output=True, text=True, timeout=timeout, input=input_text,
         )
 
-    # identidade git NO POD (onde o repo realmente está — o "git config exit 128"
-    # do path local era isto rodando no worker, que não tem o workspace).
+    # git identity IN THE POD (where the repo actually is — the local path's
+    # "git config exit 128" was exactly this running in the worker, which does
+    # not have the workspace).
     _pod_sh("cd /workspace && git config user.name dse-tester && git config user.email tester@dse.local")
 
-    # idempotência (retry): se um round anterior do Tester já autorou testes
-    # (commit `tester(...)`) e eles ainda existem no Pod, RE-RODA em vez de
-    # re-autorar — alvo FIXO p/ o Coder convergir (o path local faz o mesmo com
-    # _tester_authored_files_in_history). Sem isto cada retry autora um arquivo
-    # novo, o alvo se move e o loop Coder↔Tester nunca fecha.
+    # idempotency (retry): if a previous Tester round already authored tests
+    # (a `tester(...)` commit) and they still exist in the Pod, RE-RUN instead of
+    # re-authoring — a FIXED target so the Coder can converge (the local path
+    # does the same with _tester_authored_files_in_history). Without this, each
+    # retry authors a new file, the target moves and the Coder↔Tester loop never
+    # closes.
     reused = [
         f for f in _pod_sh(
             "cd /workspace && git log --pretty=%H --grep='^tester(' -n 8 2>/dev/null | "
@@ -1322,10 +1337,10 @@ def _tester_pod_sync(
     authored_new = False
     if reused:
         test_files = reused
-        logger.info("tester k8s: reusando %d teste(s) autorado(s) em round anterior", len(reused))
+        logger.info("tester k8s: reusing %d test(s) authored in a previous round", len(reused))
     else:
-        # autoria REAL: contexto do workspace (git show HEAD + package.json +
-        # teste exemplo). kubectl cp o /workspace do Pod → clone local read-only.
+        # REAL authoring: workspace context (git show HEAD + package.json + an
+        # example test). kubectl cp the Pod's /workspace → a read-only local clone.
         authoring_script: list[dict[str, Any]] | None = None
         tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
         try:
@@ -1337,12 +1352,12 @@ def _tester_pod_sync(
             if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
                 authoring_script = _model_authored_test_script(inp, local_ws, headers, virtual_key)
             else:
-                logger.warning("tester k8s: kubectl cp do workspace falhou (rc=%s): %.200s",
+                logger.warning("tester k8s: kubectl cp of the workspace failed (rc=%s): %.200s",
                                cp.returncode, (cp.stderr or "")[:200])
         finally:
             _shutil.rmtree(tmp, ignore_errors=True)
 
-        # escreve os test files NO POD (conteúdo via stdin — sem quoting do content)
+        # write the test files IN THE POD (content via stdin — no quoting of the content)
         for s in (authoring_script or []):
             if s.get("tool") != "write_file":
                 continue
@@ -1359,8 +1374,9 @@ def _tester_pod_sync(
             else:
                 logger.warning("tester k8s: falha escrevendo %s no Pod: %.200s", path, (w.stderr or "")[:200])
 
-    # roda a suíte NO POD (detecção determinística: package.json com script
-    # "test" → npm test; senão pytest). node/npm/pytest vêm da imagem (rebuild).
+    # run the suite IN THE POD (deterministic detection: package.json with a
+    # "test" script → npm test; otherwise pytest). node/npm/pytest come from the
+    # image (rebuild).
     run = _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
@@ -1372,11 +1388,11 @@ def _tester_pod_sync(
     tests_passed = tests_ran and run.returncode == 0
     returncode = run.returncode
     if tests_ran and not tests_passed:
-        logger.warning("tester k8s: suíte falhou (rc=%s): %.300s",
+        logger.warning("tester k8s: suite failed (rc=%s): %.300s",
                        returncode, ((run.stdout or "") + (run.stderr or ""))[-300:])
 
-    # commit dos test files NO POD (branch corrente; checkpoint pós-tester captura
-    # e o finalize dá push). Sem push aqui.
+    # commit the test files IN THE POD (current branch; the post-tester checkpoint
+    # picks them up and finalize pushes). No push here.
     head_sha = None
     if authored_new and test_files:
         files_arg = " ".join(_shlex.quote(p) for p in test_files)
@@ -1412,8 +1428,8 @@ def _tester_pod_sync(
 async def _run_tester_turn_pod(
     inp: "RunTesterTurnInput", *, sandbox_id: str, headers: Any, virtual_key: str, push: bool = True,
 ) -> TesterTurnResult:
-    """Tester no runtime K8s (Pod). Roda o corpo síncrono sob heartbeat — a
-    autoria do modelo + `npm install`/`npm test` podem levar minutos."""
+    """Tester on the K8s runtime (Pod). Runs the synchronous body under heartbeat
+    — the model's authoring + `npm install`/`npm test` can take minutes."""
     return await run_sync_with_heartbeat(
         lambda _c: _tester_pod_sync(inp, sandbox_id, headers, virtual_key, push),
         None,
@@ -1430,11 +1446,11 @@ async def _run_tester_turn_impl(
     authoring_script: list[dict[str, Any]] | None = None,
     push: bool = True,
 ) -> TesterTurnResult:
-    """Sessão Tester (WSC-E3-T4): autoria de testes + runners. Edits permitidos
-    SÓ em test paths (`TesterToolset` recusa write fora deles). Os testes
-    escritos EXECUTAM de verdade (`run_tests` → pytest real no workspace), não
-    são só gerados. O commit/push dos test files é determinístico
-    (`ScopedGitSession`), nunca pelo LLM (P1)."""
+    """Tester session (WSC-E3-T4): test authoring + runners. Edits are allowed
+    ONLY under test paths (`TesterToolset` refuses writes outside them). The
+    written tests actually EXECUTE (`run_tests` → real pytest in the workspace),
+    they are not merely generated. The commit/push of the test files is
+    deterministic (`ScopedGitSession`), never done by the LLM (P1)."""
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare = _paths_for(inp.work_item_id)
 
@@ -1447,15 +1463,15 @@ async def _run_tester_turn_impl(
     )
     vk = mint_virtual_key(headers)
 
-    # Runtime K8s: o workspace vive DENTRO do Pod (o Coder rodou lá via
-    # RemoteSubstrate), não no FS do worker. O path local abaixo
-    # (ScopedGitSession/ScriptedAgentSession) assume workspace host-visible e
-    # quebra no K8s (git config exit 128, sem workspace). Roteia p/ a bridge que
-    # opera DENTRO do Pod via kubectl exec.
+    # K8s runtime: the workspace lives INSIDE the Pod (the Coder ran there via
+    # RemoteSubstrate), not on the worker's FS. The local path below
+    # (ScopedGitSession/ScriptedAgentSession) assumes a host-visible workspace and
+    # breaks on K8s (git config exit 128, no workspace). Route to the bridge that
+    # operates INSIDE the Pod via kubectl exec.
     try:
         _driver = select_sandbox_driver()
         _host_visible = _driver.workspace_is_host_visible
-    except Exception:  # noqa: BLE001 — sem driver resolvível → mantém path local
+    except Exception:  # noqa: BLE001 — no resolvable driver → keep the local path
         _driver, _host_visible = None, True
     if _driver is not None and not _host_visible:
         return await _run_tester_turn_pod(
@@ -1466,20 +1482,21 @@ async def _run_tester_turn_impl(
             push=push,
         )
 
-    # Autoria REAL (mesmo seletor do planner, P1 por config): sem script
-    # explícito (testes) e com substrato real, o MODELO escreve os testes.
-    # Falha em qualquer ponto → script vazio → tests_ran=False → gate para.
+    # REAL authoring (same selector as the planner, P1 by config): with no
+    # explicit script (tests) and a real substrate, the MODEL writes the tests.
+    # A failure at any point → empty script → tests_ran=False → the gate stops.
     #
-    # Validação de INFRA com 1 re-autoria (achado do disparo real: o modelo
-    # escreveu Jest num repo node:test — o teste nunca executava e o fix cycle
-    # re-rodava o CODER, que nem pode tocar testes → loop sem saída): escreve,
-    # roda SÓ os arquivos novos; erro de import/sintaxe → re-autora UMA vez com
-    # o erro no prompt; persiste → remove os arquivos e devolve tests_ran=False
-    # (o gate para limpo em vez de queimar turnos de Coder).
+    # INFRA validation with 1 re-authoring pass (found in the real run: the model
+    # wrote Jest in a node:test repo — the test never executed and the fix cycle
+    # kept re-running the CODER, which cannot even touch tests → a loop with no
+    # exit): write, run ONLY the new files; an import/syntax error → re-author
+    # ONCE with the error in the prompt; if it persists → remove the files and
+    # return tests_ran=False (the gate stops cleanly instead of burning Coder
+    # turns).
     if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
-        # Idempotência do Tester (2º disparo real): testes já autorados em
-        # ciclo anterior são RE-RODADOS, nunca re-autorados — o fix cycle
-        # precisa de alvo fixo para o Coder convergir.
+        # Tester idempotency (2nd real run): tests already authored in a previous
+        # cycle are RE-RUN, never re-authored — the fix cycle needs a fixed target
+        # for the Coder to converge.
         reused = _tester_authored_files_in_history(workspace_dir)
         if reused:
             audit_emit(
@@ -1505,7 +1522,7 @@ async def _run_tester_turn_impl(
             if not authoring_script:
                 break
             new_paths = [s["path"] for s in authoring_script if s.get("tool") == "write_file"]
-            # escreve direto (mesmos paths que o toolset aceitaria — já filtrados)
+            # write directly (the same paths the toolset would accept — already filtered)
             for s in authoring_script:
                 if s.get("tool") == "write_file":
                     dest = os.path.join(workspace_dir, s["path"])
@@ -1514,15 +1531,15 @@ async def _run_tester_turn_impl(
                         fh.write(s["content"])
             infra_err = _authored_test_infra_error(workspace_dir, new_paths)
             if infra_err is None:
-                # arquivos válidos: o loop de steps abaixo só precisa registrar
-                # test_files + rodar a suíte (os writes já aconteceram).
+                # valid files: the step loop below only needs to register
+                # test_files + run the suite (the writes already happened).
                 authoring_script = (
                     [{"tool": "write_file", "path": p, "content": open(os.path.join(workspace_dir, p)).read()} for p in new_paths]
                     + [{"tool": "run_tests"}]
                 )
                 break
             logger.warning("teste autorado com erro de INFRA (tentativa %d): %.200s", attempt, infra_err)
-            for p in new_paths:  # remove o lixo antes de re-autorar/desistir
+            for p in new_paths:  # remove the junk before re-authoring/giving up
                 try:
                     os.remove(os.path.join(workspace_dir, p))
                 except OSError:
@@ -1538,9 +1555,9 @@ async def _run_tester_turn_impl(
                 details={"infra_error": error_feedback[:500]},
             )
 
-    # Fase 3 (WSC-E3-T4b): o toolset é escopado ao work item — além de test
-    # paths, `demos/<work_item_id>/` é escrita permitida (convenção do teste
-    # `@demo`); `demos/` de OUTRO work item continua bloqueado.
+    # Fase 3 (WSC-E3-T4b): the toolset is scoped to the work item — besides test
+    # paths, `demos/<work_item_id>/` is an allowed write (the `@demo` test
+    # convention); ANOTHER work item's `demos/` stays blocked.
     session = ScriptedAgentSession(
         toolset=TesterToolset(work_item_id=inp.work_item_id),
         workspace_dir=workspace_dir,
@@ -1571,8 +1588,8 @@ async def _run_tester_turn_impl(
 
     _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="tester")
 
-    # Commit/push determinístico dos test files (só test paths foram escritos —
-    # o toolset garantiu). Escapes de git ficam no código, nunca no LLM.
+    # Deterministic commit/push of the test files (only test paths were written —
+    # the toolset guaranteed it). Git escapes live in the code, never in the LLM.
     git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
     git_session.ensure_identity(name="dse-tester", email="tester@dse.local")
     if git_session.has_changes():
@@ -1615,13 +1632,13 @@ async def _run_tester_turn_impl(
 
 
 # ---------------------------------------------------------------------------
-# run_l2_review (WSC-E3-T5) — sessão Reviewer fresh-context, retorna L2Verdict
+# run_l2_review (WSC-E3-T5) — fresh-context Reviewer session, returns L2Verdict
 # ---------------------------------------------------------------------------
-# PROMOVIDO ao contrato (adendo 02 §2.3) e ENDURECIDO lá: a definição
-# canônica em `dse_contracts.activities` agora tem `extra="forbid"` — tentar
-# passar qualquer campo além de {work_item_id, tenant_id, plan, diff,
-# task_class, data_class} (ex.: histórico do Coder) falha no DECODE da
-# Activity, não apenas em teste. P3 estrutural na fundação.
+# PROMOTED to the contract (adendo 02 §2.3) and HARDENED there: the canonical
+# definition in `dse_contracts.activities` now has `extra="forbid"` — trying to
+# pass any field beyond {work_item_id, tenant_id, plan, diff, task_class,
+# data_class} (e.g. the Coder's history) fails at the Activity's DECODE, not
+# just in a test. Structural P3 in the foundation.
 from dse_contracts import RunL2ReviewInput  # noqa: E402
 
 
@@ -1635,7 +1652,7 @@ def _changed_files_from_diff(diff: str) -> list[str]:
             parts = line.split(" b/", 1)
             if len(parts) == 2:
                 files.append(parts[1].strip())
-    # dedup preservando ordem
+    # dedup preserving order
     seen: set[str] = set()
     out = []
     for f in files:
@@ -1646,22 +1663,22 @@ def _changed_files_from_diff(diff: str) -> list[str]:
 
 
 def _default_reviewer_verdict(ctx: ReviewerContext):
-    """Reviewer determinístico de STAND-IN (fixture claramente marcado, mesmo
-    espírito do FakeSubstrate). Julga aderência do diff ao plano por regras
-    objetivas: (a) nenhum arquivo alterado fora do blast radius declarado
-    (`expected_files`, se não vazio); (b) nenhum arquivo em `forbidden_paths`.
-    Em produção, uma sessão OpenHands FRESCA (só plan+diff) substitui isto e
-    devolve objeções de convenção/lógica com arquivo/linha — override via
-    `_run_l2_review_impl(..., verdict_fn=...)`. Ver README."""
+    """Deterministic STAND-IN reviewer (a clearly flagged fixture, same spirit as
+    FakeSubstrate). Judges the diff's adherence to the plan by objective rules:
+    (a) no file changed outside the declared blast radius (`expected_files`, when
+    non-empty); (b) no file under `forbidden_paths`. In production a FRESH
+    OpenHands session (plan+diff only) replaces this and returns
+    convention/logic objections with file/line — override via
+    `_run_l2_review_impl(..., verdict_fn=...)`. See the README."""
     changed = _changed_files_from_diff(ctx.diff)
     objections: list[str] = []
     expected = set(ctx.plan.expected_files)
     for f in changed:
         if expected and f not in expected:
-            objections.append(f"{f}: alterado fora do blast radius declarado no plano (expected_files)")
+            objections.append(f"{f}: changed outside the blast radius declared in the plan (expected_files)")
         for fb in ctx.plan.forbidden_paths:
             if f.startswith(fb.rstrip("*")):
-                objections.append(f"{f}: toca forbidden_path '{fb}' — requer caminho humano")
+                objections.append(f"{f}: touches forbidden_path '{fb}' — requires the human path")
     return (len(objections) == 0, objections, 0.0)
 
 
@@ -1672,10 +1689,10 @@ async def run_l2_review(inp: RunL2ReviewInput) -> L2Verdict:
 
 
 async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Verdict:
-    """Constrói a sessão Reviewer de contexto FRESCO (WSC-E3-T5) e devolve o
-    `L2Verdict`. A sessão recebe SÓ `ReviewerContext(plan, diff)` — nunca o
-    histórico do Coder (P3). O veredito é RECOMENDAÇÃO (gateia progressão); o
-    merge continua humano (P1)."""
+    """Build the FRESH-context Reviewer session (WSC-E3-T5) and return the
+    `L2Verdict`. The session receives ONLY `ReviewerContext(plan, diff)` — never
+    the Coder's history (P3). The verdict is a RECOMMENDATION (it gates
+    progression); the merge remains human (P1)."""
     context = ReviewerContext(work_item_id=inp.work_item_id, plan=inp.plan, diff=inp.diff)
     session = FreshReviewerSession(context)
     verdict = await run_sync_with_heartbeat(
@@ -1703,11 +1720,11 @@ async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Ve
 
 
 # ===========================================================================
-# Fase 4 — esteira de promoção de skill (WSC-E4-T3). Activities registradas
-# como `@activity.defn` com os nomes/tipos de `dse_contracts.activities`
-# (definidos no gate de entrada da Fase 4, antes do build). A lógica
-# determinística vive em `skill_promotion` (P1); aqui só o wrapper Activity +
-# tradução para os models de retorno do contrato.
+# Fase 4 — skill promotion pipeline (WSC-E4-T3). Activities registered as
+# `@activity.defn` with the names/types from `dse_contracts.activities` (defined
+# at the Fase 4 entry gate, before the build). The deterministic logic lives in
+# `skill_promotion` (P1); here we only have the Activity wrapper + the
+# translation into the contract's return models.
 # ===========================================================================
 from dse_contracts import (  # noqa: E402
     ACTIVITY_EVAL_SKILL_CANDIDATE,
@@ -1723,11 +1740,11 @@ from . import skill_promotion  # noqa: E402
 
 @activity.defn(name=ACTIVITY_EVAL_SKILL_CANDIDATE)
 async def eval_skill_candidate(inp: EvalSkillCandidateInput) -> EvalSkillCandidateResult:
-    """Replay do candidate contra o eval set histórico (positivos/negativos).
-    Determinístico (P1) — produz um SCORE e as contagens, nunca uma decisão de
-    promoção. `negative_regressions>0` ⇒ `passed=False`, o que bloqueia a
-    transição candidate→approved por construção (o gate está em `promote_skill`).
-    Grava em `skill_eval` (P8)."""
+    """Replay the candidate against the historical eval set
+    (positives/negatives). Deterministic (P1) — it produces a SCORE and the
+    counts, never a promotion decision. `negative_regressions>0` ⇒
+    `passed=False`, which blocks the candidate→approved transition by
+    construction (the gate is in `promote_skill`). Writes to `skill_eval` (P8)."""
     outcome = skill_promotion.evaluate_candidate(
         inp.tenant_id, inp.skill_key, inp.candidate_version
     )
@@ -1744,12 +1761,13 @@ async def eval_skill_candidate(inp: EvalSkillCandidateInput) -> EvalSkillCandida
 
 @activity.defn(name=ACTIVITY_PROMOTE_SKILL)
 async def promote_skill(inp: PromoteSkillInput) -> PromoteSkillResult:
-    """Transição de estado GOVERNADA (candidate→approved→canary→active +
-    rollback). P1/P3 NÃO-NEGOCIÁVEL: `to_status in {approved,active}` sem
-    `approver` humano levanta `ApproverRequired` ANTES de qualquer escrita —
-    promoção sem humano nomeado é impossível por construção (não há code path;
-    a Activity propaga a exceção, o workflow do WS-B nunca "cai" numa promoção
-    silenciosa). Toda transição → dse_audit.emit com a identidade do aprovador."""
+    """GOVERNED state transition (candidate→approved→canary→active + rollback).
+    NON-NEGOTIABLE P1/P3: `to_status in {approved,active}` without a human
+    `approver` raises `ApproverRequired` BEFORE any write — promotion without a
+    named human is impossible by construction (there is no code path; the
+    Activity propagates the exception and WS-B's workflow never "falls" into a
+    silent promotion). Every transition → dse_audit.emit with the approver's
+    identity."""
     outcome = skill_promotion.promote(
         inp.tenant_id,
         inp.skill_key,
@@ -1773,10 +1791,10 @@ async def promote_skill(inp: PromoteSkillInput) -> PromoteSkillResult:
     )
 
 
-# Preflight no momento em que o worker importa/registra as Activities. Em
-# produção, o adapter atual declara honestamente que ainda não executa stages
-# dentro do sandbox; logo o worker recusa boot em vez de operar no fallback
-# local. Em dev/test a compatibilidade existente é preservada.
+# Preflight at the moment the worker imports/registers the Activities. In
+# production, the current adapter honestly declares that it does not yet execute
+# stages inside the sandbox; so the worker refuses to boot instead of operating
+# on the local fallback. In dev/test the existing compatibility is preserved.
 validate_runtime_startup(
     isolated_stage_execution_available=(
         DEFAULT_SANDBOX_DRIVER.supports_isolated_stage_execution
@@ -1784,9 +1802,9 @@ validate_runtime_startup(
 )
 
 
-# Consumido pelo loader defensivo do worker unico (services/orchestrator/
-# src/dse_orchestrator/worker.py:_load_cross_workstream_activities) — nome
-# `ACTIVITIES` e o contrato que o integrador espera (ver docstring de lá).
+# Consumed by the single worker's defensive loader (services/orchestrator/
+# src/dse_orchestrator/worker.py:_load_cross_workstream_activities) — the name
+# `ACTIVITIES` and the contract the integrator expects (see its docstring).
 ACTIVITIES = [
     provision_sandbox,
     checkpoint_sandbox,

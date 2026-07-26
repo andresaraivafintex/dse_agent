@@ -1,19 +1,19 @@
-"""WSE-E2-T5 — loop de fix-retries bounded L2 -> Coder (lógica determinística).
+"""WSE-E2-T5 — bounded L2 -> Coder fix-retry loop (deterministic logic).
 
-O workflow do WS-B é dono da ORQUESTRAÇÃO de estados (chamar Coder, re-L1, re-L2);
-este módulo é a LÓGICA DE DECISÃO pura que ele consulta a cada veredito L2 (P1:
-nenhum LLM decide — é aritmética sobre contador + budget):
+The WS-B workflow owns the state ORCHESTRATION (call the Coder, re-L1, re-L2);
+this module is the pure DECISION LOGIC it consults on every L2 verdict (P1: no
+LLM decides — it is arithmetic over a counter + budget):
 
-    L2 reprova com objeção específica
-        -> volta ao Coder (re-implementa) -> re-L1 -> re-L2
-        -> repete, com contador limitado (`max_fix_retries`)
-        -> esgotou retries OU budget -> ESCALA A OPERADOR (P6: nunca insiste,
-           nunca corta no meio; falha limpa numa fronteira nomeada).
+    L2 rejects with a specific objection
+        -> back to the Coder (re-implements) -> re-L1 -> re-L2
+        -> repeat, with a bounded counter (`max_fix_retries`)
+        -> retries OR budget exhausted -> ESCALATE TO OPERATOR (P6: never insist,
+           never truncate midway; clean failure at a named boundary).
 
-Cada iteração DEBITA budget (custo do turno do Coder + do turno L2). Nenhuma
-iteração é permitida depois do cap de iterações OU do teto de custo esgotado (P6).
-Tudo é auditado (P8) e o contador é durável (`wse_fix_loops`) para sobreviver a
-crash/replay do workflow.
+Every iteration DEBITS budget (cost of the Coder turn + the L2 turn). No
+iteration is allowed after the iteration cap OR the cost ceiling is exhausted (P6).
+Everything is audited (P8) and the counter is durable (`wse_fix_loops`) so it
+survives workflow crash/replay.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ Action = Literal["proceed", "retry_coder", "escalate_operator"]
 class FixLoopState(BaseModel):
     work_item_id: str
     tenant_id: str
-    iterations: int = 0  # nº de retornos ao Coder já consumidos
+    iterations: int = 0  # number of Coder round-trips already consumed
     spent_usd: float = 0.0
     exhausted: bool = False
 
@@ -49,11 +49,11 @@ class FixLoopDecision(BaseModel):
     iterations_used: int
     iterations_remaining: int
     spent_usd: float
-    budget_remaining_usd: float | None  # None = sem teto de custo configurado
+    budget_remaining_usd: float | None  # None = no cost ceiling configured
 
 
 def load_state(work_item_id: str, tenant_id: str) -> FixLoopState:
-    """Estado durável do loop (cria em memória zerado se ainda não existe)."""
+    """Durable loop state (creates a zeroed in-memory one if it does not exist yet)."""
     row = db.get_fix_loop(work_item_id)
     if row is None:
         return FixLoopState(work_item_id=work_item_id, tenant_id=tenant_id)
@@ -75,12 +75,12 @@ def _budget_remaining(state: FixLoopState, cfg: L2Config) -> float | None:
 def decide_next_action(
     *, verdict: L2Verdict, state: FixLoopState, cfg: L2Config | None = None
 ) -> FixLoopDecision:
-    """Decisão pura (sem efeitos colaterais) a partir do veredito L2 + estado.
+    """Pure decision (no side effects) from the L2 verdict + state.
 
-    - L2 aprova            -> proceed (segue para o CI, P5).
-    - L2 reprova e ainda há retries E budget -> retry_coder (com as objeções).
-    - retries esgotados    -> escalate_operator.
-    - budget esgotado      -> escalate_operator (P6: não gasta além do teto).
+    - L2 approves          -> proceed (move on to CI, P5).
+    - L2 rejects and there are retries AND budget left -> retry_coder (with the objections).
+    - retries exhausted    -> escalate_operator.
+    - budget exhausted     -> escalate_operator (P6: never spend past the ceiling).
     """
     cfg = cfg or L2Config()
     remaining = max(0, cfg.max_fix_retries - state.iterations)
@@ -88,22 +88,22 @@ def decide_next_action(
 
     if verdict.passed:
         action: Action = "proceed"
-        reason = "L2 aprovou o diff (plan+diff, contexto fresco)"
+        reason = "L2 approved the diff (plan+diff, fresh context)"
     elif remaining <= 0:
         action = "escalate_operator"
         reason = (
-            f"objeções L2 persistem após {state.iterations} retornos ao Coder "
-            f"(cap={cfg.max_fix_retries}) — escalando a operador (P6)"
+            f"L2 objections persist after {state.iterations} returns to the Coder "
+            f"(cap={cfg.max_fix_retries}) — escalating to an operator (P6)"
         )
     elif budget_left is not None and budget_left <= 0:
         action = "escalate_operator"
         reason = (
-            f"budget do loop esgotado (spent={state.spent_usd:.4f} >= "
-            f"cap={cfg.budget_cap_usd:.4f} USD) — escalando a operador (P6)"
+            f"loop budget exhausted (spent={state.spent_usd:.4f} >= "
+            f"cap={cfg.budget_cap_usd:.4f} USD) — escalating to an operator (P6)"
         )
     else:
         action = "retry_coder"
-        reason = f"L2 reprovou; reenviando ao Coder ({remaining} retorno(s) restante(s))"
+        reason = f"L2 rejected; sending back to the Coder ({remaining} return(s) left)"
 
     return FixLoopDecision(
         action=action,
@@ -125,19 +125,19 @@ def register_retry(
     persist: bool = True,
     actor: str = "system:validation",
 ) -> FixLoopState:
-    """Debita o custo de UMA iteração de fix e incrementa o contador (durável).
+    """Debits the cost of ONE fix iteration and increments the counter (durably).
 
-    Guard P6 (belt-and-suspenders): recusa debitar se o loop já estava com o cap
-    de iterações OU de budget esgotado — nesse caso o caller deveria ter escalado,
-    não iniciado outra iteração. Levanta `FixLoopBudgetExceeded`."""
+    P6 guard (belt-and-suspenders): refuses to debit if the loop had already hit
+    the iteration cap OR exhausted its budget — in that case the caller should
+    have escalated, not started another iteration. Raises `FixLoopBudgetExceeded`."""
     cfg = cfg or L2Config()
     if state.iterations >= cfg.max_fix_retries:
         raise FixLoopBudgetExceeded(
-            f"cap de {cfg.max_fix_retries} retries já atingido — não inicie outra iteração (P6)"
+            f"cap of {cfg.max_fix_retries} retries already reached — do not start another iteration (P6)"
         )
     if cfg.budget_cap_usd > 0 and state.spent_usd >= cfg.budget_cap_usd:
         raise FixLoopBudgetExceeded(
-            f"budget cap {cfg.budget_cap_usd:.4f} USD já atingido — não gaste mais (P6)"
+            f"budget cap {cfg.budget_cap_usd:.4f} USD already reached — do not spend more (P6)"
         )
 
     new_state = state.model_copy(
@@ -178,7 +178,7 @@ def escalate_to_operator(
     persist: bool = True,
     actor: str = "system:validation",
 ) -> FixLoopState:
-    """Marca o loop como exausto (escalado a operador). Idempotente."""
+    """Marks the loop as exhausted (escalated to an operator). Idempotent."""
     new_state = state.model_copy(update={"exhausted": True})
     if persist:
         db.upsert_fix_loop(
@@ -205,4 +205,4 @@ def escalate_to_operator(
 
 
 class FixLoopBudgetExceeded(RuntimeError):
-    """P6 — tentativa de iniciar uma iteração de fix após o cap/budget esgotado."""
+    """P6 — attempt to start a fix iteration after the cap/budget was exhausted."""

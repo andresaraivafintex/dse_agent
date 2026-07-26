@@ -1,10 +1,10 @@
-"""Política fail-closed do perfil de execução do sandbox.
+"""Fail-closed policy for the sandbox execution profile.
 
-O runtime atual ainda possui atalhos deliberados de desenvolvimento: execução
-do SDK no processo do worker, substratos/estágios fixture e virtual keys locais.
-Esses atalhos continuam úteis para testes, mas não podem ser confundidos com um
-deployment seguro. Este módulo concentra a validação, lê o ambiente em cada
-chamada (sem estado import-time) e falha antes de qualquer trabalho consequencial.
+The current runtime still has deliberate development shortcuts: running the SDK
+in the worker's own process, fixture substrates/stages, and local virtual keys.
+Those shortcuts remain useful for tests, but must never be mistaken for a secure
+deployment. This module concentrates the validation, reads the environment on
+every call (no import-time state) and fails before any consequential work.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class RuntimeProfile(str, Enum):
 
 
 class RuntimeProfileViolation(RuntimeError):
-    """Configuração ou fallback incompatível com o perfil selecionado."""
+    """Configuration or fallback incompatible with the selected profile."""
 
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
@@ -43,17 +43,17 @@ def _flag(name: str, *, default: bool) -> bool:
     if normalized in _FALSE_VALUES:
         return False
     raise RuntimeProfileViolation(
-        f"{name}={raw!r} inválido; use um booleano explícito "
-        "(1/0, true/false, yes/no ou on/off)"
+        f"{name}={raw!r} invalid; use an explicit boolean "
+        "(1/0, true/false, yes/no or on/off)"
     )
 
 
 def current_runtime_profile(value: str | None = None) -> RuntimeProfile:
-    """Resolve o perfil sem cache para que testes e preflight sejam fiéis."""
+    """Resolve the profile without caching so tests and preflight stay faithful."""
     raw = (value if value is not None else os.environ.get(PROFILE_ENV_VAR, "dev"))
     normalized = raw.strip().lower()
-    # Aceitar os aliases usuais não reduz segurança: ambos selecionam o ramo
-    # mais restritivo, em vez de cair acidentalmente no default de dev.
+    # Accepting the usual aliases does not weaken security: both select the more
+    # restrictive branch, instead of accidentally falling into the dev default.
     if normalized in {"prod", "pilot"}:
         normalized = RuntimeProfile.production.value
     try:
@@ -61,23 +61,23 @@ def current_runtime_profile(value: str | None = None) -> RuntimeProfile:
     except ValueError as exc:
         valid = ", ".join(profile.value for profile in RuntimeProfile)
         raise RuntimeProfileViolation(
-            f"{PROFILE_ENV_VAR}={raw!r} desconhecido; valores válidos: {valid}"
+            f"{PROFILE_ENV_VAR}={raw!r} unknown; valid values: {valid}"
         ) from exc
 
 
 def model_gateway_fixture_allowed() -> bool:
-    """Valor efetivo do fallback, com parsing estrito e default legado."""
+    """Effective value of the fallback, with strict parsing and the legacy default."""
     return _flag(MODEL_GATEWAY_FIXTURE_ENV_VAR, default=True)
 
 
 def sandbox_inprocess_enabled() -> bool:
-    """Modo do turno de agente (Fase 1, plano 09).
+    """Agent turn mode (Phase 1, plan 09).
 
-    dev/test: default True (compatibilidade — o in-process continua sendo o
-    caminho dos testes sem docker); `DSE_SANDBOX_INPROCESS=0` liga o modo
-    isolado (RemoteSubstrate → agent-runner dentro do sandbox).
-    production: SEMPRE False — o turno só existe isolado; setar a flag para
-    true em produção já é violação em `validate_runtime_profile`.
+    dev/test: default True (compatibility — in-process remains the path for
+    tests without docker); `DSE_SANDBOX_INPROCESS=0` turns on the isolated mode
+    (RemoteSubstrate → agent-runner inside the sandbox).
+    production: ALWAYS False — the turn only exists isolated; setting the flag
+    to true in production is already a violation in `validate_runtime_profile`.
     """
     if current_runtime_profile() is RuntimeProfile.production:
         return False
@@ -91,16 +91,16 @@ def validate_runtime_profile(
     local_fallback: str | None = None,
     substrate_name: str | None = None,
 ) -> RuntimeProfile:
-    """Valida controles aplicáveis à operação corrente.
+    """Validate the controls that apply to the current operation.
 
-    Em ``dev``/``test`` apenas a sintaxe das flags é validada quando elas são
-    consultadas. Em ``production`` qualquer violação é agregada numa única
-    exceção, sem tentar degradar para um caminho local.
+    In ``dev``/``test`` only the flag syntax is validated, and only when the
+    flags are consulted. In ``production`` every violation is aggregated into a
+    single exception, with no attempt to degrade to a local path.
 
-    ``local_fallback`` deve descrever o atalho que a operação usaria. Enquanto
-    o ``agent-runner`` isolado não estiver ligado ao ``execute_stage``, as
-    Activities de agente passam esse argumento e, portanto, permanecem
-    deliberadamente indisponíveis em produção.
+    ``local_fallback`` must describe the shortcut the operation would take. As
+    long as the isolated ``agent-runner`` is not wired into ``execute_stage``,
+    the agent Activities pass this argument and are therefore deliberately
+    unavailable in production.
     """
     profile = current_runtime_profile()
     if profile is not RuntimeProfile.production:
@@ -108,27 +108,27 @@ def validate_runtime_profile(
 
     violations: list[str] = []
     if _flag(SANDBOX_INPROCESS_ENV_VAR, default=False):
-        violations.append(f"{SANDBOX_INPROCESS_ENV_VAR} habilita execução fora do sandbox")
+        violations.append(f"{SANDBOX_INPROCESS_ENV_VAR} enables execution outside the sandbox")
 
     if require_real_substrate:
         chosen = (substrate_name or os.environ.get(SUBSTRATE_ENV_VAR, "fake")).strip().lower()
         if chosen not in _REAL_SUBSTRATES:
             violations.append(
-                f"{SUBSTRATE_ENV_VAR}={chosen or '<vazio>'!r} não é um substrato real "
-                f"aprovado ({', '.join(sorted(_REAL_SUBSTRATES))})"
+                f"{SUBSTRATE_ENV_VAR}={chosen or '<empty>'!r} is not an approved real "
+                f"substrate ({', '.join(sorted(_REAL_SUBSTRATES))})"
             )
 
     if require_real_gateway and model_gateway_fixture_allowed():
         violations.append(
-            f"{MODEL_GATEWAY_FIXTURE_ENV_VAR} permite virtual key fixture/fallback local"
+            f"{MODEL_GATEWAY_FIXTURE_ENV_VAR} allows a fixture virtual key/local fallback"
         )
 
     if local_fallback:
-        violations.append(f"fallback local proibido: {local_fallback}")
+        violations.append(f"local fallback forbidden: {local_fallback}")
 
     if violations:
         raise RuntimeProfileViolation(
-            "perfil production recusado pelo sandbox-runtime: " + "; ".join(violations)
+            "production profile refused by sandbox-runtime: " + "; ".join(violations)
         )
     return profile
 
@@ -136,11 +136,11 @@ def validate_runtime_profile(
 def validate_runtime_startup(
     *, isolated_stage_execution_available: bool | None = None
 ) -> RuntimeProfile:
-    """Preflight estático para o carregamento do runtime no worker.
+    """Static preflight for loading the runtime in the worker.
 
-    O caller que carrega as Activities pode invocar esta função antes de
-    iniciar o polling. As Activities de provisionamento também a invocam, de
-    modo que um integrador que ainda não adotou o preflight continua protegido.
+    The caller that loads the Activities may invoke this function before it
+    starts polling. The provisioning Activities also invoke it, so an integrator
+    that has not adopted the preflight yet stays protected.
     """
     profile = validate_runtime_profile(
         require_real_substrate=True,
@@ -151,17 +151,17 @@ def validate_runtime_startup(
         and isolated_stage_execution_available is False
     ):
         raise RuntimeProfileViolation(
-            "perfil production recusado pelo sandbox-runtime: "
-            "SandboxDriver.execute_stage isolado ainda não está disponível; "
-            "fallback para o worker é proibido"
+            "production profile refused by sandbox-runtime: "
+            "isolated SandboxDriver.execute_stage is not available yet; "
+            "falling back to the worker is forbidden"
         )
     return profile
 
 
 def reject_local_agent_execution(stage: str) -> RuntimeProfile:
-    """Bloqueia os caminhos de agente/stand-in ainda locais em produção."""
+    """Block the agent/stand-in paths that are still local when in production."""
     return validate_runtime_profile(
         require_real_substrate=True,
         require_real_gateway=True,
-        local_fallback=f"estágio {stage!r} ainda executa no processo/workspace do worker",
+        local_fallback=f"stage {stage!r} still runs in the worker's process/workspace",
     )

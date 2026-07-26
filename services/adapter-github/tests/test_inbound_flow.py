@@ -1,7 +1,7 @@
-"""WSA-E4-T1 — issue labeled/assigned cria task_request; comentário com
-menção numa issue comum cria task_request; comentário em PR (issue_comment
-numa PR ou pull_request_review_comment) NUNCA cria WorkItem novo — só
-correlaciona (signal) por número de PR/issue."""
+"""WSA-E4-T1 — issue labeled/assigned creates a task_request; a comment with a
+mention on a plain issue creates a task_request; a comment on a PR
+(issue_comment on a PR or pull_request_review_comment) NEVER creates a new
+WorkItem — it only correlates (signal) by PR/issue number."""
 from __future__ import annotations
 
 import json
@@ -17,9 +17,9 @@ TENANT_ID = "test_tenant_github_adapter"
 
 
 def _allow_steering(login: str) -> str:
-    """Resolve o principal de `login` e o adiciona à allowlist de steering do
-    tenant de teste (WSA-E6-T2a) — sem isso, review_comment/steering de um
-    principal não listado é rejeitado por design."""
+    """Resolves the principal for `login` and adds it to the test tenant's
+    steering allowlist (WSA-E6-T2a) — without this, review_comment/steering from
+    an unlisted principal is rejected by design."""
     principal_id = resolve_principal("github", login, login)
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
@@ -137,8 +137,8 @@ def test_issue_comment_without_mention_and_no_active_work_item_is_ignored():
 
 
 def test_pr_issue_comment_never_creates_work_item_even_without_match():
-    """comentário em PR SEM WorkItem ativo correspondente -> ZERO WorkItems
-    criados (WSA-E4-T1), diferente do comportamento de issue comum."""
+    """A comment on a PR with NO matching active WorkItem -> ZERO WorkItems
+    created (WSA-E4-T1), unlike the plain-issue behavior."""
     data = _post(
         {
             "action": "created",
@@ -192,7 +192,7 @@ def test_pr_comment_on_active_work_item_correlates_as_signal_zero_new_work_items
 
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
-        # ainda só 1 work_item para o número 400 — o review comment não criou outro.
+        # still only 1 work_item for number 400 — the review comment created no other.
         cur.execute(
             "SELECT count(*) FROM work_items WHERE tenant_id='test_tenant_github_adapter' "
             "AND source_ref @> %s::jsonb",
@@ -206,9 +206,9 @@ def test_pr_comment_on_active_work_item_correlates_as_signal_zero_new_work_items
 
 
 def test_pr_comment_by_unauthorized_principal_is_rejected_not_signaled():
-    """WSA-E6-T2a: review_comment de um principal fora da allowlist do
-    tenant é rejeitado (não vira signal), mesmo havendo um WorkItem ativo
-    correspondente."""
+    """WSA-E6-T2a: a review_comment from a principal outside the tenant's
+    allowlist is rejected (does not become a signal), even when there is a
+    matching active WorkItem."""
     created = _post(
         {
             "action": "labeled",
@@ -295,8 +295,8 @@ def test_toctou_snapshot_not_refetched_on_redelivery_with_edited_body():
     conn.close()
     assert "Original title" in payload["content_snapshot"]
 
-    # Redelivery (MESMO X-GitHub-Delivery -> mesmo message_id -> mesmo
-    # event_id) com o issue "editado" -> dedup, snapshot não sobrescrito.
+    # Redelivery (SAME X-GitHub-Delivery -> same message_id -> same event_id)
+    # with the issue "edited" -> dedup, snapshot not overwritten.
     edited = _post(
         {
             "action": "labeled",
@@ -306,7 +306,7 @@ def test_toctou_snapshot_not_refetched_on_redelivery_with_edited_body():
             "sender": {"login": "alice"},
         },
         "issues",
-        "delivery-600",  # mesmo delivery id = mesma reentrega
+        "delivery-600",  # same delivery id = same redelivery
     )
     assert edited["work_item_id"] == work_item_id
 
@@ -349,11 +349,12 @@ def test_secret_pattern_in_comment_is_redacted_in_sanitized_content():
 
 
 def test_pull_request_review_submitted_carries_review_state_for_verdict():
-    """Auditoria pós-S7: o webhook `pull_request_review` (Request changes /
-    Approve na UI) é o ÚNICO com `review.state`; sem tratá-lo, o dispatcher
-    nunca via um verdict e o loop de changes_requested era inalcançável.
-    Valida: correlaciona como signal + `review_state` no source_ref do evento
-    (é dele que `_review_signal_payload` deriva o verdict)."""
+    """Post-S7 audit: the `pull_request_review` webhook (Request changes /
+    Approve in the UI) is the ONLY one carrying `review.state`; without handling
+    it, the dispatcher never saw a verdict and the changes_requested loop was
+    unreachable. Validates: correlates as a signal + `review_state` in the
+    event's source_ref (that is where `_review_signal_payload` derives the
+    verdict from)."""
     created = _post(
         {
             "action": "labeled",
@@ -375,7 +376,7 @@ def test_pull_request_review_submitted_carries_review_state_for_verdict():
             "review": {
                 "id": 7007,
                 "state": "changes_requested",
-                "body": "Remova o arquivo .dse-task-branch do PR",
+                "body": "Remove the .dse-task-branch file from the PR",
                 "user": {"login": "erin"},
             },
             "repository": {"full_name": "acme/widgets"},

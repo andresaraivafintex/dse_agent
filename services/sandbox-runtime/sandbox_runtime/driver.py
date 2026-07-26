@@ -1,11 +1,11 @@
-"""Contrato único para runtimes de sandbox.
+"""Single contract for sandbox runtimes.
 
-O adapter Docker existente continua sendo a implementação do lifecycle local
-sem alteração nas funções públicas de ``docker_driver``/``git_checkpoint``.
-``execute_stage`` entrega o payload tipado ao agent-runner DENTRO do sandbox
-(`docker exec -i` aqui; `kubectl exec -i` no driver K8s) e é fail-closed em
-qualquer indisponibilidade — este contrato nunca degrada para
-``agent.run_turn()`` no worker (invariante 2 da spec).
+The existing Docker adapter remains the local lifecycle implementation, with no
+change to the public functions of ``docker_driver``/``git_checkpoint``.
+``execute_stage`` delivers the typed payload to the agent-runner INSIDE the
+sandbox (`docker exec -i` here; `kubectl exec -i` in the K8s driver) and is
+fail-closed on any unavailability — this contract never degrades to
+``agent.run_turn()`` in the worker (invariant 2 of the spec).
 """
 from __future__ import annotations
 
@@ -31,19 +31,19 @@ class SandboxProvisionRequest:
     budget: dict[str, Any] = field(default_factory=dict)
     image: str = docker_driver.DEFAULT_SANDBOX_IMAGE
     user: str = docker_driver.DEFAULT_NONROOT_USER
-    # Repo alvo da tarefa. No driver K8s o workspace vive num volume do Pod
-    # (não visível ao worker), então o clone acontece DENTRO do Pod, no
-    # bootstrap, via egress-proxy. None → workspace vazio.
+    # The task's target repo. On the K8s driver the workspace lives in a Pod
+    # volume (not visible to the worker), so the clone happens INSIDE the Pod,
+    # at bootstrap, through the egress-proxy. None → empty workspace.
     repo: str | None = None
     base_branch: str = "main"
 
 
 @dataclass(frozen=True)
 class StageExecutionRequest:
-    """Payload interno que o worker enviará ao agent-runner isolado.
+    """Internal payload the worker sends to the isolated agent-runner.
 
-    Não contém paths do host nem credenciais privilegiadas. ``input_payload``
-    deve obedecer ao contrato específico do estágio antes de chegar ao driver.
+    Contains no host paths and no privileged credentials. ``input_payload`` must
+    already satisfy the stage-specific contract before it reaches the driver.
     """
 
     sandbox_id: str
@@ -83,12 +83,12 @@ class SandboxRebuildResult:
 
 
 class IsolatedStageExecutionUnavailable(RuntimeError):
-    """O driver não possui agent-runner isolado; nunca executar localmente."""
+    """The driver has no isolated agent-runner; never execute locally."""
 
 
 @runtime_checkable
 class SandboxDriver(Protocol):
-    """Lifecycle e execução comuns aos drivers Docker/Kubernetes."""
+    """Lifecycle and execution shared by the Docker/Kubernetes drivers."""
 
     @property
     def supports_isolated_stage_execution(self) -> bool:
@@ -96,15 +96,15 @@ class SandboxDriver(Protocol):
 
     @property
     def workspace_is_host_visible(self) -> bool:
-        """True quando o worker enxerga o workspace pelo filesystem (bind
-        mount do Docker) e pode operar git/higiene localmente; False quando o
-        workspace vive só dentro do sandbox (volume do Pod) e o pós-turno
-        precisa rodar via `execute_op` (post_turn)."""
+        """True when the worker can see the workspace through the filesystem
+        (Docker bind mount) and can run git/hygiene locally; False when the
+        workspace lives only inside the sandbox (Pod volume) and the post-turn
+        has to run via `execute_op` (post_turn)."""
         ...
 
     def sandbox_id_for(self, work_item_id: str) -> str:
-        """Identidade estável do sandbox deste work item no runtime alvo
-        (nome do container no Docker, nome do Pod no K8s)."""
+        """Stable identity of this work item's sandbox in the target runtime
+        (container name on Docker, Pod name on K8s)."""
         ...
 
     def provision(self, request: SandboxProvisionRequest) -> docker_driver.ProvisionedSandbox:
@@ -116,8 +116,8 @@ class SandboxDriver(Protocol):
     def execute_op(
         self, sandbox_id: str, op: str, payload: dict[str, Any], *, timeout_seconds: float = 180.0
     ) -> dict[str, Any]:
-        """Roda uma op de lifecycle do runner (bootstrap/checkpoint/post_turn)
-        DENTRO do sandbox e devolve o JSON do resultado."""
+        """Run a runner lifecycle op (bootstrap/checkpoint/post_turn) INSIDE the
+        sandbox and return the result JSON."""
         ...
 
     def checkpoint(self, request: SandboxCheckpointRequest) -> CheckpointRef:
@@ -131,14 +131,14 @@ class SandboxDriver(Protocol):
 
 
 class DockerSandboxDriver:
-    """Adapter compatível sobre o lifecycle Docker atual.
+    """Compatible adapter over the current Docker lifecycle.
 
-    ``execute_stage`` (Fase 1, plano 09) roda o agent-runner DENTRO do
-    container do sandbox via ``docker exec -i`` — simétrico ao ``kubectl
-    exec -i`` do driver K8s. Exige a imagem do sandbox com o módulo
-    ``agent_runner`` instalado (``make agent-runner-image``); qualquer
-    indisponibilidade (docker ausente, container morto, runner ausente na
-    imagem) é falha limpa — NUNCA fallback para execução no worker.
+    ``execute_stage`` (Fase 1, plano 09) runs the agent-runner INSIDE the
+    sandbox container via ``docker exec -i`` — symmetric to the K8s driver's
+    ``kubectl exec -i``. It requires the sandbox image to have the
+    ``agent_runner`` module installed (``make agent-runner-image``); any
+    unavailability (docker missing, container dead, runner missing from the
+    image) is a clean failure — NEVER a fallback to executing in the worker.
     """
 
     @property
@@ -147,7 +147,7 @@ class DockerSandboxDriver:
 
     @property
     def workspace_is_host_visible(self) -> bool:
-        return True  # bind mount: o worker opera git/higiene pelo host
+        return True  # bind mount: the worker runs git/hygiene from the host
 
     def sandbox_id_for(self, work_item_id: str) -> str:
         return docker_driver.container_name_for(work_item_id)
@@ -170,8 +170,8 @@ class DockerSandboxDriver:
         docker_bin = shutil.which("docker")
         if docker_bin is None:
             raise IsolatedStageExecutionUnavailable(
-                "docker CLI não encontrado — execução isolada indisponível; "
-                "execução local é proibida como fallback (invariante 2)"
+                "docker CLI not found — isolated execution unavailable; "
+                "local execution is forbidden as a fallback (invariant 2)"
             )
         try:
             proc = subprocess.run(
@@ -183,25 +183,25 @@ class DockerSandboxDriver:
             )
         except subprocess.TimeoutExpired as exc:
             raise IsolatedStageExecutionUnavailable(
-                f"agent-runner excedeu {timeout_seconds:.0f}s no exec "
+                f"agent-runner exceeded {timeout_seconds:.0f}s in the exec "
                 f"(args={runner_args}, sandbox={sandbox_id})"
             ) from exc
-        except FileNotFoundError as exc:  # docker sumiu entre o which e o exec
+        except FileNotFoundError as exc:  # docker vanished between the which and the exec
             raise IsolatedStageExecutionUnavailable(
-                "docker CLI indisponível no exec — sem fallback local"
+                "docker CLI unavailable in the exec — no local fallback"
             ) from exc
         if proc.returncode != 0:
             raise IsolatedStageExecutionUnavailable(
-                f"docker exec agent_runner falhou (exit={proc.returncode}, "
+                f"docker exec agent_runner failed (exit={proc.returncode}, "
                 f"sandbox={sandbox_id}): {proc.stderr.strip()[:400]} "
-                "— sem fallback local"
+                "— no local fallback"
             )
         try:
-            # última linha JSON: o runner escreve exatamente um resultado
+            # last JSON line: the runner writes exactly one result
             return json.loads((proc.stdout or "").strip().splitlines()[-1])
         except (json.JSONDecodeError, IndexError) as exc:
             raise IsolatedStageExecutionUnavailable(
-                f"agent-runner devolveu stdout não-JSON (sandbox={sandbox_id}): "
+                f"agent-runner returned non-JSON stdout (sandbox={sandbox_id}): "
                 f"{(proc.stdout or '')[:200]!r}"
             ) from exc
 
@@ -250,11 +250,11 @@ class DockerSandboxDriver:
 
 
 def select_sandbox_driver() -> SandboxDriver:
-    """Plano 08 §G — escolhe o driver pelo perfil (`DSE_SANDBOX_DRIVER`):
-    'docker' (default, dev local) ou 'k8s' (piloto — Pod isolado sob
-    RuntimeClass). Import lazy do driver K8s p/ evitar ciclo. No perfil piloto,
-    combine com `DSE_SANDBOX_INPROCESS=0` (o fail-closed já recusa execução
-    local)."""
+    """plano 08 §G — picks the driver by profile (`DSE_SANDBOX_DRIVER`):
+    'docker' (default, local dev) or 'k8s' (pilot — isolated Pod under a
+    RuntimeClass). The K8s driver is imported lazily to avoid an import cycle.
+    On the pilot profile, combine it with `DSE_SANDBOX_INPROCESS=0` (the
+    fail-closed check already refuses local execution)."""
     import os
 
     choice = os.environ.get("DSE_SANDBOX_DRIVER", "docker").strip().lower()

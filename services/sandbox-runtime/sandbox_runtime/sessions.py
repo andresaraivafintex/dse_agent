@@ -1,19 +1,18 @@
-"""Sessões stage-scoped da Fase 2 (WSC-E3-T3/T4/T5): hidratação de contexto do
-Planner, classificador de risco DETERMINÍSTICO, runner de sessão roteirizado
-(que executa ferramentas SEMPRE através do toolset), e a sessão Reviewer de
-contexto fresco.
+"""Fase 2 stage-scoped sessions (WSC-E3-T3/T4/T5): Planner context hydration,
+DETERMINISTIC risk classifier, scripted session runner (which ALWAYS executes
+tools through the toolset), and the fresh-context Reviewer session.
 
-P1 (nenhuma decisão de fluxo por LLM): o `risk_class` do PlanArtifact — que
-dirige o gate de aprovação do WS-B — é derivado por `classify_risk_class`
-(código determinístico sobre o blast radius declarado), NÃO pela palavra do
-LLM. A sessão Planner (LLM) propõe steps/expected_files/test_plan; a
-classificação de risco é um piso determinístico que o LLM não consegue
-rebaixar. Assim o gate a jusante nunca depende de um julgamento de modelo.
+P1 (no flow decision made by an LLM): the PlanArtifact's `risk_class` — which
+drives WS-B's approval gate — is derived by `classify_risk_class`
+(deterministic code over the declared blast radius), NOT by the LLM's word. The
+Planner session (LLM) proposes steps/expected_files/test_plan; the risk
+classification is a deterministic floor the LLM cannot lower. That way the
+downstream gate never depends on a model's judgement.
 
-P3 (nenhum produtor aprova o próprio trabalho): `FreshReviewerSession` é
-construída SÓ a partir de `PlanArtifact` + diff — não há parâmetro, atributo
-ou canal que carregue o histórico do Coder para dentro dela (provado por
-construção em `tests/test_reviewer_fresh_context.py`).
+P3 (no producer approves its own work): `FreshReviewerSession` is built ONLY
+from `PlanArtifact` + diff — there is no parameter, attribute or channel that
+carries the Coder's history into it (proven by construction in
+`tests/test_reviewer_fresh_context.py`).
 """
 from __future__ import annotations
 
@@ -32,11 +31,11 @@ from .toolsets import ReviewerToolset, Toolset, ToolInvocation
 
 
 # ---------------------------------------------------------------------------
-# Classificador de risco determinístico (piso de risco — P1)
+# Deterministic risk classifier (risk floor — P1)
 # ---------------------------------------------------------------------------
-# Globs cujo toque eleva o risco. Sensível = requer aprovação humana de plano
-# no WS-B (gate de risk class). Estes são padrões conservadores do domínio
-# fintech regulado; um access bundle por tenant (WS-F) pode estendê-los.
+# Globs whose touch raises the risk. Sensitive = requires human plan approval in
+# WS-B (the risk-class gate). These are conservative patterns from the regulated
+# fintech domain; a per-tenant access bundle (WS-F) may extend them.
 _HIGH_RISK_GLOBS = [
     ".github/workflows/*",
     "**/migrations/*",
@@ -68,14 +67,14 @@ def classify_risk_class(
     diff_budget_lines: int,
     forbidden_paths: list[str] | None = None,
 ) -> str:
-    """Deriva risk_class ('low'|'medium'|'high') DETERMINISTICAMENTE do blast
-    radius declarado. Regras (piso — o gate do WS-B decide o que fazer com
-    cada nível):
-      - high  : toca qualquer forbidden_path OU qualquer _HIGH_RISK_GLOB, OU
-                diff_budget > 800 linhas;
-      - medium: toca qualquer _MEDIUM_RISK_GLOB OU diff_budget > 300 linhas OU
-                > 15 arquivos;
-      - low   : caso contrário.
+    """Derive risk_class ('low'|'medium'|'high') DETERMINISTICALLY from the
+    declared blast radius. Rules (a floor — WS-B's gate decides what to do with
+    each level):
+      - high  : touches any forbidden_path OR any _HIGH_RISK_GLOB, OR
+                diff_budget > 800 lines;
+      - medium: touches any _MEDIUM_RISK_GLOB OR diff_budget > 300 lines OR
+                > 15 files;
+      - low   : otherwise.
     """
     forbidden = forbidden_paths or []
     for f in expected_files:
@@ -95,14 +94,14 @@ def classify_risk_class(
 
 
 # ---------------------------------------------------------------------------
-# Hidratação de contexto do Planner (WSC-E3-T3)
+# Planner context hydration (WSC-E3-T3)
 # ---------------------------------------------------------------------------
 @dataclass
 class PlannerContext:
-    """Bundle de contexto do Planner. `skills`/`agents_md`/`codeowners` são
-    CONFIÁVEIS (curados/versionados no repo do tenant). `retrieval_hits` e
-    `tickets` são NÃO CONFIÁVEIS (input externo/de código) e são renderizados
-    num bloco marcado por `render_untrusted_context`."""
+    """Planner context bundle. `skills`/`agents_md`/`codeowners` are TRUSTED
+    (curated/versioned in the tenant's repo). `retrieval_hits` and `tickets` are
+    UNTRUSTED (external/code input) and are rendered inside a block marked by
+    `render_untrusted_context`."""
 
     work_item_id: str
     tenant_id: str
@@ -123,7 +122,7 @@ class PlannerContext:
             parts.append("## Approved tenant skills (trusted)\n" + "\n\n".join(s.as_context_block() for s in self.skills))
         if self.repo_map:
             parts.append("## Repo map\n" + self.repo_map)
-        # Não confiável por último, claramente demarcado.
+        # Untrusted last, clearly demarcated.
         untrusted_blocks: list[str] = []
         if self.tickets:
             untrusted_blocks.append("Related tickets:\n" + "\n---\n".join(self.tickets))
@@ -154,14 +153,14 @@ def hydrate_planner_context(
     retrieval: RetrievalService | None = None,
     skills_conn=None,
 ) -> PlannerContext:
-    """Monta o `PlannerContext`: AGENTS.md + CODEOWNERS (do workspace), skills
-    aprovadas do tenant (skill_registry, E4), tickets relacionados, e os
-    top-k trechos do índice de retrieval (E5) relevantes à instrução. O
-    Planner é read-only — nada aqui muta o repo."""
+    """Assemble the `PlannerContext`: AGENTS.md + CODEOWNERS (from the
+    workspace), the tenant's approved skills (skill_registry, E4), related
+    tickets, and the top-k snippets from the retrieval index (E5) relevant to the
+    instruction. The Planner is read-only — nothing here mutates the repo."""
     agents_md = _read_repo_file(workspace_dir, "AGENTS.md")
     codeowners = _read_repo_file(workspace_dir, "CODEOWNERS") or _read_repo_file(workspace_dir, ".github/CODEOWNERS")
-    # Ticks por repo do console (repo_scope, migração 0029): o Planner só vê
-    # skills globais ou tickadas para ESTE repo.
+    # Per-repo checkboxes from the console (repo_scope, migration 0029): the
+    # Planner only sees skills that are global or ticked for THIS repo.
     skills = read_approved_skills(tenant_id, task_class=task_class, repo=repo or None, conn=skills_conn)
 
     hits: list[RetrievalHit] = []
@@ -183,7 +182,7 @@ def hydrate_planner_context(
 
 
 # ---------------------------------------------------------------------------
-# Runner de sessão roteirizado — executa toda tool via o toolset (P0 de teste)
+# Scripted session runner — runs every tool through the toolset (test P0)
 # ---------------------------------------------------------------------------
 @dataclass
 class ToolResult:
@@ -193,15 +192,16 @@ class ToolResult:
 
 
 class ScriptedAgentSession:
-    """Substrato roteirizado para Planner/Tester (análogo ao FakeSubstrate do
-    Coder): não chama LLM, executa uma lista de `ToolInvocation`. TODA
-    invocação passa por `toolset.check` ANTES de despachar — é isto que torna
-    o teste de conformação real (um write no Planner levanta
-    `ToolPermissionError` de verdade, não por convenção).
+    """Scripted substrate for Planner/Tester (analogous to the Coder's
+    FakeSubstrate): it calls no LLM, it executes a list of `ToolInvocation`s.
+    EVERY invocation goes through `toolset.check` BEFORE dispatch — that is what
+    makes the conformance test real (a write in the Planner raises an actual
+    `ToolPermissionError`, not one by convention).
 
-    Em produção o adapter OpenHands registra só as ferramentas cujo nome está
-    no allowlist do toolset e roteia cada tool-call pelo mesmo `check` — ver
-    README (mesmo padrão do `OpenHandsSubstrate` do Coder na Fase 1).
+    In production the OpenHands adapter registers only the tools whose names are
+    in the toolset's allowlist and routes every tool-call through the same
+    `check` — see the README (the same pattern as the Coder's
+    `OpenHandsSubstrate` in Fase 1).
     """
 
     def __init__(
@@ -224,9 +224,9 @@ class ScriptedAgentSession:
 
     def invoke(self, tool: str, **args: Any) -> ToolResult:
         inv = ToolInvocation(tool=tool, args=args)
-        # 1) enforcement — levanta ToolPermissionError se negado.
+        # 1) enforcement — raises ToolPermissionError when denied.
         self.toolset.check(inv)
-        # 2) despacho da tool permitida.
+        # 2) dispatch of the permitted tool.
         detail = self._dispatch(inv)
         res = ToolResult(tool=tool, ok=True, detail=detail)
         self.log.append(res)
@@ -261,14 +261,14 @@ class ScriptedAgentSession:
             return self._run_tests(a.get("paths"))
         if t in ("read_ticket", "read_agents_md", "read_codeowners", "list_skills"):
             return self._context_reads.get(t, "")
-        # read_plan/read_diff são servidos pela FreshReviewerSession, não aqui.
+        # read_plan/read_diff are served by FreshReviewerSession, not here.
         return None
 
     def _run_tests(self, paths: list[str] | None) -> dict[str, Any]:
-        """Executa os testes DE VERDADE dentro do workspace (WSC-E3-T4: os
-        testes escritos rodam no L1, não só são gerados). Detecção
-        DETERMINÍSTICA do runner (P1): repo Node (package.json com script
-        `test`) → `npm test`; senão pytest. Devolve rc + stdout resumido."""
+        """Actually RUN the tests inside the workspace (WSC-E3-T4: the written
+        tests run in L1, they are not merely generated). DETERMINISTIC runner
+        detection (P1): Node repo (package.json with a `test` script) →
+        `npm test`; otherwise pytest. Returns rc + a trimmed stdout."""
         import json as _json
         import os as _os
 
@@ -278,11 +278,11 @@ class ScriptedAgentSession:
         if _os.path.isfile(pkg):
             try:
                 has_test = "test" in (_json.load(open(pkg)).get("scripts") or {})
-            except Exception:  # noqa: BLE001 — package.json inválido => pytest
+            except Exception:  # noqa: BLE001 — invalid package.json => pytest
                 has_test = False
             if has_test:
-                # deps primeiro (clone fresh não tem node_modules); best-effort —
-                # se falhar, o npm test abaixo reporta o erro de verdade.
+                # deps first (a fresh clone has no node_modules); best-effort —
+                # if it fails, the npm test below reports the real error.
                 if not _os.path.isdir(_os.path.join(self.workspace_dir, "node_modules")):
                     subprocess.run(
                         ["npm", "install", "--no-audit", "--no-fund"],
@@ -313,16 +313,17 @@ class ScriptedAgentSession:
 
 
 # ---------------------------------------------------------------------------
-# Sessão Reviewer de contexto fresco (WSC-E3-T5) — P3 por construção
+# Fresh-context Reviewer session (WSC-E3-T5) — P3 by construction
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ReviewerContext:
-    """Contexto IMUTÁVEL e MÍNIMO da sessão L2: SÓ o plano + o diff final.
+    """IMMUTABLE, MINIMAL context of the L2 session: ONLY the plan + the final
+    diff.
 
-    Deliberadamente NÃO existe nenhum campo que carregue histórico do Coder,
-    logs de turnos, thoughts, tool-calls ou qualquer transcrição da sessão
-    produtora. Isto é o "por construção" de P3: a única forma de dar contexto
-    ao Reviewer é por estes dois campos.
+    There is deliberately NO field that carries the Coder's history, turn logs,
+    thoughts, tool-calls, or any transcript of the producing session. This is the
+    "by construction" part of P3: the only way to give the Reviewer context is
+    through these two fields.
     """
 
     work_item_id: str
@@ -344,17 +345,18 @@ class ReviewerContext:
 
 
 class FreshReviewerSession:
-    """Sessão NOVA (sem estado compartilhado com o Coder) que julga aderência
-    do diff ao plano/convenções. Recebe SÓ `ReviewerContext` (plan+diff).
+    """A FRESH session (no state shared with the Coder) that judges the diff's
+    adherence to the plan/conventions. It receives ONLY `ReviewerContext`
+    (plan+diff).
 
-    O julgamento em si (produzir objeções) é do substrato — em produção uma
-    conversa OpenHands fresca semeada só com `context.render()`. Aqui, para
-    teste, `review()` aceita um `verdict_fn(context) -> (passed, objections)`
-    determinístico (o "modelo" roteirizado), provando toda a plumbing sem
-    inferência real. Nota P1/P3: o veredito L2 é uma RECOMENDAÇÃO que gateia a
-    progressão — o merge continua sendo humano (nenhuma decisão de fluxo por
-    LLM); e por ser sessão fresca, nunca é o produtor aprovando o próprio
-    trabalho.
+    The judgement itself (producing objections) belongs to the substrate — in
+    production, a fresh OpenHands conversation seeded solely with
+    `context.render()`. Here, for testing, `review()` accepts a deterministic
+    `verdict_fn(context) -> (passed, objections)` (the scripted "model"), proving
+    all the plumbing without real inference. P1/P3 note: the L2 verdict is a
+    RECOMMENDATION that gates progression — the merge remains human (no flow
+    decision made by an LLM); and because the session is fresh, it is never the
+    producer approving its own work.
     """
 
     def __init__(self, context: ReviewerContext, toolset: ReviewerToolset | None = None):

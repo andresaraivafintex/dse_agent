@@ -1,5 +1,5 @@
-"""WSF-E3-T2 — access bundles: CRUD + enforcement + cascata de approvers.
-Roda contra Postgres real (migrations/0013_wsf2.sql)."""
+"""WSF-E3-T2 — access bundles: CRUD + enforcement + approver cascade.
+Runs against real Postgres (migrations/0013_wsf2.sql)."""
 from __future__ import annotations
 
 import uuid
@@ -47,7 +47,7 @@ def test_upsert_and_effective_resolution_channel_over_default(tenant):
     chan = get_effective_bundle(tenant, channel="C123")
     assert chan.allowed_repos == ["org/chan-repo"]
 
-    # canal sem bundle específico cai para o default do tenant
+    # a channel with no specific bundle falls back to the tenant default
     other = get_effective_bundle(tenant, channel="C999")
     assert other.allowed_repos == ["org/default-repo"]
 
@@ -87,7 +87,7 @@ def test_blocked_action_and_require_action_allowed(tenant):
     assert is_action_blocked(tenant, "open_pr") is False
     with pytest.raises(AccessDenied):
         require_action_allowed(tenant, "direct_merge_to_protected_branch")
-    # ação não bloqueada com bundle presente: passa
+    # an action that is not blocked, with a bundle present: passes
     require_action_allowed(tenant, "open_pr")
 
 
@@ -103,20 +103,20 @@ def test_invalid_mode_and_learning_scope_rejected(tenant):
         upsert_access_bundle(tenant, learning_scope="everything")
 
 
-# ---- cascata de approvers (P3: cascata vazia BLOQUEIA) ----
+# ---- approver cascade (P3: an empty cascade BLOCKS) ----
 def test_codeowners_take_precedence_then_designated_fallback(tenant):
     owner = resolve_principal("github", f"owner-{uuid.uuid4().hex[:8]}")
     designated = resolve_principal("github", f"desig-{uuid.uuid4().hex[:8]}")
     upsert_access_bundle(tenant, designated_approvers=[designated], modes=["scope"])
 
-    # com CODEOWNERS: usa CODEOWNERS
+    # with CODEOWNERS: use CODEOWNERS
     assert resolve_plan_approvers(tenant, codeowners=[owner]) == [owner]
-    # sem CODEOWNERS: cai para os designated do bundle
+    # without CODEOWNERS: fall back to the bundle's designated approvers
     assert resolve_plan_approvers(tenant) == [designated]
 
 
 def test_empty_cascade_blocks(tenant):
-    # sem CODEOWNERS e sem designated approvers => cascata vazia => bloqueia
+    # no CODEOWNERS and no designated approvers => empty cascade => blocks
     upsert_access_bundle(tenant, modes=["scope"])
     assert resolve_plan_approvers(tenant) == []
     with pytest.raises(NoApproverError):
@@ -127,7 +127,7 @@ def test_empty_cascade_blocks(tenant):
 def test_offboarded_approver_removed_from_cascade(tenant):
     active = resolve_principal("github", f"act-{uuid.uuid4().hex[:8]}")
     gone = resolve_principal("github", f"gone-{uuid.uuid4().hex[:8]}")
-    # provisiona o 'gone' no console e offboarda; 'active' nunca provisionado (tratado como ativo)
+    # provision 'gone' in the console and offboard it; 'active' is never provisioned (treated as active)
     provision_console_user(gone, f"sub-{gone}", roles=["approver"])
     offboard(gone, reason="left company", actor="system:test")
 

@@ -1,20 +1,19 @@
-"""Driver Docker rootless para o sandbox efêmero por tarefa (WSC-E1-T1/T2).
+"""Rootless Docker driver for the per-task ephemeral sandbox (WSC-E1-T1/T2).
 
-Garantias de isolamento aplicadas em TODO container de sandbox criado por
-este módulo:
-  - `--user <uid>:<gid>` não-root (nunca root, nunca uid 0).
-  - Sem montagem de `/var/run/docker.sock` (nem qualquer socket Docker) —
-    nunca aparece em `HostConfig.Binds`/`Mounts`.
-  - `--read-only` (root filesystem do container é somente-leitura) +
-    `--tmpfs /tmp` (camada gravável efêmera só para escratch).
-  - `--cap-drop ALL` + `--security-opt no-new-privileges` (sem escalada).
-  - Rede: conectado exclusivamente à rede interna `dse_sandbox_net`
-    (`internal=True` — sem gateway de internet). O único host alcançável de
-    dentro do container é o egress-proxy, que por sua vez está conectado
-    também a uma rede com rota de internet (`dse_net`).
-  - `--cpus`, `--memory`, `--pids-limit` derivados do `budget` do WorkItem.
-  - Label `dse.work_item_id=<id>` em todo container — usado tanto para
-    idempotência de provisionamento quanto para descoberta em teardown/kill.
+Isolation guarantees applied to EVERY sandbox container created by this module:
+  - non-root `--user <uid>:<gid>` (never root, never uid 0).
+  - No mount of `/var/run/docker.sock` (nor any Docker socket) — it never
+    appears in `HostConfig.Binds`/`Mounts`.
+  - `--read-only` (the container's root filesystem is read-only) +
+    `--tmpfs /tmp` (an ephemeral writable layer for scratch only).
+  - `--cap-drop ALL` + `--security-opt no-new-privileges` (no escalation).
+  - Network: attached exclusively to the internal `dse_sandbox_net` network
+    (`internal=True` — no internet gateway). The only host reachable from
+    inside the container is the egress-proxy, which is itself also attached to
+    a network with an internet route (`dse_net`).
+  - `--cpus`, `--memory`, `--pids-limit` derived from the WorkItem's `budget`.
+  - A `dse.work_item_id=<id>` label on every container — used both for
+    provisioning idempotency and for discovery at teardown/kill.
 """
 from __future__ import annotations
 
@@ -33,16 +32,16 @@ LABEL_TENANT = "dse.tenant_id"
 LABEL_COMPONENT = "dse.component"
 LABEL_ROLE = "dse.role"  # "sandbox" | "egress_proxy" | "checkpoint_helper"
 
-# S7-c (Fase 5): a imagem do sandbox precisa ter as ferramentas que rodam
-# DENTRO dele via `docker exec` — git (finalize_pr push) e a toolchain do repo
-# (ex.: node para o L1 `node --check` de um repo JS). A `dse-sandbox-base`
-# (WSC-E3-T4b) traz git+node+Playwright. Configurável por env para não fixar.
+# S7-c (Fase 5): the sandbox image must carry the tools that run INSIDE it via
+# `docker exec` — git (finalize_pr push) and the repo's toolchain (e.g. node for
+# L1's `node --check` on a JS repo). `dse-sandbox-base` (WSC-E3-T4b) ships
+# git+node+Playwright. Configurable by env so it is not pinned here.
 DEFAULT_SANDBOX_IMAGE = os.environ.get("DSE_SANDBOX_IMAGE", "python:3.11-slim")
 DEFAULT_NONROOT_USER = "10001:10001"
 
-# Resource class -> defaults, usado quando o WorkItem.budget não especifica
-# um valor explícito. Mantém paridade com o vocabulário de "resource class"
-# usado nas métricas OTel (dse.resource_class).
+# Resource class -> defaults, used when WorkItem.budget does not specify an
+# explicit value. Keeps parity with the "resource class" vocabulary used in the
+# OTel metrics (dse.resource_class).
 _RESOURCE_CLASS_DEFAULTS: dict[str, dict[str, Any]] = {
     "small": {"cpu_limit": 0.5, "memory_mb": 256, "pids_limit": 128},
     "medium": {"cpu_limit": 1.0, "memory_mb": 512, "pids_limit": 256},
@@ -56,10 +55,10 @@ class ResourceCaps:
     cpu_limit: float
     memory_mb: int
     pids_limit: int
-    # Fase 3 (WSC-E3-T4b): tamanho do tmpfs de /tmp. O default de 64MB da
-    # Fase 1 continua; o run de evidência @demo (chromium headless escreve
-    # scratch/crashpad em /tmp) usa `budget={"tmp_mb": 256}`. Aditivo — não
-    # muda nenhum comportamento existente.
+    # Fase 3 (WSC-E3-T4b): size of the /tmp tmpfs. The Fase 1 default of 64MB
+    # stays; the @demo evidence run (headless chromium writes scratch/crashpad
+    # to /tmp) uses `budget={"tmp_mb": 256}`. Additive — it changes no existing
+    # behavior.
     tmp_mb: int = 64
 
     @classmethod
@@ -86,7 +85,7 @@ class ProvisionedSandbox:
     workspace_host_path: str
     checkpoint_bare_repo_path: str
     resource_caps: ResourceCaps
-    created_new: bool  # False quando reaproveitou container idempotentemente
+    created_new: bool  # False when an existing container was idempotently reused
     started_at: float = field(default_factory=time.time)
 
 
@@ -95,8 +94,8 @@ def _client() -> docker.DockerClient:
 
 
 def ensure_sandbox_network(client: docker.DockerClient | None = None) -> str:
-    """Cria (se necessário) a rede Docker interna sem rota de internet usada
-    por todo sandbox. Idempotente."""
+    """Create (if needed) the internal Docker network with no internet route that
+    every sandbox uses. Idempotent."""
     client = client or _client()
     try:
         client.networks.get(SANDBOX_NETWORK_NAME)
@@ -104,7 +103,7 @@ def ensure_sandbox_network(client: docker.DockerClient | None = None) -> str:
         client.networks.create(
             SANDBOX_NETWORK_NAME,
             driver="bridge",
-            internal=True,  # sem gateway de internet — propriedade central do isolamento
+            internal=True,  # no internet gateway — the core isolation property
             check_duplicate=True,
             labels={LABEL_COMPONENT: "sandbox-runtime"},
         )
@@ -117,19 +116,20 @@ def _container_name(work_item_id: str) -> str:
 
 
 def container_name_for(work_item_id: str) -> str:
-    """Nome público e estável do container do sandbox deste work item —
-    usado pelo `SandboxDriver.sandbox_id_for` (alvo do `docker exec` do
-    agent-runner). Mesma derivação da criação (idempotência por nome+label)."""
+    """Public, stable name of this work item's sandbox container — used by
+    `SandboxDriver.sandbox_id_for` (the target of the agent-runner's
+    `docker exec`). Same derivation as at creation time (idempotency by
+    name+label)."""
     return _container_name(work_item_id)
 
 
 def find_existing_container(work_item_id: str, client: docker.DockerClient | None = None) -> Container | None:
-    """Idempotência de provisionamento (WSC-E1-T3): procura por label antes de
-    criar. Considera qualquer estado (running/exited) — reaproveita."""
+    """Provisioning idempotency (WSC-E1-T3): look up by label before creating.
+    Considers any state (running/exited) — it reuses."""
     client = client or _client()
-    # Filtra por work_item_id no daemon e por role no cliente (docker-py não
-    # garante AND entre múltiplos valores da mesma chave 'label' de forma
-    # portável entre versões do daemon).
+    # Filter by work_item_id on the daemon and by role on the client (docker-py
+    # does not portably guarantee an AND across multiple values of the same
+    # 'label' key across daemon versions).
     containers = [
         c
         for c in client.containers.list(all=True, filters={"label": f"{LABEL_WORK_ITEM}={work_item_id}"})
@@ -197,9 +197,9 @@ def provision_container(
             LABEL_ROLE: "sandbox",
             "dse.resource_class": caps.resource_class,
         },
-        # Nenhum bind de docker.sock, nenhum --privileged, nenhum extra_hosts
-        # apontando para o host — a única forma de sair da rede interna é o
-        # egress-proxy, que também está anexado a `dse_sandbox_net`.
+        # No docker.sock bind, no --privileged, no extra_hosts pointing at the
+        # host — the only way out of the internal network is the egress-proxy,
+        # which is also attached to `dse_sandbox_net`.
     )
 
     return ProvisionedSandbox(
@@ -216,8 +216,8 @@ def provision_container(
 
 
 def kill_container(container_id: str, client: docker.DockerClient | None = None, signal: str = "SIGKILL") -> None:
-    """Usado pelo teste de chaos (WSC-E1-T4): mata o container no meio da
-    tarefa, sem passar por teardown gracioso."""
+    """Used by the chaos test (WSC-E1-T4): kills the container mid-task, without
+    going through a graceful teardown."""
     client = client or _client()
     try:
         c = client.containers.get(container_id)
@@ -227,7 +227,7 @@ def kill_container(container_id: str, client: docker.DockerClient | None = None,
 
 
 def teardown_container(container_id: str, client: docker.DockerClient | None = None) -> float:
-    """Remove o container e retorna o runtime em minutos (para métrica OTel)."""
+    """Remove the container and return its runtime in minutes (for the OTel metric)."""
     client = client or _client()
     try:
         c = client.containers.get(container_id)
@@ -249,8 +249,8 @@ def teardown_container(container_id: str, client: docker.DockerClient | None = N
 
 
 def inspect_no_docker_sock(container_id: str, client: docker.DockerClient | None = None) -> bool:
-    """True se NENHUM mount do container referencia o socket Docker do host —
-    usado pelo teste de isolamento (WSC-E1-T1)."""
+    """True if NO container mount references the host's Docker socket — used by
+    the isolation test (WSC-E1-T1)."""
     client = client or _client()
     c = client.containers.get(container_id)
     c.reload()

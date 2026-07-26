@@ -1,24 +1,24 @@
--- Fintex DSE — Relatório 07 C2 (Fase B) — resolução de repositório para
--- tarefas que NÃO nascem num repo (Slack/Jira). Cascata determinística (P1):
---   1. override explícito (repo= no texto / campo Jira)  -> no adapter
---   2. binding do "unidade natural de trabalho" -> repo  -> ESTA tabela
---   3. default single-repo do tenant                     -> ESTA tabela
---   4. perguntar (clarificação)                          -> workflow
--- O repo errado nunca acontece em silêncio: sem resolução, o DSE pergunta.
+-- Fintex DSE — Report 07 C2 (Phase B) — repository resolution for tasks that
+-- do NOT originate inside a repo (Slack/Jira). Deterministic cascade (P1):
+--   1. explicit override (repo= in the text / Jira field)  -> in the adapter
+--   2. binding of the "natural unit of work" -> repo       -> THIS table
+--   3. tenant single-repo default                          -> THIS table
+--   4. ask (clarification)                                 -> workflow
+-- The wrong repo never happens silently: with no resolution, the DSE asks.
 --
--- binding_type ordena a precedência (mais específico -> menos):
---   channel   (Slack #canal)        \
---   component (Jira Component)        > específicos
+-- binding_type orders precedence (most specific -> least):
+--   channel   (Slack #channel)      \
+--   component (Jira Component)        > specific
 --   project   (Jira Project)        /
---   workspace (Slack team / Jira site) = fallback amplo
--- Migração aditiva e idempotente.
+--   workspace (Slack team / Jira site) = broad fallback
+-- Additive and idempotent migration.
 
 CREATE TABLE IF NOT EXISTS repo_bindings (
     tenant_id     TEXT NOT NULL,
     platform      TEXT NOT NULL CHECK (platform IN ('slack', 'jira', 'github')),
     binding_type  TEXT NOT NULL CHECK (binding_type IN ('channel', 'component', 'project', 'workspace')),
-    binding_value TEXT NOT NULL,             -- ex.: 'C123' (canal), 'Payments' (component), 'FINX' (project)
-    repo          TEXT NOT NULL,             -- ex.: 'andre2654/fintex-wallet'
+    binding_value TEXT NOT NULL,             -- e.g.: 'C123' (channel), 'Payments' (component), 'FINX' (project)
+    repo          TEXT NOT NULL,             -- e.g.: 'andre2654/fintex-wallet'
     base_branch   TEXT NOT NULL DEFAULT 'main',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -26,10 +26,10 @@ CREATE TABLE IF NOT EXISTS repo_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_repo_bindings_tenant ON repo_bindings (tenant_id);
 
--- default single-repo por tenant: quando o tenant tem exatamente um repo,
--- toda tarefa sem outro sinal cai nele (remove atrito p/ cliente single-repo).
--- binding_value fixo '*' representa o default.
--- (nenhuma linha inserida aqui — populado no onboarding / console.)
+-- single-repo default per tenant: when the tenant has exactly one repo, every
+-- task with no other signal lands on it (removes friction for a single-repo
+-- customer). The fixed binding_value '*' represents the default.
+-- (no row is inserted here — populated during onboarding / by the console.)
 
 CREATE TRIGGER set_updated_at_repo_bindings
     BEFORE UPDATE ON repo_bindings

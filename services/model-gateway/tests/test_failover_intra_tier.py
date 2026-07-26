@@ -1,29 +1,31 @@
-"""WSD-E4-T1 (Fase 3): failover e degradação INTRA-TIER.
+"""WSD-E4-T1 (Phase 3): INTRA-TIER failover and degradation.
 
-Testes REAIS contra o LiteLLM proxy + 2 instâncias do modelo eco em Docker.
-O failover é provado DE VERDADE: `docker stop` no container primário
-(`dse_model_gateway_echo`) e a chamada seguinte é servida pela instância B
-(`dse_model_gateway_echo_b`) via `router_settings.fallbacks` nativo do proxy.
+REAL tests against the LiteLLM proxy + 2 echo model instances in Docker. The
+failover is proven FOR REAL: `docker stop` on the primary container
+(`dse_model_gateway_echo`) and the next call is served by instance B
+(`dse_model_gateway_echo_b`) through the proxy's native
+`router_settings.fallbacks`.
 
-Provam:
-  - primário fora -> fallback assume; a resposta é COMPLETA (determinística,
-    nunca truncada — P6), o custo/atribuição continuam corretos (linha real no
-    ledger durável para o tenant/work_item) e a degradação NUNCA é silenciosa:
-    audit row `gateway.call_degraded_fallback` com o endpoint que serviu (P8);
-  - primário saudável -> zero audit de degradação (sem falso positivo);
-  - fallback NÃO burla política (mesma regra do reassign): se a política do
-    tenant não permite nenhum fallback declarado, a resposta degradada é
-    recusada na fronteira com `policy_denied`/`fallback_model_not_allowed`;
-  - teste negativo declarativo (aceitação do WSD-E4-T1): NENHUMA rota de
-    fallback do litellm_config.yaml cruza o tier contratado (NFR-07/P2), e o
-    espelho `failover.intra_tier_fallbacks()` do cliente é consistente com o
-    mapa do proxy (se alguém mudar um sem o outro, este arquivo quebra).
+They prove:
+  - primary down -> the fallback takes over; the response is COMPLETE
+    (deterministic, never truncated — P6), cost/attribution stay correct (a real
+    row on the durable ledger for the tenant/work_item) and the degradation is
+    NEVER silent: a `gateway.call_degraded_fallback` audit row with the endpoint
+    that served it (P8);
+  - healthy primary -> zero degradation audit (no false positive);
+  - a fallback does NOT bypass policy (same rule as reassign): if the tenant's
+    policy permits no declared fallback, the degraded response is refused at the
+    boundary with `policy_denied`/`fallback_model_not_allowed`;
+  - declarative negative test (WSD-E4-T1 acceptance): NO fallback route in
+    litellm_config.yaml crosses the contracted tier (NFR-07/P2), and the
+    client's `failover.intra_tier_fallbacks()` mirror is consistent with the
+    proxy's map (if someone changes one without the other, this file breaks).
 
-Nota (achado empírico desta sessão, LiteLLM 1.93.0): o fallback do router
-acontece MESMO com uma virtual key escopada só no modelo primário — o
-model-scoping da key não restringe o alvo de fallback. Por isso o check de
-política do modelo servido é feito no cliente (gateway_call) e o espelho
-declarativo existe; ver README §Fase 3.
+Note (empirical finding from this session, LiteLLM 1.93.0): the router's
+fallback happens EVEN with a virtual key scoped only to the primary model — the
+key's model-scoping does not restrict the fallback target. That is why the
+policy check on the served model is done in the client (gateway_call) and why
+the declarative mirror exists; see README §Fase 3.
 """
 from __future__ import annotations
 
@@ -92,7 +94,7 @@ def _insert_policy(tenant_id, stage, allowed_models):
 
 
 # ---------------------------------------------------------------------------
-# Testes declarativos (config) — rodam sem derrubar nada.
+# Declarative (config) tests — they run without taking anything down.
 # ---------------------------------------------------------------------------
 
 
@@ -109,16 +111,16 @@ def _proxy_fallback_map(config: dict) -> dict[str, list[str]]:
 
 
 def test_client_fallback_mirror_matches_litellm_config():
-    """O espelho declarativo do cliente (failover.intra_tier_fallbacks) e o
-    mapa do proxy (router_settings.fallbacks) são o MESMO mapa — mudar um sem
-    o outro quebra aqui."""
+    """The client's declarative mirror (failover.intra_tier_fallbacks) and the
+    proxy's map (router_settings.fallbacks) are the SAME map — changing one
+    without the other breaks here."""
     assert _proxy_fallback_map(_load_litellm_config()) == intra_tier_fallbacks()
 
 
 def test_no_fallback_route_crosses_tier():
-    """Aceitação WSD-E4-T1 (teste negativo): nenhuma rota de fallback cruza o
-    tier contratado (NFR-07/P2 — nunca Tier 2 -> Tier 1 nem para endpoint
-    público). Parseia o config declarativo real do proxy."""
+    """WSD-E4-T1 acceptance (negative test): no fallback route crosses the
+    contracted tier (NFR-07/P2 — never Tier 2 -> Tier 1, nor to a public
+    endpoint). Parses the proxy's real declarative config."""
     config = _load_litellm_config()
     tiers = {
         m["model_name"]: m.get("model_info", {}).get("dse_tier")
@@ -127,9 +129,9 @@ def test_no_fallback_route_crosses_tier():
     routes = _proxy_fallback_map(config)
     assert routes, "esperava ao menos 1 rota de fallback intra-tier configurada"
     for primary, fallbacks in routes.items():
-        assert primary in tiers, f"rota de fallback para modelo não registrado: {primary}"
+        assert primary in tiers, f"fallback route for an unregistered model: {primary}"
         for fb in fallbacks:
-            assert fb in tiers, f"fallback não registrado no model_list: {fb}"
+            assert fb in tiers, f"fallback not registered in model_list: {fb}"
             assert tiers[fb] == tiers[primary], (
                 f"ROTA DE FALLBACK CRUZA TIER: {primary} (tier={tiers[primary]}) "
                 f"-> {fb} (tier={tiers[fb]}) — viola NFR-07/P2"
@@ -138,14 +140,14 @@ def test_no_fallback_route_crosses_tier():
 
 def test_failover_set_covers_primary_and_fallbacks():
     assert intra_tier_failover_set(ECHO_MODEL) == [ECHO_MODEL, ECHO_MODEL_B]
-    # modelo sem fallback declarado -> conjunto é só ele mesmo
+    # a model with no declared fallback -> the set is just itself
     assert intra_tier_failover_set("bedrock/anthropic.claude-3-haiku") == [
         "bedrock/anthropic.claude-3-haiku"
     ]
 
 
 # ---------------------------------------------------------------------------
-# Testes de chaos REAL (docker stop no primário).
+# REAL chaos tests (docker stop on the primary).
 # ---------------------------------------------------------------------------
 
 
@@ -167,9 +169,9 @@ def test_primary_healthy_no_degradation_audit(unique_ids):
 
 
 def test_primary_down_fallback_serves_with_audit_and_correct_attribution(unique_ids):
-    """O teste central do WSD-E4-T1: derruba o primário DE VERDADE; o fallback
-    intra-tier assume; resposta completa (P6); custo/atribuição corretos no
-    ledger durável; audit row de degradação (P8)."""
+    """WSD-E4-T1's central test: takes the primary down FOR REAL; the intra-tier
+    fallback takes over; complete response (P6); correct cost/attribution on the
+    durable ledger; degradation audit row (P8)."""
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
     key = mint_virtual_key(t, wi, Stage.coder, models=intra_tier_failover_set(ECHO_MODEL))
     headers = GatewayCallHeaders(
@@ -179,38 +181,39 @@ def test_primary_down_fallback_serves_with_audit_and_correct_attribution(unique_
         ensure_primary_serving()
         stop_container(PRIMARY_ECHO_CONTAINER)
         try:
-            # Determinismo: só chama depois que o router CONFIRMOU o fallback
-            # servindo (senão o primário podia ainda estar de pé — race).
+            # Determinism: only call after the router has CONFIRMED the
+            # fallback is serving (otherwise the primary could still be up —
+            # race).
             wait_until_fallback_serves()
             result = chat_completion(
                 headers=headers, virtual_key=key, model=ECHO_MODEL,
                 messages=[{"role": "user", "content": "failover-now"}],
-                timeout=90.0,  # detecção de falha + retry + fallback do router
+                timeout=90.0,  # failure detection + retry + router fallback
             )
         finally:
             start_container(PRIMARY_ECHO_CONTAINER)
 
-        # resposta COMPLETA e determinística — o eco B produz o mesmo texto do
-        # primário (nada truncado/mascarado, P6).
+        # COMPLETE and deterministic response — echo B produces the same text
+        # as the primary (nothing truncated/masked, P6).
         assert result.content == "ECHO[won-revoliaf]"
 
-        # atribuição de custo continua correta: 1 linha real no ledger durável
-        # para o MESMO tenant/work_item/stage/task_class da chamada.
+        # cost attribution stays correct: 1 real row on the durable ledger for
+        # the SAME tenant/work_item/stage/task_class of the call.
         rows = ledger.aggregate(tenant_id=t)
         assert len(rows) == 1
         assert rows[0]["call_count"] == 1
         assert rows[0]["task_class"] == "feature"
         assert rows[0]["stage"] == "coder"
 
-        # degradação auditada (P8): nunca silenciosa, com o endpoint que serviu.
+        # audited degradation (P8): never silent, with the endpoint that served.
         rows_audit = _audit_rows(wi)
         degradations = [d for a, d in rows_audit if a == "gateway.call_degraded_fallback"]
         assert len(degradations) == 1
         det = degradations[0]
         assert det["requested_model"] == ECHO_MODEL
-        # O invariante REAL: o fallback (echo-b) serviu. attempted_fallbacks é
-        # >=1 no fallback em runtime OU 0 no cooldown (primário já fora do pool
-        # após o wait) — ambos são degradação auditável (P8).
+        # The REAL invariant: the fallback (echo-b) served. attempted_fallbacks
+        # is >=1 on a runtime fallback OR 0 on cooldown (the primary was already
+        # out of the pool after the wait) — both are auditable degradation (P8).
         assert det["served_api_base"] == FALLBACK_API_BASE
         assert det["attempted_fallbacks"] >= 0
         assert det["fallback_candidates"] == [ECHO_MODEL_B]
@@ -221,25 +224,25 @@ def test_primary_down_fallback_serves_with_audit_and_correct_attribution(unique_
 
 
 def test_fallback_does_not_bypass_policy(unique_ids):
-    """Política do tenant permite SÓ o primário -> com o primário fora, a
-    resposta degradada (servida pelo fallback) é RECUSADA na fronteira (P6)
-    com policy_denied/fallback_model_not_allowed + audit (P8). O custo real
-    incorrido ainda é gravado no ledger (accounting honesto)."""
+    """The tenant's policy permits ONLY the primary -> with the primary down,
+    the degraded response (served by the fallback) is REFUSED at the boundary
+    (P6) with policy_denied/fallback_model_not_allowed + audit (P8). The real
+    cost incurred is still written to the ledger (honest accounting)."""
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    _insert_policy(t, "coder", [ECHO_MODEL])  # fallback NÃO permitido
+    _insert_policy(t, "coder", [ECHO_MODEL])  # fallback NOT permitted
     key = mint_virtual_key(t, wi, Stage.coder, models=intra_tier_failover_set(ECHO_MODEL))
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
         ensure_primary_serving()
         stop_container(PRIMARY_ECHO_CONTAINER)
         try:
-            # Determinismo: fallback confirmado servindo antes da chamada.
+            # Determinism: fallback confirmed serving before the call.
             wait_until_fallback_serves()
             with pytest.raises(GatewayCallError) as ei:
                 chat_completion(
                     headers=headers, virtual_key=key, model=ECHO_MODEL,
                     messages=[{"role": "user", "content": "denied-degraded"}],
-                    timeout=90.0,  # detecção de falha + retry + fallback do router
+                    timeout=90.0,  # failure detection + retry + router fallback
                 )
         finally:
             start_container(PRIMARY_ECHO_CONTAINER)
@@ -250,9 +253,9 @@ def test_fallback_does_not_bypass_policy(unique_ids):
 
         rows_audit = _audit_rows(wi)
         actions = [a for a, _ in rows_audit]
-        assert "gateway.call_degraded_fallback" in actions  # degradação registrada
-        assert "gateway.call_denied_policy" in actions      # e a recusa também
-        # accounting honesto: a chamada degradada custou de verdade -> ledger.
+        assert "gateway.call_degraded_fallback" in actions  # degradation recorded
+        assert "gateway.call_denied_policy" in actions      # and the refusal too
+        # honest accounting: the degraded call really cost money -> ledger.
         rows = ledger.aggregate(tenant_id=t)
         assert len(rows) == 1 and rows[0]["call_count"] == 1
     finally:
@@ -260,10 +263,11 @@ def test_fallback_does_not_bypass_policy(unique_ids):
         ensure_primary_serving()
 
 
-# --- Unidade: detecção de degradação por COOLDOWN (sem docker/race) ----------
-# Prova determinística da lógica que o teste de integração exercita sob timing
-# do runner: o primário fora do pool (health-check) → o fallback serve DIRETO
-# (attempted_fallbacks=0), e isso PRECISA contar como degradação auditável.
+# --- Unit: COOLDOWN degradation detection (no docker/race) -------------------
+# Deterministic proof of the logic the integration test exercises under the
+# runner's timing: the primary out of the pool (health-check) -> the fallback
+# serves DIRECTLY (attempted_fallbacks=0), and that MUST count as auditable
+# degradation.
 
 def test_detect_degradation_runtime_fallback():
     from model_gateway_client.failover import detect_degradation
@@ -277,7 +281,7 @@ def test_detect_degradation_runtime_fallback():
 def test_detect_degradation_cooldown_direct_to_fallback(monkeypatch):
     monkeypatch.setenv("DSE_FALLBACK_API_BASES", FALLBACK_API_BASE)
     from model_gateway_client.failover import detect_degradation
-    # attempted=0 (primário já fora do pool) mas SERVIDO pelo fallback → degradação
+    # attempted=0 (primary already out of the pool) but SERVED by the fallback -> degradation
     deg = detect_degradation(ECHO_MODEL, {
         "x-litellm-attempted-fallbacks": "0",
         "x-litellm-model-api-base": FALLBACK_API_BASE,

@@ -1,14 +1,17 @@
-"""Materialização de skills no workspace (skill_files.py).
+"""Materialization of skills into the workspace (skill_files.py).
 
-Invariantes:
-  - SÓ materializa em workspace provisionado (git) — criar o diretório antes
-    do clone fazia o provision_sandbox pular o clone (achado wi_17eefa,
-    2026-07-23); sem `.git` => no-op;
-  - escreve `.claude/skills/<key>/SKILL.md` com frontmatter name/description;
-  - skill COMMITADA no repo alvo nunca é sobrescrita (repo vence registry);
-  - skill materializada por NÓS em run anterior É atualizada (marker);
-  - tudo que materializamos entra em `.git/info/exclude` — nunca vira diff;
-  - `workspace_skills_note` lista o que existe e é vazia sem skills.
+Invariants:
+  - ONLY materializes into a provisioned (git) workspace — creating the
+    directory before the clone made provision_sandbox skip the clone (found in
+    wi_17eefa, 2026-07-23); without `.git` => no-op;
+  - writes `.claude/skills/<key>/SKILL.md` with name/description frontmatter;
+  - a skill COMMITTED in the target repo is never overwritten (repo beats
+    registry);
+  - a skill materialized by US on a previous run IS updated (marker);
+  - everything we materialize goes into `.git/info/exclude` — it never becomes
+    a diff;
+  - `workspace_skills_note` lists what exists and is empty when there are no
+    skills.
 """
 from __future__ import annotations
 
@@ -28,15 +31,16 @@ def _git_ws(tmp_path):
 
 
 def test_non_git_workspace_is_noop(tmp_path):
-    """Workspace sem `.git` (pré-provision) => NADA é criado — o clone do
-    provision_sandbox depende do diretório não existir/ficar intacto."""
+    """Workspace without `.git` (pre-provision) => NOTHING is created — the
+    provision_sandbox clone depends on the directory not existing/staying
+    untouched."""
     written = materialize_skills(str(tmp_path / "inexistente"), [_skill("x")])
     assert written == []
     assert not (tmp_path / "inexistente").exists()
 
-    (tmp_path / "vazio").mkdir()
-    assert materialize_skills(str(tmp_path / "vazio"), [_skill("x")]) == []
-    assert list((tmp_path / "vazio").iterdir()) == []
+    (tmp_path / "empty").mkdir()
+    assert materialize_skills(str(tmp_path / "empty"), [_skill("x")]) == []
+    assert list((tmp_path / "empty").iterdir()) == []
 
 
 def test_materialize_writes_skill_md(tmp_path):
@@ -79,7 +83,7 @@ def test_git_exclude_keeps_skills_out_of_diff(tmp_path):
     status = subprocess.run(
         ["git", "status", "--porcelain"], cwd=ws, check=True, capture_output=True, text=True
     ).stdout
-    assert ".claude" not in status  # excluída localmente — o commit do Coder nunca a arrasta
+    assert ".claude" not in status  # excluded locally — the Coder's commit never drags it in
     assert "app.py" in status
 
 

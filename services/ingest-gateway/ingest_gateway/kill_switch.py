@@ -1,12 +1,13 @@
-"""Kill switch por (tenant, canal) — WSA-E1-T3. Consultado pelo gateway
-ANTES de `admit_work_item`; evento de canal desligado não cria WorkItem nem
-processa, e gera `dse_audit.emit(action="admission_blocked_kill_switch")`.
+"""Per-(tenant, channel) kill switch — WSA-E1-T3. Consulted by the gateway
+BEFORE `admit_work_item`; an event from a disabled channel creates no WorkItem
+and is not processed, and emits
+`dse_audit.emit(action="admission_blocked_kill_switch")`.
 
-Granularidade mais fina que `tenant_config.kill_switch_enabled` (WS-F,
-tenant inteiro) — checamos as duas: se o tenant inteiro estiver com
-kill-switch ligado (tabela do WS-F), tratamos como canal também desligado.
-Leitura de `tenant_config` é best-effort/opcional (import defensivo) porque
-essa tabela é dona do WS-F e pode não existir em todo ambiente de teste.
+Finer granularity than `tenant_config.kill_switch_enabled` (WS-F, whole
+tenant) — we check both: if the whole tenant has the kill switch on (WS-F
+table), we treat the channel as disabled too. Reading `tenant_config` is
+best-effort/optional (defensive import) because that table is owned by WS-F
+and may not exist in every test environment.
 """
 from __future__ import annotations
 
@@ -14,10 +15,10 @@ from psycopg2.extensions import connection as _Connection
 
 
 def is_channel_killed(conn: _Connection, tenant_id: str, channel: str) -> tuple[bool, str | None]:
-    """Retorna (killed, reason). `channel` é o identificador de canal — ex.:
-    Slack channel id, ou `owner/repo` para GitHub."""
+    """Returns (killed, reason). `channel` is the channel identifier — e.g. the
+    Slack channel id, or `owner/repo` for GitHub."""
     with conn.cursor() as cur:
-        # 1) tenant-wide kill switch (WS-F), se a tabela existir neste ambiente.
+        # 1) tenant-wide kill switch (WS-F), if the table exists in this environment.
         try:
             cur.execute(
                 "SELECT kill_switch_enabled, kill_switch_reason FROM tenant_config WHERE tenant_id = %s",
@@ -27,9 +28,9 @@ def is_channel_killed(conn: _Connection, tenant_id: str, channel: str) -> tuple[
             if row is not None and row[0]:
                 return True, row[1] or "tenant_wide_kill_switch"
         except Exception:
-            conn.rollback()  # tabela pode não existir neste ambiente de teste; segue para o canal
+            conn.rollback()  # table may not exist in this test environment; fall through to the channel
 
-        # 2) kill switch por canal (WS-A, migrations/0002_wsa.sql).
+        # 2) per-channel kill switch (WS-A, migrations/0002_wsa.sql).
         cur.execute(
             "SELECT active, reason FROM channel_kill_switches WHERE tenant_id = %s AND channel = %s",
             (tenant_id, channel),

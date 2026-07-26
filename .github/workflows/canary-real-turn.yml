@@ -1,7 +1,7 @@
-# Canário noturno de turno REAL (plano 09, Fase 4): um turno do Coder contra
-# o model-gateway com provider de verdade, budget ≤ US$ 0,50. Ativa quando o
-# repo tiver o secret DSE_CANARY_ANTHROPIC_KEY — sem ele o job sai como no-op
-# (o repo ainda é local-only; este arquivo é o kit pronto da Fase 5).
+# Nightly REAL-turn canary (plan 09, Phase 4): one Coder turn against the
+# model-gateway with a real provider, budget <= US$ 0.50. It activates once the
+# repo has the DSE_CANARY_ANTHROPIC_KEY secret — without it the job exits as a
+# no-op (the repo is still local-only; this file is the ready-made Phase 5 kit).
 name: canary-real-turn
 
 on:
@@ -18,9 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sem secret configurado — no-op
+      - name: No secret configured — no-op
         if: env.HAVE_KEY != 'true'
-        run: echo "DSE_CANARY_ANTHROPIC_KEY ausente; canário inerte até a Fase 5 configurar secrets."
+        run: echo "DSE_CANARY_ANTHROPIC_KEY missing; canary inert until Phase 5 configures secrets."
 
       - uses: actions/setup-python@v5
         if: env.HAVE_KEY == 'true'
@@ -33,7 +33,7 @@ jobs:
         if: env.HAVE_KEY == 'true'
         run: python -m pip install -r requirements-ci.lock
 
-      - name: Boot foundation + gateway (provider real)
+      - name: Boot foundation + gateway (real provider)
         if: env.HAVE_KEY == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.DSE_CANARY_ANTHROPIC_KEY }}

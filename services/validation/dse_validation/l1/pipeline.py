@@ -1,9 +1,9 @@
-"""WSE-E1 — junta os 3 sub-tarefas (T1 lint/typecheck/test/build, T2 SAST +
-secret-scan, T3 diff vs PlanArtifact) num `L1Result` único.
+"""WSE-E1 — joins the 3 sub-tasks (T1 lint/typecheck/test/build, T2 SAST +
+secret-scan, T3 diff vs PlanArtifact) into a single `L1Result`.
 
-Falha em qualquer check => `L1Result.passed=False`. Fase 1 não tem L2 —
-falha aqui volta ao Coder por decisão do workflow do WS-B; este módulo só
-reporta pass/fail com evidência, nunca decide o que fazer a seguir (P1)."""
+Failure on any check => `L1Result.passed=False`. Phase 1 has no L2 — a failure
+here goes back to the Coder by decision of the WS-B workflow; this module only
+reports pass/fail with evidence, it never decides what to do next (P1)."""
 from __future__ import annotations
 
 from dse_contracts import GateStatus, L1Finding, L1Result, PlanArtifact
@@ -15,7 +15,7 @@ from dse_validation.sandbox_exec import SandboxExecutor
 
 try:
     from dse_audit import emit as audit_emit
-except ImportError:  # pragma: no cover - defensive, dse_audit é sempre instalado no venv-wse
+except ImportError:  # pragma: no cover - defensive, dse_audit is always installed in venv-wse
     audit_emit = None
 
 

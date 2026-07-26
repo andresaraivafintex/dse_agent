@@ -1,8 +1,8 @@
-"""Persistência (best-effort) de `egress_credential_leases` — evidência
-durável e consultável do SLO de revogação de 60s (WSC-E2-T2), além do que já
-vai para `audit_log` via `dse_audit`. Import de `psycopg2` é opcional: o
-proxy continua funcionando (allowlist/deny/injeção) mesmo sem Postgres
-alcançável — só perde esta bookkeeping extra, nunca quebra o path principal.
+"""Best-effort persistence of `egress_credential_leases` — durable, queryable
+evidence of the 60s revocation SLO (WSC-E2-T2), on top of what already goes to
+`audit_log` via `dse_audit`. The `psycopg2` import is optional: the proxy keeps
+working (allowlist/deny/injection) even with no reachable Postgres — it only
+loses this extra bookkeeping, it never breaks the main path.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _connect():
     try:
         return psycopg2.connect(_DSN)
     except Exception:  # noqa: BLE001
-        logger.warning("egress_credential_leases: Postgres indisponível, seguindo sem persistência extra")
+        logger.warning("egress_credential_leases: Postgres unavailable, continuing without extra persistence")
         return None
 
 

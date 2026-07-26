@@ -19,9 +19,9 @@ spec:
         {{- include "dse.selectorLabels" (dict "component" "model-gateway" "Release" .Release) | nindent 8 }}
     spec:
       {{- include "dse.appPodDefaults" . | nindent 6 }}
-      # Todo tráfego de saída deste pod para providers de modelo (Bedrock/
-      # PrivateLink) DEVE passar pelo egress-proxy — nunca chamada direta ao
-      # SDK do provider (D6: WS-C registra o endpoint na allowlist).
+      # All outbound traffic from this pod to model providers (Bedrock/
+      # PrivateLink) MUST go through the egress-proxy — never a direct call from
+      # the provider SDK (D6: WS-C registers the endpoint in the allowlist).
       containers:
         - name: model-gateway
           image: {{ include "dse.image" (dict "root" $ "repository" .Values.modelGateway.image.repository "tag" .Values.modelGateway.image.tag "digest" .Values.modelGateway.image.digest) }}
@@ -37,7 +37,7 @@ spec:
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
             {{- if .Values.extraEnvSecret }}
-            # ANTHROPIC_API_KEY + LITELLM_MASTER_KEY (o LiteLLM lê do ambiente).
+            # ANTHROPIC_API_KEY + LITELLM_MASTER_KEY (LiteLLM reads them from the environment).
             - secretRef:
                 name: {{ .Values.extraEnvSecret }}
             {{- end }}
@@ -52,9 +52,9 @@ spec:
             {{- toYaml .Values.modelGateway.resources | nindent 12 }}
           volumeMounts:
             {{- include "dse.appTmpMount" . | nindent 12 }}
-          # O LiteLLM protege /health com auth (master key) -> 401 na probe, que
-          # reiniciava o pod. Os endpoints sem auth são /health/liveliness e
-          # /health/readiness.
+          # LiteLLM protects /health with auth (master key) -> 401 on the probe,
+          # which used to restart the pod. The unauthenticated endpoints are
+          # /health/liveliness and /health/readiness.
           readinessProbe:
             httpGet: { path: /health/readiness, port: {{ .Values.modelGateway.port }} }
             initialDelaySeconds: 5

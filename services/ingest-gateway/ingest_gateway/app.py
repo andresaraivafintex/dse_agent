@@ -1,8 +1,8 @@
-"""FastAPI da porta 8803 (WS-A, ver CONVENTIONS.md). O trabalho pesado do
-ingest-gateway (`admit_work_item`, `correlate`, dispatcher) é biblioteca
-consumida diretamente pelos adapters e pelo processo dispatcher — este app
-expõe apenas health-check e administração operacional do kill switch de
-canal (liga/desliga sem precisar de acesso direto ao Postgres).
+"""FastAPI app on port 8803 (WS-A, see CONVENTIONS.md). The heavy lifting of
+the ingest-gateway (`admit_work_item`, `correlate`, dispatcher) is a library
+consumed directly by the adapters and by the dispatcher process — this app
+only exposes health-check and operational administration of the channel kill
+switch (toggle on/off without needing direct Postgres access).
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class KillSwitchUpdate(BaseModel):
     channel: str
     active: bool
     reason: str | None = None
-    actor: str  # principal resolvido de quem está operando o kill switch (P8)
+    actor: str  # resolved principal of whoever is operating the kill switch (P8)
 
 
 @app.put("/admin/kill-switch")

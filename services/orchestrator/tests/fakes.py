@@ -1,14 +1,14 @@
-"""Activities FAKE que implementam a MESMA assinatura/nome/tipo de retorno
-das Activities cross-workstream de `dse_contracts.activities` (donas: WS-C e
-WS-E). Permitem provar a maquina de estados do workflow (WSB-E2-T3) sem
-depender dos outros workstreams terem terminado suas implementacoes reais —
-exatamente como pedido no enunciado da tarefa.
+"""FAKE Activities implementing the SAME signature/name/return type as the
+cross-workstream Activities in `dse_contracts.activities` (owners: WS-C and
+WS-E). They let us prove the workflow state machine (WSB-E2-T3) without waiting
+for the other workstreams to finish their real implementations — exactly as the
+task statement requires.
 
-Postgres e Temporal em si NUNCA sao mockados aqui — so as duas fronteiras de
-Activity que pertencem a outros workstreams. As Activities locais do WS-B
+Postgres and Temporal themselves are NEVER mocked here — only the two Activity
+boundaries that belong to other workstreams. The WS-B local Activities
 (`update_work_item_status`, `check_clarification_completeness`,
-`emit_audit_event`) usadas pelos testes SAO as reais, batendo no Postgres
-real da infra (ver `conftest.py`).
+`emit_audit_event`) used by the tests ARE the real ones, hitting the infra's
+real Postgres (see `conftest.py`).
 """
 from __future__ import annotations
 
@@ -20,12 +20,11 @@ from temporalio.exceptions import ApplicationError
 
 
 def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
-    """WSB-E5-T3b — simula uma recusa de politica fail-closed do caminho de
-    modelo/egress (egress-proxy down, virtual key expirada, kill switch). Levanta
-    um ApplicationError NAO-retryable com um marcador que o
-    `_run_model_activity` do workflow reconhece — falha limpa, sem output
-    truncado (P6). Marcado como FAKE de fronteira (WS-D/WS-C reais fazem isso
-    de verdade)."""
+    """WSB-E5-T3b — simulates a fail-closed policy refusal on the model/egress
+    path (egress-proxy down, expired virtual key, kill switch). Raises a
+    NON-retryable ApplicationError with a marker the workflow's
+    `_run_model_activity` recognizes — clean failure, no truncated output (P6).
+    Marked as a boundary FAKE (the real WS-D/WS-C do this for real)."""
     spec = state.fail_closed_on.get(name)
     if not spec:
         return
@@ -34,9 +33,9 @@ def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
         return
     spec["times"] = times - 1
     marker = spec.get("marker", "egress_proxy_unreachable_fail_closed")
-    # Fase 2 (plano 09): o default é o TYPE canônico do vocabulário do
-    # contrato (a mensagem não decide mais); "type" no spec permite simular
-    # raisers legados ("EgressFailClosed") para o teste de compat do fallback.
+    # Phase 2 (plano 09): the default is the canonical TYPE from the contract's
+    # vocabulary (the message no longer decides); "type" in the spec allows
+    # simulating legacy raisers ("EgressFailClosed") for the fallback compat test.
     from dse_contracts.failure import FailureClass, failure_type
 
     err_type = spec.get("type", failure_type(FailureClass.policy_fail_closed))
@@ -44,10 +43,10 @@ def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
 
 
 def _maybe_transient_fail(state: "FakeControlPlane", name: str) -> None:
-    """WSB-E5-T3b — simula uma oscilacao TRANSIENTE do gateway (LiteLLM cai e
-    volta mid-task). Erro RETRYABLE: o proprio Temporal retenta a Activity ate
-    passar — a durabilidade absorve a oscilacao sem perder progresso nem
-    truncar output (P6/P8)."""
+    """WSB-E5-T3b — simulates a TRANSIENT gateway oscillation (LiteLLM drops and
+    comes back mid-task). RETRYABLE error: Temporal itself retries the Activity
+    until it passes — durability absorbs the oscillation without losing progress
+    or truncating output (P6/P8)."""
     spec = state.transient_fail_on.get(name)
     if not spec:
         return
@@ -104,8 +103,8 @@ from dse_contracts.activities import (
     VisualDiffResult,
 )
 from dse_contracts.plan_artifact import PlanArtifact
-# Todos os modelos de input agora vêm do contrato canônico. Assim esta suíte
-# detecta drift no wire sem depender de importar os serviços donos.
+# All input models now come from the canonical contract. That way this suite
+# detects wire drift without importing the owning services.
 from dse_contracts.activities import (
     RunL2ReviewInput,
     RunPlannerTurnInput,
@@ -115,9 +114,9 @@ from dse_contracts.activities import (
 
 @dataclass
 class FakeControlPlane:
-    """Estado mutavel injetado num teste especifico para dirigir o
-    comportamento das fakes (quantas vezes L1 falha, sequencia de status de
-    CI, se checkpoint falha N vezes antes de funcionar, etc.)."""
+    """Mutable state injected into a specific test to drive the fakes' behavior
+    (how many times L1 fails, the CI status sequence, whether checkpoint fails N
+    times before working, etc.)."""
 
     l1_fail_times: int = 0
     ci_sequence: list[str] = field(default_factory=lambda: ["green"])
@@ -128,22 +127,22 @@ class FakeControlPlane:
     rebuild_calls: int = 0
     teardown_calls: int = 0
     finalize_calls: int = 0
-    # S7: mapeia work_item_id -> pr_number para o finalize ser idempotente por
-    # work item (o call site nao passa mais `existing_pr_number` — o PR e
-    # resolvido por work_item_id dentro do finalize real).
+    # S7: maps work_item_id -> pr_number so finalize is idempotent per work item
+    # (the call site no longer passes `existing_pr_number` — the PR is resolved
+    # by work_item_id inside the real finalize).
     pr_by_wi: dict = field(default_factory=dict)
     l1_calls: int = 0
     pr_counter: int = 1000
     calls_log: list[str] = field(default_factory=list)
-    # permite ao teste "travar" uma activity ate ser liberada (usado pelo chaos test
-    # para simular uma Activity longa em andamento quando o worker morre)
+    # lets a test "hang" an activity until released (used by the chaos test to
+    # simulate a long Activity in progress when the worker dies)
     coder_turn_hang_event: Any = None
 
-    # --- Fase 2: Planner / Tester / Reviewer L2 (WS-C/WS-E fronteiras) ---
+    # --- Phase 2: Planner / Tester / Reviewer L2 (WS-C/WS-E boundaries) ---
     planner_calls: int = 0
     tester_calls: int = 0
     l2_calls: int = 0
-    # risco declarado pelo Planner (default low -> auto-aprova o gate)
+    # risk declared by the Planner (default low -> the gate auto-approves)
     plan_risk_class: str = "low"
     plan_expected_files: list[str] = field(default_factory=lambda: ["app.py"])
     planner_cost_usd: float = 0.0
@@ -153,33 +152,34 @@ class FakeControlPlane:
     tester_returncode: int = 0
     l2_cost_usd: float = 0.0
     coder_cost_usd: float = 0.01
-    # L2: falha N vezes (objecoes) antes de aprovar
+    # L2: fails N times (objections) before approving
     l2_fail_times: int = 0
     l2_objections: list[str] = field(default_factory=lambda: ["app.py:12 sem teste"])
-    # captura do ULTIMO payload que a fake L2 recebeu (prova de isolamento P3)
+    # captures the LAST payload the L2 fake received (proof of P3 isolation)
     last_l2_payload: dict | None = None
-    # simula recusa fail-closed do caminho de modelo (WSB-E5-T3b): nome da
-    # activity -> {"times": N, "marker": str}. Erro NAO-retryable -> falha limpa.
+    # simulates a fail-closed refusal on the model path (WSB-E5-T3b): activity
+    # name -> {"times": N, "marker": str}. NON-retryable error -> clean failure.
     fail_closed_on: dict = field(default_factory=dict)
-    # simula oscilacao TRANSIENTE do gateway (LiteLLM instavel mid-task): nome
-    # da activity -> {"times": N}. Erro RETRYABLE -> Temporal retenta ate passar.
+    # simulates a TRANSIENT gateway oscillation (LiteLLM unstable mid-task):
+    # activity name -> {"times": N}. RETRYABLE error -> Temporal retries until it
+    # passes.
     transient_fail_on: dict = field(default_factory=dict)
 
-    # --- Fase 3: pipeline de evidencia (fronteira WS-E) ---
-    # Os fakes DECODIFICAM o payload com os models REAIS do contrato
-    # (TriggerPreviewInput/RunDemoEvidenceInput/RunVisualDiffInput) — nada de
-    # dict leniente (licao do adendo 02: 14 bugs de boundary nas Fases 1-2).
+    # --- Phase 3: evidence pipeline (WS-E boundary) ---
+    # The fakes DECODE the payload with the REAL contract models
+    # (TriggerPreviewInput/RunDemoEvidenceInput/RunVisualDiffInput) — no lenient
+    # dicts (lesson from addendum 02: 14 boundary bugs in Phases 1-2).
     trigger_preview_calls: int = 0
     demo_evidence_calls: int = 0
     visual_diff_calls: int = 0
-    # files_changed que o fake Coder reporta (dirige o paths-filter do preview)
+    # files_changed reported by the fake Coder (drives the preview paths-filter)
     coder_files_changed: list[str] = field(default_factory=lambda: ["app.py"])
-    # "auto" = paths-filter deterministico (espelho do FR-20 do WS-E);
-    # "created"/"degraded" forcam o status; "raise" derruba a Activity inteira.
+    # "auto" = deterministic paths-filter (mirror of WS-E's FR-20);
+    # "created"/"degraded" force the status; "raise" fails the whole Activity.
     preview_mode: str = "auto"
-    # §F F1 — verificação de merge via API do GitHub (fake): "verified" (default,
-    # PR de fato merged), "not_merged" (forjado → refuta), "unavailable" (API
-    # fora → degrada p/ envelope).
+    # §F F1 — merge verification via the GitHub API (fake): "verified" (default,
+    # PR actually merged), "not_merged" (forged -> refuted), "unavailable" (API
+    # down -> degrades to the envelope).
     merge_verify_mode: str = "verified"
     demo_passed: bool = True
     demo_video_key: str | None = "evidence/demo.webm"
@@ -189,12 +189,12 @@ class FakeControlPlane:
     last_demo_payload: dict | None = None
     last_visual_diff_payload: dict | None = None
 
-    # --- Fase 4: merge-base / base-drift (fronteira WS-E, WSE-E6-T16) ---
+    # --- Phase 4: merge-base / base-drift (WS-E boundary, WSE-E6-T16) ---
     update_base_calls: int = 0
-    # controla o retorno da fake: drift presente? conflito? threads orfas?
+    # controls the fake's return: is there drift? a conflict? orphaned threads?
     base_has_drift: bool = True
     base_conflict: bool = False
-    base_orphaned_threads: int = 0  # exit da Fase 4 exige 0 no merge-base real
+    base_orphaned_threads: int = 0  # the Phase 4 exit requires 0 on a real merge-base
     last_update_base_payload: dict | None = None
     last_l1_payload: dict | None = None
     last_finalize_payload: dict | None = None
@@ -206,12 +206,12 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.planner_calls += 1
         state.calls_log.append("run_planner_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_PLANNER_TURN)
-        RunPlannerTurnInput(**payload)  # decode REAL do contrato
+        RunPlannerTurnInput(**payload)  # REAL contract decode
         return PlanArtifact(
             work_item_id=payload["work_item_id"],
             steps=["passo 1", "passo 2"],
             expected_files=list(state.plan_expected_files),
-            test_plan="cobre o caminho feliz",
+            test_plan="covers the happy path",
             risk_class=state.plan_risk_class,
         )
 
@@ -219,7 +219,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.tester_calls += 1
         state.calls_log.append("run_tester_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
-        RunTesterTurnInput(**payload)  # decode REAL do contrato
+        RunTesterTurnInput(**payload)  # REAL contract decode
         return TesterTurnResult(
             sandbox_id=payload["sandbox_id"],
             test_files=["test_app.py"],
@@ -234,7 +234,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.calls_log.append("run_l2_review")
         state.last_l2_payload = dict(payload)
         _maybe_fail_closed(state, ACTIVITY_RUN_L2_REVIEW)
-        RunL2ReviewInput(**payload)  # decode REAL (extra=forbid — P3 estrutural)
+        RunL2ReviewInput(**payload)  # REAL decode (extra=forbid — structural P3)
         if state.l2_fail_times > 0:
             state.l2_fail_times -= 1
             return L2Verdict(
@@ -250,7 +250,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.provision_calls += 1
         state.calls_log.append("provision_sandbox")
         _maybe_fail_closed(state, ACTIVITY_PROVISION_SANDBOX)
-        inp = ProvisionSandboxInput(**payload)  # decode REAL
+        inp = ProvisionSandboxInput(**payload)  # REAL decode
         return SandboxHandle(
             sandbox_id=f"sbx-{inp.work_item_id}",
             work_item_id=inp.work_item_id,
@@ -266,7 +266,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         _maybe_fail_closed(state, ACTIVITY_RUN_CODER_TURN)
         if state.coder_turn_hang_event is not None:
             await state.coder_turn_hang_event.wait()
-        RunCoderTurnInput(**payload)  # decode REAL
+        RunCoderTurnInput(**payload)  # REAL decode
         return CoderTurnResult(
             sandbox_id=payload["sandbox_id"],
             diff_summary="fake diff",
@@ -279,7 +279,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def checkpoint_sandbox(payload: dict) -> CheckpointRef:
         state.checkpoint_calls += 1
         state.calls_log.append("checkpoint_sandbox")
-        inp = CheckpointSandboxInput(**payload)  # decode REAL
+        inp = CheckpointSandboxInput(**payload)  # REAL decode
         if state.checkpoint_fail_times > 0:
             state.checkpoint_fail_times -= 1
             raise RuntimeError("simulated checkpoint failure")
@@ -292,7 +292,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def rebuild_sandbox(payload: dict) -> SandboxHandle:
         state.rebuild_calls += 1
         state.calls_log.append("rebuild_sandbox")
-        inp = RebuildSandboxInput(**payload)  # decode REAL (exige checkpoint_ref)
+        inp = RebuildSandboxInput(**payload)  # REAL decode (requires checkpoint_ref)
         return SandboxHandle(
             sandbox_id=f"sbx-{inp.work_item_id}-rebuilt",
             work_item_id=inp.work_item_id,
@@ -303,13 +303,13 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     async def teardown_sandbox(payload: dict) -> None:
         state.teardown_calls += 1
         state.calls_log.append("teardown_sandbox")
-        TeardownSandboxInput(**payload)  # decode REAL (exige tenant_id)
+        TeardownSandboxInput(**payload)  # REAL decode (requires tenant_id)
 
     async def run_l1_pipeline(payload: dict) -> L1Result:
         state.l1_calls += 1
         state.calls_log.append("run_l1_pipeline")
         state.last_l1_payload = dict(payload)
-        inp = RunL1PipelineInput(**payload)  # decode REAL do contrato (S7)
+        inp = RunL1PipelineInput(**payload)  # REAL contract decode (S7)
         wi = inp.sandbox.work_item_id
         if state.l1_fail_times > 0:
             state.l1_fail_times -= 1
@@ -328,11 +328,11 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.finalize_calls += 1
         state.calls_log.append("finalize_pr")
         state.last_finalize_payload = dict(payload)
-        inp = FinalizePrInput(**payload)  # decode REAL (exige summary + sandbox)
+        inp = FinalizePrInput(**payload)  # REAL decode (requires summary + sandbox)
         wi = inp.work_item_id
         pr_number = state.pr_by_wi.get(wi)
         if pr_number is None:
-            pr_number = state.pr_counter  # usa o valor atual ANTES de incrementar
+            pr_number = state.pr_counter  # uses the current value BEFORE incrementing
             state.pr_counter += 1
             state.pr_by_wi[wi] = pr_number
         return PrRef(
@@ -342,9 +342,9 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         )
 
     async def verify_merge_state(payload: dict) -> MergeVerification:
-        # §F F1 — espelha o contrato real; o modo dirige o veredito.
+        # §F F1 — mirrors the real contract; the mode drives the verdict.
         state.calls_log.append("verify_merge_state")
-        inp = VerifyMergeInput(**payload)  # decode REAL do contrato
+        inp = VerifyMergeInput(**payload)  # REAL contract decode
         if state.merge_verify_mode == "not_merged":
             return MergeVerification(exists=True, merged=False, verified=False,
                                      reason="not_merged(state=open)")
@@ -354,29 +354,29 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
                                  merge_commit_sha="deadbeef", head_sha=inp.expected_head_sha,
                                  verified=True, reason="ok")
 
-    # S3 (Fase 5): post_tracking_comment agora é uma Activity LOCAL REAL
-    # (em LOCAL_ACTIVITIES) — não é mais fake aqui, senão colide (dois
-    # @activity.defn com o mesmo nome no worker de teste). A real é
-    # best-effort: sem adapter no ar nos testes, retorna ok=False sem crashar.
+    # S3 (Phase 5): post_tracking_comment is now a REAL LOCAL Activity (in
+    # LOCAL_ACTIVITIES) — it is no longer faked here, otherwise it collides (two
+    # @activity.defn with the same name on the test worker). The real one is
+    # best-effort: with no adapter up in tests, it returns ok=False without crashing.
 
     async def consume_ci_status(payload: dict) -> CiStatusResult:
         state.calls_log.append("consume_ci_status")
         state.last_ci_payload = dict(payload)
-        inp = ConsumeCiStatusInput(**payload)  # decode REAL (exige tenant/repo/ref)
+        inp = ConsumeCiStatusInput(**payload)  # REAL decode (requires tenant/repo/ref)
         status = state.ci_sequence.pop(0) if state.ci_sequence else "green"
         return CiStatusResult(
             work_item_id=inp.work_item_id, pr_number=inp.pr_number, status=status
         )
 
     # ------------------------------------------------------------------
-    # Fase 3 — pipeline de evidencia (fronteira WS-E). Cada fake decodifica o
-    # payload com o MODEL REAL do contrato: se o call site do workflow deriva
-    # do contrato, o teste quebra AQUI (nao no wire) — licao do adendo 02.
+    # Phase 3 — evidence pipeline (WS-E boundary). Each fake decodes the payload
+    # with the REAL contract MODEL: if the workflow's call site drifts from the
+    # contract, the test breaks HERE (not on the wire) — lesson from addendum 02.
     # ------------------------------------------------------------------
     def _preview_kind(files: list[str]) -> str:
-        # espelho do paths-filter deterministico do WS-E (FR-20 + plano 08 §D)
-        # para o fake — ui (front) tem precedencia; senao serviço deployável
-        # (back: fonte/Dockerfile/manifest); senao none (docs/config).
+        # mirror of WS-E's deterministic paths-filter (FR-20 + plano 08 §D) for
+        # the fake — ui (front) takes precedence; otherwise a deployable service
+        # (back: source/Dockerfile/manifest); otherwise none (docs/config).
         for f in files:
             if f.startswith(("ui/", "frontend/")) or f.endswith((".css", ".tsx", ".jsx")):
                 return "ui"
@@ -391,12 +391,12 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.trigger_preview_calls += 1
         state.calls_log.append("trigger_preview")
         state.last_preview_payload = dict(payload)
-        inp = TriggerPreviewInput(**payload)  # decode REAL do contrato
+        inp = TriggerPreviewInput(**payload)  # REAL contract decode
         if state.preview_mode == "raise":
             raise ApplicationError("argocd unreachable (fake)",
                                    type="PreviewProvisionError", non_retryable=True)
-        # Plano 08 §D — gate deploys_preview (operator-set). Repo desabilitado
-        # pula LIMPO (antes de qualquer provisionamento).
+        # Plano 08 §D — deploys_preview gate (operator-set). A disabled repo
+        # skips CLEANLY (before any provisioning).
         if not inp.preview_enabled:
             return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
                               status="skipped_disabled", detail="repo sem preview (fake)")
@@ -413,13 +413,13 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             )
         return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
                           status="skipped_backend_only",
-                          detail="paths-filter: sem mudança previewável (§D)")
+                          detail="paths-filter: no previewable change (§D)")
 
     async def run_demo_evidence(payload: dict) -> DemoEvidenceResult:
         state.demo_evidence_calls += 1
         state.calls_log.append("run_demo_evidence")
         state.last_demo_payload = dict(payload)
-        inp = RunDemoEvidenceInput(**payload)  # decode REAL do contrato
+        inp = RunDemoEvidenceInput(**payload)  # REAL contract decode
         return DemoEvidenceResult(
             work_item_id=inp.work_item_id, passed=state.demo_passed,
             video_artifact_key=state.demo_video_key,
@@ -431,7 +431,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.visual_diff_calls += 1
         state.calls_log.append("run_visual_diff")
         state.last_visual_diff_payload = dict(payload)
-        inp = RunVisualDiffInput(**payload)  # decode REAL do contrato
+        inp = RunVisualDiffInput(**payload)  # REAL contract decode
         baseline_created = inp.base_screenshot_key is None
         return VisualDiffResult(
             work_item_id=inp.work_item_id,
@@ -445,9 +445,9 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.update_base_calls += 1
         state.calls_log.append("update_base_branch")
         state.last_update_base_payload = dict(payload)
-        inp = UpdateBaseBranchInput(**payload)  # decode REAL do contrato (WSE-E6-T16)
+        inp = UpdateBaseBranchInput(**payload)  # REAL contract decode (WSE-E6-T16)
         if state.base_conflict:
-            # conflito nao-resolvivel: o workflow deve escalar (nunca resolve a forca)
+            # unresolvable conflict: the workflow must escalate (never force a resolution)
             return UpdateBaseBranchResult(
                 work_item_id=inp.work_item_id, strategy="merge_base",
                 conflict=True, orphaned_threads=0, detail="merge conflict (fake)",
@@ -457,9 +457,9 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
                 work_item_id=inp.work_item_id, strategy="noop_no_drift",
                 conflict=False, orphaned_threads=0, detail="no drift (fake)",
             )
-        # P1: a estrategia e determinada pelo first_human_review_done. Depois do
-        # 1o review (True) -> SEMPRE merge_base (nunca rebase). Zero orfas por
-        # construcao — a menos que o teste force o cenario de violacao.
+        # P1: the strategy is determined by first_human_review_done. After the
+        # 1st review (True) -> ALWAYS merge_base (never rebase). Zero orphans by
+        # construction — unless the test forces the violation scenario.
         strategy = "merge_base" if inp.first_human_review_done else "rebase_prefirst_review"
         return UpdateBaseBranchResult(
             work_item_id=inp.work_item_id, strategy=strategy, conflict=False,
@@ -479,7 +479,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)(run_l1_pipeline),
         activity.defn(name=ACTIVITY_FINALIZE_PR)(finalize_pr),
         activity.defn(name=ACTIVITY_VERIFY_MERGE_STATE)(verify_merge_state),
-        # post_tracking_comment: real, vem de LOCAL_ACTIVITIES (S3) — não registrar aqui.
+        # post_tracking_comment: real, comes from LOCAL_ACTIVITIES (S3) — do not register here.
         activity.defn(name=ACTIVITY_CONSUME_CI_STATUS)(consume_ci_status),
         activity.defn(name=ACTIVITY_TRIGGER_PREVIEW)(trigger_preview),
         activity.defn(name=ACTIVITY_RUN_DEMO_EVIDENCE)(run_demo_evidence),

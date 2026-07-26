@@ -1,4 +1,4 @@
-"""Classificador de task_class (Plano 08 §A) — determinístico, vocabulário fechado."""
+"""task_class classifier (Plano 08 §A) — deterministic, closed vocabulary."""
 from ingest_gateway.task_class import classify_task_class, TASK_CLASSES, DEFAULT_TASK_CLASS
 
 
@@ -17,7 +17,7 @@ def test_jira_issue_type():
 
 
 def test_precedence_most_specific_wins():
-    # bug ganha de documentation/feature quando ambos presentes
+    # bug beats documentation/feature when both are present
     assert classify_task_class(labels=["documentation", "bug", "enhancement"]) == "bug_fix"
 
 
@@ -26,6 +26,6 @@ def test_default_and_closed_vocabulary():
     assert classify_task_class() == DEFAULT_TASK_CLASS
     for c in TASK_CLASSES:
         assert isinstance(c, str)
-    # tudo que o classificador emite está no vocabulário fechado
+    # everything the classifier emits is in the closed vocabulary
     for labels in (["bug"], ["enhancement"], ["deps"], ["docs"], ["refactor"], ["test"], []):
         assert classify_task_class(labels=labels) in TASK_CLASSES

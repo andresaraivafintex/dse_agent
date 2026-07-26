@@ -1,10 +1,10 @@
-"""WSB-E2-T3 estendida — sequenciamento das novas sessoes:
-Planner (read-only, ANTES do gate) -> [gate] -> Coder -> Tester -> L1 -> L2 -> PR.
-Usa os nomes ACTIVITY_RUN_PLANNER_TURN/TESTER_TURN/L2_REVIEW (dse_contracts) via
-Activities FAKE (WS-C/WS-E constroem as reais em paralelo).
+"""Extended WSB-E2-T3 — sequencing of the new sessions:
+Planner (read-only, BEFORE the gate) -> [gate] -> Coder -> Tester -> L1 -> L2 -> PR.
+Uses the ACTIVITY_RUN_PLANNER_TURN/TESTER_TURN/L2_REVIEW names (dse_contracts)
+via FAKE Activities (WS-C/WS-E build the real ones in parallel).
 
-Inclui a prova de P3 (NAO-NEGOCIAVEL): a sessao L2 recebe SO plan + diff final,
-NUNCA o historico/instrucoes do Coder.
+Includes the P3 proof (NON-NEGOTIABLE): the L2 session receives ONLY plan +
+final diff, NEVER the Coder's history/instructions.
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ async def test_session_sequence_planner_gate_coder_tester_l1_l2_pr(time_skipping
 
     assert result.status == WorkItemStatus.done.value
     log = state.calls_log
-    # ordem relativa exigida: planner < provision < coder < tester < l1 < l2 < pr
+    # required relative order: planner < provision < coder < tester < l1 < l2 < pr
     assert _order(log, "run_planner_turn") < _order(log, "provision_sandbox")
     assert _order(log, "provision_sandbox") < _order(log, "run_coder_turn")
     assert _order(log, "run_coder_turn") < _order(log, "run_tester_turn")
@@ -65,8 +65,8 @@ async def test_session_sequence_planner_gate_coder_tester_l1_l2_pr(time_skipping
 
 @pytest.mark.asyncio
 async def test_l2_review_receives_only_plan_and_diff_not_coder_history(time_skipping_env):
-    """P3: o payload que a sessao L2 recebe contem plan + diff e NADA do
-    historico/instrucoes do Coder."""
+    """P3: the payload the L2 session receives contains plan + diff and NOTHING
+    from the Coder's history/instructions."""
     work_item_id = new_work_item_id("p3")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -88,14 +88,14 @@ async def test_l2_review_receives_only_plan_and_diff_not_coder_history(time_skip
 
     payload = state.last_l2_payload
     assert payload is not None
-    # presente: plan artifact + diff final
+    # present: plan artifact + final diff
     assert "plan" in payload and payload["plan"]
-    # Reconciliação da integração da Fase 2: o input estrito da Activity L2
-    # (RunL2ReviewInput, WS-C) declara `diff` — o workflow agora envia `diff`
-    # (o diff resumido do Coder), não `diff_summary`/`files_changed`. P3 segue
-    # sendo a propriedade sob teste (nenhum campo de histórico do Coder).
+    # Phase 2 integration reconciliation: the L2 Activity's strict input
+    # (RunL2ReviewInput, WS-C) declares `diff` — the workflow now sends `diff`
+    # (the Coder's summarized diff), not `diff_summary`/`files_changed`. P3
+    # remains the property under test (no Coder history field).
     assert "diff" in payload
-    # AUSENTE (P3): nada do historico/instrucoes do Coder
+    # ABSENT (P3): nothing from the Coder's history/instructions
     for forbidden in ("instructions", "clarification_notes", "objections",
                       "model_override", "files_changed", "sandbox_id"):
         assert forbidden not in payload, f"L2 recebeu '{forbidden}' — viola P3"
@@ -106,7 +106,7 @@ async def test_l2_objections_cycle_back_to_coder_then_pass(time_skipping_env):
     work_item_id = new_work_item_id("l2obj")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    state = FakeControlPlane(plan_risk_class="low", l2_fail_times=1)  # objeta 1x, depois passa
+    state = FakeControlPlane(plan_risk_class="low", l2_fail_times=1)  # objects once, then passes
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(time_skipping_env.client, task_queue=task_queue,
@@ -123,8 +123,8 @@ async def test_l2_objections_cycle_back_to_coder_then_pass(time_skipping_env):
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    assert state.l2_calls == 2       # objetou, depois aprovou
-    assert state.coder_turn_calls == 2  # a objecao voltou ao Coder
+    assert state.l2_calls == 2       # objected, then approved
+    assert state.coder_turn_calls == 2  # the objection went back to the Coder
     actions = read_audit_actions(work_item_id)
     assert "l2_objections_raised" in actions
     assert "l2_changes_requested" in actions
@@ -135,7 +135,7 @@ async def test_l2_objections_exhaust_cap_and_escalate(time_skipping_env):
     work_item_id = new_work_item_id("l2cap")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    state = FakeControlPlane(plan_risk_class="low", l2_fail_times=999)  # sempre objeta
+    state = FakeControlPlane(plan_risk_class="low", l2_fail_times=999)  # always objects
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(time_skipping_env.client, task_queue=task_queue,
@@ -150,6 +150,6 @@ async def test_l2_objections_exhaust_cap_and_escalate(time_skipping_env):
         result = await handle.result()
 
     assert result.status == WorkItemStatus.escalated.value
-    assert state.finalize_calls == 0  # nunca finalizou PR com objecoes abertas (P6)
+    assert state.finalize_calls == 0  # never finalized a PR with open objections (P6)
     actions = read_audit_actions(work_item_id)
     assert "escalated" in actions

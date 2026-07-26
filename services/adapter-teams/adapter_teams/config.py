@@ -1,17 +1,17 @@
-"""Configuração do adapter Teams — credenciais e parâmetros.
+"""Teams adapter configuration — credentials and parameters.
 
-Mesma convenção dos outros adapters WS-A (WSA-E2-T1): backend de secrets do
-WS-F (`dse_secrets`) PRIMEIRO se disponível/responder, senão cai para env var
-local. Sem tenant Teams real nesta sessão, o path do Vault (`dse/teams/webhook`,
-`dse/teams/bot`) não tem versão gravada e a leitura cai (via
-`VaultUnavailableError`) para as env vars abaixo — preenchidas com valores de
-teste local para rodar as fixtures.
+Same convention as the other WS-A adapters (WSA-E2-T1): the WS-F secrets backend
+(`dse_secrets`) FIRST if available/responsive, otherwise fall back to a local env
+var. With no real Teams tenant in this session, the Vault paths
+(`dse/teams/webhook`, `dse/teams/bot`) have no version written and the read falls
+back (via `VaultUnavailableError`) to the env vars below — filled with local test
+values so the fixtures can run.
 
-Dois modos de credencial (o adapter suporta ambos os transportes de inbound):
-  - Outgoing webhook: `TEAMS_OUTGOING_SECRET` (Base64) — HMAC do corpo.
-  - Bot Framework (Azure Bot): `TEAMS_APP_ID` + `TEAMS_APP_PASSWORD` — usados
-    para obter o bearer token do connector REST (outbound) e, na ativação, para
-    validar o JWT Bearer do inbound.
+Two credential modes (the adapter supports both inbound transports):
+  - Outgoing webhook: `TEAMS_OUTGOING_SECRET` (Base64) — HMAC of the body.
+  - Bot Framework (Azure Bot): `TEAMS_APP_ID` + `TEAMS_APP_PASSWORD` — used to
+    obtain the connector REST bearer token (outbound) and, once activated, to
+    validate the inbound JWT Bearer.
 """
 from __future__ import annotations
 
@@ -32,14 +32,14 @@ def _from_vault_or_env(vault_path: str, vault_key: str, env_var: str, default: s
 
 
 def get_tenant_id() -> str:
-    """Fallback single-tenant (mesma env var dos outros adapters). A resolução
-    real por AAD tenant guid -> tenant DSE é feita por
-    `ingest_gateway.resolve_tenant` (WSA-E1-T5) na ativação."""
+    """Single-tenant fallback (same env var as the other adapters). The real
+    resolution from AAD tenant guid -> DSE tenant is done by
+    `ingest_gateway.resolve_tenant` (WSA-E1-T5) once activated."""
     return os.environ.get("DSE_TENANT_ID", "tenant_dev")
 
 
 def get_teams_shared_secret() -> str:
-    """Secret Base64 do outgoing webhook (usado pelo HMAC de assinatura)."""
+    """Base64 secret of the outgoing webhook (used by the signature HMAC)."""
     return _from_vault_or_env("dse/teams/webhook", "shared_secret", "TEAMS_OUTGOING_SECRET")
 
 
@@ -52,7 +52,7 @@ def get_teams_app_password() -> str:
 
 
 def get_default_service_url() -> str:
-    """`serviceUrl` do Bot Framework connector (por região; ex.:
-    `https://smba.trafficmanager.net/emea/`). Em produção vem em cada Activity
-    recebida; este default é só para outbound iniciado internamente."""
+    """Bot Framework connector `serviceUrl` (per region; e.g.
+    `https://smba.trafficmanager.net/emea/`). In production it arrives on every
+    received Activity; this default is only for outbound initiated internally."""
     return _from_vault_or_env("dse/teams/bot", "service_url", "TEAMS_SERVICE_URL")

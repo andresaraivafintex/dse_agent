@@ -1,5 +1,5 @@
-# Use sempre depois do baseline seguro de piloto:
+# Always use it on top of the safe pilot baseline:
 #   helm upgrade --install ... -f values-pilot.yaml -f values-production.yaml \
 #     -f values-<tenant>.yaml
-# As mesmas validações fail-closed são aplicadas; production não relaxa gates.
+# The same fail-closed validations apply; production relaxes no gate.
 deploymentProfile: production

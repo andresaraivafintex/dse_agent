@@ -1,24 +1,23 @@
-"""Abstração de execução de comando dentro do sandbox.
+"""Abstraction for running a command inside the sandbox.
 
-`dse_contracts.activities.SandboxHandle` (dono: WS-C) só carrega os dados do
-handle (sandbox_id, container_id, branch...) — não expõe um jeito de rodar
-comando. WS-E precisa disso para o pipeline L1 (WSE-E1-T1: lint/typecheck/
-test/build DENTRO do sandbox). Enquanto `services/sandbox-runtime` (WS-C) não
-publica sua própria interface de execução, WS-E define aqui um Protocol
-mínimo (`SandboxExecutor`) e duas implementações:
+`dse_contracts.activities.SandboxHandle` (owner: WS-C) only carries the handle's
+data (sandbox_id, container_id, branch...) — it does not expose a way to run a
+command. WS-E needs that for the L1 pipeline (WSE-E1-T1: lint/typecheck/test/
+build INSIDE the sandbox). Until `services/sandbox-runtime` (WS-C) publishes its
+own execution interface, WS-E defines a minimal Protocol (`SandboxExecutor`)
+here plus two implementations:
 
-  - `DockerExecSandbox`  — real: `docker exec <container_id> ...`. Funciona
-    assim que WS-C provisionar o container e popular `SandboxHandle.container_id`
-    — não depende de nenhum código do WS-C além desse campo, que já está no
-    contrato publicado.
-  - `LocalFakeSandbox`   — modo local/teste: roda o mesmo comando via
-    `subprocess` num diretório local (sem Docker), para permitir testar toda
-    a lógica do pipeline L1 antes do WS-C entregar o runtime real.
+  - `DockerExecSandbox`  — real: `docker exec <container_id> ...`. Works as soon
+    as WS-C provisions the container and populates `SandboxHandle.container_id` —
+    it depends on no WS-C code beyond that field, which is already in the
+    published contract.
+  - `LocalFakeSandbox`   — local/test mode: runs the same command via
+    `subprocess` in a local directory (no Docker), so the whole L1 pipeline logic
+    can be tested before WS-C ships the real runtime.
 
-Se `services/sandbox-runtime` publicar mais tarde uma interface de execução
-mais rica (ex.: streaming, timeout nativo), troque só a implementação de
-`DockerExecSandbox` — a interface `SandboxExecutor` e o pipeline L1 que a
-consome não mudam.
+If `services/sandbox-runtime` later publishes a richer execution interface (e.g.
+streaming, native timeout), swap only the `DockerExecSandbox` implementation —
+the `SandboxExecutor` interface and the L1 pipeline that consumes it do not change.
 """
 from __future__ import annotations
 
@@ -47,7 +46,7 @@ class SandboxExecutor(Protocol):
 
 
 class DockerExecSandbox:
-    """Executa comandos via `docker exec` no container do sandbox (WS-C)."""
+    """Runs commands via `docker exec` in the sandbox container (WS-C)."""
 
     def __init__(self, container_id: str, default_cwd: str = "/workspace/repo"):
         self.container_id = container_id
@@ -73,15 +72,15 @@ class DockerExecSandbox:
 
 
 class KubectlExecSandbox:
-    """Executa comandos via ``kubectl exec`` no Pod de sandbox (driver K8s).
+    """Runs commands via ``kubectl exec`` in the sandbox Pod (K8s driver).
 
-    Espelha ``DockerExecSandbox`` para o runtime K8s: no driver K8s o
-    ``SandboxHandle.container_id`` é o NOME do Pod (ver ``activities.py``,
-    ``container_id = driver.sandbox_id_for``). Roda a partir do worker do
-    orchestrator, que tem ``kubectl`` e RBAC de ``pods/exec`` no namespace do
-    sandbox (least-privilege verificado). ``kubectl exec`` não tem flag de
-    working-dir, então embrulhamos em ``sh -c 'cd <cwd> && exec <argv>'`` com
-    cada argumento devidamente escapado.
+    Mirrors ``DockerExecSandbox`` for the K8s runtime: under the K8s driver,
+    ``SandboxHandle.container_id`` is the Pod NAME (see ``activities.py``,
+    ``container_id = driver.sandbox_id_for``). Runs from the orchestrator worker,
+    which has ``kubectl`` and ``pods/exec`` RBAC in the sandbox namespace
+    (least-privilege, verified). ``kubectl exec`` has no working-dir flag, so we
+    wrap the command in ``sh -c 'cd <cwd> && exec <argv>'`` with every argument
+    properly quoted.
     """
 
     def __init__(
@@ -123,11 +122,11 @@ class KubectlExecSandbox:
 
 
 class LocalFakeSandbox:
-    """Modo local/teste: roda o comando diretamente num diretório local, sem
-    Docker. Usado pelos testes de `dse_validation` para provar a lógica do
-    pipeline L1 (parsing de findings, diff-budget, forbidden-paths) contra
-    execuções REAIS de bandit/ruff/pytest/git (não mocka a ferramenta, só o
-    isolamento de container que o WS-C ainda não publicou)."""
+    """Local/test mode: runs the command directly in a local directory, without
+    Docker. Used by the `dse_validation` tests to prove the L1 pipeline logic
+    (finding parsing, diff-budget, forbidden-paths) against REAL bandit/ruff/
+    pytest/git executions (it does not mock the tool, only the container
+    isolation that WS-C has not published yet)."""
 
     def __init__(self, repo_dir: str | Path):
         self.repo_dir = Path(repo_dir)
@@ -154,20 +153,20 @@ class LocalFakeSandbox:
 
 
 def executor_for_handle(sandbox_handle, repo_dir: str = "/workspace/repo") -> SandboxExecutor:
-    """Resolve o executor real a partir de um `SandboxHandle` (WS-C). Usado
-    pelo wrapper de Activity (`activities.py`) — os testes chamam a lógica
-    core diretamente com um `LocalFakeSandbox` injetado, sem passar por aqui.
+    """Resolves the real executor from a `SandboxHandle` (WS-C). Used by the
+    Activity wrapper (`activities.py`) — the tests call the core logic directly
+    with an injected `LocalFakeSandbox`, without going through here.
     """
-    # S7 (Fase 5) — modo IN-PROCESS do PoC. Quando o substrato do agente roda no
-    # processo do control-plane (claude-agent-sdk no orchestrator, não DENTRO do
-    # container efêmero), o código real vive no workspace LOCAL
-    # (`$DSE_SANDBOX_STATE_DIR/<wi>/workspace`) — o clone, o Coder e o checkpoint
-    # rodam todos ali. O `/workspace` do container fica VAZIO (docker-out-of-
-    # docker: o daemon monta um path do host que não corresponde ao path interno
-    # do orchestrator). Logo L1 e finalize (git push) TÊM que operar nesse
-    # workspace local, via subprocesso. PRODUÇÃO (agente DENTRO do container)
-    # mantém o DockerExec — este ramo é gated por env e é OFF por default, então
-    # não muda o comportamento de produção nem dos testes do WS-C/WS-E.
+    # S7 (Phase 5) — the PoC's IN-PROCESS mode. When the agent substrate runs in
+    # the control-plane process (claude-agent-sdk in the orchestrator, not INSIDE
+    # the ephemeral container), the real code lives in the LOCAL workspace
+    # (`$DSE_SANDBOX_STATE_DIR/<wi>/workspace`) — clone, Coder and checkpoint all
+    # run there. The container's `/workspace` is EMPTY (docker-out-of-docker: the
+    # daemon mounts a host path that does not match the orchestrator's internal
+    # path). So L1 and finalize (git push) MUST operate on that local workspace,
+    # via subprocess. PRODUCTION (agent INSIDE the container) keeps DockerExec —
+    # this branch is env-gated and OFF by default, so it changes neither
+    # production behavior nor the WS-C/WS-E tests.
     deployment_profile = os.environ.get("DSE_DEPLOYMENT_PROFILE", "dev").strip().lower()
     inprocess = os.environ.get("DSE_SANDBOX_INPROCESS", "0").strip().lower() in {
         "1",
@@ -176,27 +175,27 @@ def executor_for_handle(sandbox_handle, repo_dir: str = "/workspace/repo") -> Sa
     }
     if deployment_profile in {"pilot", "prod", "production"} and inprocess:
         raise RuntimeError(
-            "perfil production recusa DSE_SANDBOX_INPROCESS: L1 deve executar "
-            "no sandbox isolado"
+            "production profile refuses DSE_SANDBOX_INPROCESS: L1 must run "
+            "in the isolated sandbox"
         )
     if inprocess:
         wi = getattr(sandbox_handle, "work_item_id", None)
         if not wi:
-            raise RuntimeError("DSE_SANDBOX_INPROCESS=1 exige SandboxHandle com work_item_id")
+            raise RuntimeError("DSE_SANDBOX_INPROCESS=1 requires a SandboxHandle with work_item_id")
         state_dir = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
         local_ws = Path(state_dir) / wi / "workspace"
         return LocalFakeSandbox(local_ws)
-    # Driver K8s (POC/produção isolada): o agente roda DENTRO do Pod de sandbox;
-    # o "container_id" do handle é o NOME do Pod. L1/finalize devem operar nesse
-    # Pod via `kubectl exec` — não `docker exec` (não há Docker no node). O
-    # default_cwd do runtime K8s é /workspace (onde o runner clona), não
-    # /workspace/repo (layout docker). Gated pelo mesmo env do driver.
+    # K8s driver (PoC/isolated production): the agent runs INSIDE the sandbox Pod;
+    # the handle's "container_id" is the Pod NAME. L1/finalize must operate on
+    # that Pod via `kubectl exec` — not `docker exec` (there is no Docker on the
+    # node). The K8s runtime's default_cwd is /workspace (where the runner clones),
+    # not /workspace/repo (docker layout). Gated by the driver's own env var.
     driver = os.environ.get("DSE_SANDBOX_DRIVER", "").strip().lower()
     if driver in {"k8s", "kubernetes"} and getattr(sandbox_handle, "container_id", None):
         return KubectlExecSandbox(sandbox_handle.container_id)
     if getattr(sandbox_handle, "container_id", None):
         return DockerExecSandbox(sandbox_handle.container_id, default_cwd=repo_dir)
     raise RuntimeError(
-        "SandboxHandle sem container_id — WS-C ainda não provisionou o sandbox real; "
-        "use LocalFakeSandbox explicitamente em testes/dev."
+        "SandboxHandle without container_id — WS-C has not provisioned the real sandbox yet; "
+        "use LocalFakeSandbox explicitly in tests/dev."
     )

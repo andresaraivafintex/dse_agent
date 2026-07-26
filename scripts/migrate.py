@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Aplica migrações SQL puras em migrations/*.sql em ordem lexicográfica.
+"""Applies plain SQL migrations from migrations/*.sql in lexicographic order.
 
-Idempotente: cada arquivo aplicado é registrado em schema_migrations e nunca
-reaplicado. Sem framework de migration (P7 boring-first) — os próprios .sql
-são idempotentes internamente (IF NOT EXISTS / ON CONFLICT) para permitir
-reexecução manual segura durante desenvolvimento.
+Idempotent: every applied file is recorded in schema_migrations and never
+re-applied. No migration framework (P7 boring-first) — the .sql files are
+themselves internally idempotent (IF NOT EXISTS / ON CONFLICT) so they can be
+safely re-run by hand during development.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 def main() -> int:
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not files:
-        print("Nenhuma migração encontrada em", MIGRATIONS_DIR)
+        print("No migration found in", MIGRATIONS_DIR)
         return 0
 
     conn = psycopg2.connect(DSN)
@@ -43,7 +43,7 @@ def main() -> int:
                 )
                 already = cur.fetchone() is not None
             if already:
-                print(f"skip  {f.name} (já aplicada)")
+                print(f"skip  {f.name} (already applied)")
                 continue
             print(f"apply {f.name}")
             sql = f.read_text()
@@ -60,7 +60,7 @@ def main() -> int:
         raise
     finally:
         conn.close()
-    print("Migrações em dia.")
+    print("Migrations up to date.")
     return 0
 
 

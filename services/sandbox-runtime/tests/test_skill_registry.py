@@ -1,10 +1,11 @@
-"""WSC-E4-T1: skill registry bootstrap + leitura consumida pelo Planner.
+"""WSC-E4-T1: skill registry bootstrap + the read consumed by the Planner.
 
-Contra Postgres real (migração 0010_wsc2 aplicada + seed). Prova:
-  - só skills `status='approved'` são lidas (rascunho `draft-not-ready` nunca);
-  - isolamento por tenant rigoroso (dev não vê acme-bank e vice-versa),
-    inclusive para um tenant recém-criado dinamicamente no teste;
-  - o filtro por task_class respeita `applies_to`/'default'.
+Against real Postgres (migration 0010_wsc2 applied + seed). Proves:
+  - only `status='approved'` skills are read (the `draft-not-ready` draft never
+    is);
+  - strict per-tenant isolation (dev does not see acme-bank and vice versa),
+    including for a tenant created dynamically inside the test;
+  - the task_class filter honors `applies_to`/'default'.
 """
 from __future__ import annotations
 
@@ -16,21 +17,21 @@ from sandbox_runtime.skill_registry import Skill, read_approved_skills
 
 def test_reads_only_approved_skills_for_tenant(pg_conn):
     keys = {s.skill_key for s in read_approved_skills("dev", conn=pg_conn)}
-    assert "draft-not-ready" not in keys, "rascunho (draft) não deve ser lido pelo Planner"
+    assert "draft-not-ready" not in keys, "a draft must not be read by the Planner"
     assert {"pci-dss-logging", "migrations-reversible", "idempotent-webhooks"} <= keys
 
 
 def test_tenant_isolation_seeded(pg_conn):
     dev = {s.skill_key for s in read_approved_skills("dev", conn=pg_conn)}
     acme = {s.skill_key for s in read_approved_skills("acme-bank", conn=pg_conn)}
-    assert "acme-naming" not in dev, "skill de acme-bank vazou para dev"
-    assert "pci-dss-logging" not in acme, "skill de dev vazou para acme-bank"
+    assert "acme-naming" not in dev, "an acme-bank skill leaked into dev"
+    assert "pci-dss-logging" not in acme, "a dev skill leaked into acme-bank"
     assert acme == {"acme-naming"}
 
 
 def test_tenant_isolation_dynamic(pg_conn):
-    """Cria dois tenants novos com skills homônimas e prova que a leitura de um
-    nunca traz a do outro."""
+    """Creates two fresh tenants with same-named skills and proves that reading
+    one never brings back the other's."""
     t_a = f"iso-a-{uuid.uuid4().hex[:8]}"
     t_b = f"iso-b-{uuid.uuid4().hex[:8]}"
     with pg_conn, pg_conn.cursor() as cur:
@@ -51,7 +52,7 @@ def test_tenant_isolation_dynamic(pg_conn):
 
 
 def test_task_class_filter(pg_conn):
-    # pci-dss-logging aplica-se a ["payments","default"] → aparece para payments.
+    # pci-dss-logging applies to ["payments","default"] → shows up for payments.
     pay = {s.skill_key for s in read_approved_skills("dev", task_class="payments", conn=pg_conn)}
     assert "pci-dss-logging" in pay
 

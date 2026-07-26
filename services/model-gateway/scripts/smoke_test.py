@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Smoke test de "upgrade simulado" do LiteLLM (WSD-E1-T1).
+"""LiteLLM "simulated upgrade" smoke test (WSD-E1-T1).
 
-Procedimento de upgrade documentado:
-  1. Rode este script UMA VEZ contra a versão pinada atual com `--record`
-     para gravar a baseline em `scripts/smoke_baseline.json`.
-  2. Para testar um upgrade: edite o digest da imagem em
-     `docker-compose.wsd.yml` (WS-D) para a nova versão candidata.
+Documented upgrade procedure:
+  1. Run this script ONCE against the currently pinned version with `--record`
+     to write the baseline into `scripts/smoke_baseline.json`.
+  2. To test an upgrade: edit the image digest in `docker-compose.wsd.yml`
+     (WS-D) to the new candidate version.
   3. `docker compose -f docker-compose.wsd.yml up -d --force-recreate model-gateway`
-  4. Rode este script SEM `--record` — ele compara a resposta atual
-     byte-a-byte (conteúdo determinístico do modelo eco + shape da resposta)
-     contra a baseline gravada. Qualquer diferença = regressão do proxy
-     (roteamento, serialização, headers de custo) — decline-never-truncate
-     (P6): o script sai com código != 0, nunca "continua mesmo assim".
-  5. Só promova o novo digest depois de rodar a suíte pytest completa E este
-     smoke test batendo limpo.
+  4. Run this script WITHOUT `--record` — it compares the current response byte
+     for byte (the echo model's deterministic content + the response shape)
+     against the recorded baseline. Any difference = a proxy regression
+     (routing, serialization, cost headers) — decline-never-truncate (P6): the
+     script exits with a non-zero code, never "carries on anyway".
+  5. Only promote the new digest after running the full pytest suite AND this
+     smoke test coming out clean.
 
-Determinismo: o modelo eco (echo_provider/server.py) não usa relógio nem
-RNG — a MESMA entrada sempre produz a MESMA saída, então qualquer diff aqui
-é 100% atribuível ao LiteLLM em si (proxy), não a variabilidade de um LLM
-real. Isso é o que torna esta comparação byte-a-byte válida.
+Determinism: the echo model (echo_provider/server.py) uses neither a clock nor
+RNG — the SAME input always produces the SAME output, so any diff here is 100%
+attributable to LiteLLM itself (the proxy), not to a real LLM's variability.
+That is what makes this byte-for-byte comparison valid.
 """
 from __future__ import annotations
 
@@ -67,15 +67,15 @@ def main() -> int:
 
     if args.record or not BASELINE_PATH.exists():
         BASELINE_PATH.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
-        print(f"[smoke_test] baseline gravada em {BASELINE_PATH}")
+        print(f"[smoke_test] baseline written to {BASELINE_PATH}")
         print(json.dumps(current, indent=2, sort_keys=True))
         return 0
 
     baseline = json.loads(BASELINE_PATH.read_text())
-    # chat_id é determinístico por conteúdo do request, mas embute detalhes
-    # de implementação do LiteLLM (routing) que podem mudar de forma
-    # inofensiva entre versões — comparamos separadamente e não falhamos
-    # smoke test só por causa dele (falha real é conteúdo/shape/status).
+    # chat_id is deterministic per request content, but it embeds LiteLLM
+    # implementation details (routing) that can change harmlessly between
+    # versions — we compare it separately and do not fail the smoke test just
+    # because of it (a real failure is content/shape/status).
     baseline_stable = {k: v for k, v in baseline.items() if k != "chat_id"}
     current_stable = {k: v for k, v in current.items() if k != "chat_id"}
 
@@ -85,7 +85,7 @@ def main() -> int:
         print(f"atual:    {json.dumps(current_stable, indent=2, sort_keys=True)}", file=sys.stderr)
         return 1
 
-    print("[smoke_test] OK — resposta idêntica à baseline")
+    print("[smoke_test] OK — response identical to the baseline")
     return 0
 
 

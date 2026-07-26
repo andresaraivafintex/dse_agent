@@ -1,11 +1,11 @@
--- Fintex DSE — Plano 08 §A — classe da tarefa (taxonomia determinística).
--- Alimenta o ROI (horas humanas por classe) e os gráficos "por categoria" do
--- Analytics. Classificada na admissão por label (GitHub) / issue-type (Jira);
--- nenhum LLM decide (P1). Migração aditiva e idempotente.
+-- Fintex DSE — Plan 08 §A — task class (deterministic taxonomy).
+-- Feeds the ROI (human hours per class) and the "by category" charts in
+-- Analytics. Classified at admission by label (GitHub) / issue-type (Jira);
+-- no LLM decides (P1). Additive and idempotent migration.
 
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS task_class TEXT NOT NULL DEFAULT 'chore';
 
--- Vocabulário fechado (defesa em profundidade; o classificador só emite estes).
+-- Closed vocabulary (defense in depth; the classifier only emits these).
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'work_items_task_class_check') THEN

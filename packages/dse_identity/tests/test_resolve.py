@@ -1,4 +1,4 @@
-"""Requer `make up && make migrate` rodando (Postgres real)."""
+"""Requires `make up && make migrate` running (real Postgres)."""
 import uuid
 
 from dse_identity import resolve_principal

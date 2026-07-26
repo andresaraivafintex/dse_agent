@@ -1,11 +1,11 @@
-"""Fase 3 (plano 09) — budget hook FAIL-CLOSED com degradação limitada.
+"""Phase 3 (plano 09) — FAIL-CLOSED budget hook with bounded degradation.
 
-As quatro células da matriz (DB ok/fora × cache fresco/vencido) + o chaos de
-conexão real. Antes: blip de Postgres = fail-open silencioso (kill-switch e
-teto de tenant não seguravam a chamada). Agora: DB fora serve o último
-veredito BOM dentro do hard TTL (contado e logado) e, sem veredito fresco,
-BLOQUEIA a chamada DSE com erro retryable — chamada sem contexto DSE nunca é
-bloqueada por indisponibilidade.
+The four cells of the matrix (DB up/down × cache fresh/stale) + the real
+connection chaos. Before: a Postgres blip = silent fail-open (kill-switch and
+tenant cap did not hold the call back). Now: a DB that is down serves the last
+GOOD verdict within the hard TTL (counted and logged) and, with no fresh
+verdict, BLOCKS the DSE call with a retryable error — a call with no DSE
+context is never blocked by unavailability.
 """
 from __future__ import annotations
 
@@ -42,13 +42,13 @@ def ids():
 def test_db_down_with_fresh_allowed_verdict_serves_cache_visibly(ids):
     tid, wid = ids
     degraded_before = hook.DEGRADED_DECISIONS
-    # semeia o cache com um veredito REAL (DB ok, dentro do budget)
+    # seeds the cache with a REAL verdict (DB up, within budget)
     allowed, _, reason = evaluate_gate(tid, wid)
     assert allowed and reason == "ok"
 
     allowed, error, _ = evaluate_gate(tid, wid, connect=_down)
-    assert allowed and error == ""  # degradou para o último veredito bom
-    assert hook.DEGRADED_DECISIONS == degraded_before + 1  # visível, nunca silencioso
+    assert allowed and error == ""  # degraded to the last good verdict
+    assert hook.DEGRADED_DECISIONS == degraded_before + 1  # visible, never silent
 
 
 def test_db_down_with_cached_block_stays_blocked(ids):
@@ -65,7 +65,7 @@ def test_db_down_with_cached_block_stays_blocked(ids):
     allowed, error, _ = evaluate_gate(tid, wid)
     assert not allowed and error == "kill_switch_active"
 
-    # DB cai: o freio CONTINUA puxado (veredito de bloqueio também é cacheado)
+    # DB goes down: the brake STAYS pulled (a blocking verdict is cached too)
     allowed, error, _ = evaluate_gate(tid, wid, connect=_down)
     assert not allowed and error == "kill_switch_active"
 
@@ -86,7 +86,7 @@ def test_db_down_with_stale_cache_blocks_fail_closed(ids):
     allowed, _, _ = evaluate_gate(tid, wid, now=lambda: t0)
     assert allowed
 
-    # relógio avança além do hard TTL com o DB fora → cache vencido não vale
+    # clock moves past the hard TTL with the DB down -> a stale cache is not valid
     beyond = t0 + hook.HARD_TTL_S + 1
     allowed, error, _ = evaluate_gate(tid, wid, connect=_down, now=lambda: beyond)
     assert not allowed and error == "budget_enforcement_unavailable"
@@ -98,13 +98,13 @@ def test_no_dse_context_never_blocked_by_unavailability():
 
 
 def test_real_connection_failure_is_bounded_and_fail_closed(ids, monkeypatch):
-    """Chaos real de conexão: DSN apontando para porta morta — o psycopg2
-    falha DENTRO do connect_timeout (um Postgres inacessível não pendura o
-    pre-call do proxy) e a decisão é fail-closed."""
+    """Real connection chaos: DSN pointing at a dead port — psycopg2 fails
+    WITHIN connect_timeout (an unreachable Postgres does not hang the proxy's
+    pre-call) and the decision is fail-closed."""
     tid, wid = ids
     monkeypatch.setattr(hook, "_DSN", "postgresql://x:x@127.0.0.1:59999/dse")
     started = time.monotonic()
     allowed, error, _ = evaluate_gate(tid, wid)
     elapsed = time.monotonic() - started
     assert not allowed and error == "budget_enforcement_unavailable"
-    assert elapsed < hook.CONNECT_TIMEOUT_S + 3  # limitado, nunca pendurado
+    assert elapsed < hook.CONNECT_TIMEOUT_S + 3  # bounded, never hung

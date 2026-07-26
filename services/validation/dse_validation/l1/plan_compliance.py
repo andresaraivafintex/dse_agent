@@ -1,8 +1,8 @@
-"""Conformidade do patch contra plano e SHAs imutáveis.
+"""Patch compliance against the plan and immutable SHAs.
 
-O diff é sempre ``base_sha...head_sha``. Nomes de branch são mutáveis e
-podem nem existir no clone do sandbox; aceitá-los aqui foi a causa da
-regressão em que ``main...HEAD`` prendia o WorkItem.
+The diff is always ``base_sha...head_sha``. Branch names are mutable and may
+not even exist in the sandbox clone; accepting them here was the cause of the
+regression where ``main...HEAD`` got the WorkItem stuck.
 """
 from __future__ import annotations
 
@@ -38,11 +38,11 @@ _FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 def _verify_commit(executor: SandboxExecutor, sha: str, label: str, timeout: int) -> None:
     if not _FULL_GIT_SHA_RE.fullmatch(sha):
         raise DiffComputationError(
-            f"{label} deve ser um SHA Git completo de 40 ou 64 caracteres hexadecimais"
+            f"{label} must be a full Git SHA of 40 or 64 hexadecimal characters"
         )
     result = executor.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], timeout=timeout)
     if not result.ok:
-        raise DiffComputationError(f"{label}={sha} não existe como commit no sandbox")
+        raise DiffComputationError(f"{label}={sha} does not exist as a commit in the sandbox")
 
 
 def compute_diff_summary(
@@ -51,10 +51,10 @@ def compute_diff_summary(
     head_sha: str,
     timeout: int = 60,
 ) -> DiffSummary:
-    """``git diff --numstat <base_sha>...<head_sha>`` dentro do sandbox — soma
-    linhas adicionadas+removidas por arquivo (arquivos binários reportam
-    "-" no numstat; contamos como arquivo tocado mas 0 linhas, para não
-    quebrar em diffs com assets)."""
+    """``git diff --numstat <base_sha>...<head_sha>`` inside the sandbox — sums
+    added+removed lines per file (binary files report "-" in the numstat; we
+    count them as a touched file but 0 lines, so diffs with assets don't
+    break)."""
     _verify_commit(executor, base_sha, "base_sha", timeout)
     _verify_commit(executor, head_sha, "head_sha", timeout)
     result = executor.run(
@@ -62,7 +62,7 @@ def compute_diff_summary(
     )
     if result.returncode != 0:
         raise DiffComputationError(
-            f"git diff --numstat falhou (exit={result.returncode}): {result.stderr.strip()}"
+            f"git diff --numstat failed (exit={result.returncode}): {result.stderr.strip()}"
         )
     files: list[str] = []
     total = 0
@@ -95,51 +95,51 @@ def _is_forbidden(path: str, forbidden_paths: list[str]) -> str | None:
 
 
 def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
-    # no_code_change: o plano declara que NÃO há mudança de código, mas o diff
-    # imutável mudou arquivos — inconsistência real, reprova. (Isto NÃO é
-    # expected_files; é sobre existir OU NÃO diff.)
+    # no_code_change: the plan declares there is NO code change, but the
+    # immutable diff changed files — a real inconsistency, so it fails. (This
+    # is NOT expected_files; it is about whether a diff exists at all.)
     if plan.no_code_change and diff.files_changed:
         return L1Finding(
             check="diff_budget",
             passed=False,
             status=GateStatus.FAIL,
             detail=(
-                "PlanArtifact.no_code_change=true, mas o diff imutável "
-                f"{diff.base_sha[:12]}...{diff.head_sha[:12]} alterou {diff.files_changed}"
+                "PlanArtifact.no_code_change=true, but the immutable diff "
+                f"{diff.base_sha[:12]}...{diff.head_sha[:12]} changed {diff.files_changed}"
             ),
         )
 
-    # DECISÃO DO OPERADOR (2026-07-22, 3º disparo real): expected_files NÃO
-    # reprova mais o diff. O Planner prevê os arquivos a partir do TEXTO da
-    # issue, ANTES de ler o código; num bug-fix o defeito quase sempre mora
-    # numa camada diferente da que o sintoma sugere (a issue falava de
-    # DELETE /api/transactions → server.js; o bug estava em src/store.js — o
-    # Coder acertou o arquivo e o gate reprovava a correção CERTA).
+    # OPERATOR DECISION (2026-07-22, 3rd real occurrence): expected_files no
+    # longer fails the diff. The Planner predicts files from the TEXT of the
+    # issue, BEFORE reading the code; in a bug fix the defect almost always
+    # lives in a different layer than the symptom suggests (the issue talked
+    # about DELETE /api/transactions → server.js; the bug was in src/store.js —
+    # the Coder picked the right file and the gate failed the CORRECT fix).
     #
-    # Gates de segurança que PERMANECEM (não dependem de previsão do Planner):
-    #   - orçamento de linhas (aqui): anti-sprawl real;
-    #   - forbidden_paths: check duro SEPARADO (migrations/, workflows/…);
-    #   - sandbox escopado ao repo; plano vazio barrado no workflow
-    #     (patch reject-empty-expected-files-v1), antes do L1.
-    # expected_files segue usado para CLASSIFICAR RISCO no workflow — só deixou
-    # de ser gate de igualdade do diff.
+    # Safety gates that REMAIN (they don't depend on the Planner's prediction):
+    #   - line budget (here): real anti-sprawl;
+    #   - forbidden_paths: a SEPARATE hard check (migrations/, workflows/…);
+    #   - sandbox scoped to the repo; empty plan blocked in the workflow
+    #     (patch reject-empty-expected-files-v1), before L1.
+    # expected_files is still used to CLASSIFY RISK in the workflow — it just
+    # stopped being an equality gate on the diff.
     over_budget = diff.total_lines_changed > plan.diff_budget_lines
     if not over_budget:
         return L1Finding(
             check="diff_budget",
             passed=True,
             detail=(
-                f"diff dentro do orçamento: {diff.total_lines_changed}/{plan.diff_budget_lines} "
-                f"linhas, {len(diff.files_changed)} arquivo(s) "
-                "(expected_files é advisory; forbidden_paths valida os caminhos)"
+                f"diff within budget: {diff.total_lines_changed}/{plan.diff_budget_lines} "
+                f"lines, {len(diff.files_changed)} file(s) "
+                "(expected_files is advisory; forbidden_paths validates the paths)"
             ),
         )
     return L1Finding(
         check="diff_budget",
         passed=False,
         detail=(
-            f"diff de {diff.total_lines_changed} linhas excede "
-            f"diff_budget_lines={plan.diff_budget_lines} do PlanArtifact"
+            f"diff of {diff.total_lines_changed} lines exceeds the PlanArtifact's "
+            f"diff_budget_lines={plan.diff_budget_lines}"
         ),
     )
 
@@ -155,11 +155,11 @@ def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
         return L1Finding(
             check="forbidden_paths",
             passed=True,
-            detail=f"nenhum arquivo tocado sob forbidden_paths do plano ({plan.forbidden_paths})",
+            detail=f"no file touched under the plan's forbidden_paths ({plan.forbidden_paths})",
         )
 
     detail = "; ".join(
-        f"{f} está sob path proibido pelo PlanArtifact.forbidden_paths='{hit}'" for f, hit in violations
+        f"{f} is under a path forbidden by PlanArtifact.forbidden_paths='{hit}'" for f, hit in violations
     )
     return L1Finding(check="forbidden_paths", passed=False, detail=detail)
 

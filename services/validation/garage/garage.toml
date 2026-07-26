@@ -1,7 +1,7 @@
-# WSE-E5-T12 — Garage (artifact store S3 self-hosted), single-node DEV layout.
-# Produção: multi-nó com replication_factor >= 2 e segredos via Vault/ESO — este
-# arquivo é o análogo local (mesma disciplina do vault dev-mode da fundação).
-# O rpc_secret/admin_token abaixo são DEV-ONLY (repo local), não segredos reais.
+# WSE-E5-T12 — Garage (self-hosted S3 artifact store), single-node DEV layout.
+# Production: multi-node with replication_factor >= 2 and secrets via Vault/ESO —
+# this file is the local analogue (same discipline as the foundation's dev-mode vault).
+# The rpc_secret/admin_token below are DEV-ONLY (local repo), not real secrets.
 
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"

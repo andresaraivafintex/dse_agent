@@ -1,6 +1,6 @@
-"""WSE-E5-T13 — visual diff REAL (Pillow pixel-diff, baseline no Garage).
-Sem SaaS; imagens geradas com Pillow, comparação e round-trip do baseline
-contra o artifact store de verdade."""
+"""WSE-E5-T13 — REAL visual diff (Pillow pixel-diff, baseline in Garage).
+No SaaS; images generated with Pillow, comparison and baseline round-trip
+against the actual artifact store."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,9 +20,9 @@ def _png(path: Path, *, rect: tuple[int, int, int, int] | None = None,
 
     img = Image.new("RGB", size, base_color)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([10, 10, 100, 60], fill=(30, 90, 200))  # elemento estável
+    draw.rectangle([10, 10, 100, 60], fill=(30, 90, 200))  # stable element
     if rect is not None:
-        draw.rectangle(list(rect), fill=(200, 30, 30))  # a "mudança visual"
+        draw.rectangle(list(rect), fill=(200, 30, 30))  # the "visual change"
     img.save(path)
     return path
 
@@ -37,7 +37,7 @@ def test_first_run_creates_baseline_in_store(work_item_id, tenant_id, tmp_path):
     )
     assert res.baseline_created is True
     assert res.passed is True
-    # a baseline está NO STORE (kind visual_baseline) e é recuperável
+    # the baseline is IN THE STORE (kind visual_baseline) and is retrievable
     assert res.diff_artifact_key.startswith(f"{work_item_id}/visual_baseline/")
     row = db.get_artifact(work_item_id, res.diff_artifact_key)
     assert row is not None and row["kind"] == "visual_baseline"
@@ -62,7 +62,7 @@ def test_identical_screenshot_passes_against_stored_baseline(work_item_id, tenan
     assert res.baseline_created is False
     assert res.passed is True
     assert res.changed_pct == 0.0
-    assert res.diff_artifact_key is None  # sem diff publicado quando passa
+    assert res.diff_artifact_key is None  # no diff published when it passes
 
 
 def test_visual_change_fails_and_publishes_diff_image(work_item_id, tenant_id, tmp_path):
@@ -84,7 +84,7 @@ def test_visual_change_fails_and_publishes_diff_image(work_item_id, tenant_id, t
     assert res.passed is False
     assert res.changed_pct > 0.1
     assert res.diff_artifact_key and res.diff_artifact_key.startswith(f"{work_item_id}/visual_diff/")
-    # a imagem de diff publicada é um PNG real e recuperável do Garage
+    # the published diff image is a real PNG and is retrievable from Garage
     url = garage.resolve_artifact_url(
         work_item_id=work_item_id, store_key=res.diff_artifact_key, accessor="user:tester"
     )
@@ -104,11 +104,11 @@ def test_different_sizes_is_structural_change_100pct(tmp_path):
 
 
 def test_encoding_noise_within_tolerance_passes(tmp_path):
-    """Tolerância por canal absorve ruído de compressão (anti-flake documentado)."""
+    """Per-channel tolerance absorbs compression noise (documented anti-flake)."""
     from PIL import Image
 
     a = tmp_path / "a.png"
     b = tmp_path / "b.png"
     Image.new("RGB", (100, 100), (100, 100, 100)).save(a)
-    Image.new("RGB", (100, 100), (104, 104, 104)).save(b)  # delta 4 < tolerância 8
+    Image.new("RGB", (100, 100), (104, 104, 104)).save(b)  # delta 4 < tolerance 8
     assert compare_images(a, b, tmp_path / "diff.png") == 0.0

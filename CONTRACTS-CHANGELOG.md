@@ -1,93 +1,93 @@
 # Contracts changelog — Fintex DSE
 
-Histórico de versões dos pacotes publicados em `packages/` (contratos
-estáveis inter-workstream, conforme `CONVENTIONS.md`). Mantido por WS-F
-(WSF-E0) como parte da fundação de CI/CD de plataforma.
+Version history for the packages published under `packages/` (stable
+cross-workstream contracts, per `CONVENTIONS.md`). Maintained by WS-F
+(WSF-E0) as part of the platform CI/CD foundation.
 
-## Regra de mudança de contrato
+## Contract change rule
 
-> **Mudança de contrato exige aprovação do arquiteto-chefe.**
+> **Contract changes require chief-architect approval.**
 
-Concretamente:
+Concretely:
 
-1. **Aditivo é sempre permitido sem aprovação prévia** (adicionar um campo
-   opcional novo, uma função nova, uma constante nova) — desde que não
-   remova, renomeie ou mude o tipo/assinatura de nada que já existe
-   (`CONVENTIONS.md`: "adicione um campo/tipo novo sem remover ou renomear o
-   que já existe"). Isto cobre a extensão de `dse_audit` feita pelo WS-F
-   nesta Fase 1 (`dse_audit.queries` — ver entrada abaixo).
-2. **Qualquer mudança breaking** (remover/renomear campo público, mudar
-   assinatura de função pública, mudar semântica de um status/enum já
-   consumido por outro workstream) requer:
-   - um PR isolado só com a mudança de contrato (nunca misturado com lógica
-     de negócio de um serviço específico);
-   - aprovação explícita do arquiteto-chefe do programa (não apenas do lead
-     do workstream que precisa da mudança) — P3 (nenhuma sessão de agente
-     aprova o próprio trabalho) se aplica aqui também: quem propõe a mudança
-     de contrato não pode ser quem a aprova;
-   - um bump de versão MAJOR (ver semver abaixo) e uma entrada nova neste
-     changelog **antes** do merge, não depois;
-   - notificação nos canais dos workstreams consumidores (ver "consumido
-     por" em cada entrada) — o merge não deve surpreender quem depende do
-     contrato.
-3. Nenhum workstream deve reimplementar um contrato já publicado (ex.: uma
-   cópia local de `ConversationEvent` ou um segundo caminho de escrita no
-   audit ledger fora de `dse_audit.emit`) — isso quebra a garantia de "fonte
-   única de verdade" que o contrato existe para prover.
+1. **Additive changes are always allowed without prior approval** (adding a
+   new optional field, a new function, a new constant) — as long as nothing
+   that already exists is removed, renamed, or has its type/signature changed
+   (`CONVENTIONS.md`: "add a new field/type without removing or renaming what
+   already exists"). This covers the `dse_audit` extension made by WS-F in
+   this Phase 1 (`dse_audit.queries` — see the entry below).
+2. **Any breaking change** (removing/renaming a public field, changing the
+   signature of a public function, changing the semantics of a status/enum
+   already consumed by another workstream) requires:
+   - an isolated PR containing only the contract change (never mixed with
+     business logic for a specific service);
+   - explicit approval from the program's chief architect (not just from the
+     lead of the workstream that needs the change) — P3 (no agent session
+     approves its own work) applies here too: whoever proposes the contract
+     change cannot be the one who approves it;
+   - a MAJOR version bump (see semver below) and a new entry in this
+     changelog **before** the merge, not after;
+   - notification in the channels of the consuming workstreams (see "consumed
+     by" in each entry) — the merge must not surprise anyone who depends on
+     the contract.
+3. No workstream should reimplement an already-published contract (e.g. a
+   local copy of `ConversationEvent`, or a second write path into the audit
+   ledger outside `dse_audit.emit`) — that breaks the "single source of
+   truth" guarantee the contract exists to provide.
 
-Versionamento: semver (`MAJOR.MINOR.PATCH`) por pacote, declarado no
-`pyproject.toml` de cada um. MAJOR = breaking; MINOR = aditivo; PATCH = fix
-sem mudança de superfície pública.
+Versioning: semver (`MAJOR.MINOR.PATCH`) per package, declared in each one's
+`pyproject.toml`. MAJOR = breaking; MINOR = additive; PATCH = fix with no
+change to the public surface.
 
-## Pacotes e versões atuais
+## Packages and current versions
 
-| Pacote | Versão | Dono | Consumido por |
+| Package | Version | Owner | Consumed by |
 |---|---|---|---|
-| `dse_contracts` (`packages/contracts`) | 0.1.0 | Fundação | WS-A, WS-B, WS-C, WS-D, WS-E, WS-F |
-| `dse_audit` (`packages/dse_audit`) | 0.1.0 | Fundação (mínimo) → **estendido pelo WS-F na Fase 1** | Todos (via `emit`); `dse_audit.queries` (reconstrução/export) consumido por qualquer serviço/relatório de compliance |
-| `dse_identity` (`packages/dse_identity`) | 0.1.0 | Fundação (mínimo) | WS-A (adapters resolvem `platform_user_id` antes de gravar `actor`) |
+| `dse_contracts` (`packages/contracts`) | 0.1.0 | Foundation | WS-A, WS-B, WS-C, WS-D, WS-E, WS-F |
+| `dse_audit` (`packages/dse_audit`) | 0.1.0 | Foundation (minimal) → **extended by WS-F in Phase 1** | Everyone (via `emit`); `dse_audit.queries` (reconstruction/export) consumed by any compliance service/report |
+| `dse_identity` (`packages/dse_identity`) | 0.1.0 | Foundation (minimal) | WS-A (adapters resolve `platform_user_id` before writing `actor`) |
 
-## Entradas
+## Entries
 
-### `dse_audit` 0.1.0 → extensão aditiva (WSF-E1-T2, sem bump de versão declarado no pyproject — ver nota abaixo)
+### `dse_audit` 0.1.0 → additive extension (WSF-E1-T2, no version bump declared in pyproject — see note below)
 
-- **O quê:** novo módulo `dse_audit/queries.py` com
+- **What:** new module `dse_audit/queries.py` with
   `reconstruct_work_item_history(work_item_id) -> list[dict]`,
-  `export_audit_range(tenant_id, start, end) -> list[dict]` e
-  `export_audit_range_csv(...) -> str`. Reexportado em `dse_audit/__init__.py`
-  junto dos símbolos já existentes (`emit`, `get_connection` — nenhum deles
-  foi removido/renomeado).
-- **Por quê:** exit criterion da Fase 1 ("first audit-based reconstruction
-  exercise passes") + export compliance-grade por tenant/período.
-- **Tipo de mudança:** aditivo (regra 1 acima) — não requer aprovação prévia
-  do arquiteto-chefe, mas **está documentado aqui para visibilidade cross-
-  workstream**, já que `packages/dse_audit` é um diretório da fundação e
-  outros workstreams podem (razoavelmente) não esperar mudanças nele.
-- **Nota de processo:** o `pyproject.toml` de `dse_audit` continua declarando
-  `version = "0.1.0"` — recomendação do WS-F para a consolidação final: bump
-  para `0.2.0` (MINOR, aditivo) no PR de integração, já que uma versão nova
-  de fato foi publicada.
-- **Consumido por:** qualquer serviço/relatório que precise responder "o que
-  aconteceu com o WorkItem X" ou produzir um export de auditoria — nenhum
-  consumidor real ainda integrado nesta sessão (cross-workstream, integração
-  na fase de consolidação).
+  `export_audit_range(tenant_id, start, end) -> list[dict]` and
+  `export_audit_range_csv(...) -> str`. Re-exported from `dse_audit/__init__.py`
+  alongside the pre-existing symbols (`emit`, `get_connection` — neither of
+  which was removed/renamed).
+- **Why:** Phase 1 exit criterion ("first audit-based reconstruction
+  exercise passes") + compliance-grade export per tenant/period.
+- **Change type:** additive (rule 1 above) — does not require prior
+  chief-architect approval, but **is documented here for cross-workstream
+  visibility**, since `packages/dse_audit` is a foundation directory and
+  other workstreams may (reasonably) not expect changes in it.
+- **Process note:** `dse_audit`'s `pyproject.toml` still declares
+  `version = "0.1.0"` — WS-F's recommendation for the final consolidation:
+  bump to `0.2.0` (MINOR, additive) in the integration PR, since a new
+  version was in fact published.
+- **Consumed by:** any service/report that needs to answer "what happened to
+  WorkItem X" or produce an audit export — no real consumer integrated yet in
+  this session (cross-workstream, integration happens in the consolidation
+  phase).
 
-### `services/platform` (dse-platform) 0.1.0 → novo pacote (WSF-E2-T3a)
+### `services/platform` (dse-platform) 0.1.0 → new package (WSF-E2-T3a)
 
-- **O quê:** `dse_secrets` — cliente do Vault (`SecretsClient`, `get_secret`,
-  `put_secret`, `delete_secret`). Não é um pacote em `packages/` porque é
-  específico do WS-F (plataforma), mas é publicado como contrato de consumo
-  estável para WS-A/WS-C/WS-D (assinatura documentada em
+- **What:** `dse_secrets` — Vault client (`SecretsClient`, `get_secret`,
+  `put_secret`, `delete_secret`). It is not a package under `packages/`
+  because it is WS-F-specific (platform), but it is published as a stable
+  consumption contract for WS-A/WS-C/WS-D (signature documented in
   `services/platform/README.md`).
-- **Tipo de mudança:** novo pacote, não é uma mudança de contrato existente —
-  não requer aprovação do arquiteto-chefe para a v0.1.0 inicial, mas
-  mudanças futuras na assinatura pública de `SecretsClient` seguem a regra 2
-  acima assim que WS-A/WS-C/WS-D integrarem de fato.
+- **Change type:** new package, not a change to an existing contract — does
+  not require chief-architect approval for the initial v0.1.0, but future
+  changes to `SecretsClient`'s public signature follow rule 2 above as soon
+  as WS-A/WS-C/WS-D actually integrate.
 
-## Como propor uma mudança breaking
+## How to propose a breaking change
 
-1. Abra uma issue/PR descrevendo o campo/assinatura afetado, por que o
-   aditivo não é suficiente, e todos os consumidores conhecidos.
-2. Marque o arquiteto-chefe do programa para revisão.
-3. Após aprovação, faça o bump de versão + esta entrada no changelog no
-   mesmo PR do contrato (antes de qualquer PR que dependa da mudança).
+1. Open an issue/PR describing the affected field/signature, why an additive
+   change is not sufficient, and every known consumer.
+2. Tag the program's chief architect for review.
+3. After approval, do the version bump + this changelog entry in the same PR
+   as the contract change (before any PR that depends on the change).

@@ -1,17 +1,18 @@
-"""RemoteSubstrate — o turno do Coder executando DENTRO do sandbox (Fase 1).
+"""RemoteSubstrate — the Coder turn running INSIDE the sandbox (Fase 1).
 
-Implementa a MESMA interface `AgentSubstrate` dos substratos in-process, mas
-`run_turn` nunca toca o SDK do agente: serializa um `AgentTurnRequest` (contrato
-tipado do dse_contracts) e o despacha via `SandboxDriver.execute_stage` — que o
-entrega ao agent-runner dentro do container (`docker exec -i`, dev) ou do Pod
-(`kubectl exec -i`, cluster). O código de workflow/Activity não muda de forma:
-a troca in-process ↔ isolado é seleção de deployment (`DSE_SANDBOX_INPROCESS`),
-exatamente como a troca de substrato (`DSE_CODER_SUBSTRATE`).
+Implements the SAME `AgentSubstrate` interface as the in-process substrates, but
+`run_turn` never touches the agent SDK: it serializes an `AgentTurnRequest`
+(typed dse_contracts contract) and dispatches it through
+`SandboxDriver.execute_stage` — which hands it to the agent-runner inside the
+container (`docker exec -i`, dev) or the Pod (`kubectl exec -i`, cluster). The
+workflow/Activity code does not change shape: switching in-process ↔ isolated is
+a deployment choice (`DSE_SANDBOX_INPROCESS`), exactly like switching substrate
+(`DSE_CODER_SUBSTRATE`).
 
-O que NUNCA atravessa a fronteira: paths do host (o request leva `/workspace`,
-o caminho de DENTRO do sandbox), master key/credencial de provider (só a
-virtual key efêmera) e decisão de fluxo (o resultado é diagnóstico + custo;
-quem decide continua sendo o workflow — P1).
+What NEVER crosses the boundary: host paths (the request carries `/workspace`,
+the path as seen from INSIDE the sandbox), the master key/provider credential
+(only the ephemeral virtual key), and flow decisions (the result is diagnostics +
+cost; the workflow remains the decider — P1).
 """
 from __future__ import annotations
 
@@ -33,20 +34,21 @@ from dse_contracts import (
 from .driver import SandboxDriver, StageExecutionRequest
 from .substrate import TurnLog
 
-# URL do model-gateway ALCANÇÁVEL DE DENTRO do sandbox (rede interna
-# dse_sandbox_net / Service do cluster). O default do worker costuma ser
-# localhost — que dentro do container é o próprio container.
+# model-gateway URL REACHABLE FROM INSIDE the sandbox (the internal
+# dse_sandbox_net network / the cluster Service). The worker's default is
+# usually localhost — which, inside the container, is the container itself.
 SANDBOX_GATEWAY_URL_ENV = "DSE_SANDBOX_GATEWAY_URL"
 TURN_TIMEOUT_ENV = "DSE_CODER_TURN_TIMEOUT_S"
 
-# Caminho do workspace DENTRO do sandbox — convenção dos dois drivers
-# (bind mount no Docker, emptyDir no Pod).
+# Workspace path INSIDE the sandbox — a convention shared by both drivers
+# (bind mount on Docker, emptyDir on the Pod).
 SANDBOX_WORKSPACE_DIR = "/workspace"
 
 
 class RemoteTurnError(RuntimeError):
-    """Falha estruturada do runner (P6). `kind` vem do vocabulário fechado de
-    `AgentTurnResult.error_kind` — o chamador classifica sem substring."""
+    """Structured runner failure (P6). `kind` comes from the closed vocabulary of
+    `AgentTurnResult.error_kind` — the caller classifies without substring
+    matching."""
 
     def __init__(self, kind: str, message: str):
         super().__init__(f"[{kind}] {message}")
@@ -71,7 +73,7 @@ class RemoteSubstrate:
         self._headers: GatewayCallHeaders | None = None
         self._virtual_key = ""
         self._gateway_base_url = ""
-        self.workspace_dir: str | None = None  # host-side; NUNCA entra no request
+        self.workspace_dir: str | None = None  # host-side; NEVER goes into the request
         self.sandbox_id = ""
         self._turns: list[TurnLog] = []
         self._cost_usd = 0.0
@@ -99,7 +101,7 @@ class RemoteSubstrate:
 
     def run_turn(self, instruction: str) -> TurnLog:
         if self._headers is None:
-            raise RuntimeError("create_session precisa ser chamado antes de run_turn")
+            raise RuntimeError("create_session must be called before run_turn")
         timeout = float(os.environ.get(TURN_TIMEOUT_ENV, "900"))
         request = AgentTurnRequest(
             work_item_id=self._headers.work_item_id,
@@ -124,7 +126,7 @@ class RemoteSubstrate:
                 tenant_id=self._headers.tenant_id,
                 stage=Stage(self._stage),
                 input_payload=request.model_dump(),
-                # margem para o overhead do exec além do timeout do turno
+                # headroom for the exec overhead on top of the turn timeout
                 timeout_seconds=timeout + 60.0,
             )
         )
@@ -149,11 +151,12 @@ class RemoteSubstrate:
         return self._driver
 
     def checkpoint_sha(self, *, branch: str, phase: str) -> str:
-        """SHA atual do branch DENTRO do sandbox (checkpoint no-op quando não
-        há mudanças) — substitui o `ScopedGitSession.current_sha()` do host
-        nos runtimes onde o workspace não é visível ao worker."""
+        """Current SHA of the branch INSIDE the sandbox (the checkpoint is a
+        no-op when there are no changes) — replaces the host's
+        `ScopedGitSession.current_sha()` on runtimes where the workspace is not
+        visible to the worker."""
         if self._headers is None:
-            raise RuntimeError("create_session precisa ser chamado antes")
+            raise RuntimeError("create_session must be called first")
         out = self._driver.execute_op(
             self.sandbox_id,
             "checkpoint",
@@ -171,10 +174,10 @@ class RemoteSubstrate:
     def run_post_turn(
         self, *, branch: str, expected_files: list[str], turn_start_sha: str, commit_message: str
     ) -> PostTurnResult:
-        """Pós-turno determinístico (prune/lockfile/revert/commit/push)
-        executado DENTRO do sandbox — mesma sequência do worker no Docker."""
+        """Deterministic post-turn (prune/lockfile/revert/commit/push) executed
+        INSIDE the sandbox — same sequence the worker runs on Docker."""
         if self._headers is None:
-            raise RuntimeError("create_session precisa ser chamado antes")
+            raise RuntimeError("create_session must be called first")
         out = self._driver.execute_op(
             self.sandbox_id,
             "post_turn",
@@ -195,7 +198,7 @@ class RemoteSubstrate:
         return CoderTurnResult(
             sandbox_id=self.sandbox_id,
             diff_summary=f"{len(self._turns)} turno(s) executado(s) via RemoteSubstrate ({self._name})",
-            files_changed=[],  # quem apura é o ScopedGitSession (determinístico)
+            files_changed=[],  # ScopedGitSession is what computes this (deterministic)
             cost_usd=self._cost_usd,
             tokens_in=self._tokens_in,
             tokens_out=self._tokens_out,

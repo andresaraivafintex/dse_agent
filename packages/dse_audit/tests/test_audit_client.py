@@ -1,5 +1,5 @@
-"""Requer `make up && make migrate` rodando (Postgres real — a garantia
-append-only é estrutural, não vale mockar)."""
+"""Requires `make up && make migrate` to have run (real Postgres — the
+append-only guarantee is structural, mocking it proves nothing)."""
 import uuid
 
 import psycopg2
@@ -9,9 +9,9 @@ from dse_audit import emit, get_connection
 
 @pytest.fixture()
 def tenant():
-    # tenant único por teste: dse_app não tem DELETE (é o ponto do teste de
-    # imutabilidade), então não há limpeza possível entre testes — isolar por
-    # tenant_id único evita qualquer necessidade de cleanup.
+    # unique tenant per test: dse_app has no DELETE (that is the whole point of
+    # the immutability test), so no cleanup between tests is possible — isolating
+    # by a unique tenant_id removes the need for any cleanup.
     return f"acme-test-{uuid.uuid4().hex[:8]}"
 
 

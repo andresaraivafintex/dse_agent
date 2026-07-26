@@ -1,99 +1,99 @@
-# ADR-25 — Cisco Webex como superfície de intake (Fintex DSE)
+# ADR-25 — Cisco Webex as an intake surface (Fintex DSE)
 
-Status: **Accepted — DE-SCOPE FORMAL (Webex fora do escopo do piloto)**. Fase 4. Autor: WS-F.
-Decisão de go/no-go executada conforme adendo 03 §Parte 2 #6 e §Parte 3 ("executar como restaurar
-atrás do adapter OU de-scope formal registrado").
+Status: **Accepted — FORMAL DE-SCOPE (Webex out of the pilot's scope)**. Phase 4. Author: WS-F.
+Go/no-go decision executed per addendum 03 §Part 2 #6 and §Part 3 ("either implement it behind the
+adapter OR record a formal de-scope").
 
-Nada é descartado silenciosamente — este ADR é o registro explícito exigido pelo espírito da
-disciplina de ADR: a decisão, a justificativa, e **exatamente o que reverter custaria**.
+Nothing is dropped silently — this ADR is the explicit record required by the spirit of the
+ADR discipline: the decision, the rationale, and **exactly what reverting it would cost**.
 
-## Contexto
+## Context
 
-O DSE recebe pedidos de trabalho por superfícies de chat/ticket normalizadas em um
-`ConversationEvent` (`dse_contracts.conversation_event`). A interface de adapter já está **provada
-e madura**: três adapters em produção como molde — `adapter-slack`, `adapter-github`,
-`adapter-jira` — todos com o mesmo formato (inbound com verificação de assinatura → sanitização →
-`ConversationEvent`; outbound com "exatamente 1 comentário de status mutável por surface" via
+The DSE receives work requests over chat/ticket surfaces normalized into a
+`ConversationEvent` (`dse_contracts.conversation_event`). The adapter interface is already **proven
+and mature**: three adapters in production as the mold — `adapter-slack`, `adapter-github`,
+`adapter-jira` — all with the same shape (inbound with signature verification → sanitization →
+`ConversationEvent`; outbound with "exactly 1 mutable status comment per surface" via
 `dse_contracts.mutable_comment.MutableCommentWriter`).
 
-Webex apareceu no planejamento inicial como uma quarta superfície possível de chat. A pergunta de
-go/no-go: **construir o `adapter-webex` agora, ou de-scope formal?**
+Webex appeared in the initial planning as a possible fourth chat surface. The go/no-go
+question: **build `adapter-webex` now, or formally de-scope it?**
 
-Fatos que pesam na decisão (verificados, não assumidos):
+Facts weighing on the decision (verified, not assumed):
 
-1. **Teams é a provisão de chat priorizada**, não Webex (adendo 03 §Parte 2 #7 lista o Teams
-   adapter como o escopo órfão de chat que recebe esforço; Webex não).
-2. A interface de adapter é um **molde estável** — adicionar uma superfície é mecânico, mas cada
-   adapter novo carrega custo real e recorrente: registro/rotação de segredo de webhook, um
-   esquema de assinatura próprio para atacar no red-team (`test_red_team.py::TestForgedWebhook`
-   hoje cobre Slack/GitHub; um novo precisaria de sua própria linha), um back-end de
-   `MutableCommentWriter`, mapeamento de tenant (`tenant_platform_bindings`), e uma credencial de
-   app real (item de maior lead time — adendo 03 §Parte 3).
-3. **Nenhum cliente do piloto pediu Webex.** As superfícies exigidas pelos pilotos em vista são
-   Slack e/ou GitHub e/ou Jira, com Teams como próxima provisão.
-4. Construir um adapter sem um consumidor real viola boring-first (P7): é superfície de ataque e
-   custo de manutenção sem demanda que o justifique.
+1. **Teams is the prioritized chat provision**, not Webex (addendum 03 §Part 2 #7 lists the Teams
+   adapter as the orphaned chat scope that gets effort; Webex does not).
+2. The adapter interface is a **stable mold** — adding a surface is mechanical, but each
+   new adapter carries a real, recurring cost: webhook secret registration/rotation, its
+   own signature scheme to attack in the red-team (`test_red_team.py::TestForgedWebhook`
+   covers Slack/GitHub today; a new one would need its own row), a
+   `MutableCommentWriter` back end, tenant mapping (`tenant_platform_bindings`), and a real
+   app credential (the longest-lead-time item — addendum 03 §Part 3).
+3. **No pilot client asked for Webex.** The surfaces the pilots in sight require
+   are Slack and/or GitHub and/or Jira, with Teams as the next provision.
+4. Building an adapter with no real consumer violates boring-first (P7): it is attack surface
+   and maintenance cost with no demand to justify it.
 
-## Decisão
+## Decision
 
-**De-scope formal do Webex do escopo de engenharia do piloto.** Não construir `adapter-webex`
-nesta fase nem antes do go-live do piloto. O esforço de adapter de chat disponível vai para
-**Teams** (a provisão priorizada).
+**Formally de-scope Webex from the pilot's engineering scope.** Do not build `adapter-webex`
+in this phase or before the pilot goes live. The available chat-adapter effort goes to
+**Teams** (the prioritized provision).
 
-Isto é uma decisão de **negócio/priorização**, não uma limitação técnica: a interface está pronta,
-o molde existe, e restaurar Webex é mecânico (ver "Como reverter" abaixo). O de-scope é sobre
-**não gastar esforço agora**, não sobre incapacidade.
+This is a **business/prioritization** decision, not a technical limitation: the interface is ready,
+the mold exists, and restoring Webex is mechanical (see "How to revert" below). The de-scope is about
+**not spending effort now**, not about inability.
 
-### Consequências
+### Consequences
 
-- O contrato `ConversationEvent` e a interface de adapter **permanecem agnósticos de superfície** —
-  nada nelas presume o conjunto {Slack, GitHub, Jira, Teams}. Adicionar Webex depois não exige
-  mudança de contrato (mudança aditiva de um novo `platform` value, como foi Jira e será Teams).
-- O `platform` enum / roteamento não ganha um valor `webex` agora (não introduzimos código morto).
-- O threat model (`infra/THREAT-MODEL.md §2.1`) e o red-team (`infra/RED-TEAM-PROGRAM.md §3`)
-  cobrem "adapters" genericamente; quando/se Webex entrar, ganha sua própria linha de ataque de
-  assinatura na suíte — item já previsto no procedimento (§ "ad-hoc: a cada mudança em um
-  controle de segurança, o autor adiciona o ataque correspondente").
+- The `ConversationEvent` contract and the adapter interface **remain surface-agnostic** —
+  nothing in them presumes the set {Slack, GitHub, Jira, Teams}. Adding Webex later does not require
+  a contract change (it is an additive change of a new `platform` value, as Jira was and Teams will be).
+- The `platform` enum / routing does not gain a `webex` value now (we do not introduce dead code).
+- The threat model (`infra/THREAT-MODEL.md §2.1`) and the red-team (`infra/RED-TEAM-PROGRAM.md §3`)
+  cover "adapters" generically; when/if Webex lands, it gets its own signature attack row
+  in the suite — an item already anticipated in the procedure (§ "ad-hoc: on every change to a
+  security control, the author adds the corresponding attack").
 
-## Alternativa considerada e rejeitada: restaurar atrás do adapter agora
+## Alternative considered and rejected: implement it behind the adapter now
 
-Construir `adapter-webex` imediatamente aproveitando o molde. **Rejeitada** porque:
-- Sem consumidor (fato #3), é custo e superfície de ataque sem retorno (fato #4, P7).
-- Compete por esforço com Teams, que **tem** demanda priorizada (fatos #1).
-- O lead time real de um adapter não é o código (mecânico) e sim a **credencial de app real** +
-  o registro de webhook — que só faz sentido puxar quando um cliente concreto usa Webex.
+Build `adapter-webex` immediately, leveraging the mold. **Rejected** because:
+- With no consumer (fact #3), it is cost and attack surface with no return (fact #4, P7).
+- It competes for effort with Teams, which **does** have prioritized demand (fact #1).
+- An adapter's real lead time is not the code (mechanical) but the **real app credential** +
+  the webhook registration — which is only worth pulling when a concrete client uses Webex.
 
-## Como reverter (o que seria necessário para restaurar) — nada é descartado
+## How to revert (what restoring it would take) — nothing is discarded
 
-Se um cliente exigir Webex, restaurar é **mecânico** e estimável, seguindo o molde dos três
-adapters existentes:
+If a client requires Webex, restoring it is **mechanical** and estimable, following the mold of the
+three existing adapters:
 
-1. **`services/adapter-webex/`** espelhando `adapter-jira/` (o mais recente): inbound handler que
-   (a) verifica a assinatura do webhook Webex (HMAC-SHA1/SHA256 sobre o corpo com o segredo do
-   registro — o mesmo padrão puro de `ingest_gateway/security.py`), (b) sanitiza
-   (`sanitize_content`), (c) emite `ConversationEvent` com `platform="webex"`.
-2. **Outbound** via um novo back-end de `MutableCommentWriter` (Webex Messages API) — "exatamente
-   1 mensagem de status mutável por surface", idêntico ao contrato dos outros.
-3. **Mapeamento de tenant**: uma linha de binding em `tenant_platform_bindings` (migração 0008) —
-   sem migração nova.
-4. **Segurança**: registrar o app Webex real + segredo de webhook no Vault; adicionar a linha de
-   ataque de assinatura forjada em `services/platform/tests/test_red_team.py::TestForgedWebhook`;
-   se o deployment for topologia B/air-gapped, avaliar se Webex (SaaS externo) é sequer admissível
-   (provavelmente exige exceção explícita revisada pelo red-team, §4 do RED-TEAM-PROGRAM.md).
-5. **Roteamento**: adicionar `webex` ao roteamento de signal por status do ingest (aditivo).
+1. **`services/adapter-webex/`** mirroring `adapter-jira/` (the most recent): an inbound handler that
+   (a) verifies the Webex webhook signature (HMAC-SHA1/SHA256 over the body with the registration's
+   secret — the same pure pattern as `ingest_gateway/security.py`), (b) sanitizes
+   (`sanitize_content`), (c) emits a `ConversationEvent` with `platform="webex"`.
+2. **Outbound** via a new `MutableCommentWriter` back end (Webex Messages API) — "exactly
+   1 mutable status message per surface", identical to the others' contract.
+3. **Tenant mapping**: one binding row in `tenant_platform_bindings` (migration 0008) —
+   no new migration.
+4. **Security**: register the real Webex app + webhook secret in Vault; add the forged-signature
+   attack row in `services/platform/tests/test_red_team.py::TestForgedWebhook`;
+   if the deployment is topology B/air-gapped, assess whether Webex (external SaaS) is admissible
+   at all (it likely requires an explicit exception reviewed by the red-team, §4 of RED-TEAM-PROGRAM.md).
+5. **Routing**: add `webex` to the ingest's status-signal routing (additive).
 
-Estimativa de referência: comparável ao adapter Teams / a um adapter novo do molde (≈3 pw, a
-mesma ordem do escopo órfão de chat do adendo 03 §Parte 2 #7). Nenhum trabalho de plataforma
-(contrato, isolamento, audit) precisa ser refeito — só o adapter e seu registro de credencial.
+Reference estimate: comparable to the Teams adapter / any new adapter from the mold (≈3 pw, the
+same order as the orphaned chat scope in addendum 03 §Part 2 #7). No platform work
+(contract, isolation, audit) needs redoing — only the adapter and its credential registration.
 
 ## Sign-off
 
-| Papel | Decisão | Nota |
+| Role | Decision | Note |
 |---|---|---|
-| Autor (WS-F, plataforma/segurança) | **De-scope formal aprovado** | Registrado neste ADR; reversão documentada e mecânica. |
-| Arquiteto | **Requer assinatura** | Consistente com Teams-priorizado (adendo 03) e P7 (boring-first). |
-| Stakeholder do piloto | **Requer assinatura** | Confirmar que nenhum cliente do piloto usa Webex como superfície primária. |
+| Author (WS-F, platform/security) | **Formal de-scope approved** | Recorded in this ADR; reversal documented and mechanical. |
+| Architect | **Signature required** | Consistent with Teams-prioritized (addendum 03) and P7 (boring-first). |
+| Pilot stakeholder | **Signature required** | Confirm that no pilot client uses Webex as a primary surface. |
 
-Enquanto as assinaturas de arquiteto/stakeholder não forem coletadas, o status operacional é
-"de-scope proposto por WS-F, pendente de ratificação" — mas a decisão de engenharia (não construir
-agora) já vale, pois é reversível a custo conhecido e não bloqueia nada.
+Until the architect/stakeholder signatures are collected, the operational status is
+"de-scope proposed by WS-F, pending ratification" — but the engineering decision (do not build
+now) already stands, since it is reversible at a known cost and blocks nothing.

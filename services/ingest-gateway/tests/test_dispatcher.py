@@ -1,11 +1,11 @@
-"""WSA-E1-T3 — dispatcher outbox: `SELECT ... FOR UPDATE SKIP LOCKED` +
-Temporal `start_workflow` real (sem mock — Postgres e Temporal reais da
-infra, conforme CONVENTIONS.md: nunca mockar durabilidade/idempotência).
+"""WSA-E1-T3 — outbox dispatcher: `SELECT ... FOR UPDATE SKIP LOCKED` + real
+Temporal `start_workflow` (no mocks — the real Postgres and Temporal from the
+infra, per CONVENTIONS.md: never mock durability/idempotency).
 
-Teste central (núcleo do chaos test de saída da Fase 1, NFR-01, lado do
-intake): 2 dispatchers concorrentes (2 threads, cada uma com seu próprio
-event loop + Client Temporal) drenando a MESMA fila de ingest_events sem
-duplicar nem perder.
+Central test (core of the Phase 1 exit chaos test, NFR-01, intake side): 2
+concurrent dispatchers (2 threads, each with its own event loop + Temporal
+Client) draining the SAME ingest_events queue without duplicating or losing
+anything.
 """
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ TEMPORAL_ADDRESS = "localhost:7233"
 
 
 def _insert_task_request_row(tenant_id: str, n: int) -> str:
-    """Cria um work_item + ingest_event (kind=task_request) diretamente,
-    simulando o que `admit_work_item` já teria feito — o dispatcher não se
-    importa com quem escreveu a linha."""
+    """Creates a work_item + ingest_event (kind=task_request) directly,
+    simulating what `admit_work_item` would already have done — the dispatcher
+    does not care who wrote the row."""
     work_item_id = f"wi_disp_{uuid.uuid4().hex[:12]}"
     event_id = f"evt_{uuid.uuid4().hex}"
     conn = psycopg2.connect(DSN)
@@ -90,11 +90,11 @@ def test_single_dispatcher_starts_workflow_and_marks_processed(tenant_id, tempor
 
 
 def test_duplicate_ingest_event_for_same_work_item_is_idempotent(tenant_id, temporal_client):
-    """Simula 2 linhas de outbox apontando para o MESMO work_item (nunca
-    deveria acontecer via admit_work_item, que dedupe por event_id — mas o
-    dispatcher precisa ser à prova disso): a 2a tentativa de start_workflow
-    esbarra em WorkflowAlreadyStartedError e é tratada como sucesso
-    idempotente, nunca re-lançada."""
+    """Simulates 2 outbox rows pointing to the SAME work_item (this should
+    never happen via admit_work_item, which dedupes by event_id — but the
+    dispatcher must be proof against it): the 2nd start_workflow attempt hits
+    WorkflowAlreadyStartedError and is treated as an idempotent success, never
+    re-raised."""
     work_item_id = f"wi_disp_{uuid.uuid4().hex[:12]}"
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
@@ -114,7 +114,7 @@ def test_duplicate_ingest_event_for_same_work_item_is_idempotent(tenant_id, temp
     dispatcher = Dispatcher(temporal_client, batch_size=10)
     loop = asyncio.new_event_loop()
     processed = loop.run_until_complete(dispatcher.drain_all())
-    assert processed == 2  # ambas as linhas marcadas processed, nenhum crash
+    assert processed == 2  # both rows marked processed, no crash
 
     check_conn = psycopg2.connect(DSN)
     with check_conn.cursor() as cur:
@@ -131,15 +131,14 @@ def test_duplicate_ingest_event_for_same_work_item_is_idempotent(tenant_id, temp
 
 
 def test_two_concurrent_dispatchers_drain_without_duplication_or_loss(tenant_id):
-    """NÚCLEO do chaos test NFR-01 (lado do intake): 20 ingest_events
-    distintos, 2 dispatchers concorrentes (threads/processos separados,
-    cada um com seu próprio Client Temporal e conexão Postgres) drenando a
-    MESMA fila via `SELECT ... FOR UPDATE SKIP LOCKED`. Ao final: todas as
-    20 linhas processed=true, exatamente uma vez cada (nenhuma duplicada,
-    nenhuma perdida), e exatamente um workflow Temporal iniciado por
-    work_item (nenhum WorkflowAlreadyStartedError deveria sequer ocorrer
-    aqui, já que cada work_item é único — provando que SKIP LOCKED evita a
-    corrida antes mesmo de chegar no Temporal)."""
+    """CORE of the NFR-01 chaos test (intake side): 20 distinct ingest_events,
+    2 concurrent dispatchers (separate threads/processes, each with its own
+    Temporal Client and Postgres connection) draining the SAME queue via
+    `SELECT ... FOR UPDATE SKIP LOCKED`. At the end: all 20 rows
+    processed=true, exactly once each (none duplicated, none lost), and exactly
+    one Temporal workflow started per work_item (no WorkflowAlreadyStartedError
+    should even occur here, since each work_item is unique — proving that SKIP
+    LOCKED avoids the race before it even reaches Temporal)."""
     N = 20
     work_item_ids = [_insert_task_request_row(tenant_id, i) for i in range(N)]
 
@@ -147,23 +146,23 @@ def test_two_concurrent_dispatchers_drain_without_duplication_or_loss(tenant_id)
         futures = [pool.submit(_run_dispatcher_drain_all, 3) for _ in range(2)]
         results = [f.result(timeout=60) for f in futures]
 
-    # Os 2 dispatchers do teste juntos processam NO MÁXIMO N. A igualdade
-    # estrita (== N) só vale quando eles são os ÚNICOS consumidores da fila;
-    # no ambiente compartilhado desta fase o container `dse_ingest_dispatcher`
-    # (run_forever) também está no ar e pode drenar parte das linhas via o
-    # MESMO `SELECT ... FOR UPDATE SKIP LOCKED`. Isso NÃO viola NFR-01 — a
-    # invariante real (nenhuma perda, nenhuma duplicação, exatamente-uma-vez)
-    # é provada pelas asserções de banco abaixo, que valem para QUALQUER número
-    # de consumidores concorrentes (2 do teste + o container). SKIP LOCKED
-    # garante um consumidor por linha; quem processou é irrelevante.
+    # The test's 2 dispatchers together process AT MOST N. Strict equality
+    # (== N) only holds when they are the ONLY consumers of the queue; in this
+    # phase's shared environment the `dse_ingest_dispatcher` container
+    # (run_forever) is also up and may drain part of the rows via the SAME
+    # `SELECT ... FOR UPDATE SKIP LOCKED`. That does NOT violate NFR-01 — the
+    # real invariant (no loss, no duplication, exactly-once) is proven by the
+    # database assertions below, which hold for ANY number of concurrent
+    # consumers (the test's 2 + the container). SKIP LOCKED guarantees one
+    # consumer per row; which one processed it is irrelevant.
     assert sum(results) <= N
     assert sum(results) >= 0
 
-    # Espera curta: se o container de background pegou (via SKIP LOCKED) as
-    # linhas que os 2 dispatchers do teste pularam, elas podem estar em voo no
-    # instante em que os dispatchers do teste desistem (3 rounds vazios). Poll
-    # com timeout absorve essa janela sem mascarar perda real — se ao fim do
-    # timeout faltar alguma, é perda de verdade e o assert falha.
+    # Short wait: if the background container picked up (via SKIP LOCKED) the
+    # rows the test's 2 dispatchers skipped, they may be in flight at the
+    # instant the test dispatchers give up (3 empty rounds). Polling with a
+    # timeout absorbs that window without masking real loss — if any are still
+    # missing when the timeout expires, it is genuine loss and the assert fails.
     import time as _time
 
     deadline = _time.time() + 15
@@ -175,21 +174,21 @@ def test_two_concurrent_dispatchers_drain_without_duplication_or_loss(tenant_id)
                 (work_item_ids,),
             )
             done = cur.fetchone()[0]
-        conn.commit()  # encerra o snapshot para a próxima leitura ver commits recentes
+        conn.commit()  # ends the snapshot so the next read sees recent commits
         if done == N or _time.time() >= deadline:
             break
         _time.sleep(0.25)
 
     with conn.cursor() as cur:
-        assert done == N  # nenhuma perdida — TODAS processadas (por qualquer consumidor)
+        assert done == N  # none lost — ALL processed (by any consumer)
 
         cur.execute(
             "SELECT count(*) FROM ingest_events WHERE work_item_id = ANY(%s)",
             (work_item_ids,),
         )
-        assert cur.fetchone()[0] == N  # nenhuma linha duplicada foi criada
+        assert cur.fetchone()[0] == N  # no duplicate row was created
 
-        # Exatamente um dispatch_started por work_item — sem corrida dupla.
+        # Exactly one dispatch_started per work_item — no double race.
         cur.execute(
             """
             SELECT work_item_id, count(*) FROM audit_log

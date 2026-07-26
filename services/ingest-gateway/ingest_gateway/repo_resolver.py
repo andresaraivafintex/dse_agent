@@ -1,33 +1,34 @@
-"""Cascata determinística de resolução de repositório (Relatório 07 C2 / Fase B).
+"""Deterministic repository resolution cascade (Report 07 C2 / Phase B).
 
-Tarefas de Slack/Jira não nascem num repo (diferente do GitHub, onde a issue
-JÁ está no repo). Esta cascata descobre o repo do MAIS específico/explícito
-para o menos, e — crucialmente — devolve `(None, None)` quando não há
-resolução confiável, para o workflow PERGUNTAR em vez de adivinhar. O repo
-errado nunca acontece em silêncio (fail-safe; P1: só config + regex, nenhum LLM).
+Slack/Jira tasks are not born in a repo (unlike GitHub, where the issue is
+ALREADY in the repo). This cascade discovers the repo from the MOST
+specific/explicit to the least and — crucially — returns `(None, None)` when
+there is no trustworthy resolution, so the workflow ASKS instead of guessing.
+The wrong repo never happens silently (fail-safe; P1: config + regex only, no
+LLM).
 
-Ordem:
-  1. override explícito (`repo=owner/name` no texto / campo dedicado)
-  2. binding específico: channel (Slack) / component (Jira) / project (Jira)
-  3. binding amplo: workspace (Slack team / Jira site)
-  4. default single-repo do tenant (binding_value '*')
-  5. nada -> (None, None) -> clarificação
+Order:
+  1. explicit override (`repo=owner/name` in the text / dedicated field)
+  2. specific binding: channel (Slack) / component (Jira) / project (Jira)
+  3. broad binding: workspace (Slack team / Jira site)
+  4. the tenant's single-repo default (binding_value '*')
+  5. nothing -> (None, None) -> clarification
 """
 from __future__ import annotations
 
 import re
 from typing import Any
 
-# override explícito no texto livre (mesmo formato do C4).
+# explicit override in free text (same format as C4).
 _RE_REPO = re.compile(r"\brepo(?:sitory)?\s*[:=]\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)", re.I)
 _RE_BRANCH = re.compile(r"\b(?:base[_-]?)?branch\s*[:=]\s*([A-Za-z0-9._/-]+)", re.I)
 
-# precedência: índice menor = mais específico.
+# precedence: lower index = more specific.
 _TYPE_PRECEDENCE = ("channel", "component", "project", "workspace")
 
 
 def parse_explicit_repo(text: str) -> tuple[str | None, str | None]:
-    """(repo, base_branch) explícitos no texto, se houver. Rung 1 da cascata."""
+    """(repo, base_branch) explicitly given in the text, if any. Rung 1 of the cascade."""
     if not text:
         return None, None
     m = _RE_REPO.search(text)
@@ -42,18 +43,19 @@ def resolve_repo(
     platform: str,
     signals: dict[str, Any],
 ) -> tuple[str | None, str | None]:
-    """Executa a cascata. `signals` traz o que o adapter conseguiu extrair:
-    {text, channel, component, project, workspace}. Retorna (repo, base_branch)
-    ou (None, None) se nada resolve (=> o workflow pergunta).
+    """Runs the cascade. `signals` carries whatever the adapter managed to
+    extract: {text, channel, component, project, workspace}. Returns (repo,
+    base_branch) or (None, None) if nothing resolves (=> the workflow asks).
 
-    GitHub não usa isto (o repo vem do webhook); mantido genérico por simetria.
+    GitHub does not use this (the repo comes from the webhook); kept generic
+    for symmetry.
     """
-    # Rung 1 — override explícito ganha de tudo.
+    # Rung 1 — an explicit override beats everything.
     repo, branch = parse_explicit_repo(signals.get("text") or "")
     if repo:
         return repo, (branch or "main")
 
-    # Rungs 2–3 — bindings, do mais específico ao mais amplo.
+    # Rungs 2-3 — bindings, from the most specific to the broadest.
     candidates: list[tuple[str, str]] = []  # (binding_type, binding_value)
     for btype in _TYPE_PRECEDENCE:
         val = signals.get(btype)
@@ -61,7 +63,7 @@ def resolve_repo(
             candidates.append((btype, str(val)))
     if candidates:
         with conn.cursor() as cur:
-            for btype, val in candidates:  # já em ordem de precedência
+            for btype, val in candidates:  # already in precedence order
                 cur.execute(
                     "SELECT repo, base_branch FROM repo_bindings "
                     "WHERE tenant_id = %s AND platform = %s AND binding_type = %s "
@@ -72,8 +74,8 @@ def resolve_repo(
                 if row:
                     return row[0], row[1]
 
-    # Rung 4 — default single-repo do tenant (binding_value '*'), qualquer
-    # binding_type; se o tenant tem EXATAMENTE um repo distinto, usa ele.
+    # Rung 4 — the tenant's single-repo default (binding_value '*'), any
+    # binding_type; if the tenant has EXACTLY one distinct repo, use it.
     with conn.cursor() as cur:
         cur.execute(
             "SELECT DISTINCT repo, base_branch FROM repo_bindings WHERE tenant_id = %s",
@@ -85,6 +87,6 @@ def resolve_repo(
         only = rows[0]
         return only[0], only[1]
 
-    # Rung 5 — ambíguo ou vazio: sem resolução confiável, pergunta (nunca
-    # adivinha entre múltiplos repos).
+    # Rung 5 — ambiguous or empty: no trustworthy resolution, so ask (never
+    # guesses among multiple repos).
     return None, None

@@ -31,14 +31,14 @@ _SUPERUSER_DSN = os.environ.get(
 
 @pytest.fixture(autouse=True)
 def _cleanup_test_rows():
-    """Limpa linhas criadas pelos testes (identificadas pelo prefixo
-    test_tenant_/wi_ + o padrão de event_id determinístico dos testes) para
-    não acumular lixo entre execuções repetidas contra o Postgres real.
+    """Cleans up rows created by the tests (identified by the test_tenant_/wi_
+    prefix + the tests' deterministic event_id pattern) so garbage does not
+    accumulate across repeated runs against the real Postgres.
 
-    Usa o superuser `dse` (não `dse_app`) porque DELETE em work_items/
-    ingest_events é deliberadamente NÃO concedido a `dse_app` em produção
-    (ver migrations/0001_foundation.sql) — limpeza de teste é uma
-    preocupação de dev-only, não deve ampliar o grant de produção."""
+    Uses the `dse` superuser (not `dse_app`) because DELETE on work_items/
+    ingest_events is deliberately NOT granted to `dse_app` in production (see
+    migrations/0001_foundation.sql) — test cleanup is a dev-only concern and
+    must not widen the production grant."""
     yield
     conn = psycopg2.connect(_SUPERUSER_DSN)
     try:
@@ -52,11 +52,12 @@ def _cleanup_test_rows():
             cur.execute("DELETE FROM jira_transition_queue WHERE tenant_id LIKE 'test_tenant_%'")
             cur.execute("DELETE FROM jira_poll_state WHERE tenant_id LIKE 'test_tenant_%'")
             cur.execute("DELETE FROM audit_log WHERE tenant_id LIKE 'test_tenant_%'")
-            # WSA-E6-T2b: steering agora resolve papel via dse_console_identity /
-            # dse_access_bundle (WS-F). Os testes de steering criam principals de
-            # teste (prefixo `usr_test_`) + linhas nessas tabelas; limpe-as aqui
-            # (superuser) sem ampliar grants de produção. Ordem: console_identity
-            # antes de principals (FK), access_bundle por prefixo de tenant.
+            # WSA-E6-T2b: steering now resolves the role via dse_console_identity /
+            # dse_access_bundle (WS-F). The steering tests create test principals
+            # (prefix `usr_test_`) + rows in those tables; clean them up here
+            # (superuser) without widening production grants. Order:
+            # console_identity before principals (FK), access_bundle by tenant
+            # prefix.
             cur.execute("DELETE FROM dse_access_bundle WHERE tenant_id LIKE 'test_tenant_%'")
             cur.execute(
                 "DELETE FROM dse_console_identity "

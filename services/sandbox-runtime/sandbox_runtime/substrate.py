@@ -1,19 +1,18 @@
-"""Interface de orquestrador de substrato + adapters (WSC-E3-T1).
+"""Substrate orchestrator interface + adapters (WSC-E3-T1).
 
-`AgentSubstrate` é o contrato que qualquer runtime de agente (OpenHands hoje;
-outro substrato amanhã) precisa implementar para ser plugado na Activity
-`run_coder_turn`. Importante (P1 — nenhuma decisão de fluxo por LLM): o
-substrato SÓ EDITA ARQUIVOS no workspace. Ele nunca recebe uma ferramenta de
-git push/PR — quem decide commitar e para onde fazer push é código
-determinístico em `activities.py` (via `scoped_git.ScopedGitSession`),
-depois que o turno termina.
+`AgentSubstrate` is the contract any agent runtime (OpenHands today; another
+substrate tomorrow) must implement to be plugged into the `run_coder_turn`
+Activity. Important (P1 — no flow decision made by an LLM): the substrate ONLY
+EDITS FILES in the workspace. It never receives a git push/PR tool — deciding to
+commit and where to push is deterministic code in `activities.py` (via
+`scoped_git.ScopedGitSession`), after the turn ends.
 
-Toda chamada de modelo do substrato tem que sair via o model-gateway
-(`dse_contracts.gateway_contract.GatewayCallHeaders` + a virtual key mintada
-por `model_gateway_client.mint_virtual_key`) — nunca um SDK de provider
-direto. Isso é reforçado tanto pela wiring do `OpenHandsSubstrate` (LLM
-sempre construído com `base_url=<gateway>`) quanto pelo egress-proxy (WS-C
-E2), que bloquearia mesmo se alguém tentasse burlar isso.
+Every model call from the substrate must go out through the model-gateway
+(`dse_contracts.gateway_contract.GatewayCallHeaders` + the virtual key minted by
+`model_gateway_client.mint_virtual_key`) — never a direct provider SDK. This is
+enforced both by the `OpenHandsSubstrate` wiring (the LLM is always constructed
+with `base_url=<gateway>`) and by the egress-proxy (WS-C E2), which would block
+it even if someone tried to work around that.
 """
 from __future__ import annotations
 
@@ -37,7 +36,7 @@ class TurnLog:
 
 @runtime_checkable
 class AgentSubstrate(Protocol):
-    """Contrato mínimo que todo runtime de agente Coder precisa cumprir."""
+    """Minimal contract every Coder agent runtime must fulfill."""
 
     def create_session(
         self,
@@ -58,13 +57,13 @@ class AgentSubstrate(Protocol):
 
 
 class FakeSubstrate:
-    """Substrato in-memory determinístico para testes (WSC-E3-T1).
+    """Deterministic in-memory substrate for tests (WSC-E3-T1).
 
-    Não chama nenhum LLM, não faz nenhuma requisição de rede — aplica uma
-    lista de edições de arquivo pré-roteirizada (`script`), turno a turno.
-    Serve para testar toda a plumbing de `run_coder_turn` (sandbox real +
-    git de escopo limitado real) sem depender do model-gateway do WS-D
-    estar de pé nem gastar inferência real.
+    It calls no LLM and makes no network request — it applies a pre-scripted list
+    of file edits (`script`), turn by turn. It exists to test all of
+    `run_coder_turn`'s plumbing (real sandbox + real scope-limited git) without
+    depending on WS-D's model-gateway being up, and without spending real
+    inference.
     """
 
     def __init__(self, script: list[dict[str, Any]]):
@@ -88,9 +87,10 @@ class FakeSubstrate:
     ) -> None:
         self.workspace_dir = workspace_dir
         self.sandbox_id = work_item_id
-        # Note: FakeSubstrate deliberadamente NÃO usa virtual_key/gateway_base_url
-        # (não faz chamada de modelo nenhuma) — mas guarda para provar em teste
-        # que a Activity sempre os fornece, mesmo quando o substrato não os usa.
+        # Note: FakeSubstrate deliberately does NOT use
+        # virtual_key/gateway_base_url (it makes no model call at all) — but it
+        # stores them so tests can prove the Activity always supplies them, even
+        # when the substrate does not use them.
         self._gateway_headers = gateway_headers
         self._virtual_key = virtual_key
         self._gateway_base_url = gateway_base_url
@@ -100,7 +100,7 @@ class FakeSubstrate:
             return TurnLog(instruction=instruction, done=True)
         step = self._script[self._turn_idx]
         self._turn_idx += 1
-        assert self.workspace_dir is not None, "create_session precisa ser chamado antes de run_turn"
+        assert self.workspace_dir is not None, "create_session must be called before run_turn"
         for rel_path, content in step.get("write_files", {}).items():
             p = Path(self.workspace_dir) / rel_path
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -119,7 +119,7 @@ class FakeSubstrate:
     def collect_artifacts(self) -> CoderTurnResult:
         return CoderTurnResult(
             sandbox_id=self.sandbox_id,
-            diff_summary=f"{len(self._files_changed)} arquivo(s) alterado(s) por FakeSubstrate",
+            diff_summary=f"{len(self._files_changed)} file(s) changed by FakeSubstrate",
             files_changed=sorted(self._files_changed),
             cost_usd=round(self._cost_usd, 4),
             tokens_in=self._tokens_in,
@@ -128,47 +128,46 @@ class FakeSubstrate:
 
 
 class SubstrateUnavailable(Exception):
-    """Levantado quando o SDK do substrato pedido não está instalado no venv
-    atual (base para as variantes por adapter)."""
+    """Raised when the requested substrate's SDK is not installed in the current
+    venv (base class for the per-adapter variants)."""
 
 
 class OpenHandsSubstrateUnavailable(SubstrateUnavailable):
-    """Levantado quando `openhands-sdk` não está instalado no venv atual."""
+    """Raised when `openhands-sdk` is not installed in the current venv."""
 
 
 class ClaudeAgentSubstrateUnavailable(SubstrateUnavailable):
-    """Levantado quando `claude-agent-sdk` não está instalado no venv atual."""
+    """Raised when `claude-agent-sdk` is not installed in the current venv."""
 
 
 class OpenHandsSubstrate:
-    """Adapter real sobre o OpenHands `software-agent-sdk`
-    (pacote PyPI `openhands-sdk`, testado disponível nesta sessão em
-    `pip install openhands-sdk` — v1.21.0 no momento em que este código foi
-    escrito).
+    """Real adapter over the OpenHands `software-agent-sdk` (PyPI package
+    `openhands-sdk`, verified available in this session via
+    `pip install openhands-sdk` — v1.21.0 at the time this code was written).
 
-    Wiring de produção (P1: nunca um SDK de provider direto):
+    Production wiring (P1: never a direct provider SDK):
       `openhands.sdk.LLM(base_url=<model-gateway>, api_key=<virtual_key>,
        extra_headers=GatewayCallHeaders(...).to_http_headers())`
-    — o LLM do OpenHands nunca aponta para um provider (Anthropic/OpenAI/
-    Bedrock) diretamente; sempre para o model-gateway do WS-D. Mesmo que o
-    código tentasse, o egress-proxy (E2) bloquearia a rota de rede.
+    — the OpenHands LLM never points at a provider (Anthropic/OpenAI/Bedrock)
+    directly; always at WS-D's model-gateway. Even if the code tried to, the
+    egress-proxy (E2) would block the network route.
 
-    NÃO exercitado por turno completo nesta suíte de testes: rodar
-    `Conversation.run()` de verdade dispara inferência real, que exige (a)
-    o model-gateway do WS-D de pé e respondendo, e (b) uma virtual key válida
-    apontando para um provider real configurado no LiteLLM — nenhum dos dois
-    está disponível nesta sessão de desenvolvimento paralelo. O teste
-    `test_substrate.py::test_openhands_substrate_wiring` cobre apenas a
-    CONSTRUÇÃO (LLM/Agent/Workspace apontando para os lugares certos),
-    usando `create_session` que não faz I/O de rede por si só.
+    NOT exercised through a full turn in this test suite: actually running
+    `Conversation.run()` triggers real inference, which requires (a) WS-D's
+    model-gateway up and answering, and (b) a valid virtual key pointing at a
+    real provider configured in LiteLLM — neither is available in this parallel
+    development session. The test
+    `test_substrate.py::test_openhands_substrate_wiring` covers only
+    CONSTRUCTION (LLM/Agent/Workspace pointing at the right places), using
+    `create_session`, which performs no network I/O by itself.
 
-    Produção também deveria trocar `LocalWorkspace` (executa ferramentas no
-    filesystem local do processo que roda o SDK) por `RemoteWorkspace`
-    apontando para um `openhands-agent-server` rodando DENTRO do container
-    provisionado por `docker_driver.py` — assim a execução de ferramentas do
-    agente (bash, edição de arquivo) acontece de fato dentro do sandbox
-    isolado, não no processo do worker Temporal. Ver README.md, seção
-    "Limitações conhecidas / o que falta para produção".
+    Production should also swap `LocalWorkspace` (which executes tools on the
+    local filesystem of the process running the SDK) for a `RemoteWorkspace`
+    pointing at an `openhands-agent-server` running INSIDE the container
+    provisioned by `docker_driver.py` — so that the agent's tool execution
+    (bash, file editing) genuinely happens inside the isolated sandbox rather
+    than in the Temporal worker's process. See README.md, section "What is
+    missing for production".
     """
 
     def __init__(self, *, model: str | None = None):
@@ -191,11 +190,11 @@ class OpenHandsSubstrate:
     ) -> None:
         try:
             import openhands.sdk as sdk
-        except ImportError as exc:  # pragma: no cover - exercitado só quando o pacote falta
+        except ImportError as exc:  # pragma: no cover - only exercised when the package is missing
             raise OpenHandsSubstrateUnavailable(
-                "openhands-sdk não instalado neste venv. "
-                "`pip install openhands-sdk` (testado funcionando em 2026-07 "
-                "nesta sessão, v1.21.0). Enquanto isso, use FakeSubstrate."
+                "openhands-sdk not installed in this venv. "
+                "`pip install openhands-sdk` (verified working in 2026-07 "
+                "in this session, v1.21.0). Until then, use FakeSubstrate."
             ) from exc
 
         self.workspace_dir = workspace_dir
@@ -215,7 +214,7 @@ class OpenHandsSubstrate:
 
     def run_turn(self, instruction: str) -> TurnLog:
         if self._conversation is None:
-            raise RuntimeError("create_session precisa ser chamado antes de run_turn")
+            raise RuntimeError("create_session must be called before run_turn")
         self._conversation.send_message(instruction)
         self._conversation.run()
         log = TurnLog(instruction=instruction, done=True)
@@ -244,41 +243,40 @@ class OpenHandsSubstrate:
 
 
 class ClaudeAgentSubstrate:
-    """Segundo substrato (WSC-E3-T6): adapter real sobre o Claude Agent SDK
-    (pacote PyPI `claude-agent-sdk` — `pip install claude-agent-sdk`
-    **funcionou nesta sessão**, v0.2.124; o wheel embute o CLI, sem depender
-    de um node global). É o seguro contra volatilidade upstream do OpenHands
-    (risco 5 do plano; precedentes MinIO/RabbitMQ 2026): mesma interface
-    `AgentSubstrate`, mesma suíte de conformidade
-    (`tests/test_substrate_conformance.py`), troca por CONFIG DE DEPLOYMENT
-    (`DSE_CODER_SUBSTRATE`, ver `substrate_from_env`) — zero mudança em
-    código de workflow.
+    """Second substrate (WSC-E3-T6): a real adapter over the Claude Agent SDK
+    (PyPI package `claude-agent-sdk` — `pip install claude-agent-sdk` **worked in
+    this session**, v0.2.124; the wheel embeds the CLI, with no dependency on a
+    global node). It is the insurance against OpenHands upstream volatility
+    (risk 5 of the plan; the MinIO/RabbitMQ 2026 precedents): same
+    `AgentSubstrate` interface, same conformance suite
+    (`tests/test_substrate_conformance.py`), swapped by DEPLOYMENT CONFIG
+    (`DSE_CODER_SUBSTRATE`, see `substrate_from_env`) — zero workflow code
+    changes.
 
-    Wiring gateway-only (P1 — nunca um SDK/endpoint de provider direto): o
-    Claude Agent SDK fala com a API Anthropic via o CLI empacotado, que
-    respeita as envs `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/
-    `ANTHROPIC_CUSTOM_HEADERS`. `create_session` constrói
-    `ClaudeAgentOptions(env=...)` com base_url = model-gateway, api_key =
-    virtual key mintada por tarefa e os headers obrigatórios do contrato
-    (`GatewayCallHeaders`) — exatamente o mesmo triângulo do
-    `OpenHandsSubstrate`. Mesmo que o processo tentasse outro endpoint, o
-    egress-proxy (E2) bloquearia a rota.
+    Gateway-only wiring (P1 — never a direct provider SDK/endpoint): the Claude
+    Agent SDK talks to the Anthropic API through the bundled CLI, which honors
+    the `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_CUSTOM_HEADERS` envs.
+    `create_session` builds `ClaudeAgentOptions(env=...)` with base_url =
+    model-gateway, api_key = the per-task minted virtual key, and the contract's
+    mandatory headers (`GatewayCallHeaders`) — exactly the same triangle as
+    `OpenHandsSubstrate`. Even if the process tried another endpoint, the
+    egress-proxy (E2) would block the route.
 
-    Toolset (P1): `allowed_tools` restrito a leitura/edição de arquivo
-    (`Read`/`Write`/`Edit`/`Glob`/`Grep`) — NENHUMA tool de git/PR/bash; o
-    commit/push continua determinístico na Activity (`ScopedGitSession`),
-    idêntico ao substrato OpenHands. `setting_sources=["project"]` carrega
-    SÓ o `.claude/` do workspace (skills tickadas no console + commitadas no
-    repo alvo — ver skill_files.py); settings/skills do usuário do HOST
-    continuam fora (sessão hermética quanto ao host).
+    Toolset (P1): `allowed_tools` is restricted to file read/edit
+    (`Read`/`Write`/`Edit`/`Glob`/`Grep`) — NO git/PR/bash tool; the commit/push
+    remains deterministic in the Activity (`ScopedGitSession`), identical to the
+    OpenHands substrate. `setting_sources=["project"]` loads ONLY the workspace's
+    `.claude/` (skills ticked in the console + skills committed in the target
+    repo — see skill_files.py); the HOST user's settings/skills stay out (the
+    session is hermetic with respect to the host).
 
-    NÃO exercitado por turno completo nesta suíte (mesma limitação declarada
-    do OpenHands): `run_turn` dispara inferência real, que exige o
-    model-gateway com provider válido atendendo a virtual key. Os testes de
-    conformidade cobrem construção/wiring/seleção — ver README."""
+    NOT exercised through a full turn in this suite (the same limitation declared
+    for OpenHands): `run_turn` triggers real inference, which requires the
+    model-gateway with a valid provider serving the virtual key. The conformance
+    tests cover construction/wiring/selection — see the README."""
 
-    # Superfície de tools de edição de arquivo do Claude Code — deliberadamente
-    # sem Bash/WebFetch/Task e sem qualquer tool git/PR (P1).
+    # Claude Code's file-editing tool surface — deliberately without
+    # Bash/WebFetch/Task and without any git/PR tool (P1).
     DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep"]
 
     def __init__(self, *, model: str | None = None, allowed_tools: list[str] | None = None):
@@ -303,12 +301,12 @@ class ClaudeAgentSubstrate:
     ) -> None:
         try:
             import claude_agent_sdk as sdk
-        except ImportError as exc:  # pragma: no cover - exercitado só quando o pacote falta
+        except ImportError as exc:  # pragma: no cover - only exercised when the package is missing
             raise ClaudeAgentSubstrateUnavailable(
-                "claude-agent-sdk não instalado neste venv. "
-                "`pip install claude-agent-sdk` (testado funcionando em "
-                "2026-07 nesta sessão, v0.2.124). Enquanto isso, use "
-                "FakeSubstrate ou OpenHandsSubstrate."
+                "claude-agent-sdk not installed in this venv. "
+                "`pip install claude-agent-sdk` (verified working in "
+                "2026-07 in this session, v0.2.124). Until then, use "
+                "FakeSubstrate or OpenHandsSubstrate."
             ) from exc
 
         self.workspace_dir = workspace_dir
@@ -319,14 +317,15 @@ class ClaudeAgentSubstrate:
             cwd=workspace_dir,
             allowed_tools=list(self._allowed_tools),
             permission_mode="acceptEdits",
-            # "project" = SÓ o workspace (cwd): carrega as skills tickadas no
-            # console e materializadas em .claude/skills/ + as commitadas no
-            # repo alvo. Continua hermético quanto ao HOST — "user" (settings/
-            # skills do usuário da máquina) segue fora da lista.
+            # "project" = ONLY the workspace (cwd): loads the skills ticked in
+            # the console and materialized under .claude/skills/ + the ones
+            # committed in the target repo. Still hermetic with respect to the
+            # HOST — "user" (the machine user's settings/skills) stays off the
+            # list.
             setting_sources=["project"],
             env={
-                # Gateway-only: o CLI empacotado respeita estas envs — nunca
-                # aponta para api.anthropic.com com credencial de provider.
+                # Gateway-only: the bundled CLI honors these envs — it never
+                # points at api.anthropic.com with a provider credential.
                 "ANTHROPIC_BASE_URL": gateway_base_url,
                 "ANTHROPIC_API_KEY": virtual_key,
                 "ANTHROPIC_CUSTOM_HEADERS": custom_headers,
@@ -343,11 +342,11 @@ class ClaudeAgentSubstrate:
 
         import claude_agent_sdk as sdk
 
-        # Timeout DURO por turn (achado do disparo real 2026-07-22: o CLI
-        # pendurou 45+ min sem progresso — heartbeat da Activity continua
-        # batendo enquanto a thread trava, então heartbeat ≠ progresso; o
-        # start_to_close de 1h só mataria a activity inteira). TimeoutError
-        # vira retry normal do Temporal.
+        # HARD per-turn timeout (found in the real 2026-07-22 run: the CLI hung
+        # 45+ min with no progress — the Activity's heartbeat keeps beating while
+        # the thread is stuck, so heartbeat ≠ progress; the 1h start_to_close
+        # would only kill the whole activity). TimeoutError becomes a normal
+        # Temporal retry.
         turn_timeout = float(os.environ.get("DSE_CODER_TURN_TIMEOUT_S", "900"))
 
         log = TurnLog(instruction=instruction, done=True)
@@ -371,7 +370,7 @@ class ClaudeAgentSubstrate:
 
     def run_turn(self, instruction: str) -> TurnLog:
         if self._options is None:
-            raise RuntimeError("create_session precisa ser chamado antes de run_turn")
+            raise RuntimeError("create_session must be called before run_turn")
         import asyncio
         import concurrent.futures
 
@@ -381,9 +380,9 @@ class ClaudeAgentSubstrate:
         except RuntimeError:
             log = asyncio.run(coro)
         else:
-            # Dentro de um event loop (ex.: Activity async do Temporal): roda
-            # o turno num loop próprio em thread dedicado — a interface do
-            # substrato é síncrona por contrato (paridade com OpenHands).
+            # Inside an event loop (e.g. a Temporal async Activity): run the turn
+            # in its own loop on a dedicated thread — the substrate interface is
+            # synchronous by contract (parity with OpenHands).
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 log = ex.submit(asyncio.run, coro).result()
         self._turns.append(log)
@@ -401,9 +400,9 @@ class ClaudeAgentSubstrate:
 
 
 # ---------------------------------------------------------------------------
-# Seleção de substrato por CONFIG DE DEPLOYMENT (WSC-E3-T6) — troca de
-# substrato nunca exige mudança em código de workflow: o worker lê
-# `DSE_CODER_SUBSTRATE` no deploy e a Activity constrói via esta factory.
+# Substrate selection by DEPLOYMENT CONFIG (WSC-E3-T6) — swapping substrates
+# never requires a workflow code change: the worker reads `DSE_CODER_SUBSTRATE`
+# at deploy time and the Activity builds through this factory.
 # ---------------------------------------------------------------------------
 SUBSTRATE_ENV_VAR = "DSE_CODER_SUBSTRATE"
 
@@ -413,12 +412,12 @@ _SUBSTRATE_NAMES = ("fake", "openhands", "claude-agent")
 def substrate_from_env(
     name: str | None = None, *, script: list[dict[str, Any]] | None = None
 ) -> AgentSubstrate:
-    """Constrói o substrato configurado: `fake` (default — nenhum modelo),
-    `openhands` ou `claude-agent`. Nome desconhecido é falha LIMPA (P6),
-    nunca fallback silencioso para outro substrato."""
+    """Build the configured substrate: `fake` (default — no model), `openhands`
+    or `claude-agent`. An unknown name is a CLEAN failure (P6), never a silent
+    fallback to another substrate."""
     chosen = (name or os.environ.get(SUBSTRATE_ENV_VAR, "fake")).strip().lower()
-    # Construção direta do fake continua suportada em dev/test, mas jamais
-    # pode ser selecionada pelo deployment de produção.
+    # Constructing the fake directly is still supported in dev/test, but it can
+    # never be selected by a production deployment.
     validate_runtime_profile(require_real_substrate=True, substrate_name=chosen)
     if chosen == "fake":
         return FakeSubstrate(script or [])
@@ -427,6 +426,6 @@ def substrate_from_env(
     if chosen == "claude-agent":
         return ClaudeAgentSubstrate()
     raise ValueError(
-        f"{SUBSTRATE_ENV_VAR}={chosen!r} não é um substrato conhecido "
-        f"(válidos: {', '.join(_SUBSTRATE_NAMES)})"
+        f"{SUBSTRATE_ENV_VAR}={chosen!r} is not a known substrate "
+        f"(valid: {', '.join(_SUBSTRATE_NAMES)})"
     )

@@ -35,8 +35,8 @@ spec:
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
             {{- if .Values.extraEnvSecret }}
-            # GitHub App (finalize_pr / clone) + LITELLM master key (mint de
-            # virtual key). Ver extraEnvSecret em values.yaml.
+            # GitHub App (finalize_pr / clone) + LITELLM master key (virtual key
+            # minting). See extraEnvSecret in values.yaml.
             - secretRef:
                 name: {{ .Values.extraEnvSecret }}
             {{- end }}
@@ -45,14 +45,14 @@ spec:
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
             - name: HTTP_PROXY
               value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
-            # O API server do K8s (kubectl que cria os Pods de sandbox) tem de
-            # ficar FORA do proxy — senão o HTTPS_PROXY sequestra a chamada e o
-            # kubectl trava. NO_PROXY usa o ClusterIP que o kubectl MIRA
-            # (serviceHost), NÃO o CIDR pós-DNAT da NetworkPolicy.
+            # The K8s API server (the kubectl that creates the sandbox Pods) has
+            # to stay OUTSIDE the proxy — otherwise HTTPS_PROXY hijacks the call
+            # and kubectl hangs. NO_PROXY uses the ClusterIP that kubectl TARGETS
+            # (serviceHost), NOT the post-DNAT CIDR from the NetworkPolicy.
             - name: NO_PROXY
               value: ".svc,.cluster.local{{ if .Values.networkPolicy.kubeApiServer.serviceHost }},{{ .Values.networkPolicy.kubeApiServer.serviceHost }}{{ end }}"
-            # kubectl grava cache de discovery em $HOME/.kube/cache; sob
-            # readOnlyRootFilesystem, HOME precisa apontar para o /tmp emptyDir.
+            # kubectl writes its discovery cache to $HOME/.kube/cache; under
+            # readOnlyRootFilesystem, HOME must point at the /tmp emptyDir.
             - name: HOME
               value: "/tmp"
           resources:

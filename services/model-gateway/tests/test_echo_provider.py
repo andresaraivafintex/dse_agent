@@ -1,7 +1,7 @@
-"""Testa o servidor "modelo eco" (echo_provider/server.py) isoladamente,
-sem Docker — sobe o mesmo processo HTTP num thread local em porta efêmera.
-Prova que a lógica é determinística (WSD-E1-T2: pré-requisito para o
-"upgrade simulado" comparar respostas byte-a-byte)."""
+"""Tests the "echo model" server (echo_provider/server.py) in isolation,
+without Docker — it brings up the same HTTP process on a local thread on an
+ephemeral port. Proves the logic is deterministic (WSD-E1-T2: a prerequisite
+for the "simulated upgrade" to compare responses byte for byte)."""
 from __future__ import annotations
 
 import importlib.util
@@ -47,7 +47,7 @@ def test_chat_completion_is_deterministic(echo_server):
     resp1 = httpx.post(f"{echo_server}/v1/chat/completions", json=body)
     resp2 = httpx.post(f"{echo_server}/v1/chat/completions", json=body)
     assert resp1.status_code == 200
-    assert resp1.json() == resp2.json()  # mesma entrada -> mesma saída, sempre
+    assert resp1.json() == resp2.json()  # same input -> same output, always
 
 
 def test_chat_completion_shape_and_content(echo_server):

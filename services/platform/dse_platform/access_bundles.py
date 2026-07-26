@@ -1,27 +1,27 @@
-"""WSF-E3-T2 — Access bundles por tenant/canal (§10.18).
+"""WSF-E3-T2 — Per-tenant/channel access bundles (§10.18).
 
-Um *access bundle* é a unidade administrável que diz, para um (tenant, canal):
-repos permitidos, modes habilitados, budgets, ações bloqueadas, approvers
-designados (fallback da cascata CODEOWNERS do gate de plano do WS-B) e escopo
-de learning (promoção de skill). Este módulo é tanto o CRUD administrável
-quanto o *enforcement* consultado nos pontos de decisão dos outros workstreams.
+An *access bundle* is the administrable unit that states, for one
+(tenant, channel): allowed repos, enabled modes, budgets, blocked actions,
+designated approvers (the fallback of the CODEOWNERS cascade in WS-B's plan gate)
+and learning scope (skill promotion). This module is both the administrable CRUD
+and the *enforcement* consulted at the other workstreams' decision points.
 
-Princípios:
-- **P1 (deterministic-or-human)**: toda decisão aqui é comparação de conjuntos/
-  strings em código — nenhum LLM decide se um repo/mode/ação é permitido.
-- **P3 / cascata vazia bloqueia**: `resolve_plan_approvers` retorna a cascata
-  (CODEOWNERS -> designated_approvers do bundle). Se o resultado for vazio, o
-  caller DEVE bloquear (o gate de plano do WS-B nunca auto-aprova) — este
-  módulo expõe `require_plan_approver` que levanta `NoApproverError` nesse caso,
-  para que o "vazio bloqueia" seja estrutural e não uma checagem esquecível.
-- **P8 (evidence over assertion)**: toda decisão de enforcement negativa
-  (repo negado, ação bloqueada, mode não permitido, approver ausente) grava uma
-  linha de audit via `dse_audit.emit`.
+Principles:
+- **P1 (deterministic-or-human)**: every decision here is a set/string comparison
+  in code — no LLM decides whether a repo/mode/action is allowed.
+- **P3 / an empty cascade blocks**: `resolve_plan_approvers` returns the cascade
+  (CODEOWNERS -> the bundle's designated_approvers). If the result is empty, the
+  caller MUST block (WS-B's plan gate never self-approves) — this module exposes
+  `require_plan_approver`, which raises `NoApproverError` in that case, so that
+  "empty blocks" is structural rather than a forgettable check.
+- **P8 (evidence over assertion)**: every negative enforcement decision (repo
+  denied, action blocked, mode not allowed, approver missing) writes an audit row
+  via `dse_audit.emit`.
 
-Resolução (tenant, canal): bundle específico do canal primeiro; se não existir
-(ou desabilitado), cai para o bundle default do tenant (channel IS NULL). Se
-nenhum existir, `get_effective_bundle` retorna None e o enforcement trata como
-"nada permitido" (deny-by-default, nunca "sem limite").
+Resolution (tenant, channel): the channel-specific bundle first; if it does not
+exist (or is disabled), fall back to the tenant's default bundle (channel IS
+NULL). If neither exists, `get_effective_bundle` returns None and enforcement
+treats that as "nothing allowed" (deny-by-default, never "no limit").
 """
 from __future__ import annotations
 
@@ -46,13 +46,13 @@ def _get_connection():
 
 
 class AccessDenied(Exception):
-    """Enforcement negou uma operação (repo/mode/ação). Fail-closed em fronteira
-    (P6: nunca segue meio-caminho)."""
+    """Enforcement denied an operation (repo/mode/action). Fail-closed at the
+    boundary (P6: never proceeds halfway)."""
 
 
 class NoApproverError(Exception):
-    """A cascata de approvers de plano resolveu vazia — o gate DEVE bloquear
-    (P3: nunca auto-aprova). Levantada por `require_plan_approver`."""
+    """The plan approver cascade resolved empty — the gate MUST block (P3: never
+    self-approve). Raised by `require_plan_approver`."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,7 +85,7 @@ def _row_to_bundle(row) -> AccessBundle:
 
 
 # ---------------------------------------------------------------------------
-# CRUD administrável
+# Administrable CRUD
 # ---------------------------------------------------------------------------
 def upsert_access_bundle(
     tenant_id: str,
@@ -101,22 +101,22 @@ def upsert_access_bundle(
     actor: str = "system:platform-admin",
     conn=None,
 ) -> AccessBundle:
-    """Cria/atualiza o bundle de (tenant, channel). Campos None não são tocados
-    num update (idempotência parcial). Grava audit (P8)."""
+    """Creates/updates the bundle of (tenant, channel). None fields are left
+    untouched on an update (partial idempotency). Writes audit (P8)."""
     if modes is not None:
         invalid = set(modes) - VALID_MODES
         if invalid:
-            raise ValueError(f"modes inválidos: {sorted(invalid)} (válidos: {sorted(VALID_MODES)})")
+            raise ValueError(f"invalid modes: {sorted(invalid)} (valid: {sorted(VALID_MODES)})")
     if learning_scope is not None and learning_scope not in {"none", "tenant", "global"}:
-        raise ValueError(f"learning_scope inválido: {learning_scope!r}")
+        raise ValueError(f"invalid learning_scope: {learning_scope!r}")
 
     owns = conn is None
     if owns:
         conn = _get_connection()
     try:
         with conn.cursor() as cur:
-            # channel NULL usa índice único parcial próprio; ON CONFLICT precisa
-            # do índice correto conforme channel seja NULL ou não.
+            # a NULL channel uses its own partial unique index; ON CONFLICT needs
+            # the right index depending on whether channel is NULL or not.
             if channel is None:
                 conflict = "(tenant_id) WHERE channel IS NULL"
             else:
@@ -182,8 +182,8 @@ def _json_or_none(v):
 
 
 def get_bundle(tenant_id: str, *, channel: str | None = None, conn=None) -> AccessBundle | None:
-    """Busca o bundle EXATO de (tenant, channel) — sem fallback. Use
-    `get_effective_bundle` para a resolução com fallback."""
+    """Fetches the EXACT bundle of (tenant, channel) — no fallback. Use
+    `get_effective_bundle` for the resolution with fallback."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -207,9 +207,9 @@ def get_bundle(tenant_id: str, *, channel: str | None = None, conn=None) -> Acce
 
 
 def get_effective_bundle(tenant_id: str, *, channel: str | None = None, conn=None) -> AccessBundle | None:
-    """Bundle efetivo para (tenant, channel): específico do canal (se existir e
-    enabled) senão o default do tenant (channel IS NULL, se enabled). None se
-    nenhum — o enforcement trata None como deny-by-default."""
+    """Effective bundle for (tenant, channel): the channel-specific one (if it
+    exists and is enabled), otherwise the tenant default (channel IS NULL, if
+    enabled). None if neither — enforcement treats None as deny-by-default."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -222,7 +222,7 @@ def get_effective_bundle(tenant_id: str, *, channel: str | None = None, conn=Non
         default = get_bundle(tenant_id, channel=None, conn=conn)
         if default is not None and default.enabled:
             return default
-        # canal específico existe mas está desabilitado, e não há default: sem bundle.
+        # the channel-specific one exists but is disabled, and there is no default: no bundle.
         return None
     finally:
         if owns:
@@ -247,7 +247,7 @@ def list_bundles(tenant_id: str, conn=None) -> list[AccessBundle]:
 
 
 # ---------------------------------------------------------------------------
-# Enforcement (consultado nos pontos de decisão)
+# Enforcement (consulted at the decision points)
 # ---------------------------------------------------------------------------
 def _audit_denial(tenant_id: str, work_item_id: str | None, action: str, details: dict, conn=None) -> None:
     emit(
@@ -263,8 +263,8 @@ def _audit_denial(tenant_id: str, work_item_id: str | None, action: str, details
 def check_repo_allowed(
     tenant_id: str, repo: str, *, channel: str | None = None, work_item_id: str | None = None
 ) -> bool:
-    """True sse `repo` está na allowlist do bundle efetivo. Ausência de bundle
-    ou repo fora da lista = negado (deny-by-default) + audit."""
+    """True iff `repo` is in the effective bundle's allowlist. No bundle, or a
+    repo outside the list = denied (deny-by-default) + audit."""
     bundle = get_effective_bundle(tenant_id, channel=channel)
     if bundle is not None and repo in bundle.allowed_repos:
         return True
@@ -277,13 +277,13 @@ def check_repo_allowed(
 
 def require_repo_allowed(tenant_id: str, repo: str, *, channel: str | None = None, work_item_id: str | None = None) -> None:
     if not check_repo_allowed(tenant_id, repo, channel=channel, work_item_id=work_item_id):
-        raise AccessDenied(f"repo {repo!r} não permitido para tenant {tenant_id!r} (channel={channel!r})")
+        raise AccessDenied(f"repo {repo!r} not allowed for tenant {tenant_id!r} (channel={channel!r})")
 
 
 def check_mode_allowed(
     tenant_id: str, mode: str, *, channel: str | None = None, work_item_id: str | None = None
 ) -> bool:
-    """True sse `mode` está habilitado no bundle efetivo. deny-by-default + audit."""
+    """True iff `mode` is enabled in the effective bundle. deny-by-default + audit."""
     if mode not in VALID_MODES:
         raise ValueError(f"mode desconhecido: {mode!r}")
     bundle = get_effective_bundle(tenant_id, channel=channel)
@@ -299,10 +299,10 @@ def check_mode_allowed(
 def is_action_blocked(
     tenant_id: str, action: str, *, channel: str | None = None, work_item_id: str | None = None
 ) -> bool:
-    """True sse `action` está em blocked_actions do bundle efetivo (ex.:
-    "direct_merge_to_protected_branch"). Sem bundle => nada explicitamente
-    bloqueado por lista, MAS o caller de uma ação sensível deve usar
-    `require_action_allowed`, que também nega quando não há bundle."""
+    """True iff `action` is in the effective bundle's blocked_actions (e.g.
+    "direct_merge_to_protected_branch"). With no bundle => nothing is explicitly
+    blocked by list, BUT the caller of a sensitive action must use
+    `require_action_allowed`, which also denies when there is no bundle."""
     bundle = get_effective_bundle(tenant_id, channel=channel)
     if bundle is None:
         return False
@@ -318,25 +318,25 @@ def is_action_blocked(
 def require_action_allowed(
     tenant_id: str, action: str, *, channel: str | None = None, work_item_id: str | None = None
 ) -> None:
-    """Levanta AccessDenied se a ação está bloqueada OU se não há bundle
-    (deny-by-default para ações sensíveis)."""
+    """Raises AccessDenied if the action is blocked OR if there is no bundle
+    (deny-by-default for sensitive actions)."""
     bundle = get_effective_bundle(tenant_id, channel=channel)
     if bundle is None:
         _audit_denial(
             tenant_id, work_item_id, "access_denied_action",
             {"action": action, "channel": channel, "reason": "no_bundle"},
         )
-        raise AccessDenied(f"ação {action!r} negada: sem access bundle para tenant {tenant_id!r}")
+        raise AccessDenied(f"action {action!r} denied: no access bundle for tenant {tenant_id!r}")
     if action in bundle.blocked_actions:
         _audit_denial(
             tenant_id, work_item_id, "access_denied_action",
             {"action": action, "channel": channel, "reason": "action_in_blocklist"},
         )
-        raise AccessDenied(f"ação {action!r} bloqueada pelo bundle de {tenant_id!r} (channel={channel!r})")
+        raise AccessDenied(f"action {action!r} blocked by the bundle of {tenant_id!r} (channel={channel!r})")
 
 
 # ---------------------------------------------------------------------------
-# Cascata de approvers do gate de plano (WSB-E3-T2) — fallback do CODEOWNERS
+# Plan gate approver cascade (WSB-E3-T2) — CODEOWNERS fallback
 # ---------------------------------------------------------------------------
 def resolve_plan_approvers(
     tenant_id: str,
@@ -346,13 +346,13 @@ def resolve_plan_approvers(
     work_item_id: str | None = None,
     conn=None,
 ) -> list[str]:
-    """Cascata do gate de plano: CODEOWNERS resolvidos (passados pelo WS-B a
-    partir do repo) PRIMEIRO; se vazio/ausente, cai para os
-    `designated_approvers` do bundle efetivo. Approvers offboardados
-    (dse_console_identity.active = false) são REMOVIDOS da cascata (WSF-E3-T3).
+    """Plan gate cascade: resolved CODEOWNERS (passed by WS-B from the repo)
+    FIRST; if empty/absent, fall back to the effective bundle's
+    `designated_approvers`. Offboarded approvers (dse_console_identity.active =
+    false) are REMOVED from the cascade (WSF-E3-T3).
 
-    Retorna a lista final (pode ser vazia — o caller decide; `require_plan_approver`
-    faz o "vazio bloqueia" estrutural)."""
+    Returns the final list (may be empty — the caller decides;
+    `require_plan_approver` makes "empty blocks" structural)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -368,7 +368,7 @@ def resolve_plan_approvers(
                     if p and p not in candidates:
                         candidates.append(p)
 
-        # remove offboardados/expirados da resolução (WSF-E3-T3 offboarding)
+        # drop offboarded/expired principals from the resolution (WSF-E3-T3 offboarding)
         active = _filter_active_principals(candidates, conn=conn)
         removed = [p for p in candidates if p not in active]
         if removed:
@@ -389,10 +389,10 @@ def resolve_plan_approvers(
 
 
 def _filter_active_principals(principals: list[str], conn=None) -> list[str]:
-    """Mantém só os principals que NÃO estão desativados no console identity.
-    Um principal sem linha em dse_console_identity é considerado ativo (ele
-    pode ser um CODEOWNER que nunca logou no console — não o removemos por
-    isso; só removemos os EXPLICITAMENTE desativados/expirados)."""
+    """Keeps only the principals that are NOT deactivated in the console
+    identity. A principal with no row in dse_console_identity is considered
+    active (it may be a CODEOWNER who never logged into the console — we do not
+    drop it for that; we only drop the EXPLICITLY deactivated/expired ones)."""
     if not principals:
         return []
     owns = conn is None
@@ -422,9 +422,9 @@ def require_plan_approver(
     codeowners: list[str] | None = None,
     work_item_id: str | None = None,
 ) -> list[str]:
-    """Igual a `resolve_plan_approvers`, mas levanta `NoApproverError` se a
-    cascata resolver vazia — o "cascata vazia BLOQUEIA" do enunciado, feito
-    estrutural (P1/P3: o gate nunca auto-aprova por falta de approver)."""
+    """Same as `resolve_plan_approvers`, but raises `NoApproverError` if the
+    cascade resolves empty — the spec's "an empty cascade BLOCKS", made
+    structural (P1/P3: the gate never self-approves for lack of an approver)."""
     approvers = resolve_plan_approvers(
         tenant_id, channel=channel, codeowners=codeowners, work_item_id=work_item_id
     )
@@ -434,6 +434,6 @@ def require_plan_approver(
             {"channel": channel, "reason": "empty_cascade"},
         )
         raise NoApproverError(
-            f"cascata de approvers vazia para tenant {tenant_id!r} (channel={channel!r}): gate bloqueado"
+            f"empty approver cascade for tenant {tenant_id!r} (channel={channel!r}): gate blocked"
         )
     return approvers

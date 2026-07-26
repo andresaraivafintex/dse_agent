@@ -1,6 +1,5 @@
-"""WSC-E1-T2: caps de recursos (--cpus/--memory/--pids-limit) parametrizados
-pelo budget do WorkItem + métricas OTel de minutos de runtime por resource
-class."""
+"""WSC-E1-T2: resource caps (--cpus/--memory/--pids-limit) parameterized from
+the WorkItem budget + OTel metrics for runtime minutes per resource class."""
 from __future__ import annotations
 
 import asyncio

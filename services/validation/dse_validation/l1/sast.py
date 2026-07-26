@@ -1,6 +1,6 @@
-"""WSE-E1-T2 (parte 1) — SAST via `bandit` (self-hostable, real, sem custo de
-licença) rodando dentro do sandbox contra o diretório do diff. Normaliza a
-saída JSON do bandit para `L1Finding` (mesmo formato dos outros checks)."""
+"""WSE-E1-T2 (part 1) — SAST via `bandit` (self-hostable, real, no license
+cost) running inside the sandbox against the diff directory. Normalizes
+bandit's JSON output into `L1Finding` (the same shape as the other checks)."""
 from __future__ import annotations
 
 import json
@@ -26,10 +26,10 @@ def sast_check(
             check="sast",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"bandit não encontrado: {result.stderr.strip()}",
+            detail=f"bandit not found: {result.stderr.strip()}",
         )
 
-    # bandit sai com returncode 1 quando encontra issues (não é erro de execução).
+    # bandit exits with returncode 1 when it finds issues (not an execution error).
     try:
         payload = json.loads(result.stdout or "{}")
     except json.JSONDecodeError:
@@ -37,7 +37,7 @@ def sast_check(
             check="sast",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"bandit não produziu JSON válido (exit={result.returncode}): {result.stderr[:2000]}",
+            detail=f"bandit did not produce valid JSON (exit={result.returncode}): {result.stderr[:2000]}",
         )
 
     findings = payload.get("results", [])
@@ -46,12 +46,12 @@ def sast_check(
     ]
 
     if not gating:
-        detail = f"{len(findings)} achado(s) de SAST no total, nenhum >= {severity_gate}"
+        detail = f"{len(findings)} SAST finding(s) in total, none >= {severity_gate}"
         return L1Finding(check="sast", passed=True, detail=detail)
 
     lines = [
         f"- [{f.get('issue_severity')}] {f.get('test_id')} {f.get('filename')}:{f.get('line_number')} — {f.get('issue_text')}"
         for f in gating[:20]
     ]
-    detail = f"{len(gating)} achado(s) de SAST >= {severity_gate}:\n" + "\n".join(lines)
+    detail = f"{len(gating)} SAST finding(s) >= {severity_gate}:\n" + "\n".join(lines)
     return L1Finding(check="sast", passed=False, detail=detail)

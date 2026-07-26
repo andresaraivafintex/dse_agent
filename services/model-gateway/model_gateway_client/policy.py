@@ -1,30 +1,30 @@
-"""Motor de política per-stage/per-tenant (WSD-E2-T1).
+"""Per-stage/per-tenant policy engine (WSD-E2-T1).
 
-Config DECLARATIVA (fora do código do agente) que mapeia
-`(tenant, stage, data_class, risk_class)` -> conjunto de modelos permitidos +
-modelo preferido. A ideia do plano mestre: o Coder recebe o modelo mais forte,
-o Reviewer L2 recebe o mais barato — sem que o agente decida nada (P1: nenhuma
-decisão de fluxo por LLM; a política é dados, não código do agente).
+DECLARATIVE config (outside the agent's code) mapping
+`(tenant, stage, data_class, risk_class)` -> set of allowed models + preferred
+model. The master plan's idea: the Coder gets the strongest model, the L2
+Reviewer gets the cheapest one — with the agent deciding nothing (P1: no flow
+decision made by an LLM; policy is data, not agent code).
 
-Fontes de política (ordem de autoridade):
-  1. Tabela `model_policies` (migrations/0011_wsd2.sql) — fonte durável e
-     hot-reloadable. Um operador dá INSERT/UPDATE aqui e o efeito aparece em
-     <TTL segundos SEM redeploy (o motor lê no call time com cache TTL curto).
-  2. `load_policies_from_file(path)` — carrega um YAML/JSON declarativo para a
-     tabela (autoria da config "as code" fora do agente). É açúcar de
-     conveniência; a autoridade em runtime é sempre a tabela.
+Policy sources (order of authority):
+  1. The `model_policies` table (migrations/0011_wsd2.sql) — durable and
+     hot-reloadable source. An operator does an INSERT/UPDATE here and the
+     effect shows up within <TTL seconds with NO redeploy (the engine reads it
+     at call time with a short TTL cache).
+  2. `load_policies_from_file(path)` — loads a declarative YAML/JSON into the
+     table (authoring the config "as code" outside the agent). It is
+     convenience sugar; the runtime authority is always the table.
 
-Integração com o access bundle do tenant (WS-F, `dse_access_bundle`): se existe
-um bundle default do tenant e ele está `enabled=false`, o tenant está
-totalmente desligado -> nenhum modelo é permitido (deny-all). Ler o bundle é
-defensivo: se a tabela do WS-F ainda não existir (build em paralelo), o motor
-degrada para "sem restrição adicional" e documenta no README.
+Integration with the tenant's access bundle (WS-F, `dse_access_bundle`): if a
+default bundle exists for the tenant and it is `enabled=false`, the tenant is
+fully switched off -> no model is allowed (deny-all). Reading the bundle is
+defensive: if the WS-F table does not exist yet (parallel build), the engine
+degrades to "no additional restriction" and documents that in the README.
 
-Resolução: entre as linhas ATIVAS que casam (com coringa '*' permitido em
-qualquer dimensão), vence a mais ESPECÍFICA (menos coringas) e, no empate, a de
-maior `priority`. Sem nenhuma linha aplicável -> política permissiva (allow),
-para não quebrar o comportamento da Fase 1 quando nenhuma política foi
-configurada.
+Resolution: among the ACTIVE matching rows (with wildcard '*' allowed on any
+dimension), the most SPECIFIC one wins (fewest wildcards) and, on a tie, the
+one with the highest `priority`. With no applicable row -> permissive policy
+(allow), so Phase 1 behavior is not broken when no policy has been configured.
 """
 from __future__ import annotations
 
@@ -36,20 +36,20 @@ from dataclasses import dataclass
 
 from . import db
 
-# Cache TTL curto: hot-reload sem redeploy, efeito em <=_CACHE_TTL segundos.
+# Short cache TTL: hot-reload without redeploy, effective in <=_CACHE_TTL seconds.
 _CACHE_TTL_SECONDS = float(os.environ.get("DSE_POLICY_CACHE_TTL_SECONDS", "5"))
 _WILDCARD = "*"
 
 
 @dataclass(frozen=True)
 class PolicyDecision:
-    """Resultado da resolução de política. `allowed_models=None` significa
-    'sem restrição de modelo configurada' (allow-all) — distinto de uma lista
-    vazia, que significa deny-all (ex.: tenant desligado no access bundle)."""
+    """Result of policy resolution. `allowed_models=None` means 'no model
+    restriction configured' (allow-all) — distinct from an empty list, which
+    means deny-all (e.g. tenant switched off in the access bundle)."""
 
     allowed_models: list[str] | None
     preferred_model: str | None
-    source: str  # descrição legível de onde a decisão veio (auditoria/debug)
+    source: str  # human-readable description of where the decision came from (audit/debug)
 
     def permits(self, model: str) -> bool:
         if self.allowed_models is None:
@@ -57,7 +57,7 @@ class PolicyDecision:
         return model in self.allowed_models
 
 
-# --- cache simples com TTL (thread-safe) ------------------------------------
+# --- simple TTL cache (thread-safe) -----------------------------------------
 _cache_lock = threading.Lock()
 _cache: dict[tuple, tuple[float, list[dict]]] = {}
 
@@ -72,9 +72,9 @@ def clear_cache() -> None:
 
 
 def _load_active_rows(tenant_id: str) -> list[dict]:
-    """Linhas de política ativas aplicáveis ao tenant (o próprio tenant + o
-    coringa '*'). Cacheado por TTL curto para não bater no Postgres a cada
-    chamada de modelo, mantendo o hot-reload em <=TTL segundos."""
+    """Active policy rows applicable to the tenant (the tenant itself + the '*'
+    wildcard). Cached with a short TTL so we do not hit Postgres on every model
+    call, while keeping hot-reload within <=TTL seconds."""
     cache_key = ("policies", tenant_id)
     with _cache_lock:
         hit = _cache.get(cache_key)
@@ -118,9 +118,9 @@ def _matches(row_value: str, actual: str) -> bool:
 
 
 def _specificity(row: dict) -> tuple[int, int]:
-    """Chave de ordenação: (num_dimensões_específicas, priority). Maior vence."""
+    """Sort key: (num_specific_dimensions, priority). Higher wins."""
     specific = 0
-    # conta como específica cada dimensão que não é coringa (mais específica vence)
+    # every non-wildcard dimension counts as specific (most specific wins)
     for dim in ("tenant_id", "stage", "data_class", "risk_class"):
         if row[dim] != _WILDCARD:
             specific += 1
@@ -128,10 +128,11 @@ def _specificity(row: dict) -> tuple[int, int]:
 
 
 def _tenant_disabled_in_access_bundle(tenant_id: str) -> bool:
-    """Consulta defensiva ao access bundle do WS-F (`dse_access_bundle`): se o
-    bundle DEFAULT do tenant (channel IS NULL) existe e está enabled=false, o
-    tenant está desligado (deny-all). Se a tabela ainda não existe (WS-F em
-    build paralelo) ou não há bundle, retorna False (sem restrição extra)."""
+    """Defensive query against WS-F's access bundle (`dse_access_bundle`): if
+    the tenant's DEFAULT bundle (channel IS NULL) exists and is enabled=false,
+    the tenant is switched off (deny-all). If the table does not exist yet
+    (WS-F built in parallel) or there is no bundle, returns False (no extra
+    restriction)."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -148,8 +149,9 @@ def _tenant_disabled_in_access_bundle(tenant_id: str) -> bool:
                 return False
             return row[0] is False
     except Exception:
-        # Tabela ausente / esquema diferente do esperado: degrade permissivo,
-        # documentado no README (integração WS-F é opcional/defensiva aqui).
+        # Missing table / schema different from expected: permissive degrade,
+        # documented in the README (the WS-F integration is optional/defensive
+        # here).
         conn.rollback()
         return False
     finally:
@@ -163,8 +165,8 @@ def resolve_policy(
     data_class: str = "internal",
     risk_class: str = "*",
 ) -> PolicyDecision:
-    """Resolve a política aplicável. Ver docstring do módulo para a semântica
-    de especificidade/coringa e da integração com o access bundle."""
+    """Resolves the applicable policy. See the module docstring for the
+    specificity/wildcard semantics and the access bundle integration."""
     if _tenant_disabled_in_access_bundle(tenant_id):
         return PolicyDecision(
             allowed_models=[],
@@ -199,24 +201,24 @@ def resolve_policy(
     )
 
 
-# --- autoria declarativa: carregar YAML/JSON para a tabela ------------------
+# --- declarative authoring: load YAML/JSON into the table -------------------
 def load_policies_from_file(path: str) -> int:
-    """Carrega um arquivo declarativo (YAML ou JSON) para `model_policies`
-    (upsert por (tenant_id, stage, data_class, risk_class)). Retorna quantas
-    linhas foram upsertadas. Formato:
+    """Loads a declarative file (YAML or JSON) into `model_policies` (upsert on
+    (tenant_id, stage, data_class, risk_class)). Returns how many rows were
+    upserted. Format:
 
         policies:
-          - tenant_id: "*"          # opcional (default '*')
+          - tenant_id: "*"          # optional (default '*')
             stage: "coder"
-            data_class: "*"          # opcional
-            risk_class: "*"          # opcional
+            data_class: "*"          # optional
+            risk_class: "*"          # optional
             allowed_models: ["bedrock/anthropic.claude-3-5-sonnet"]
             preferred_model: "bedrock/anthropic.claude-3-5-sonnet"
-            priority: 10             # opcional (default 0)
+            priority: 10             # optional (default 0)
 
-    Isto é conveniência de autoria "config as code" fora do agente; a
-    autoridade em runtime continua sendo a tabela (hot-reload). Chamado por
-    um operador/CD, nunca por uma sessão de agente.
+    This is "config as code" authoring convenience outside the agent; the
+    runtime authority remains the table (hot-reload). Called by an operator/CD,
+    never by an agent session.
     """
     data = _read_config_file(path)
     entries = data.get("policies", []) if isinstance(data, dict) else []
@@ -261,10 +263,10 @@ def _read_config_file(path: str) -> dict:
     if path.endswith(".json"):
         return json.loads(text)
     try:
-        import yaml  # pyyaml é dependência do pacote (ver pyproject.toml)
+        import yaml  # pyyaml is a package dependency (see pyproject.toml)
 
         return yaml.safe_load(text) or {}
-    except ModuleNotFoundError as exc:  # pragma: no cover - defensivo
+    except ModuleNotFoundError as exc:  # pragma: no cover - defensive
         raise RuntimeError(
-            "pyyaml não instalado — use um arquivo .json ou instale o extra"
+            "pyyaml not installed — use a .json file or install the extra"
         ) from exc

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Plano 08 §D — kubeconfig para DENTRO da rede docker (dse_net).
+# Plan 08 §D — kubeconfig for use INSIDE the docker network (dse_net).
 #
-# O kubeconfig do host aponta para 0.0.0.0:<porta-aleatória> (publicada pelo
-# serverlb) — inútil de dentro de um container. Este script gera a variante
-# interna: server https://k3d-<cluster>-serverlb:6443 (nome resolvível na
-# dse_net; o cert do k3s inclui o serverlb no SAN). O worker do orchestrator
-# monta o arquivo e é assim que o trigger_preview fala com o cluster.
+# The host kubeconfig points at 0.0.0.0:<random-port> (published by the
+# serverlb) — useless from inside a container. This script generates the
+# internal variant: server https://k3d-<cluster>-serverlb:6443 (a name
+# resolvable on dse_net; the k3s cert includes the serverlb in its SAN). The
+# orchestrator worker mounts the file, and that is how trigger_preview talks
+# to the cluster.
 #
-# Credencial de DEV efêmera (cluster k3d local, recriável) — o arquivo é
-# gitignored; re-rode após recriar o cluster. Produção usa o kubeconfig do
-# cluster real do cliente (Vault/CSI), nunca este.
+# Ephemeral DEV credential (local k3d cluster, re-creatable) — the file is
+# gitignored; re-run it after re-creating the cluster. Production uses the
+# customer's real cluster kubeconfig (Vault/CSI), never this one.
 set -euo pipefail
 CLUSTER_NAME="${DSE_K3D_CLUSTER:-dse-preview}"
 OUT="$(cd "$(dirname "$0")" && pwd)/kubeconfig-internal.yaml"

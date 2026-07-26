@@ -1,22 +1,23 @@
-"""Contrato tipado de execução isolada de turno de agente (plano 09, Fase 1).
+"""Typed contract for isolated agent-turn execution (plano 09, Phase 1).
 
-Invariante 2 da REMEDIATION-CANONICAL-SPEC: "Agent SDK code and untrusted
+Invariant 2 of the REMEDIATION-CANONICAL-SPEC: "Agent SDK code and untrusted
 tools execute only in a stage-scoped sandbox. The Temporal worker dispatches a
 typed execution contract; it does not call the agent SDK in its own process."
 
-Este módulo É esse contrato: o worker serializa um `AgentTurnRequest`, o
-driver de sandbox o entrega ao agent-runner DENTRO do container/pod
-(`docker exec -i` no dev, `kubectl exec -i` no cluster), e o runner devolve um
-`AgentTurnResult`. Regras:
+This module IS that contract: the worker serializes an `AgentTurnRequest`, the
+sandbox driver hands it to the agent-runner INSIDE the container/pod
+(`docker exec -i` in dev, `kubectl exec -i` in the cluster), and the runner
+returns an `AgentTurnResult`. Rules:
 
-  - `extra="forbid"` nos dois lados: payload desconhecido é falha limpa (P6),
-    nunca campo ignorado silenciosamente.
-  - NENHUM path do host atravessa a fronteira: `workspace_dir` é o caminho
-    DENTRO do sandbox (por convenção `/workspace`, bind/emptyDir do driver).
-  - NENHUMA credencial de longo prazo: `gateway.virtual_key` é a key efêmera
-    por tarefa mintada pelo WS-D; o runner nunca vê master key/provider key.
-  - Evolução de shape é ADITIVA (spec §5): campo novo tem default seguro e
-    `schema_version` permite recusar payload de versão futura com erro limpo.
+  - `extra="forbid"` on both sides: an unknown payload is a clean failure (P6),
+    never a silently ignored field.
+  - NO host path crosses the boundary: `workspace_dir` is the path INSIDE the
+    sandbox (by convention `/workspace`, the driver's bind/emptyDir).
+  - NO long-lived credential: `gateway.virtual_key` is the ephemeral per-task
+    key minted by WS-D; the runner never sees the master key/provider key.
+  - Shape evolution is ADDITIVE (spec §5): a new field has a safe default and
+    `schema_version` allows refusing a future-version payload with a clean
+    error.
 """
 from __future__ import annotations
 
@@ -24,15 +25,15 @@ from pydantic import BaseModel, Field
 
 AGENT_TURN_SCHEMA_VERSION = 1
 
-# Substratos que o runner conhece. "fake" existe para conformidade/testes —
-# o runtime_profile continua recusando fake em produção (require_real_substrate).
+# Substrates the runner knows about. "fake" exists for conformance/tests — the
+# runtime_profile still refuses fake in production (require_real_substrate).
 KNOWN_SUBSTRATES = ("fake", "claude-agent", "openhands")
 
 
 class AgentTurnGateway(BaseModel, extra="forbid"):
-    """Triângulo gateway-only (P1): base_url do model-gateway ALCANÇÁVEL DE
-    DENTRO do sandbox (rede interna), virtual key efêmera e os headers
-    obrigatórios do contrato WS-D (`GatewayCallHeaders.to_http_headers()`)."""
+    """Gateway-only triangle (P1): model-gateway base_url REACHABLE FROM INSIDE
+    the sandbox (internal network), the ephemeral virtual key, and the headers
+    required by the WS-D contract (`GatewayCallHeaders.to_http_headers()`)."""
 
     base_url: str
     virtual_key: str
@@ -43,35 +44,35 @@ class AgentTurnRequest(BaseModel, extra="forbid"):
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     work_item_id: str
     tenant_id: str
-    stage: str  # "coder" | "tester" (vocabulário de Stage do gateway_contract)
-    substrate: str  # um de KNOWN_SUBSTRATES
+    stage: str  # "coder" | "tester" (Stage vocabulary from gateway_contract)
+    substrate: str  # one of KNOWN_SUBSTRATES
     instruction: str
     model: str | None = None
-    # Toolset SÓ de edição de arquivo (P1) — o default espelha
-    # ClaudeAgentSubstrate.DEFAULT_ALLOWED_TOOLS; git/PR/bash nunca entram.
+    # File-editing-ONLY toolset (P1) — the default mirrors
+    # ClaudeAgentSubstrate.DEFAULT_ALLOWED_TOOLS; git/PR/bash never get in.
     allowed_tools: list[str] = Field(
         default_factory=lambda: ["Read", "Write", "Edit", "Glob", "Grep"]
     )
-    # Caminho DENTRO do sandbox (convenção do driver), nunca path do host.
+    # Path INSIDE the sandbox (driver convention), never a host path.
     workspace_dir: str = "/workspace"
     timeout_seconds: float = 900.0
     gateway: AgentTurnGateway
-    # SÓ para substrate="fake" (conformidade/testes): roteiro do FakeSubstrate.
+    # ONLY for substrate="fake" (conformance/tests): the FakeSubstrate script.
     fake_script: list[dict] | None = None
 
 
 class WorkspaceBootstrapRequest(BaseModel, extra="forbid"):
-    """Op de lifecycle executada DENTRO do sandbox (runner `--op bootstrap`):
-    materializa o workspace git da tarefa no runtime alvo. No Docker o
-    checkpoint é o bind mount `/checkpoint.git`; no K8s, o volume do Pod.
-    O hook pre-receive de escopo (branch único, sem force-push) é instalado
-    no bare repo ANTES do primeiro push — o enforcement mora no remoto.
+    """Lifecycle op executed INSIDE the sandbox (runner `--op bootstrap`):
+    materializes the task's git workspace on the target runtime. On Docker the
+    checkpoint is the bind mount `/checkpoint.git`; on K8s, the Pod volume.
+    The scoping pre-receive hook (single branch, no force-push) is installed on
+    the bare repo BEFORE the first push — the enforcement lives on the remote.
 
-    `repo` (ex.: "andre2654/fintex-wallet"): quando presente, o bootstrap
-    CLONA o repo real de dentro do Pod, através do egress-proxy (HTTPS_PROXY),
-    em vez de iniciar um workspace vazio — o token nunca entra no Pod (o proxy
-    injeta a credencial; repo público via CONNECT anônimo). Ausente → workspace
-    vazio (mecânica original / testes)."""
+    `repo` (e.g. "andre2654/fintex-wallet"): when present, the bootstrap CLONES
+    the real repo from inside the Pod, through the egress-proxy (HTTPS_PROXY),
+    instead of starting an empty workspace — the token never enters the Pod
+    (the proxy injects the credential; public repo via anonymous CONNECT).
+    Absent → empty workspace (original mechanics / tests)."""
 
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     work_item_id: str
@@ -87,7 +88,7 @@ class WorkspaceBootstrapRequest(BaseModel, extra="forbid"):
 class WorkspaceBootstrapResult(BaseModel, extra="forbid"):
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     sha: str = ""
-    created: bool = False  # False = workspace/branch já existia (idempotente)
+    created: bool = False  # False = workspace/branch already existed (idempotent)
     error: str | None = None
     error_kind: str | None = None
 
@@ -97,8 +98,8 @@ class WorkspaceBootstrapResult(BaseModel, extra="forbid"):
 
 
 class CheckpointOpRequest(BaseModel, extra="forbid"):
-    """Op `--op checkpoint`: commit (se houver mudanças) + push do branch da
-    tarefa para o checkpoint — refspec fixo, jamais force."""
+    """Op `--op checkpoint`: commit (if there are changes) + push of the task
+    branch to the checkpoint — fixed refspec, never force."""
 
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     work_item_id: str
@@ -120,11 +121,11 @@ class CheckpointOpResult(BaseModel, extra="forbid"):
 
 
 class PostTurnRequest(BaseModel, extra="forbid"):
-    """Op `--op post_turn`: a higiene determinística + commit/push do turno do
-    Coder executada DENTRO do sandbox (runtime K8s, onde o worker não enxerga
-    o workspace). Mesma sequência do worker no runtime Docker: prune de
-    descartáveis → restore de lockfile churn → revert de edições de teste →
-    commit/push escopado. O LLM nunca participa (P1)."""
+    """Op `--op post_turn`: the deterministic hygiene + commit/push of the
+    Coder turn executed INSIDE the sandbox (K8s runtime, where the worker
+    cannot see the workspace). Same sequence as the worker on the Docker
+    runtime: prune disposables → restore lockfile churn → revert test edits →
+    scoped commit/push. The LLM never takes part (P1)."""
 
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     work_item_id: str
@@ -154,15 +155,16 @@ class PostTurnResult(BaseModel, extra="forbid"):
 class AgentTurnResult(BaseModel, extra="forbid"):
     schema_version: int = AGENT_TURN_SCHEMA_VERSION
     done: bool
-    # Diagnóstico compacto do turno (nunca é decisão de fluxo — P1): amostra
-    # de pensamentos/tool calls para audit/debug, capada pelo runner.
+    # Compact turn diagnostics (never a flow decision — P1): a sample of
+    # thoughts/tool calls for audit/debug, capped by the runner.
     thoughts: list[str] = Field(default_factory=list)
     tool_calls: list[str] = Field(default_factory=list)
     cost_usd: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
-    # Falha limpa do runner (P6): erro estruturado, nunca stdout truncado.
-    # error_kind é vocabulário fechado para o worker classificar sem substring:
+    # Clean runner failure (P6): structured error, never truncated stdout.
+    # error_kind is a closed vocabulary so the worker classifies without
+    # substring matching:
     # "unsupported_substrate" | "invalid_payload" | "substrate_error" | "timeout"
     error: str | None = None
     error_kind: str | None = None

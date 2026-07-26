@@ -1,12 +1,13 @@
--- 0030 (WS-C) — GRANT DELETE em skill_episode/skill_eval para dse_app.
+-- 0030 (WS-C) — GRANT DELETE on skill_episode/skill_eval for dse_app.
 --
--- A 0019 concedeu só SELECT, INSERT. São tabelas OPERACIONAIS (não ledger): a
--- app precisa poder limpar episódios/avaliações por tenant — retenção, GDPR,
--- reprocessamento — igual a console_rm.cost_rollup (0027, que já tem DELETE).
--- O ledger imutável de verdade é o audit_log, onde DELETE é REVOGADO (0001).
+-- 0019 granted only SELECT, INSERT. These are OPERATIONAL tables (not a ledger):
+-- the app needs to be able to clean up episodes/evaluations per tenant —
+-- retention, GDPR, reprocessing — just like console_rm.cost_rollup (0027, which
+-- already has DELETE). The truly immutable ledger is audit_log, where DELETE is
+-- REVOKED (0001).
 --
--- Achado na primeira execução real do CI (2026-07-24): o runner usa a role
--- dse_app e o teardown dos testes de promoção faz DELETE FROM skill_episode →
--- "permission denied for table skill_episode". Passava local só porque o
--- conftest usa a role superuser dse. Aditiva e idempotente (GRANT).
+-- Found on the first real CI run (2026-07-24): the runner uses the dse_app role
+-- and the teardown of the promotion tests does DELETE FROM skill_episode →
+-- "permission denied for table skill_episode". It passed locally only because
+-- conftest uses the superuser role dse. Additive and idempotent (GRANT).
 GRANT DELETE ON skill_episode, skill_eval TO dse_app;

@@ -1,40 +1,40 @@
--- Fintex DSE — adapter Teams: DDL de ATIVAÇÃO (NÃO aplicada nesta sessão).
+-- Fintex DSE — Teams adapter: ACTIVATION DDL (NOT applied in this session).
 --
--- Este arquivo NÃO é uma migração numerada e NÃO é aplicado por
--- scripts/migrate.py. Ele documenta as mudanças de FUNDAÇÃO necessárias para
--- ativar o adapter Teams (decisão de negócio/roadmap Fase 4+). Aplicar como
--- parte de uma migração de ativação, junto com o passo de código:
+-- This file is NOT a numbered migration and is NOT applied by
+-- scripts/migrate.py. It documents the FOUNDATION changes required to activate
+-- the Teams adapter (business/roadmap decision, Phase 4+). Apply it as part of
+-- an activation migration, together with the code step:
 --
---   CÓDIGO (packages/contracts/dse_contracts/conversation_event.py):
+--   CODE (packages/contracts/dse_contracts/conversation_event.py):
 --     class Platform(str, Enum):
 --         slack = "slack"
 --         github = "github"
 --         jira = "jira"
---         teams = "teams"          # <-- 1 linha aditiva
+--         teams = "teams"          # <-- 1 additive line
 --
--- Por que não está aplicado agora: WS-A (Fase 4) não edita packages/* nem as
--- migrações 0001-0019 (convivência com 4 agentes em paralelo). Os CHECKs abaixo
--- vivem na fundação (migração 0001) e mutá-los pega lock em tabelas quentes
--- (work_items/identity_links) usadas por todos — então a ativação é deliberada,
--- não um efeito colateral desta entrega.
+-- Why it is not applied now: WS-A (Phase 4) does not edit packages/* nor
+-- migrations 0001-0019 (coexistence with 4 agents in parallel). The CHECKs below
+-- live in the foundation (migration 0001) and mutating them takes locks on hot
+-- tables (work_items/identity_links) used by everyone — so activation is
+-- deliberate, not a side effect of this delivery.
 --
--- Todas as mudanças são ADITIVAS (só ampliam o conjunto permitido). Idempotentes.
+-- All changes are ADDITIVE (they only widen the allowed set). Idempotent.
 
 BEGIN;
 
--- 1. work_items.source aceita 'teams'
+-- 1. work_items.source accepts 'teams'
 ALTER TABLE work_items DROP CONSTRAINT IF EXISTS work_items_source_check;
 ALTER TABLE work_items ADD CONSTRAINT work_items_source_check
     CHECK (source IN ('slack', 'github', 'jira', 'teams'));
 
--- 2. identity_links.platform aceita 'teams' (para resolve_principal('teams', ...))
+-- 2. identity_links.platform accepts 'teams' (for resolve_principal('teams', ...))
 ALTER TABLE identity_links DROP CONSTRAINT IF EXISTS identity_links_platform_check;
 ALTER TABLE identity_links ADD CONSTRAINT identity_links_platform_check
     CHECK (platform IN ('slack', 'github', 'jira', 'teams'));
 
 COMMIT;
 
--- Após aplicar isto + a linha do enum: /health passa a reportar
--- {"activated": true} e o endpoint /teams/messages passa do 501
--- teams_not_activated para o pipeline completo (correlate/admit) sem nenhuma
--- outra mudança no serviço.
+-- After applying this + the enum line: /health starts reporting
+-- {"activated": true} and the /teams/messages endpoint moves from the 501
+-- teams_not_activated to the full pipeline (correlate/admit) with no other
+-- change to the service.

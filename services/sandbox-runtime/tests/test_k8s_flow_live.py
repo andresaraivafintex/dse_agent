@@ -1,15 +1,14 @@
-"""Prova viva do fluxo K8s completo num cluster real (k3d local) — Fase 1.
+"""Live proof of the full K8s flow on a real cluster (local k3d) — Fase 1.
 
-Exercita o KubernetesSandboxDriver contra um cluster de verdade: Pod
-endurecido sobe, o bootstrap materializa o workspace git DENTRO do Pod
-(exec op), o turno fake executa e edita o /workspace, o checkpoint commita e
-push a para /checkpoint.git in-pod, e o teardown remove o Pod. É o mesmo
-caminho de código do piloto na VPS — só o RuntimeClass (gVisor) fica de fora
-aqui (k3d local não o tem; cfg.runtime_class="" marca isolamento fraco via
-annotation, e o gate pilotReadiness continua fechado até a prova no cluster
-alvo).
+Exercises the KubernetesSandboxDriver against a real cluster: the hardened Pod
+comes up, the bootstrap materializes the git workspace INSIDE the Pod (exec op),
+the fake turn runs and edits /workspace, the checkpoint commits and pushes to
+/checkpoint.git in-pod, and the teardown removes the Pod. It is the same code
+path as the VPS pilot — only the RuntimeClass (gVisor) is left out here (local
+k3d does not have it; cfg.runtime_class="" marks weak isolation via annotation,
+and the pilotReadiness gate stays closed until the proof on the target cluster).
 
-Pula quando não há kubectl/k3d/cluster k3d ativo/imagem local.
+Skips when there is no kubectl/k3d/active k3d cluster/local image.
 """
 from __future__ import annotations
 
@@ -66,7 +65,7 @@ def cluster():
     subprocess.run(
         ["kubectl", "create", "namespace", NAMESPACE],
         capture_output=True, text=True,
-    )  # idempotente: AlreadyExists é ok
+    )  # idempotent: AlreadyExists is fine
     yield cluster_name
 
 
@@ -75,7 +74,7 @@ def k8s_driver(cluster, work_item_id):
     cfg = K8sSandboxConfig(
         namespace=NAMESPACE,
         image=RUNNER_IMAGE,
-        runtime_class="",  # k3d local não tem gVisor — prova de FLUXO, não de RuntimeClass
+        runtime_class="",  # local k3d has no gVisor — this proves the FLOW, not the RuntimeClass
         service_account="default",
     )
     driver = KubernetesSandboxDriver(cfg)
@@ -98,8 +97,8 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     pod = sandbox.container_name
     assert pod == pod_name_for(work_item_id)
 
-    # bootstrap já rodou dentro do provision: /workspace é um repo git com o
-    # branch da tarefa e o commit inicial pushado para /checkpoint.git
+    # bootstrap already ran inside provision: /workspace is a git repo on the
+    # task branch with the initial commit pushed to /checkpoint.git
     head = subprocess.run(
         ["kubectl", "exec", pod, "-n", NAMESPACE, "--", "git", "-C", "/workspace",
          "rev-parse", "--abbrev-ref", "HEAD"],
@@ -107,7 +106,7 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     ).stdout.strip()
     assert head == f"dse/{work_item_id}"
 
-    # turno fake DENTRO do Pod
+    # fake turn INSIDE the Pod
     turn = AgentTurnRequest(
         work_item_id=work_item_id,
         tenant_id="tenant-k8s",
@@ -136,7 +135,7 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     ).stdout
     assert inside == "IN_POD = True\n"
 
-    # checkpoint in-pod: commit + push para /checkpoint.git com refspec fixo
+    # in-pod checkpoint: commit + push to /checkpoint.git with a fixed refspec
     from sandbox_runtime.driver import SandboxCheckpointRequest
 
     ref = k8s_driver.checkpoint(
@@ -149,7 +148,7 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     )
     assert ref.git_ref and ref.phase == "coder"
 
-    # o checkpoint bare DENTRO do Pod tem o sha
+    # the bare checkpoint INSIDE the Pod has the sha
     ls = subprocess.run(
         ["kubectl", "exec", pod, "-n", NAMESPACE, "--", "git", "-C", "/checkpoint.git",
          "rev-parse", f"refs/heads/dse/{work_item_id}"],
@@ -157,8 +156,8 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
     ).stdout.strip()
     assert ls == ref.git_ref
 
-    # pós-turno completo in-pod (--op post_turn): outro turno suja o workspace
-    # com lixo + edição de teste; o post_turn poda, reverte e commita/pusha
+    # full in-pod post-turn (--op post_turn): another turn dirties the workspace
+    # with junk + a test edit; post_turn prunes, reverts and commits/pushes
     from dse_contracts import PostTurnRequest, PostTurnResult
 
     k8s_driver.execute_stage(

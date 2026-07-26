@@ -1,5 +1,5 @@
-"""WSE-E1-T2 — SAST (bandit real) e secret-scan (scanner regex+entropia
-próprio, real) rodando via LocalFakeSandbox contra arquivos de verdade."""
+"""WSE-E1-T2 — SAST (real bandit) and secret-scan (our own real regex+entropy
+scanner) running through LocalFakeSandbox against actual files."""
 from __future__ import annotations
 
 from dse_validation.l1.sast import sast_check
@@ -13,7 +13,7 @@ def test_sast_passes_on_clean_code(sandbox):
 
 
 def test_sast_flags_real_bandit_high_severity_issue(sandbox, git_repo):
-    # B301/B302-style: uso de eval em input não confiável -> bandit HIGH/MEDIUM.
+    # B301/B302-style: eval on untrusted input -> bandit HIGH/MEDIUM.
     (git_repo / "vuln.py").write_text(
         "import subprocess\n\n"
         "def run(cmd):\n"
@@ -22,7 +22,7 @@ def test_sast_flags_real_bandit_high_severity_issue(sandbox, git_repo):
     finding = sast_check(sandbox, severity_gate="LOW")
     assert finding.check == "sast"
     assert finding.passed is False
-    assert "achado" in finding.detail.lower()
+    assert "finding" in finding.detail.lower()
 
 
 def test_secret_scan_passes_on_clean_code(sandbox):

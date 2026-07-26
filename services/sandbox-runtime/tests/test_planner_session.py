@@ -1,14 +1,14 @@
-"""WSC-E3-T3: sessão Planner read-only.
+"""WSC-E3-T3: read-only Planner session.
 
-Prova (contra sandbox/git/Postgres reais, harness real do Temporal SDK):
-  - a Activity `run_planner_turn` é uma Activity Temporal de verdade com o nome
-    do contrato e emite um `PlanArtifact` estruturado;
-  - o contexto é hidratado com AGENTS.md + CODEOWNERS (do workspace) + skills
-    aprovadas do tenant (registry) + tickets + retrieval/index;
-  - `risk_class` é DERIVADO deterministicamente do blast radius (P1), não da
-    palavra do proposer;
-  - CONFORMIDADE: qualquer tool de ESCRITA no Planner FALHA
-    (`ToolPermissionError`) — a sessão é read-only por construção.
+Proves (against real sandbox/git/Postgres, the real Temporal SDK harness):
+  - the `run_planner_turn` Activity is a genuine Temporal Activity named after
+    the contract and emits a structured `PlanArtifact`;
+  - the context is hydrated with AGENTS.md + CODEOWNERS (from the workspace) +
+    the tenant's approved skills (registry) + tickets + retrieval/index;
+  - `risk_class` is DERIVED deterministically from the blast radius (P1), not
+    from the proposer's word;
+  - CONFORMANCE: any WRITE tool in the Planner FAILS (`ToolPermissionError`) —
+    the session is read-only by construction.
 """
 from __future__ import annotations
 
@@ -44,10 +44,10 @@ def _cleanup_retrieval(dsn, tenant):
 
 
 def _seed_workspace(work_item_id, tenant, dsn, repo="app"):
-    """Provisiona o sandbox e semeia AGENTS.md/CODEOWNERS + índice de retrieval."""
+    """Provisions the sandbox and seeds AGENTS.md/CODEOWNERS + the retrieval index."""
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant)))
     workspace_dir, _ = _paths_for(work_item_id)
-    (Path(workspace_dir) / "AGENTS.md").write_text("# AGENTS\nUse camelCase. Rode os testes antes do PR.\n")
+    (Path(workspace_dir) / "AGENTS.md").write_text("# AGENTS\nUse camelCase. Run the tests before the PR.\n")
     (Path(workspace_dir) / "CODEOWNERS").write_text("src/payments/ @payments-team\n")
     svc = RetrievalService(dsn=dsn)
     svc.index_repo(
@@ -67,7 +67,7 @@ def test_activity_name_matches_contract():
 
 def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state_dir, pg_dsn):
     tenant = f"plan-{uuid.uuid4().hex[:8]}"
-    # semeia uma skill aprovada para este tenant, para provar hidratação
+    # seed an approved skill for this tenant, to prove hydration
     import psycopg2
 
     conn = psycopg2.connect(pg_dsn)
@@ -83,13 +83,13 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
     workspace_dir, svc = _seed_workspace(work_item_id, tenant, pg_dsn)
     try:
         def proposer(ctx):
-            # o proposer 'LLM' vê o contexto hidratado
+            # the 'LLM' proposer sees the hydrated context
             assert "AGENTS" in ctx.agents_md
             assert any(s.skill_key == "no-plaintext-secrets" for s in ctx.skills)
             return {
                 "steps": ["Adicionar validação no login"],
                 "expected_files": ["src/auth.py"],
-                "test_plan": "Testar login inválido.",
+                "test_plan": "Test an invalid login.",
             }
 
         plan = asyncio.run(
@@ -97,9 +97,9 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
                 RunPlannerTurnInput(
                     work_item_id=work_item_id,
                     tenant_id=tenant,
-                    instruction="melhore a validação do login",
+                    instruction="improve the login validation",
                     repo="app",
-                    related_tickets=["JIRA-1: reforçar login"],
+                    related_tickets=["JIRA-1: harden login"],
                 ),
                 retrieval=svc,
                 proposer=proposer,
@@ -109,8 +109,8 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
         assert plan.work_item_id == work_item_id
         assert plan.steps == ["Adicionar validação no login"]
         assert plan.expected_files == ["src/auth.py"]
-        # auth é sensível no domínio fintech → o classificador determinístico o
-        # eleva a 'high' (glob **/*auth*), independente do que o proposer disse.
+        # auth is sensitive in the fintech domain → the deterministic classifier
+        # raises it to 'high' (glob **/*auth*), regardless of what the proposer said.
         assert plan.risk_class == "high"
     finally:
         _cleanup_retrieval(pg_dsn, tenant)
@@ -122,8 +122,8 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
 
 
 def test_planner_risk_class_is_deterministic_floor_not_llm(work_item_id, state_dir, pg_dsn):
-    """Mesmo que o proposer diga expected_files tocando migração, o risk_class
-    é derivado por código (high), não pelo que o 'LLM' afirma."""
+    """Even if the proposer reports expected_files touching a migration, the
+    risk_class is derived in code (high), not from what the 'LLM' claims."""
     tenant = f"plan-{uuid.uuid4().hex[:8]}"
     workspace_dir, svc = _seed_workspace(work_item_id, tenant, pg_dsn)
     try:
@@ -143,8 +143,8 @@ def test_planner_risk_class_is_deterministic_floor_not_llm(work_item_id, state_d
 
 
 def test_planner_write_tool_fails_conformance(work_item_id, state_dir, pg_dsn):
-    """CONFORMIDADE (WSC-E3-T3): um passo de escrita no script de exploração do
-    Planner levanta ToolPermissionError — a sessão é read-only."""
+    """CONFORMANCE (WSC-E3-T3): a write step in the Planner's exploration script
+    raises ToolPermissionError — the session is read-only."""
     tenant = f"plan-{uuid.uuid4().hex[:8]}"
     workspace_dir, svc = _seed_workspace(work_item_id, tenant, pg_dsn)
     try:
@@ -152,16 +152,16 @@ def test_planner_write_tool_fails_conformance(work_item_id, state_dir, pg_dsn):
             asyncio.run(
                 _run_planner_turn_impl(
                     RunPlannerTurnInput(
-                        work_item_id=work_item_id, tenant_id=tenant, instruction="tenta escrever", repo="app"
+                        work_item_id=work_item_id, tenant_id=tenant, instruction="tries to write", repo="app"
                     ),
                     retrieval=svc,
                     exploration_script=[
                         {"tool": "read_file", "path": "src/auth.py"},  # ok
-                        {"tool": "write_file", "path": "src/evil.py", "content": "x=1"},  # deve falhar
+                        {"tool": "write_file", "path": "src/evil.py", "content": "x=1"},  # must fail
                     ],
                 )
             )
-        # o arquivo NÃO foi criado (a escrita nunca chegou ao dispatch)
+        # the file was NOT created (the write never reached the dispatch)
         assert not (Path(workspace_dir) / "src/evil.py").exists()
     finally:
         _cleanup_retrieval(pg_dsn, tenant)

@@ -1,16 +1,16 @@
-"""Parâmetros de fairness/budget/kill-switch por tenant (migração reservada
-do WS-F, `migrations/0007_wsf.sql` — tabela `tenant_config`).
+"""Per-tenant fairness/budget/kill-switch parameters (WS-F's reserved migration,
+`migrations/0007_wsf.sql` — table `tenant_config`).
 
-Consumido pelo orchestrator (WS-B, antes de admitir/continuar trabalho para
-um tenant) e pelo model-gateway (WS-D, antes de emitir uma chave virtual) —
-ver `infra/ALERTING-RULES.md` regra 1 para o fluxo de exaustão de budget que
-usa este módulo.
+Consumed by the orchestrator (WS-B, before admitting/continuing work for a
+tenant) and by the model-gateway (WS-D, before issuing a virtual key) — see
+`infra/ALERTING-RULES.md` rule 1 for the budget-exhaustion flow that uses this
+module.
 
-P1 (deterministic-or-human): a leitura/decisão de bloquear um tenant aqui é
-puramente uma comparação numérica em código — nunca um LLM decide se um
-tenant está sobre budget.
-P8 (evidence over assertion): toda mudança de `kill_switch_enabled` grava
-uma linha em audit_log via `dse_audit.emit` (nunca silenciosa).
+P1 (deterministic-or-human): reading/deciding to block a tenant here is purely a
+numeric comparison in code — an LLM never decides whether a tenant is over
+budget.
+P8 (evidence over assertion): every change to `kill_switch_enabled` writes an
+audit_log row via `dse_audit.emit` (never silent).
 """
 from __future__ import annotations
 
@@ -44,9 +44,9 @@ class TenantConfig:
 
 
 def get_tenant_config(tenant_id: str, conn=None) -> TenantConfig | None:
-    """Retorna a config do tenant, ou None se ainda não foi provisionado
-    (caller deve tratar `None` como "usar defaults conservadores" — nunca
-    como "sem limite")."""
+    """Returns the tenant config, or None if it has not been provisioned yet
+    (the caller must treat `None` as "use conservative defaults" — never as
+    "no limit")."""
     owns_conn = conn is None
     if owns_conn:
         conn = _get_connection()
@@ -85,9 +85,9 @@ def upsert_tenant_config(
     fairness: dict[str, Any] | None = None,
     conn=None,
 ) -> TenantConfig:
-    """Cria a config do tenant (com os defaults da migração) se não existir,
-    ou atualiza os campos passados (não-None) se já existir. Idempotente:
-    chamar de novo com os mesmos valores não muda nada."""
+    """Creates the tenant config (with the migration defaults) if it does not
+    exist, or updates the fields that were passed (non-None) if it does.
+    Idempotent: calling again with the same values changes nothing."""
     owns_conn = conn is None
     if owns_conn:
         conn = _get_connection()
@@ -132,17 +132,17 @@ def set_kill_switch(
     actor: str,
     conn=None,
 ) -> TenantConfig:
-    """Liga/desliga o kill-switch de um tenant. Sempre grava uma linha em
-    audit_log (P8) — mesma transação da mudança de estado, para que a
-    reconstrução por auditoria (`dse_audit.queries.reconstruct_work_item_history`
-    não se aplica aqui, mas o princípio de atomicidade é o mesmo do resto do
-    sistema) nunca veja um kill-switch mudado sem o evento correspondente.
+    """Turns a tenant's kill-switch on/off. Always writes an audit_log row (P8) —
+    in the same transaction as the state change, so that audit reconstruction
+    (`dse_audit.queries.reconstruct_work_item_history` does not apply here, but
+    the atomicity principle is the same as in the rest of the system) never sees
+    a kill-switch change without the corresponding event.
 
-    `actor` deve ser um principal resolvido ou `system:<component>` — nunca
-    um platform_user_id bruto (mesma regra de `dse_audit.emit`).
+    `actor` must be a resolved principal or `system:<component>` — never a raw
+    platform_user_id (same rule as `dse_audit.emit`).
     """
     if enabled and not reason:
-        raise ValueError("kill_switch_reason é obrigatório ao ATIVAR o kill-switch (P8: nunca silencioso)")
+        raise ValueError("kill_switch_reason is mandatory when ENABLING the kill-switch (P8: never silent)")
 
     owns_conn = conn is None
     if owns_conn:

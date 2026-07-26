@@ -1,25 +1,25 @@
-"""WSE-E4-T9b — L3 completo (Fase 3): em cima do consumo mínimo de status
-checks da Fase 1 (`ci_status.consume_ci_status_core`), adiciona:
+"""WSE-E4-T9b — full L3 (Phase 3): on top of Phase 1's minimal status-check
+consumption (`ci_status.consume_ci_status_core`), it adds:
 
-  1. REFLEXÃO — o status agregado do CI é refletido no tracking comment único
-     do PR (o mesmo `MutableCommentWriter` da fundação, editado in-place) na
-     MESMA chamada de consumo => a latência de reflexão é a latência do poll
-     do workflow (WS-B chama a Activity ao receber webhook/timer; a escrita do
-     comentário acontece inline, <1min por construção — provado por teste).
+  1. REFLECTION — the aggregated CI status is reflected in the PR's single
+     tracking comment (the foundation's own `MutableCommentWriter`, edited
+     in-place) within the SAME consumption call => the reflection latency is the
+     workflow's poll latency (WS-B calls the Activity on webhook/timer; the
+     comment write happens inline, <1min by construction — proven by test).
 
-  2. TARGETED RE-RUNS — em fix commit (novo sha depois de um estado `red`),
-     re-roda SÓ os check-runs que falharam (`POST .../rerequest`, por job) em
-     vez da suíte inteira (P5 cheapest-first). Quando o CI do repo não suporta
-     re-run por job (403/422), registra e segue — nunca bloqueia. Evidência em
-     `wse_ci_reruns` + audit (P8).
+  2. TARGETED RE-RUNS — on a fix commit (new sha after a `red` state), re-runs
+     ONLY the check-runs that failed (`POST .../rerequest`, per job) instead of
+     the whole suite (P5 cheapest-first). When the repo's CI does not support
+     per-job re-run (403/422), it records and moves on — never blocks. Evidence
+     in `wse_ci_reruns` + audit (P8).
 
-  3. EPISÓDIOS DE SKILL-LEARNING — quando um padrão de CI-repair se completa
-     (estado `red` num sha antigo -> `green` num sha novo), emite um EPISÓDIO
-     tenant-scoped com proveniência (`wse_ci_repair_episodes`). `occurrence_n`
-     conta as repetições do MESMO padrão (tenant, failure_signature) — insumo
-     para a promoção de skills da FASE 4. NENHUMA skill é criada/ativada aqui.
+  3. SKILL-LEARNING EPISODES — when a CI-repair pattern completes (`red` state on
+     an older sha -> `green` on a newer sha), it emits a tenant-scoped EPISODE
+     with provenance (`wse_ci_repair_episodes`). `occurrence_n` counts repetitions
+     of the SAME pattern (tenant, failure_signature) — input to PHASE 4's skill
+     promotion. NO skill is created/activated here.
 
-Tudo determinístico (P1) — nenhum LLM decide nada neste módulo.
+Everything deterministic (P1) — no LLM decides anything in this module.
 """
 from __future__ import annotations
 
@@ -56,8 +56,8 @@ _EMOJI = {"green": "🟢", "red": "🔴", "pending": "🟡"}
 
 
 def failure_signature(check_name: str, conclusion: str, output_summary: str = "") -> str:
-    """Assinatura DETERMINÍSTICA do padrão de falha (tenant-scoped na tabela):
-    hash curto de (check, conclusão, 1ª linha do output normalizada)."""
+    """DETERMINISTIC signature of the failure pattern (tenant-scoped in the
+    table): short hash of (check, conclusion, normalized 1st line of output)."""
     first_line = (output_summary or "").strip().splitlines()[0].strip().lower() if output_summary.strip() else ""
     raw = f"{check_name}|{conclusion}|{first_line}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
@@ -96,10 +96,10 @@ def consume_ci_status_l3(
     surface_ref: dict | None = None,
     actor: str = "system:validation",
 ) -> CiStatusResult:
-    """Consumo L3 completo: agrega (Fase 1) + reflete no tracking comment +
-    targeted re-run em fix commit + episódio de repair quando red->green.
-    O estado ANTERIOR (status + ref + falhas) vem de `wse_ci_status.detail`
-    (persistido aqui de forma aditiva — nada da Fase 1 quebra)."""
+    """Full L3 consumption: aggregate (Phase 1) + reflect in the tracking comment
+    + targeted re-run on a fix commit + repair episode when red->green.
+    The PREVIOUS state (status + ref + failures) comes from `wse_ci_status.detail`
+    (persisted here additively — nothing from Phase 1 breaks)."""
     previous = db.get_ci_status(work_item_id)
     prev_detail = (previous or {}).get("detail") or {}
     prev_status = (previous or {}).get("status")
@@ -112,7 +112,7 @@ def consume_ci_status_l3(
     )
     check_runs = github_client.list_check_runs(repo, ref)
 
-    # persiste (aditivo) o ref e as falhas atuais para a próxima comparação.
+    # persists (additively) the ref and the current failures for the next comparison.
     failed_now = [
         {"id": r.get("id"), "name": r.get("name"), "conclusion": r.get("conclusion"),
          "output_summary": (r.get("output") or {}).get("summary", "")}
@@ -130,7 +130,7 @@ def consume_ci_status_l3(
         },
     )
 
-    # 1) REFLEXÃO no tracking comment único (in-place, <1min por construção).
+    # 1) REFLECTION in the single tracking comment (in-place, <1min by construction).
     if comment_writer is not None and surface_ref is not None:
         body = render_ci_comment(work_item_id, pr_number, result.status, check_runs)
         comment_writer.upsert(work_item_id, surface_ref, body)
@@ -143,7 +143,7 @@ def consume_ci_status_l3(
 
     is_fix_commit = prev_ref is not None and prev_ref != ref and prev_status == "red"
 
-    # 2) TARGETED RE-RUNS — só os check-runs falhos, só em fix commit.
+    # 2) TARGETED RE-RUNS — only the failed check-runs, only on a fix commit.
     if is_fix_commit and failed_now:
         rerun_ids: list[int] = []
         rerun_names: list[str] = []
@@ -167,10 +167,10 @@ def consume_ci_status_l3(
                 )
         else:
             logger.info(
-                "l3 %s: CI do repo não suporta re-run por job — seguindo sem re-run", work_item_id
+                "l3 %s: the repo CI does not support per-job re-run — continuing without re-run", work_item_id
             )
 
-    # 3) EPISÓDIO de CI-repair — red no sha anterior -> green no sha novo.
+    # 3) CI-repair EPISODE — red on the previous sha -> green on the new sha.
     if is_fix_commit and result.status == "green" and prev_failed:
         for run in prev_failed:
             sig = failure_signature(
@@ -184,7 +184,7 @@ def consume_ci_status_l3(
                     "repo": repo, "pr_number": pr_number,
                     "failed_ref": prev_ref, "fix_ref": ref,
                     "conclusion": run.get("conclusion"),
-                    "source": "wse_ci_status.detail",  # de onde veio a observação
+                    "source": "wse_ci_status.detail",  # where the observation came from
                 },
             )
             if audit_emit is not None:
@@ -193,7 +193,7 @@ def consume_ci_status_l3(
                     work_item_id=work_item_id,
                     details={"check_name": run.get("name"), "failure_signature": sig,
                              "occurrence_n": episode["occurrence_n"],
-                             "note": "episódio apenas — nenhuma skill criada/ativada (Fase 4)"},
+                             "note": "episode only — no skill created/activated (Phase 4)"},
                 )
 
     return result

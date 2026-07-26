@@ -1,4 +1,4 @@
-"""Heartbeat periódico real sem dependência de um servidor Temporal."""
+"""Real periodic heartbeat without depending on a Temporal server."""
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +41,7 @@ def test_long_sync_call_emits_periodic_real_temporal_heartbeats():
     assert result == "ok"
     states = [item["state"] for item in heartbeats]
     assert states[0] == "started"
-    assert "running" in states, "a chamada bloqueante precisa permitir heartbeat durante o turno"
+    assert "running" in states, "the blocking call must allow heartbeats during the turn"
     assert states[-1] == "completed"
     assert [item["sequence"] for item in heartbeats] == list(range(len(heartbeats)))
     assert all(item["work_item_id"] == "wi-heartbeat" for item in heartbeats)
@@ -50,7 +50,7 @@ def test_long_sync_call_emits_periodic_real_temporal_heartbeats():
 
 def test_same_helper_works_outside_activity_without_calling_heartbeat(monkeypatch):
     def forbidden_heartbeat(*_args):
-        raise AssertionError("heartbeat não pode ser chamado fora de Activity")
+        raise AssertionError("heartbeat must not be called outside an Activity")
 
     monkeypatch.setattr(activity, "heartbeat", forbidden_heartbeat)
     assert asyncio.run(

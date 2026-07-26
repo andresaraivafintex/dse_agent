@@ -1,29 +1,30 @@
-"""WSA-E6-T1 — Correlação Path A/B.
+"""WSA-E6-T1 — Path A/B correlation.
 
-`correlate(...)` decide, para um `ConversationEvent` recebido, se ele abre
-uma tarefa nova (Path A, "new_task" -> `admit_work_item`) ou é um sinal para
-uma tarefa já em andamento (Path B, "signal" -> `SignalWorkflow`, decidido
-por quem chama: o próprio dispatcher ou o WS-B via Temporal client).
+For an incoming `ConversationEvent`, `correlate(...)` decides whether it opens
+a new task (Path A, "new_task" -> `admit_work_item`) or is a signal to a task
+already in flight (Path B, "signal" -> `SignalWorkflow`, decided by the
+caller: the dispatcher itself or WS-B via the Temporal client).
 
-Lookup determinístico por `source_ref` (thread_ts/PR number/ticket) contra
-`work_items` com status NÃO-terminal. Convenção de `source_ref` usada para o
-match (ver adapters): Slack `{"channel":..., "thread_ts":...}`, GitHub
-`{"repo":..., "number":...}` (mesmo número serve para issue e PR — a API do
-GitHub compartilha o namespace de números entre os dois).
+Deterministic lookup by `source_ref` (thread_ts/PR number/ticket) against
+`work_items` with a NON-terminal status. `source_ref` convention used for the
+match (see adapters): Slack `{"channel":..., "thread_ts":...}`, GitHub
+`{"repo":..., "number":...}` (the same number covers issue and PR — the GitHub
+API shares the number namespace between them).
 
-Regra de steering allowlist (WSA-E6-T2a): comentário do tipo `steering` ou
-`review_comment` sobre uma tarefa ativa só vira "signal" se
-`is_authorized_to_steer` autorizar o principal; senão retorna "unauthorized"
-e emite `dse_audit.emit(action="steering_rejected_unauthorized")`.
-`clarification_answer`/`approval` não passam por este gate — são respostas
-esperadas dentro do próprio fluxo (o bot perguntou, o usuário respondeu),
-não uma injeção de direção não solicitada.
+Steering allowlist rule (WSA-E6-T2a): a comment of kind `steering` or
+`review_comment` on an active task only becomes a "signal" if
+`is_authorized_to_steer` authorizes the principal; otherwise it returns
+"unauthorized" and emits
+`dse_audit.emit(action="steering_rejected_unauthorized")`.
+`clarification_answer`/`approval` do not go through this gate — they are
+expected replies within the flow itself (the bot asked, the user answered),
+not an unsolicited injection of direction.
 
-Evento correlacionado a um WorkItem já em estado TERMINAL (done/failed):
-por definição não pode receber um sinal (o workflow já encerrou) — a regra
-documentada é permitir a criação de um WorkItem NOVO com um link de
-proveniência ao anterior (`provenance_work_item_id`), gravado pelo caller
-nos `details` do audit row de admissão.
+Event correlated to a WorkItem already in a TERMINAL state (done/failed): by
+definition it cannot receive a signal (the workflow has already ended) — the
+documented rule is to allow creating a NEW WorkItem with a provenance link to
+the previous one (`provenance_work_item_id`), recorded by the caller in the
+`details` of the admission audit row.
 """
 from __future__ import annotations
 
@@ -39,17 +40,17 @@ CorrelationKind = Literal["new_task", "signal", "unauthorized"]
 
 _TERMINAL_STATUSES = {WorkItemStatus.done.value, WorkItemStatus.failed.value}
 
-# Kinds que representam "alguém injetando direção nova" numa tarefa ativa —
-# passam pelo gate de steering allowlist (deny-by-default; ver steering.py).
+# Kinds that represent "someone injecting new direction" into an active task —
+# they go through the steering allowlist gate (deny-by-default; see steering.py).
 #
-# Plano 08 §F (F4): `clarification_answer` TAMBÉM é gateado. Numa issue pública
-# do GitHub (ou canal/ticket) QUALQUER um pode comentar; um terceiro não
-# autorizado respondendo a clarificação injetaria direção na tarefa sem passar
-# por autorização. O requester legítimo está na allowlist (semeada com
-# requester + CODEOWNERS — ver steering.py), então o fluxo esperado não quebra;
-# um estranho vira `steering_rejected_unauthorized` (auditado, não sinaliza).
-# `approval` de plano tem seu PRÓPRIO gate (resolução de approver, WSB-E3-T2) e
-# não é duplicado aqui.
+# Plano 08 §F (F4): `clarification_answer` is ALSO gated. On a public GitHub
+# issue (or channel/ticket) ANYONE can comment; an unauthorized third party
+# answering the clarification would inject direction into the task without
+# going through authorization. The legitimate requester is on the allowlist
+# (seeded with requester + CODEOWNERS — see steering.py), so the expected flow
+# does not break; a stranger becomes `steering_rejected_unauthorized` (audited,
+# does not signal). Plan `approval` has its OWN gate (approver resolution,
+# WSB-E3-T2) and is not duplicated here.
 _STEERING_GATED_KINDS = {
     EventKind.steering,
     EventKind.review_comment,
@@ -71,10 +72,10 @@ def correlate(
     requester_principal: str,
     correlation_ref: dict[str, Any] | None = None,
 ) -> CorrelationResult:
-    """Nota de transação: quando o resultado é "unauthorized", esta função
-    grava a audit row usando `conn` mas NÃO comita — o caller (adapter)
-    controla a fronteira de transação e deve chamar `conn.commit()` (mesma
-    convenção de `dse_audit.emit(conn=...)`)."""
+    """Transaction note: when the result is "unauthorized", this function
+    writes the audit row using `conn` but does NOT commit — the caller
+    (adapter) owns the transaction boundary and must call `conn.commit()` (same
+    convention as `dse_audit.emit(conn=...)`)."""
     ref = correlation_ref if correlation_ref is not None else event.source_ref
 
     with conn.cursor() as cur:
@@ -95,18 +96,19 @@ def correlate(
     matched_id, status, wi_requester = row
 
     if status in _TERMINAL_STATUSES:
-        # Regra documentada: WorkItem terminal não recebe sinal — vira
-        # WorkItem novo com proveniência ao anterior.
+        # Documented rule: a terminal WorkItem does not receive a signal — it
+        # becomes a new WorkItem with provenance to the previous one.
         return CorrelationResult("new_task", None, provenance_work_item_id=matched_id)
 
     if event.kind in _STEERING_GATED_KINDS:
-        # Plano 08 §F (F4, ajuste da auditoria): o REQUESTER da tarefa responder
-        # à clarificação da PRÓPRIA tarefa é o fluxo esperado (a pergunta foi
-        # feita a ele) — autorizado por construção, comparação determinística
-        # com a coluna requester (P1). Vale só para clarification_answer;
-        # steering/review_comment de qualquer um (inclusive o requester) seguem
-        # o gate estrito. Sem isto, o F4 bloquearia o fluxo real nos três
-        # canais (Jira/Slack tratam todo comentário como clarification_answer).
+        # Plano 08 §F (F4, audit adjustment): the task's REQUESTER answering the
+        # clarification of their OWN task is the expected flow (the question was
+        # asked to them) — authorized by construction, a deterministic
+        # comparison against the requester column (P1). Applies only to
+        # clarification_answer; steering/review_comment from anyone (including
+        # the requester) still go through the strict gate. Without this, F4
+        # would block the real flow on all three channels (Jira/Slack treat
+        # every comment as a clarification_answer).
         if (
             event.kind is EventKind.clarification_answer
             and wi_requester

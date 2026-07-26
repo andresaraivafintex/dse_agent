@@ -1,125 +1,125 @@
-# ADR-22 — Identity, SSO/SCIM e offboarding (Fintex DSE)
+# ADR-22 — Identity, SSO/SCIM and offboarding (Fintex DSE)
 
-Status: **Accepted** (Fase 2). Autor: WS-F. Substitui a resolução por
-auto-registro da Fase 1 (`dse_identity.resolve_principal`) para os usuários do
-**console admin**; mantém o auto-registro para atores de chat/VCS (Slack/GitHub/
-Jira) que aparecem em `ConversationEvent`.
+Status: **Accepted** (Phase 2). Author: WS-F. Supersedes Phase 1's
+auto-registration resolution (`dse_identity.resolve_principal`) for **admin
+console** users; keeps auto-registration for chat/VCS actors (Slack/GitHub/
+Jira) that show up in a `ConversationEvent`.
 
-## Contexto
+## Context
 
-Na Fase 1, qualquer ator visto numa superfície (menção no Slack, comentário no
-GitHub) é resolvido para um `principal_id` único por auto-registro na primeira
-aparição (`dse_identity.resolve_principal(platform, platform_user_id)`), com o
-mapa em `principals` + `identity_links`. Isso é suficiente para atribuir
-autoria de eventos, mas **não** dá:
+In Phase 1, any actor seen on a surface (a Slack mention, a GitHub
+comment) is resolved to a unique `principal_id` by auto-registration on first
+appearance (`dse_identity.resolve_principal(platform, platform_user_id)`), with the
+map living in `principals` + `identity_links`. That is enough to attribute
+event authorship, but it does **not** give:
 
-- **account matching** entre a identidade corporativa (IdP: Okta/Entra/Ping/
-  Keycloak) e o principal do DSE;
-- **autorização** de quem pode operar o console, aprovar planos, ou steerar
-  tarefas;
-- **offboarding** — quando alguém sai da empresa, o acesso e o papel de
-  approver/steering precisam morrer imediatamente e de forma auditável;
-- tratamento de **contractors** (acesso com expiração).
+- **account matching** between the corporate identity (IdP: Okta/Entra/Ping/
+  Keycloak) and the DSE principal;
+- **authorization** for who may operate the console, approve plans, or steer
+  tasks;
+- **offboarding** — when someone leaves the company, their access and their
+  approver/steering role must die immediately and auditably;
+- handling of **contractors** (access with an expiry).
 
-A Fase 2 introduz o gate de aprovação de plano (WS-B), o queue board operável
-(WS-F/E6) e access bundles por tenant (WS-F/E3-T2) — todos precisam de uma
-identidade de console autenticada por SSO e de uma noção de "ativo vs.
-offboardado". Este ADR fecha essas decisões.
+Phase 2 introduces the plan approval gate (WS-B), the operable queue board
+(WS-F/E6) and per-tenant access bundles (WS-F/E3-T2) — all of which need a
+console identity authenticated by SSO and a notion of "active vs.
+offboarded". This ADR settles those decisions.
 
-## Decisão
+## Decision
 
-### 1. Protocolo: OIDC primeiro, SAML como adaptador
+### 1. Protocol: OIDC first, SAML via an adapter
 
-O login do console usa **OpenID Connect (OIDC)** — o IdP emite um `id_token`
-(JWT RS256) que o console valida contra o `jwks_uri` do IdP (assinatura, `iss`,
-`aud` = client_id, `exp`). Implementado em `dse_platform.sso.OIDCVerifier` +
-`login`. Para IdPs que só falam **SAML**, a recomendação é um broker OIDC na
-frente (Keycloak/Dex/`oauth2-proxy`) que fala SAML com o IdP e OIDC com o DSE —
-o console **não** implementa um parser SAML próprio (menos superfície de
-ataque; boring-first, P7). O contrato de verificação (assinatura + claims) é o
-mesmo dos dois lados.
+Console login uses **OpenID Connect (OIDC)** — the IdP issues an `id_token`
+(RS256 JWT) that the console validates against the IdP's `jwks_uri` (signature, `iss`,
+`aud` = client_id, `exp`). Implemented in `dse_platform.sso.OIDCVerifier` +
+`login`. For IdPs that only speak **SAML**, the recommendation is an OIDC broker in
+front (Keycloak/Dex/`oauth2-proxy`) that speaks SAML to the IdP and OIDC to the DSE —
+the console does **not** implement its own SAML parser (less attack
+surface; boring-first, P7). The verification contract (signature + claims) is the
+same on both sides.
 
-### 2. Account matching: por `sub` estável, nunca por email
+### 2. Account matching: by stable `sub`, never by email
 
-A chave de matching entre o IdP e o principal do DSE é o **`sub`** (subject) do
-`id_token` — um identificador opaco e estável do IdP. **Email não é chave de
-matching** (pode ser reatribuído a outra pessoa depois que alguém sai; é PII
-mutável). O email é guardado só para exibição/contato.
+The matching key between the IdP and the DSE principal is the `id_token`'s
+**`sub`** (subject) — an opaque, stable identifier from the IdP. **Email is not a
+matching key** (it can be reassigned to another person after someone leaves; it is mutable
+PII). Email is kept only for display/contact.
 
-`dse_console_identity` (migração `0013_wsf2.sql`) é a tabela de matching:
-`sso_subject` (UNIQUE) → `principal_id`. O `principal_id` é um `usr_<uuid>`
-normal em `principals`.
+`dse_console_identity` (migration `0013_wsf2.sql`) is the matching table:
+`sso_subject` (UNIQUE) → `principal_id`. The `principal_id` is an ordinary `usr_<uuid>`
+in `principals`.
 
-> **Nota de fundação (limitação real, documentada):** o `identity_links` da
-> fundação (`0001_foundation.sql`) tem um CHECK
-> `platform IN ('slack','github','jira')`. Não é possível gravar
-> `platform = 'sso'` lá, e a migração da fundação não pode ser editada nesta
-> fase (regra de convivência). Portanto o principal de um usuário de SSO é
-> criado **direto** em `principals` (via `dse_platform.sso.ensure_sso_principal`)
-> e o account-matching vive em `dse_console_identity.sso_subject` — **não** em
-> `identity_links`. Consumidores continuam vendo um `usr_<uuid>` idêntico ao de
-> qualquer outro principal; a assinatura pública não muda. Quando a fundação
-> relaxar o CHECK (adicionar `'sso'`), pode-se opcionalmente espelhar o link em
-> `identity_links` para unificar chat+VCS+SSO sob o mesmo principal (o campo
-> `email`/`sub` daria o join). Registrado como dívida no README do serviço.
+> **Foundation note (real limitation, documented):** the foundation's
+> `identity_links` (`0001_foundation.sql`) has a
+> `platform IN ('slack','github','jira')` CHECK. It is not possible to write
+> `platform = 'sso'` there, and the foundation migration cannot be edited in this
+> phase (coexistence rule). Therefore an SSO user's principal is
+> created **directly** in `principals` (via `dse_platform.sso.ensure_sso_principal`)
+> and the account matching lives in `dse_console_identity.sso_subject` — **not** in
+> `identity_links`. Consumers still see a `usr_<uuid>` identical to that of
+> any other principal; the public signature does not change. Once the foundation
+> relaxes the CHECK (adding `'sso'`), the link can optionally be mirrored into
+> `identity_links` to unify chat+VCS+SSO under the same principal (the
+> `email`/`sub` field would provide the join). Recorded as debt in the service README.
 
 ### 3. SCIM / provisioning
 
-Fase 2 implementa o caminho de **login just-in-time** (JIT): a primeira vez que
-um `sub` válido loga, a identidade de console é criada. Papéis (`operator`,
-`approver`, `viewer`, `admin`) podem ser pré-provisionados por um admin via
-`provision_console_user` (ou, em produção, por um endpoint SCIM do IdP que
-escreve na mesma tabela — o schema já suporta; o endpoint SCIM em si é trabalho
-de integração por cliente, fora do escopo do código desta fase — ver README,
-gaps). A ausência de papel = `viewer` implícito (não pode operar controles nem
-aprovar).
+Phase 2 implements the **just-in-time (JIT) login** path: the first time
+a valid `sub` logs in, the console identity is created. Roles (`operator`,
+`approver`, `viewer`, `admin`) can be pre-provisioned by an admin via
+`provision_console_user` (or, in production, by a SCIM endpoint on the IdP that
+writes to the same table — the schema already supports it; the SCIM endpoint itself is
+per-client integration work, out of scope for this phase's code — see README,
+gaps). Absence of a role = implicit `viewer` (cannot operate controls nor
+approve).
 
-### 4. Offboarding — efeito imediato e em cascata
+### 4. Offboarding — immediate, cascading effect
 
-`dse_platform.sso.offboard(principal_id, reason, actor)` seta
-`active = false` + `deactivated_at`. Efeitos, todos imediatos (checados por
-request/decisão, não por um job noturno):
+`dse_platform.sso.offboard(principal_id, reason, actor)` sets
+`active = false` + `deactivated_at`. Effects, all immediate (checked per
+request/decision, not by a nightly job):
 
-| Superfície | Como o offboarding tem efeito |
+| Surface | How offboarding takes effect |
 |---|---|
-| **Login do console** | `login()` recusa (`LoginDenied`) e cada request re-checa `is_console_active` (uma sessão já emitida morre no próximo request). |
-| **Cascata de approvers do gate de plano** | `access_bundles.resolve_plan_approvers` filtra principals `active = false` (ou expirados). Se a cascata esvaziar, `require_plan_approver` **bloqueia** (P3: nunca auto-aprova). |
-| **Steering de tarefas** | `steering_resolution.is_steering_allowed` nega mesmo que o principal ainda esteja na allowlist do WS-A. |
+| **Console login** | `login()` refuses (`LoginDenied`) and every request re-checks `is_console_active` (an already-issued session dies on the next request). |
+| **Plan-gate approver cascade** | `access_bundles.resolve_plan_approvers` filters out principals with `active = false` (or expired). If the cascade empties out, `require_plan_approver` **blocks** (P3: never auto-approves). |
+| **Task steering** | `steering_resolution.is_steering_allowed` denies even if the principal is still on the WS-A allowlist. |
 
-Toda mudança grava audit (`console_user_offboarded`, `console_login_denied`,
+Every change writes an audit record (`console_user_offboarded`, `console_login_denied`,
 `approvers_filtered_offboarded`) — P8.
 
-Regra de projeto: um principal **sem** linha em `dse_console_identity` (ex.: um
-CODEOWNER que nunca logou no console) é tratado como **ativo** na cascata de
-approver/steering — só removemos os **explicitamente** desativados/expirados.
-Isso evita bloquear approvers legítimos que nunca precisaram do console.
+Design rule: a principal **without** a row in `dse_console_identity` (e.g. a
+CODEOWNER who never logged into the console) is treated as **active** in the
+approver/steering cascade — we only remove those **explicitly** deactivated/expired.
+This avoids blocking legitimate approvers who never needed the console.
 
-### 5. Contractors — acesso com expiração
+### 5. Contractors — access with an expiry
 
-`is_contractor = true` + `expires_at`. `is_console_active` e a cascata de
-approvers tratam `expires_at < now()` exatamente como offboardado (login negado,
-removido da cascata). Renovação = atualizar `expires_at` via
-`provision_console_user`. Auditável.
+`is_contractor = true` + `expires_at`. `is_console_active` and the approver
+cascade treat `expires_at < now()` exactly like offboarded (login denied,
+removed from the cascade). Renewal = update `expires_at` via
+`provision_console_user`. Auditable.
 
-## Consequências
+## Consequences
 
-- **Positivas:** account matching estável; offboarding com efeito imediato e
-  auditável em 3 superfícies; contractors com expiração automática; nenhum
-  consumidor da assinatura `principal_id` quebra (o `resolve_principal` da
-  fundação continua para chat/VCS).
-- **Negativas / dívida:** SSO e chat/VCS não compartilham o mesmo principal
-  ainda (o CHECK do `identity_links` da fundação bloqueia unificar) — um mesmo
-  humano pode ter um principal de SSO e um principal de GitHub distintos até a
-  fundação relaxar o CHECK. Endpoint SCIM real e broker SAML são integração por
-  cliente, não incluídos no código desta fase (ver gaps do README).
+- **Positive:** stable account matching; offboarding with immediate, auditable
+  effect on 3 surfaces; contractors with automatic expiry; no consumer of the
+  `principal_id` signature breaks (the foundation's `resolve_principal` still
+  handles chat/VCS).
+- **Negative / debt:** SSO and chat/VCS do not share the same principal
+  yet (the foundation's `identity_links` CHECK blocks unification) — the same
+  human may have a distinct SSO principal and GitHub principal until the
+  foundation relaxes the CHECK. A real SCIM endpoint and a SAML broker are per-client
+  integration work, not included in this phase's code (see the README gaps).
 
-## Implementação (arquivos)
+## Implementation (files)
 
 - `services/platform/dse_platform/sso.py` — `OIDCVerifier`, `login`, `offboard`,
   `provision_console_user`, `ensure_sso_principal`, `is_console_active`.
-- `services/platform/dse_platform/dev_idp.py` — IdP OIDC de dev (fixture, mina
-  id_tokens RS256 + JWKS) para exercitar o verifier sem um IdP real.
+- `services/platform/dse_platform/dev_idp.py` — dev OIDC IdP (fixture, mints
+  RS256 id_tokens + JWKS) to exercise the verifier without a real IdP.
 - `services/platform/dse_platform/steering_resolution.py` — offboarding × steering.
-- `services/platform/dse_platform/access_bundles.py` — offboarding × cascata de approver.
+- `services/platform/dse_platform/access_bundles.py` — offboarding × approver cascade.
 - `migrations/0013_wsf2.sql` — `dse_console_identity`.
-- Login do console: `services/platform/dse_platform/queue_board/app.py` (`/login`).
+- Console login: `services/platform/dse_platform/queue_board/app.py` (`/login`).

@@ -17,5 +17,5 @@ def test_production_refuses_inprocess_executor(monkeypatch):
         branch="dse/wi-1",
     )
 
-    with pytest.raises(RuntimeError, match="recusa DSE_SANDBOX_INPROCESS"):
+    with pytest.raises(RuntimeError, match="refuses DSE_SANDBOX_INPROCESS"):
         executor_for_handle(handle)

@@ -1,5 +1,5 @@
-"""Emissão/revogação de virtual keys do LiteLLM por tenant+work_item+stage
-(WSD-E1-T3). Esta é a superfície ESTÁVEL que `sandbox_runtime` (WS-C) importa:
+"""Issue/revoke LiteLLM virtual keys per tenant+work_item+stage (WSD-E1-T3).
+This is the STABLE surface that `sandbox_runtime` (WS-C) imports:
 
     from model_gateway_client import mint_virtual_key, revoke_virtual_key
 
@@ -7,18 +7,18 @@
     ...
     revoke_virtual_key(key)
 
-Contrato:
-  - `mint_virtual_key` chama a API nativa do LiteLLM (`POST /key/generate`)
-    com o master key (nunca exposto ao sandbox — só a virtual key emitida
-    sai daqui). Grava um registro em `virtual_keys` (migrations/0005_wsd.sql)
-    para reconciliação/auditoria e emite uma linha no audit ledger via
-    `dse_audit.emit` (P8). Nunca decide budget/policy aqui (isso é
-    WSD-E2/Fase 2) — só emite a credencial.
-  - `revoke_virtual_key` chama `POST /key/delete`, marca o registro local
-    como revogado e também emite audit.
-  - Nenhuma das duas funções decide se a emissão "deveria" acontecer — quem
-    chama decide (P1: nenhuma decisão de fluxo por LLM; aqui nem é um LLM,
-    é o sandbox_runtime determinístico decidindo o lifecycle).
+Contract:
+  - `mint_virtual_key` calls LiteLLM's native API (`POST /key/generate`) with
+    the master key (never exposed to the sandbox — only the issued virtual key
+    leaves this module). It writes a row into `virtual_keys`
+    (migrations/0005_wsd.sql) for reconciliation/auditing and emits a line on
+    the audit ledger via `dse_audit.emit` (P8). It never decides budget/policy
+    here (that is WSD-E2/Phase 2) — it only issues the credential.
+  - `revoke_virtual_key` calls `POST /key/delete`, marks the local row as
+    revoked and emits audit as well.
+  - Neither function decides whether the issuance "should" happen — the caller
+    decides (P1: no flow decision made by an LLM; here it is not even an LLM,
+    it is the deterministic sandbox_runtime driving the lifecycle).
 """
 from __future__ import annotations
 
@@ -38,8 +38,8 @@ _AUDIT_ACTOR = "system:model-gateway"
 
 @dataclass(frozen=True)
 class IssuedVirtualKey:
-    """Valor de retorno rico para quem quiser mais que a string da key (o
-    `sandbox_runtime` normalmente só precisa de `.key`)."""
+    """Rich return value for callers that want more than the key string
+    (`sandbox_runtime` usually only needs `.key`)."""
 
     key: str
     key_alias: str
@@ -68,11 +68,11 @@ def mint_virtual_key(
     max_budget_usd: float | None = None,
     ttl_seconds: int | None = None,
 ) -> str:
-    """Emite uma virtual key nova no LiteLLM, escopada a `models` (default:
-    todos os models registrados são permitidos se `models=None` — o
-    allowlist real por task_class/risk_class é WSD-E2/Fase 2). Retorna a
-    string da virtual key (ex.: `sk-...`) — é isso que o sandbox injeta como
-    credencial efêmera do Coder para o egress-proxy (WS-C) repassar.
+    """Issues a fresh virtual key on LiteLLM, scoped to `models` (default: all
+    registered models are allowed when `models=None` — the real allowlist per
+    task_class/risk_class is WSD-E2/Phase 2). Returns the virtual key string
+    (e.g. `sk-...`) — that is what the sandbox injects as the Coder's ephemeral
+    credential for the egress-proxy (WS-C) to forward.
     """
     stage_str = _stage_value(stage)
     key_alias = f"{tenant_id}--{work_item_id}--{stage_str}--{uuid.uuid4().hex[:8]}"
@@ -153,11 +153,11 @@ def mint_virtual_key(
 
 
 def revoke_virtual_key(key: str) -> None:
-    """Revoga uma virtual key: derruba no LiteLLM (chamadas futuras com essa
-    key passam a receber 401) e marca `virtual_keys.status='revoked'`
-    localmente. Idempotente na parte de negócio: revogar uma key já revogada
-    localmente ainda tenta a chamada no LiteLLM (não assume que já foi feita
-    lá) mas não falha se o registro local já estiver marcado."""
+    """Revokes a virtual key: kills it on LiteLLM (future calls with that key
+    start getting 401) and marks `virtual_keys.status='revoked'` locally.
+    Idempotent on the business side: revoking a key already revoked locally
+    still attempts the LiteLLM call (it does not assume it already happened
+    there) but does not fail if the local row is already marked."""
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     conn = db.get_connection()
@@ -171,8 +171,8 @@ def revoke_virtual_key(key: str) -> None:
             row = cur.fetchone()
         if row is None:
             raise VirtualKeyNotFoundError(
-                "revoke_virtual_key chamado com uma key não rastreada em virtual_keys "
-                "(nunca emitida por mint_virtual_key deste control-plane, ou já apagada)"
+                "revoke_virtual_key called with a key not tracked in virtual_keys "
+                "(never issued by this control-plane's mint_virtual_key, or already deleted)"
             )
         tenant_id, work_item_id, stage_str, key_alias, key_prefix, status = row
 

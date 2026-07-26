@@ -1,5 +1,5 @@
-"""WSA-E4-T3 (webhook pull_request merged -> signal merged_by_human) e
-WSA-E1-T5 (resolução installation GitHub -> tenant)."""
+"""WSA-E4-T3 (pull_request merged webhook -> merged_by_human signal) and
+WSA-E1-T5 (GitHub installation -> tenant resolution)."""
 from __future__ import annotations
 
 import json
@@ -122,20 +122,20 @@ def test_merge_redelivery_is_deduped_by_event_id():
         "sender": {"login": "m"},
     }
     _post(merge_payload, "pull_request", "d-841")
-    _post(merge_payload, "pull_request", "d-842")  # reentrega (mesmo merge_commit_sha)
+    _post(merge_payload, "pull_request", "d-842")  # redelivery (same merge_commit_sha)
 
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM ingest_events WHERE work_item_id=%s AND kind='approval'", (work_item_id,)
         )
-        assert cur.fetchone()[0] == 1  # dedup por event_id (merge_commit_sha estável)
+        assert cur.fetchone()[0] == 1  # dedup by event_id (stable merge_commit_sha)
     conn.close()
 
 
 def test_installation_binding_resolves_tenant(monkeypatch):
-    """Um webhook com installation mapeada em tenant_platform_bindings admite
-    o WorkItem sob o tenant mapeado (não o DSE_TENANT_ID default)."""
+    """A webhook whose installation is mapped in tenant_platform_bindings admits
+    the WorkItem under the mapped tenant (not the default DSE_TENANT_ID)."""
     mapped_tenant = "test_tenant_gh_mapped"
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
@@ -161,9 +161,9 @@ def test_installation_binding_resolves_tenant(monkeypatch):
     )
     assert data["path"] == "new_task"
 
-    # Limpeza fica a cargo do fixture `_cleanup` (superuser) — mapped_tenant
-    # casa com o prefixo `test_tenant_%`, então work_items/ingest_events/
-    # tenant_platform_bindings/audit são removidos automaticamente.
+    # Cleanup is handled by the `_cleanup` fixture (superuser) — mapped_tenant
+    # matches the `test_tenant_%` prefix, so work_items/ingest_events/
+    # tenant_platform_bindings/audit are removed automatically.
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
         cur.execute("SELECT tenant_id FROM work_items WHERE id=%s", (data["work_item_id"],))

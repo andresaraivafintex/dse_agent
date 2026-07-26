@@ -40,7 +40,7 @@ def test_manifest_rejects_shell_string_commands(sandbox, git_repo, git_sha):
 
     assert cfg.manifest_status == GateStatus.ERROR
     assert cfg.test_cmd == []
-    assert "array JSON" in cfg.manifest_detail
+    assert "JSON array" in cfg.manifest_detail
 
 
 def test_manifest_missing_command_remains_not_configured(sandbox, git_repo, git_sha):

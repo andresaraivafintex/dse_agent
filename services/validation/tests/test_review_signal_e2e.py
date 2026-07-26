@@ -1,10 +1,10 @@
-"""WSE-E6-T15 — resume do workflow por comentário de review (núcleo do UC4).
+"""WSE-E6-T15 — workflow resume from a review comment (core of UC4).
 
-Roda contra o Temporal REAL de localhost:7233 (nunca mockamos durabilidade/
-sinalização — é o próprio ponto do sistema). Um workflow mínimo de teste
-substitui o `WorkItemLifecycleWorkflow` real do WS-B (que ainda pode não
-existir/estar estável durante o desenvolvimento em paralelo) só para provar
-que `handle_review_event` entrega o signal certo no workflow certo
+Runs against the REAL Temporal on localhost:7233 (we never mock durability/
+signaling — that is the whole point of the system). A minimal test workflow
+stands in for WS-B's real `WorkItemLifecycleWorkflow` (which may not exist or be
+stable yet during parallel development), just to prove that
+`handle_review_event` delivers the right signal to the right workflow
 (workflow_id == work_item_id).
 """
 from __future__ import annotations
@@ -26,9 +26,9 @@ TEMPORAL_ADDRESS = "localhost:7233"
 
 @workflow.defn
 class ReviewSignalProbeWorkflow:
-    """Substitui o WorkItemLifecycleWorkflow real do WS-B só para este teste:
-    espera exatamente o mesmo nome de signal (`review_decision`) que o
-    workflow de produção vai definir (WSB-E3-T4) e devolve o payload recebido."""
+    """Stands in for WS-B's real WorkItemLifecycleWorkflow for this test only:
+    it waits on exactly the same signal name (`review_decision`) that the
+    production workflow will define (WSB-E3-T4) and returns the received payload."""
 
     def __init__(self) -> None:
         self._decision: dict | None = None
@@ -103,9 +103,9 @@ async def test_approval_signals_the_correct_workflow_by_work_item_id():
         assert signaled is True
 
         result = await handle.result()
-        # Achado da integração da Fase 1: o workflow real (WS-B) lê
-        # payload["verdict"], não payload["decision"] — corrigido em
-        # review_signal.py; a asserção segue a mesma correção.
+        # Found during Phase 1 integration: the real workflow (WS-B) reads
+        # payload["verdict"], not payload["decision"] — fixed in
+        # review_signal.py; this assertion follows the same fix.
         assert result["verdict"] == "approved"
         assert result["event_id"] == event.event_id
 
@@ -135,10 +135,10 @@ async def test_changes_requested_signals_and_resumes_with_correct_decision():
 
 @pytest.mark.asyncio
 async def test_plain_review_comment_creates_no_work_item_and_no_pr_and_does_not_touch_temporal():
-    """Núcleo da prova do UC4: um comentário de review comum não é uma
-    decisão — não deve criar WorkItem, não deve criar PR, e não deve sequer
-    tentar sinalizar um workflow (ver assert signaled is False antes de
-    qualquer chamada ao client Temporal em `handle_review_event`)."""
+    """Core of the UC4 proof: a plain review comment is not a decision — it must
+    not create a WorkItem, must not create a PR, and must not even attempt to
+    signal a workflow (see `assert signaled is False` before any Temporal client
+    call inside `handle_review_event`)."""
     client = await Client.connect(TEMPORAL_ADDRESS)
     work_item_id = f"wi_test_{uuid.uuid4().hex[:8]}"
     tenant_id = f"acme-test-{uuid.uuid4().hex[:8]}"
@@ -150,9 +150,9 @@ async def test_plain_review_comment_creates_no_work_item_and_no_pr_and_does_not_
     assert before_work_items == 0
     assert before_pr_tracking == 0
 
-    # NENHUM workflow é iniciado para este work_item_id de propósito — se
-    # handle_review_event tentasse sinalizar mesmo assim, receberíamos um erro
-    # "workflow not found" do Temporal real em vez de um False silencioso.
+    # NO workflow is started for this work_item_id on purpose — if
+    # handle_review_event tried to signal anyway, we would get a
+    # "workflow not found" error from the real Temporal instead of a quiet False.
     event = _make_event(
         EventKind.review_comment, {"repo": "acme/repo", "pr_number": 2}, "looks fine overall, ship it eventually"
     )

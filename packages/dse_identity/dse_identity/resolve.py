@@ -1,10 +1,10 @@
-"""Fundações do identity map (WSF-E3-T1). Fase 1: resolução por auto-registro
-na primeira aparição — SEM SSO/SCIM (isso é ADR-22 fechado + WSF-E3-T3,
-Fase 2). Todo adapter chama `resolve_principal` antes de gravar `actor` em
-qualquer `ConversationEvent`, `WorkItem.requester` ou linha de audit.
+"""Identity map foundations (WSF-E3-T1). Fase 1: resolution by self-registration
+on first appearance — NO SSO/SCIM (that is ADR-22, closed, plus WSF-E3-T3, in
+Fase 2). Every adapter calls `resolve_principal` before writing `actor` into any
+`ConversationEvent`, `WorkItem.requester` or audit row.
 
-Contrato estável (WS-A depende disto na Fase 1; WS-F troca a implementação
-por baixo na Fase 2 sem quebrar a assinatura — ver WSA-E6-T2b).
+Stable contract (WS-A depends on it in Fase 1; WS-F swaps the implementation
+underneath in Fase 2 without breaking the signature — see WSA-E6-T2b).
 """
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ _DSN = os.environ.get(
 
 
 def resolve_principal(platform: str, platform_user_id: str, display_name: str | None = None) -> str:
-    """Retorna o principal_id único para (platform, platform_user_id),
-    criando-o na primeira aparição. Idempotente: chamadas repetidas com o
-    mesmo par platform/platform_user_id sempre retornam o mesmo principal_id.
+    """Returns the unique principal_id for (platform, platform_user_id), creating
+    it on first appearance. Idempotent: repeated calls with the same
+    platform/platform_user_id pair always return the same principal_id.
     """
     conn = psycopg2.connect(_DSN)
     try:
@@ -47,9 +47,9 @@ def resolve_principal(platform: str, platform_user_id: str, display_name: str | 
             )
         conn.commit()
 
-        # corrida rara: outro processo criou entre o SELECT e o INSERT — a
-        # constraint ON CONFLICT acima não sobrescreve; relê para pegar o
-        # principal_id vencedor (garante 1 principal por platform_user_id).
+        # rare race: another process created it between the SELECT and the
+        # INSERT — the ON CONFLICT above does not overwrite; re-read to pick up
+        # the winning principal_id (guarantees 1 principal per platform_user_id).
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT principal_id FROM identity_links WHERE platform = %s AND platform_user_id = %s",

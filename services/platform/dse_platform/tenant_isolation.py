@@ -1,22 +1,23 @@
-"""WSF-E4-T3 — enforcement de isolamento multi-tenant (NFR-03), camada a camada.
+"""WSF-E4-T3 — multi-tenant isolation enforcement (NFR-03), layer by layer.
 
-Este módulo é a *primitiva reutilizável* de "toda leitura cruza a fronteira do
-tenant que a pediu"; a *prova* (tentativas ativas de acesso cross-tenant que
-DEVEM falhar e ser auditadas) vive na suíte `tests/test_tenant_isolation.py`.
+This module is the *reusable primitive* for "every read is checked against the
+tenant boundary of whoever asked"; the *proof* (active cross-tenant access
+attempts that MUST fail and be audited) lives in the `tests/test_tenant_isolation.py`
+suite.
 
-Camadas cobertas (NFR-03):
-  - filas        -> `fairness_key(tenant)` (namespacing determinístico da chave
-                    de fairness worker-side lida pelo WS-B de `tenant_config`)
-  - artifacts    -> `artifact_prefix(tenant)` (prefixo por tenant no store)
-  - skills       -> `fetch_skill_scoped` (skill_registry do WS-C, tenant-scoped)
-  - retrieval    -> `query_retrieval_scoped` (retrieval_documents do WS-C, E5)
-  - audit        -> `query_audit_scoped` (partições por tenant do audit_log)
-  - tokens       -> `assert_token_belongs_to_tenant` (virtual_keys do WS-D)
+Layers covered (NFR-03):
+  - queues       -> `fairness_key(tenant)` (deterministic namespacing of the
+                    worker-side fairness key WS-B reads from `tenant_config`)
+  - artifacts    -> `artifact_prefix(tenant)` (per-tenant prefix in the store)
+  - skills       -> `fetch_skill_scoped` (WS-C skill_registry, tenant-scoped)
+  - retrieval    -> `query_retrieval_scoped` (WS-C retrieval_documents, E5)
+  - audit        -> `query_audit_scoped` (per-tenant audit_log partitions)
+  - tokens       -> `assert_token_belongs_to_tenant` (WS-D virtual_keys)
 
-Toda tentativa de um tenant A ler um recurso do tenant B é NEGADA (deny) e
-AUDITADA como `cross_tenant_access_denied` (P8). O guard central
-`guard_same_tenant` é o "vazio/errado bloqueia" estrutural — nunca devolve dado
-de outro tenant, nem silenciosamente (P6).
+Every attempt by tenant A to read a resource of tenant B is DENIED and AUDITED as
+`cross_tenant_access_denied` (P8). The central guard `guard_same_tenant` is the
+structural "missing/wrong blocks" — it never returns another tenant's data, and
+never fails silently (P6).
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ def _get_connection():
 
 
 class CrossTenantViolation(Exception):
-    """Um tenant tentou acessar um recurso de outro tenant. Fail-closed (P6)."""
+    """A tenant tried to access another tenant's resource. Fail-closed (P6)."""
 
 
 def _valid_tenant(tenant_id: str) -> bool:
@@ -56,9 +57,9 @@ def guard_same_tenant(
     actor: str = "system:tenant-isolation",
     conn=None,
 ) -> None:
-    """Núcleo do enforcement: levanta `CrossTenantViolation` (e audita) se
-    `resource_tenant` for None (recurso inexistente/oculto) ou diferente de
-    `requesting_tenant`. Chamado por todos os accessors scoped abaixo."""
+    """Enforcement core: raises `CrossTenantViolation` (and audits) if
+    `resource_tenant` is None (nonexistent/hidden resource) or differs from
+    `requesting_tenant`. Called by every scoped accessor below."""
     if resource_tenant is not None and resource_tenant == requesting_tenant:
         return
     emit(
@@ -80,25 +81,25 @@ def guard_same_tenant(
 
 
 # ---------------------------------------------------------------------------
-# Camada: filas (fairness keys) — namespacing determinístico
+# Layer: queues (fairness keys) — deterministic namespacing
 # ---------------------------------------------------------------------------
 def fairness_key(tenant_id: str) -> str:
-    """Chave de fairness worker-side (WS-B lê caps de `tenant_config` por esta
-    chave). Namespacing forte por tenant: dois tenants NUNCA colidem. Rejeita
-    tenant_id malformado (defesa contra injeção de separador)."""
+    """Worker-side fairness key (WS-B reads caps from `tenant_config` by this
+    key). Strong per-tenant namespacing: two tenants NEVER collide. Rejects a
+    malformed tenant_id (defense against separator injection)."""
     if not _valid_tenant(tenant_id):
-        raise ValueError(f"tenant_id inválido para fairness_key: {tenant_id!r}")
+        raise ValueError(f"invalid tenant_id for fairness_key: {tenant_id!r}")
     return f"tenant::{tenant_id}"
 
 
 # ---------------------------------------------------------------------------
-# Camada: artifacts — prefixo por tenant
+# Layer: artifacts — per-tenant prefix
 # ---------------------------------------------------------------------------
 def artifact_prefix(tenant_id: str) -> str:
-    """Prefixo obrigatório de qualquer chave de artifact/objeto de um tenant.
-    Rejeita tenant_id malformado (evita path traversal `../` no prefixo)."""
+    """Mandatory prefix for any artifact/object key of a tenant. Rejects a
+    malformed tenant_id (prevents `../` path traversal in the prefix)."""
     if not _valid_tenant(tenant_id):
-        raise ValueError(f"tenant_id inválido para artifact_prefix: {tenant_id!r}")
+        raise ValueError(f"invalid tenant_id for artifact_prefix: {tenant_id!r}")
     return f"tenants/{tenant_id}/"
 
 
@@ -109,13 +110,13 @@ def artifact_key(tenant_id: str, relative_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Camada: skills (skill_registry do WS-C) — tenant-scoped
+# Layer: skills (WS-C skill_registry) — tenant-scoped
 # ---------------------------------------------------------------------------
 def fetch_skill_scoped(requesting_tenant: str, skill_id: int, *, conn=None):
-    """Busca uma skill por id, mas SÓ devolve se pertencer ao tenant que pede.
-    Se a skill for de outro tenant, audita `cross_tenant_access_denied` e
-    levanta `CrossTenantViolation` — nunca devolve a linha (o Planner de um
-    tenant não pode carregar a skill de outro)."""
+    """Fetches a skill by id, but ONLY returns it if it belongs to the requesting
+    tenant. If the skill belongs to another tenant, it audits
+    `cross_tenant_access_denied` and raises `CrossTenantViolation` — it never
+    returns the row (one tenant's Planner must not load another's skill)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -132,11 +133,11 @@ def fetch_skill_scoped(requesting_tenant: str, skill_id: int, *, conn=None):
             conn=conn,
         )
         if owns:
-            conn.commit()  # persistir o audit da violação (não alcançado se levantou)
+            conn.commit()  # persist the violation audit (not reached if it raised)
         return dict(row)
     except Exception:
         if owns:
-            conn.commit()  # audit da violação já foi emitido na mesma conn — preservar
+            conn.commit()  # the violation audit was already emitted on this conn — preserve it
         raise
     finally:
         if owns:
@@ -144,11 +145,11 @@ def fetch_skill_scoped(requesting_tenant: str, skill_id: int, *, conn=None):
 
 
 # ---------------------------------------------------------------------------
-# Camada: retrieval index (retrieval_documents do WS-C E5) — tenant-scoped
+# Layer: retrieval index (WS-C E5 retrieval_documents) — tenant-scoped
 # ---------------------------------------------------------------------------
 def query_retrieval_scoped(requesting_tenant: str, document_id: int, *, conn=None):
-    """Igual a `fetch_skill_scoped`, para o índice de retrieval: um tenant não
-    pode consultar um documento indexado de outro tenant."""
+    """Same as `fetch_skill_scoped`, for the retrieval index: a tenant cannot
+    query another tenant's indexed document."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -177,12 +178,12 @@ def query_retrieval_scoped(requesting_tenant: str, document_id: int, *, conn=Non
 
 
 # ---------------------------------------------------------------------------
-# Camada: audit (partições por tenant) — nenhuma query cruza tenant
+# Layer: audit (per-tenant partitions) — no query crosses tenants
 # ---------------------------------------------------------------------------
 def query_audit_scoped(requesting_tenant: str, target_tenant: str, *, conn=None):
-    """Query de audit por tenant. Uma tentativa de um tenant consultar o audit
-    de OUTRO tenant é negada + auditada. Só quando requesting == target a query
-    roda (e devolve as linhas daquela partição)."""
+    """Per-tenant audit query. An attempt by one tenant to query ANOTHER tenant's
+    audit is denied + audited. Only when requesting == target does the query run
+    (returning the rows of that partition)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -213,11 +214,11 @@ def query_audit_scoped(requesting_tenant: str, target_tenant: str, *, conn=None)
 
 
 # ---------------------------------------------------------------------------
-# Camada: tokens (virtual_keys do WS-D)
+# Layer: tokens (WS-D virtual_keys)
 # ---------------------------------------------------------------------------
 def assert_token_belongs_to_tenant(requesting_tenant: str, key_alias: str, *, conn=None) -> None:
-    """Confirma que a virtual key (por alias) pertence ao tenant que a apresenta.
-    Um tenant apresentando o alias de key de outro tenant é negado + auditado."""
+    """Confirms the virtual key (by alias) belongs to the tenant presenting it.
+    A tenant presenting another tenant's key alias is denied + audited."""
     owns = conn is None
     if owns:
         conn = _get_connection()

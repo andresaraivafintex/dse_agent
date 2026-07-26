@@ -1,8 +1,8 @@
-"""WSF-E1-T2 — exercício de reconstrução por auditoria (exit criterion da
-Fase 1: "first audit-based reconstruction exercise passes").
+"""WSF-E1-T2 — audit-based reconstruction exercise (Fase 1 exit criterion:
+"first audit-based reconstruction exercise passes").
 
-Requer Postgres real (`make up && make migrate` já rodando) — nunca mocke o
-audit_log para provar reconstrução: é o próprio ponto do sistema (P8).
+Requires a real Postgres (`make up && make migrate` already running) — never mock
+audit_log to prove reconstruction: that is the whole point of the system (P8).
 """
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import uuid
 
 from dse_audit import emit, export_audit_range, export_audit_range_csv, reconstruct_work_item_history
 
-# Sequência canônica de um WorkItem completo pela máquina de estados da
-# proposta técnica §9.3 (Fase 1 core loop).
+# Canonical sequence of a full WorkItem through the state machine from the
+# technical proposal §9.3 (Fase 1 core loop).
 LIFECYCLE: list[tuple[str, str, dict[str, object]]] = [
     ("system:ingest-gateway", "admitted", {"channel": "#eng-payments"}),
     ("usr_requester", "clarified", {"answer": "use tabela orders"}),
@@ -38,9 +38,9 @@ def test_reconstruct_work_item_history_reproduces_exact_order():
 
     history = reconstruct_work_item_history(work_item_id)
 
-    # A reconstrução deve conter exatamente as 8 transições, na ordem exata em
-    # que foram gravadas (prova de que um único SELECT ordenado por ts basta
-    # para responder "quem fez o quê, quando" para este WorkItem).
+    # The reconstruction must contain exactly the 8 transitions, in the exact
+    # order they were written (proof that a single SELECT ordered by ts is enough
+    # to answer "who did what, when" for this WorkItem).
     assert len(history) == len(LIFECYCLE)
     reconstructed_actions = [row["action"] for row in history]
     expected_actions = [action for _, action, _ in LIFECYCLE]
@@ -50,12 +50,12 @@ def test_reconstruct_work_item_history_reproduces_exact_order():
     expected_actors = [actor for actor, _, _ in LIFECYCLE]
     assert reconstructed_actors == expected_actors
 
-    # timestamps monotonicamente não-decrescentes (prova de ordenação real,
-    # não apenas ordem de inserção coincidente)
+    # monotonically non-decreasing timestamps (proof of real ordering, not just a
+    # coincidental insertion order)
     timestamps = [row["ts"] for row in history]
     assert timestamps == sorted(timestamps)
 
-    # detalhes de cada evento preservados fielmente
+    # each event's details preserved faithfully
     for row, (_, _, expected_details) in zip(history, LIFECYCLE):
         assert row["details"] == expected_details
         assert row["tenant_id"] == tenant_id
@@ -94,7 +94,7 @@ def test_export_audit_range_covers_tenant_period_and_excludes_outside_events():
     assert all(row["tenant_id"] == tenant_id for row in exported)
     assert all(row["work_item_id"] == work_item_id for row in exported)
 
-    # janela estreita antes do primeiro evento não deve incluir nada
+    # a narrow window ending before the first event must include nothing
     far_past_start = before - dt.timedelta(days=1)
     far_past_end = before
     assert export_audit_range(tenant_id, far_past_start, far_past_end) == []

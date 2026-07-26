@@ -1,4 +1,4 @@
-"""Vocabulário fechado de classes de falha (Fase 2, plano 09)."""
+"""Closed vocabulary of failure classes (Phase 2, plano 09)."""
 from __future__ import annotations
 
 from dse_contracts import (
@@ -18,7 +18,7 @@ def test_roundtrip_canonical_types():
 
 
 def test_legacy_types_are_recognized_forever():
-    # types já gravados em histórias do Temporal — remoção quebraria replay
+    # types already recorded in Temporal histories — removing them breaks replay
     assert parse_failure_type("ProviderBillingError") is FailureClass.provider_billing
     assert parse_failure_type("EgressFailClosed") is FailureClass.policy_fail_closed
 
@@ -31,7 +31,7 @@ def test_unknown_types_map_to_none():
 
 
 def test_fail_closed_classes_vocabulary_is_closed():
-    # infra_transient NUNCA entra: transiente é problema de retry, não recusa
+    # infra_transient NEVER gets in: transient is a retry problem, not a refusal
     assert FAIL_CLOSED_CLASSES == {
         FailureClass.policy_fail_closed,
         FailureClass.budget_denied,

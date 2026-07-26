@@ -1,19 +1,19 @@
-"""Ledger de custo DURÁVEL (WSD-E3-T4).
+"""DURABLE cost ledger (WSD-E3-T4).
 
-Na Fase 1 o custo por chamada só existia num `InMemorySpanExporter` do processo
-atual — sumia em restart e não agregava entre processos. A Fase 2 grava cada
-chamada bem-sucedida numa tabela Postgres (`model_call_ledger`,
-migrations/0011_wsd2.sql) com o custo/tokens REAIS que o LiteLLM devolve. Essa
-tabela é:
+In Phase 1 the per-call cost only existed in the current process's
+`InMemorySpanExporter` — it vanished on restart and did not aggregate across
+processes. Phase 2 writes every successful call into a Postgres table
+(`model_call_ledger`, migrations/0011_wsd2.sql) with the REAL cost/tokens
+LiteLLM returns. That table is:
 
-  1. a fonte consultável e DURÁVEL do `cost_export` (sobrevive a restart), e
-  2. o accounting de "spent-so-far" do enforcement de budget no call time
+  1. the queryable, DURABLE source for `cost_export` (survives a restart), and
+  2. the "spent-so-far" accounting for call-time budget enforcement
      (`budget.py`).
 
-Os spans OTel continuam sendo exportados em paralelo para o collector do WS-F
-(`telemetry.py`) — mas o collector local só faz `debug`/stdout (sem backend
-consultável neste ambiente), então a agregação durável mora aqui, não no
-collector. Ver README §"WSD-E3-T4".
+OTel spans keep being exported in parallel to the WS-F collector
+(`telemetry.py`) — but the local collector only does `debug`/stdout (no
+queryable backend in this environment), so the durable aggregation lives here,
+not in the collector. See README §"WSD-E3-T4".
 """
 from __future__ import annotations
 
@@ -57,9 +57,9 @@ def record_call(
     tokens_in: int,
     tokens_out: int,
 ) -> None:
-    """Grava uma linha imutável no ledger. Chamado por
-    `gateway_call.chat_completion` DEPOIS de uma resposta 2xx (só custo real
-    entra no ledger — uma chamada negada/falha não gera linha aqui)."""
+    """Writes an immutable row into the ledger. Called by
+    `gateway_call.chat_completion` AFTER a 2xx response (only real cost goes
+    into the ledger — a denied/failed call produces no row here)."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -87,9 +87,9 @@ def record_call(
 
 
 def aggregate(*, tenant_id: str | None = None) -> list[dict]:
-    """Agrega custo/tokens por (tenant_id, task_class, stage) a partir da
-    tabela durável. Substitui a leitura do buffer em memória da Fase 1 — o
-    resultado sobrevive a restart do processo e agrega entre processos."""
+    """Aggregates cost/tokens by (tenant_id, task_class, stage) from the
+    durable table. Replaces Phase 1's read of the in-memory buffer — the result
+    survives a process restart and aggregates across processes."""
     where = ""
     params: tuple = ()
     if tenant_id is not None:
@@ -134,7 +134,7 @@ def aggregate(*, tenant_id: str | None = None) -> list[dict]:
 
 
 def spent_for_work_item(work_item_id: str) -> float:
-    """Custo acumulado (USD) de um WorkItem — usado pelo enforcement de budget."""
+    """Accumulated cost (USD) for a WorkItem — used by budget enforcement."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -148,7 +148,8 @@ def spent_for_work_item(work_item_id: str) -> float:
 
 
 def spent_for_tenant_this_month(tenant_id: str) -> float:
-    """Custo acumulado (USD) do tenant no mês corrente (UTC) — budget agregado."""
+    """Accumulated cost (USD) for the tenant in the current month (UTC) — the
+    aggregate budget."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:

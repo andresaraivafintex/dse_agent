@@ -1,10 +1,10 @@
-"""Fase 1 (plano 09): o agent-runner executa o turno de verdade no sandbox.
+"""Phase 1 (plan 09): the agent-runner really executes the turn in the sandbox.
 
-Estes testes rodam o executor EM PROCESSO (sem docker/k8s): provam o contrato
-(decodificação com o modelo real, envelope dos drivers, vocabulário de erro) e
-a semântica do substrato fake — a mesma que a suíte de conformidade usa. O
-turno claude-agent vivo (inferência real) continua fora da suíte, como todo
-substrato real (ver README "o que falta para produção").
+These tests run the executor IN PROCESS (no docker/k8s): they prove the contract
+(decoding with the real model, the drivers' envelope, the error vocabulary) and
+the fake substrate's semantics — the same ones the conformance suite uses. The
+live claude-agent turn (real inference) stays out of the suite, like every real
+substrate (see the README, "What is missing for production").
 """
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import json
 import os
 import sys
 
-# O pacote agent_runner vive na imagem do sandbox (services/sandbox-runtime/
-# agent-runner), não no venv do worker — os testes o importam pelo caminho.
+# The agent_runner package lives in the sandbox image (services/sandbox-runtime/
+# agent-runner), not in the worker venv — the tests import it by path.
 _RUNNER_DIR = os.path.join(os.path.dirname(__file__), "..", "agent-runner")
 sys.path.insert(0, os.path.abspath(_RUNNER_DIR))
 
@@ -52,7 +52,7 @@ def test_fake_substrate_writes_files_inside_workspace(tmp_path):
 
 
 def test_openhands_missing_sdk_is_structured_error_not_fallback(tmp_path, monkeypatch):
-    # força ImportError mesmo se o venv tiver o SDK (sys.modules[name] = None)
+    # forces an ImportError even if the venv has the SDK (sys.modules[name] = None)
     monkeypatch.setitem(sys.modules, "openhands", None)
     monkeypatch.setitem(sys.modules, "openhands.sdk", None)
     result = run_agent_turn(_req(tmp_path, substrate="openhands"))
@@ -62,9 +62,9 @@ def test_openhands_missing_sdk_is_structured_error_not_fallback(tmp_path, monkey
 
 
 def test_openhands_wiring_is_gateway_only(tmp_path, monkeypatch):
-    """Stub do openhands.sdk: prova que o LLM aponta para o gateway com a
-    virtual key + headers do contrato e o workspace é o do request — dentro
-    do sandbox, LocalWorkspace é o desenho certo."""
+    """openhands.sdk stub: proves the LLM points at the gateway with the
+    contract's virtual key + headers and that the workspace is the request's —
+    inside the sandbox, LocalWorkspace is the right design."""
     import types
 
     seen: dict = {}
@@ -133,9 +133,9 @@ def test_claude_gateway_env_is_gateway_only(tmp_path):
     )
     env = build_claude_gateway_env(req)
     assert env["ANTHROPIC_BASE_URL"] == "http://model-gateway:4000"
-    assert env["ANTHROPIC_API_KEY"] == "vk-eph"  # SÓ a virtual key efêmera
+    assert env["ANTHROPIC_API_KEY"] == "vk-eph"  # ONLY the ephemeral virtual key
     assert "X-Dse-Tenant-Id: tenant-a" in env["ANTHROPIC_CUSTOM_HEADERS"]
-    # nenhuma credencial de provider/master key existe neste dicionário
+    # no provider credential/master key exists in this dict
     assert not any("MASTER" in k or "AWS" in k for k in env)
 
 
@@ -152,10 +152,10 @@ def _run_main_with_stdin(payload: str) -> tuple[int, dict]:
 
 def test_main_accepts_driver_envelope_and_raw_request(tmp_path):
     req = _req(tmp_path, fake_script=[{"write_files": {"a.txt": "x"}, "done": True}])
-    # envelope dos drivers ({"stage","input"}) — formato do kubectl/docker exec
+    # the drivers' envelope ({"stage","input"}) — the kubectl/docker exec format
     code, out = _run_main_with_stdin(json.dumps({"stage": "coder", "input": req.model_dump()}))
     assert code == 0 and out["done"] is True and out["error_kind"] is None
-    # request cru também é aceito (mesmo contrato)
+    # the raw request is accepted too (same contract)
     code, out = _run_main_with_stdin(req.model_dump_json())
     assert code == 0 and out["done"] is True
 
@@ -164,6 +164,6 @@ def test_main_invalid_payload_is_structured_error(tmp_path):
     code, out = _run_main_with_stdin(json.dumps({"input": {"host_workspace_path": "/Users/x"}}))
     assert code == 0
     assert out["error_kind"] == "invalid_payload" and out["done"] is False
-    # stdin que nem é JSON → exit != 0 (falha catastrófica, driver traduz)
-    code, out = _run_main_with_stdin("isto não é json")
+    # stdin that is not even JSON → exit != 0 (catastrophic failure, the driver translates it)
+    code, out = _run_main_with_stdin("this is not json")
     assert code == 2

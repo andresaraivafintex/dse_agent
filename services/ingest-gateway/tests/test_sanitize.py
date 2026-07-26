@@ -1,6 +1,6 @@
-"""WSA-E2-T3 — corpus com caracteres invisíveis e padrões de credencial
-conhecidos. O snapshot original permanece intacto (auditoria); apenas a
-versão sanitizada segue no pipeline."""
+"""WSA-E2-T3 — corpus with invisible characters and known credential patterns.
+The original snapshot stays intact (auditing); only the sanitized version flows
+down the pipeline."""
 from __future__ import annotations
 
 from ingest_gateway.sanitize import redact_secrets, sanitize_content, strip_invisible_unicode

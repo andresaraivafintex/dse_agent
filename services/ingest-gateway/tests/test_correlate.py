@@ -1,5 +1,5 @@
-"""WSA-E6-T1 — correlate(): Path A (new_task) vs Path B (signal), regra de
-WorkItem terminal (provenance), e gate de steering allowlist (WSA-E6-T2a)."""
+"""WSA-E6-T1 — correlate(): Path A (new_task) vs Path B (signal), terminal
+WorkItem rule (provenance), and the steering allowlist gate (WSA-E6-T2a)."""
 from __future__ import annotations
 
 import json
@@ -58,8 +58,8 @@ def test_match_on_active_work_item_returns_signal(tenant_id):
     ref = {"channel": "C1", "thread_ts": "111.111"}
     wi_id = _insert_work_item(tenant_id, ref, status="implementing")
 
-    # clarification_answer é steering-gated (§F F4): o requester legítimo está
-    # na allowlist; aqui autorizamos p/ o teste focar na correlação Path B.
+    # clarification_answer is steering-gated (§F F4): the legitimate requester is
+    # on the allowlist; here we authorize so the test focuses on Path B correlation.
     allow_conn = psycopg2.connect(DSN)
     with allow_conn.cursor() as cur:
         cur.execute(
@@ -145,9 +145,9 @@ def test_review_comment_is_steering_gated_too(tenant_id):
 
 
 def test_clarification_answer_by_unauthorized_is_rejected(tenant_id):
-    """Plano 08 §F (F4): clarification_answer AGORA é steering-gated. Numa issue
-    pública qualquer um comenta; um terceiro não-autorizado não deve dirigir a
-    tarefa. Vira `unauthorized` + audit, nunca signal."""
+    """Plano 08 §F (F4): clarification_answer is NOW steering-gated. On a public
+    issue anyone can comment; an unauthorized third party must not direct the
+    task. It becomes `unauthorized` + audit, never a signal."""
     ref = {"channel": "C1", "thread_ts": "333.333"}
     wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
 
@@ -169,13 +169,13 @@ def test_clarification_answer_by_unauthorized_is_rejected(tenant_id):
 
 
 def test_clarification_answer_by_task_requester_is_signal_without_allowlist(tenant_id):
-    """Ajuste da auditoria (F4): o REQUESTER da tarefa responde à clarificação
-    da própria tarefa SEM precisar de allowlist — a pergunta foi feita a ele
-    (fluxo esperado nos 3 canais). Comparação determinística com a coluna
-    requester do work item."""
+    """Audit adjustment (F4): the task's REQUESTER answers the clarification of
+    their own task WITHOUT needing the allowlist — the question was asked to
+    them (expected flow on all 3 channels). Deterministic comparison against the
+    work item's requester column."""
     ref = {"channel": "C1", "thread_ts": "444.444"}
     wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
-    # _insert_work_item grava requester='usr_original_requester'
+    # _insert_work_item writes requester='usr_original_requester'
 
     conn = get_connection()
     event = _event(EventKind.clarification_answer, ref, principal="usr_original_requester")
@@ -185,7 +185,7 @@ def test_clarification_answer_by_task_requester_is_signal_without_allowlist(tena
 
     assert result.kind == "signal"
     assert result.work_item_id == wi_id
-    # proveniência do grant (P8): method=task_requester
+    # provenance of the grant (P8): method=task_requester
     check = psycopg2.connect(DSN)
     with check.cursor() as cur:
         cur.execute(
@@ -198,7 +198,8 @@ def test_clarification_answer_by_task_requester_is_signal_without_allowlist(tena
 
 
 def test_clarification_answer_by_third_party_on_allowlist_is_signal(tenant_id):
-    """Terceiro NÃO-requester mas autorizado (allowlist) também pode responder."""
+    """A third party who is NOT the requester but is authorized (allowlist) can
+    answer as well."""
     ref = {"channel": "C1", "thread_ts": "555.555"}
     wi_id = _insert_work_item(tenant_id, ref, status="needs_clarification")
 
@@ -220,8 +221,9 @@ def test_clarification_answer_by_third_party_on_allowlist_is_signal(tenant_id):
 
 
 def test_steering_by_task_requester_still_requires_allowlist(tenant_id):
-    """O shortcut do requester vale SÓ para clarification_answer: steering do
-    próprio requester continua passando pelo gate estrito (deny-by-default)."""
+    """The requester shortcut applies ONLY to clarification_answer: steering by
+    the requester themselves still goes through the strict gate
+    (deny-by-default)."""
     ref = {"repo": "acme/widgets", "number": 46}
     wi_id = _insert_work_item(tenant_id, ref, status="implementing")
 

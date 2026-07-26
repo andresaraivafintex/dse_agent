@@ -1,21 +1,21 @@
-"""Agregação de custo por tenant/task-class/stage (WSD-E3-T2 / WSD-E3-T4).
+"""Cost aggregation by tenant/task-class/stage (WSD-E3-T2 / WSD-E3-T4).
 
-Fonte DURÁVEL (default a partir da Fase 2 — WSD-E3-T4): a tabela
-`model_call_ledger` (`ledger.py`), gravada a cada chamada bem-sucedida com o
-custo/tokens REAIS do LiteLLM. Sobrevive a restart do processo e agrega entre
-processos — a pendência #4 do adendo ("hoje em memória por processo") está
-resolvida. `aggregate_cost(..., source="ledger")` (default) lê daí.
+DURABLE source (the default from Phase 2 on — WSD-E3-T4): the
+`model_call_ledger` table (`ledger.py`), written on every successful call with
+LiteLLM's REAL cost/tokens. It survives a process restart and aggregates across
+processes — open item #4 from the addendum ("today in memory, per process") is
+resolved. `aggregate_cost(..., source="ledger")` (the default) reads from it.
 
-Fonte em memória (legado da Fase 1, ainda disponível via `source="memory"`):
-os spans do `InMemorySpanExporter` do processo atual
-(`telemetry.get_recorded_spans()`). Útil para testes de unidade puros que não
-querem tocar o Postgres.
+In-memory source (Phase 1 legacy, still available via `source="memory"`): the
+spans from the current process's `InMemorySpanExporter`
+(`telemetry.get_recorded_spans()`). Useful for pure unit tests that do not want
+to touch Postgres.
 
-Os spans OTel continuam sendo exportados em paralelo para o collector do WS-F
-quando `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` está setado (dashboards/alerting do
-WSF-E7). O collector local só faz `debug`/stdout (sem backend consultável neste
-ambiente), então a agregação consultável mora no ledger Postgres, não no
-collector — ver README §"WSD-E3-T4".
+OTel spans keep being exported in parallel to the WS-F collector when
+`DSE_OTEL_EXPORTER_OTLP_ENDPOINT` is set (WSF-E7 dashboards/alerting). The
+local collector only does `debug`/stdout (no queryable backend in this
+environment), so the queryable aggregation lives in the Postgres ledger, not in
+the collector — see README §"WSD-E3-T4".
 """
 from __future__ import annotations
 
@@ -60,23 +60,23 @@ class CostBucket:
 
 
 def _iter_spans():
-    """Buffer em memória do processo atual (source="memory"). Fonte legado da
-    Fase 1 — ver docstring do módulo."""
+    """In-memory buffer of the current process (source="memory"). Phase 1
+    legacy source — see the module docstring."""
     return telemetry.get_recorded_spans()
 
 
 def aggregate_cost(*, tenant_id: str | None = None, source: str = "ledger") -> list[dict]:
-    """Agrega custo/tokens por (tenant_id, task_class, stage). Se
-    `tenant_id` for passado, filtra só aquele tenant (isolamento — nunca
-    devolve dados de outro tenant misturados por engano).
+    """Aggregates cost/tokens by (tenant_id, task_class, stage). If `tenant_id`
+    is passed, filters to that tenant only (isolation — never returns another
+    tenant's data mixed in by accident).
 
     `source`:
-      - "ledger" (default, WSD-E3-T4): tabela durável `model_call_ledger`;
-      - "memory": spans do processo atual (legado Fase 1)."""
+      - "ledger" (default, WSD-E3-T4): the durable `model_call_ledger` table;
+      - "memory": spans from the current process (Phase 1 legacy)."""
     if source == "ledger":
         return ledger.aggregate(tenant_id=tenant_id)
     if source != "memory":
-        raise ValueError(f"source inválido: {source!r} (use 'ledger' ou 'memory')")
+        raise ValueError(f"invalid source: {source!r} (use 'ledger' or 'memory')")
 
     buckets: dict[tuple[str, str, str], CostBucket] = {}
 
@@ -108,7 +108,7 @@ def aggregate_cost(*, tenant_id: str | None = None, source: str = "ledger") -> l
 
 
 def aggregate_cost_by_tenant() -> dict[str, float]:
-    """Atalho: total de custo por tenant (soma de todas as task_class/stage)."""
+    """Shortcut: total cost per tenant (sum over all task_class/stage)."""
     totals: dict[str, float] = defaultdict(float)
     for row in aggregate_cost():
         totals[row["tenant_id"]] += row["total_cost_usd"]

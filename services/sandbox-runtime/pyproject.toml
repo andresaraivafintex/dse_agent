@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-sandbox-runtime"
 version = "0.1.0"
-description = "WS-C: sandbox efemero por tarefa (Docker rootless), lifecycle Temporal Activities, adapter de substrato de agente (OpenHands) e sessao Coder com git de escopo limitado"
+description = "WS-C: per-task ephemeral sandbox (rootless Docker), Temporal Activities lifecycle, agent substrate adapter (OpenHands) and Coder session with scope-limited git"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
@@ -15,8 +15,8 @@ dependencies = [
     "opentelemetry-sdk>=1.24",
     "httpx>=0.27",
     "psycopg2-binary>=2.9",
-    # S4 (Fase 5): mint de installation token de GitHub App para clonar o repo
-    # alvo no control plane (JWT RS256). Leve; não é o SDK de substrato.
+    # S4 (Phase 5): mints a GitHub App installation token to clone the target
+    # repo in the control plane (JWT RS256). Lightweight; not the substrate SDK.
     "PyJWT>=2.8",
     "cryptography>=42.0",
     "dse-contracts",
@@ -24,11 +24,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Substratos reais (WSC-E3-T1/T6): opcionais por design — o default de
-# testes/dev é o FakeSubstrate (nenhum SDK precisa estar instalado). Pins
-# de piso testados de verdade nesta sessão: openhands-sdk 1.21.0,
+# Real substrates (WSC-E3-T1/T6): optional by design — the test/dev default
+# is the FakeSubstrate (no SDK needs to be installed). Floor pins actually
+# tested for real in this session: openhands-sdk 1.21.0,
 # claude-agent-sdk 0.2.124 (NFR-09: compatibility suite =
-# tests/test_substrate_conformance.py roda contra ambos).
+# tests/test_substrate_conformance.py runs against both).
 substrates = [
     "openhands-sdk>=1.21.0",
     "claude-agent-sdk>=0.2.124",

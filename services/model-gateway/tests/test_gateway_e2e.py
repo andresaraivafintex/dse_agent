@@ -1,9 +1,9 @@
-"""Fim-a-fim contra o LiteLLM proxy REAL (docker-compose.wsd.yml) + o modelo
-eco real. Nenhum mock de HTTP/Postgres — a garantia de durabilidade
-(virtual key emitida de verdade, revogada de verdade, chamada negada de
-verdade após revoke) é o próprio ponto do teste (P8: evidência > asserção).
+"""End-to-end against the REAL LiteLLM proxy (docker-compose.wsd.yml) + the
+real echo model. No HTTP/Postgres mocks — the durability guarantee (a virtual
+key actually issued, actually revoked, a call actually denied after revoke) is
+the whole point of the test (P8: evidence > assertion).
 
-Requer a infra do WS-D no ar:
+Requires the WS-D infra to be up:
     docker compose -f docker-compose.wsd.yml up -d
 """
 from __future__ import annotations
@@ -50,8 +50,8 @@ def test_mint_call_revoke_denied_roundtrip(unique_ids):
 
 
 def test_virtual_key_is_scoped_to_allowed_models(unique_ids):
-    """Uma virtual key emitida só com `models=[ECHO_MODEL]` não deve
-    conseguir chamar um model_name diferente registrado no gateway."""
+    """A virtual key issued only with `models=[ECHO_MODEL]` must not be able to
+    call a different model_name registered in the gateway."""
     key = mint_virtual_key(
         unique_ids["tenant_id"], unique_ids["work_item_id"], Stage.coder, models=[ECHO_MODEL]
     )

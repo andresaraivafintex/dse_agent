@@ -1,17 +1,17 @@
-"""WSC-E3-T2: sessão Coder com git de escopo limitado.
+"""WSC-E3-T2: Coder session with scope-limited git.
 
-Prova as duas camadas de enforcement:
-  1. Toolset: `ScopedGitSession` não expõe force-push/PR/comando genérico.
-  2. Escopo do remoto: o hook `pre-receive` do bare repo de checkpoint
-     recusa force-push e push para outro branch, MESMO quando alguém
-     contorna `ScopedGitSession` e roda `git push --force` cru.
-  3. Escopo da credencial: `ScopedCredential.create_pull_request()`/
-     `.force_push()` sempre recusam (contrato de escopo do token do GitHub
-     App que o egress-proxy injetaria em produção).
+Proves the two enforcement layers:
+  1. Toolset: `ScopedGitSession` exposes no force-push/PR/generic command.
+  2. Remote scope: the checkpoint bare repo's `pre-receive` hook refuses
+     force-push and pushes to another branch, EVEN when someone bypasses
+     `ScopedGitSession` and runs a raw `git push --force`.
+  3. Credential scope: `ScopedCredential.create_pull_request()`/`.force_push()`
+     always refuse (the scope contract of the GitHub App token that the
+     egress-proxy would inject in production).
 
-Também prova o caminho feliz: `run_coder_turn` roda um `FakeSubstrate`
-roteirizado, e o resultado (`CoderTurnResult`) reflete os arquivos
-realmente commitados/pushados para o branch da tarefa.
+It also proves the happy path: `run_coder_turn` runs a scripted `FakeSubstrate`,
+and the result (`CoderTurnResult`) reflects the files actually committed/pushed
+to the task branch.
 """
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ from sandbox_runtime.substrate import FakeSubstrate
 def test_scoped_git_session_has_no_escape_hatch():
     public_methods = {name for name in dir(ScopedGitSession) if not name.startswith("_")}
     overlap = public_methods & FORBIDDEN_METHOD_NAMES
-    assert not overlap, f"ScopedGitSession expõe métodos fora do escopo permitido: {overlap}"
-    # apenas commit/push/leitura devem existir
+    assert not overlap, f"ScopedGitSession exposes methods outside the allowed scope: {overlap}"
+    # only commit/push/read operations should exist
     assert {"commit", "push", "has_changes", "ensure_identity", "current_sha", "files_changed_against"} <= public_methods
 
 
@@ -74,9 +74,9 @@ def test_run_coder_turn_commits_and_pushes_only_scripted_files(work_item_id, sta
 
 
 def test_adversarial_force_push_is_rejected_by_remote_scope(work_item_id, state_dir):
-    """Mesmo contornando `ScopedGitSession` (subprocess cru), o bare repo
-    recusa non-fast-forward — a segunda camada de enforcement não depende do
-    código que fez o push."""
+    """Even bypassing `ScopedGitSession` (raw subprocess), the bare repo refuses
+    non-fast-forward — the second enforcement layer does not depend on the code
+    that issued the push."""
     tenant_id = "tenant-a"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
     workspace_dir, bare_repo_path = _paths_for(work_item_id)
@@ -91,8 +91,8 @@ def test_adversarial_force_push_is_rejected_by_remote_scope(work_item_id, state_
     )
     subprocess.run(["git", "push", "origin", f"HEAD:refs/heads/{branch}"], cwd=workspace_dir, check=True, capture_output=True, text=True)
 
-    # Reescreve a história local (simula um force-push adversarial) e tenta
-    # empurrar cru, sem passar por ScopedGitSession.
+    # Rewrites local history (simulating an adversarial force-push) and tries to
+    # push raw, without going through ScopedGitSession.
     subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=workspace_dir, check=True, capture_output=True, text=True)
     subprocess.run(
         ["git", "-c", "user.email=x@x.com", "-c", "user.name=x", "commit", "--allow-empty", "-m", "rewritten-history"],
@@ -124,16 +124,16 @@ def test_adversarial_push_to_other_branch_is_rejected(work_item_id, state_dir):
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0, "push para branch fora do escopo deveria ter sido recusado"
+    assert result.returncode != 0, "a push to an out-of-scope branch should have been refused"
     assert "recusado" in result.stderr or "rejected" in result.stderr.lower()
 
     asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
 
 
 def test_scoped_git_session_push_raises_git_scope_violation_on_conflict(work_item_id, state_dir):
-    """`ScopedGitSession.push()` propaga a recusa do hook como
-    `GitScopeViolation` (P6: falha limpa, nunca engolida) mesmo dentro da
-    API "segura"."""
+    """`ScopedGitSession.push()` propagates the hook's refusal as a
+    `GitScopeViolation` (P6: clean failure, never swallowed) even inside the
+    "safe" API."""
     tenant_id = "tenant-a"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
     workspace_dir, _bare = _paths_for(work_item_id)

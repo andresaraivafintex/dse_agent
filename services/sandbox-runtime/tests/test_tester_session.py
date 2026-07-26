@@ -1,13 +1,14 @@
-"""WSC-E3-T4: sessão Tester.
+"""WSC-E3-T4: Tester session.
 
-Prova (contra sandbox/git reais):
-  - a Activity `run_tester_turn` é uma Activity Temporal com o nome do contrato;
-  - edits são permitidos SÓ em test paths — escrever em código de produção
-    FALHA (`ToolPermissionError`);
-  - os testes escritos EXECUTAM de verdade (pytest real no workspace), não são
-    só gerados;
-  - os test files são commitados/pushados por código determinístico ao branch
-    da tarefa.
+Proves (against real sandbox/git):
+  - the `run_tester_turn` Activity is a Temporal Activity named after the
+    contract;
+  - edits are allowed ONLY under test paths — writing to production code FAILS
+    (`ToolPermissionError`);
+  - the written tests actually EXECUTE (real pytest in the workspace), they are
+    not merely generated;
+  - the test files are committed/pushed by deterministic code onto the task
+    branch.
 """
 from __future__ import annotations
 
@@ -44,7 +45,7 @@ def test_tester_writes_test_path_runs_pytest_and_commits(work_item_id, state_dir
     try:
         result = asyncio.run(
             _run_tester_turn_impl(
-                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="cobre o handler"),
+                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="cover the handler"),
                 authoring_script=[
                     {"tool": "write_file", "path": "tests/test_generated.py", "content": _PASSING_TEST},
                     {"tool": "run_tests", "paths": ["tests/test_generated.py"]},
@@ -56,7 +57,7 @@ def test_tester_writes_test_path_runs_pytest_and_commits(work_item_id, state_dir
         assert result.tests_passed is True, "o teste escrito deveria rodar e passar de verdade"
         assert result.returncode == 0
 
-        # commit real no bare repo do branch da tarefa
+        # real commit in the bare repo on the task branch
         _workspace, bare = _paths_for(work_item_id)
         log = subprocess.run(
             ["git", "log", "--oneline", f"dse/{work_item_id}"], cwd=bare, check=True, capture_output=True, text=True
@@ -73,7 +74,7 @@ def test_tester_write_to_production_path_fails(work_item_id, state_dir):
         with pytest.raises(ToolPermissionError):
             asyncio.run(
                 _run_tester_turn_impl(
-                    RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="tenta editar código"),
+                    RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="tries to edit code"),
                     authoring_script=[
                         {"tool": "write_file", "path": "src/handler.py", "content": "def handler(): return 'hacked'"},
                     ],
@@ -84,8 +85,8 @@ def test_tester_write_to_production_path_fails(work_item_id, state_dir):
 
 
 def test_tester_reports_real_failure_when_written_test_fails(work_item_id, state_dir):
-    """Um teste que falha de verdade é reportado como falha (não 'gerado ok') —
-    prova que a execução é real, não simulada."""
+    """A test that genuinely fails is reported as a failure (not 'generated
+    ok') — proof that execution is real, not simulated."""
     tenant = "tenant-t"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant)))
     try:

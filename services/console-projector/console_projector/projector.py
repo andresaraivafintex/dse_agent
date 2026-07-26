@@ -1,14 +1,14 @@
 """Projector fase1 -> console_rm (Plano 06 §5).
 
-Uma passada (`run_once`) processa cada fonte a partir do seu cursor e grava
-saída + cursor NA MESMA transação (exactly-once efetivo; upserts idempotentes
-— replay de lote é inofensivo; replay TOTAL com cursor 0 reconstrói o read
-model do zero, que é também o plano de DR).
+One pass (`run_once`) processes each source from its cursor and writes both
+output + cursor IN THE SAME TRANSACTION (effectively exactly-once; upserts are
+idempotent — replaying a batch is harmless; a FULL replay with cursor 0 rebuilds
+the read model from scratch, which doubles as the DR plan).
 
-Fontes F0:
-  - work_items        (cursor por updated_at — trigger set_updated_at)
-  - audit_log         (cursor por id BIGSERIAL) -> timeline_events + last_event
-  - model_call_ledger (cursor por id BIGSERIAL) -> runs_view
+F0 sources:
+  - work_items        (cursor on updated_at — set_updated_at trigger)
+  - audit_log         (cursor on id BIGSERIAL) -> timeline_events + last_event
+  - model_call_ledger (cursor on id BIGSERIAL) -> runs_view
 """
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def _cursor(cur, source: str):
         (source,),
     )
     row = cur.fetchone()
-    # cur é RealDictCursor (run_once) — acesso por nome, não posição.
+    # cur is a RealDictCursor (run_once) — access by name, not by position.
     return int(row["last_id"]), row["last_seen"], row["last_key"]
 
 
@@ -68,8 +68,8 @@ def _advance(cur, source: str, *, last_id: int | None = None, last_seen=None,
 # ---------------------------------------------------------------------------
 
 def _project_work_items(cur) -> int:
-    # Keyset (updated_at, id): progresso ESTRITO — empates de timestamp são
-    # desambiguados pela PK; drena até 0 (necessário para drain()/testes).
+    # Keyset (updated_at, id): STRICT progress — timestamp ties are broken by
+    # the PK; drains to 0 (required by drain()/tests).
     _, last_seen, last_key = _cursor(cur, "work_items")
     if last_seen is None:
         cur.execute(
@@ -100,7 +100,8 @@ def _upsert_work_item(cur, wi) -> None:
     try:
         status, phase = map_status(wi["status"])
     except KeyError:
-        # status novo sem mapa: fail-visible (loga, não inventa nem derruba).
+        # new status with no map entry: fail-visible (log it; never make one up,
+        # never crash).
         logger.error("status fase1 sem mapa no console: %r (wi=%s)", wi["status"], wi["id"])
         return
 
@@ -108,7 +109,7 @@ def _upsert_work_item(cur, wi) -> None:
     number = source_ref.get("number") or source_ref.get("issue_number")
     source_id = f"{wi['repo']}#{number}" if wi["repo"] and number else (wi["repo"] or wi["id"][:18])
 
-    # titulo/descricao: snapshot da admissao (TOCTOU) no outbox — sanitizado.
+    # title/description: admission-time snapshot (TOCTOU) from the outbox — sanitized.
     cur.execute(
         "SELECT payload FROM ingest_events WHERE work_item_id = %s AND kind = 'task_request' "
         "ORDER BY id LIMIT 1",
@@ -152,11 +153,12 @@ def _upsert_work_item(cur, wi) -> None:
 # ---------------------------------------------------------------------------
 
 def _project_evidence(cur) -> int:
-    """Reflete o estado do pipeline de evidência (preview/demo) na view. Keyset
-    (updated_at, work_item_id) — mesmo padrão de _project_work_items; drena até
-    0. Só ATUALIZA a linha da view (o work item sempre existe antes da
-    evidência); se a linha ainda não foi projetada, o UPDATE é no-op e o cursor
-    avança (a evidência entra quando o work item for projetado — idempotente)."""
+    """Reflects the evidence pipeline state (preview/demo) into the view. Keyset
+    (updated_at, work_item_id) — same pattern as _project_work_items; drains to
+    0. Only UPDATEs the view row (the work item always exists before its
+    evidence); if the row hasn't been projected yet the UPDATE is a no-op and the
+    cursor still advances (the evidence lands once the work item is projected —
+    idempotent)."""
     _, last_seen, last_key = _cursor(cur, "work_item_evidence")
     if last_seen is None:
         cur.execute(
@@ -238,15 +240,15 @@ _AUDIT_COST_ACTIONS = {
 
 
 def _maybe_run_from_audit(cur, row) -> None:
-    """Custo real dos turnos in-process (F0): o substrato fala com o gateway
-    direto (nao passa pelo client Python que grava o ledger), entao o custo
-    duravel esta em details->>'cost_usd' dos *_turn_completed. run_key
-    'audit:<id>' nao colide com 'ledger:<id>'.
+    """Real cost of in-process turns (F0): the substrate talks to the gateway
+    directly (it does not go through the Python client that writes the ledger),
+    so the durable cost lives in details->>'cost_usd' of the *_turn_completed
+    events. run_key 'audit:<id>' cannot collide with 'ledger:<id>'.
 
-    Dedup (achado do painel mostrando ~2× o gasto real): o MESMO turno é
-    auditado DUAS vezes — pela activity (system:sandbox-runtime) e pelo
-    workflow (system:orchestrator). Só o row do ORQUESTRADOR vira run; o da
-    activity fica na timeline mas não soma custo de novo."""
+    Dedup (found via the dashboard showing ~2x the real spend): the SAME turn is
+    audited TWICE — once by the activity (system:sandbox-runtime) and once by the
+    workflow (system:orchestrator). Only the ORCHESTRATOR row becomes a run; the
+    activity row stays on the timeline but does not add cost again."""
     engine = _AUDIT_COST_ACTIONS.get(row["action"])
     if not engine:
         return
@@ -310,12 +312,12 @@ def _project_ledger(cur) -> int:
 # ---------------------------------------------------------------------------
 
 def _refresh_cost_rollup(cur) -> int:
-    """Plano 08 §E — recomputa o rollup de custo do SoR (model_call_ledger, a
-    verdade de custo P8), agregando por dia×repo×model×task_class. Recompute
-    total (DELETE+INSERT) → idempotente por construção (o teste de reconciliação
-    garante rollup == ledger). Chamado só quando o ledger avançou nesta passada
-    (barato o suficiente na escala do dev; um rollup incremental é o upgrade
-    quando o volume exigir). Retorna o nº de células do rollup."""
+    """Plano 08 §E — recomputes the cost rollup from the SoR (model_call_ledger,
+    the P8 cost truth), aggregating by day x repo x model x task_class. Full
+    recompute (DELETE+INSERT) -> idempotent by construction (the reconciliation
+    test guarantees rollup == ledger). Called only when the ledger advanced in
+    this pass (cheap enough at dev scale; an incremental rollup is the upgrade
+    once volume demands it). Returns the number of rollup cells."""
     cur.execute("DELETE FROM console_rm.cost_rollup")
     cur.execute(
         """
@@ -337,43 +339,42 @@ def _refresh_cost_rollup(cur) -> int:
 
 
 def run_once(conn) -> dict[str, int]:
-    """Uma passada por todas as fontes. Transação única: saída + cursores
-    comitam juntos; qualquer erro faz rollback do lote inteiro (re-tentável)."""
+    """One pass over every source. Single transaction: output + cursors commit
+    together; any error rolls the whole batch back (retryable)."""
     with conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             counts = {
                 "work_items": _project_work_items(cur),
-                # depois de work_items: a evidência ATUALIZA a linha da view (§D D5)
+                # after work_items: the evidence UPDATEs the view row (§D D5)
                 "work_item_evidence": _project_evidence(cur),
                 "audit_log": _project_audit(cur),
                 "model_call_ledger": _project_ledger(cur),
             }
-            # §E — rollup de custo: recomputa só quando o ledger avançou (evita
-            # trabalho a cada tick ocioso). NÃO conta para a convergência do
-            # drain (é derivado, não uma fonte com cursor).
+            # §E — cost rollup: recompute only when the ledger advanced (avoids
+            # work on every idle tick). Does NOT count toward drain convergence
+            # (it is derived, not a cursor-backed source).
             if counts["model_call_ledger"] > 0:
                 _refresh_cost_rollup(cur)
     return counts
 
 
 def drain(conn, *, max_iterations: int = 1000) -> None:
-    """Roda run_once até todas as fontes zerarem (backfill/testes). Progresso
-    é garantido pelos cursores estritos; o cap é so um backstop.
+    """Runs run_once until every source returns 0 (backfill/tests). Progress is
+    guaranteed by the strict cursors; the cap is just a backstop.
 
-    §E: ao final força UM refresh do rollup de custo — o backfill/DR deve
-    reconstruir o rollup mesmo quando o cursor do ledger já está no fim (nenhum
-    row novo dispararia o refresh incremental do run_once). Recompute total é
-    idempotente."""
+    §E: at the end, forces ONE cost-rollup refresh — backfill/DR must rebuild the
+    rollup even when the ledger cursor is already at the end (no new row would
+    trigger run_once's incremental refresh). A full recompute is idempotent."""
     for _ in range(max_iterations):
         if not any(run_once(conn).values()):
             with conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     _refresh_cost_rollup(cur)
             return
-    raise RuntimeError("drain não convergiu — cursor sem progresso?")
+    raise RuntimeError("drain did not converge — cursor made no progress?")
 
 
-def main() -> None:  # pragma: no cover - loop de produção
+def main() -> None:  # pragma: no cover - production loop
     logging.basicConfig(level=logging.INFO)
     interval = float(os.environ.get("DSE_PROJECTOR_INTERVAL_SECONDS", "2"))
     conn = get_connection()

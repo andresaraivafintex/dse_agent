@@ -1,106 +1,109 @@
-# Convenções do monorepo — Fintex DSE, Fase 1 (Core loop)
+# Monorepo conventions — Fintex DSE, Phase 1 (Core loop)
 
-Lido por: todo agente/engenheiro que for construir dentro de `services/*`. Este documento é o
-"contracts sprint" das semanas 1-2 do plano mestre (D1, D2, D3, D5, D6, D7, D10, D11, D12):
-define o que já está construído (fundação) e as regras para não colidir com os outros
-workstreams enquanto trabalham em paralelo.
+Read by: every agent/engineer building inside `services/*`. This document is the "contracts
+sprint" of weeks 1-2 of the master plan (D1, D2, D3, D5, D6, D7, D10, D11, D12): it defines what
+is already built (the foundation) and the rules for not colliding with the other workstreams
+while they work in parallel.
 
-## Escopo desta Fase 1 ("Core loop")
+## Scope of this Phase 1 ("Core loop")
 
-Conforme `plano-desenvolvimento/00-PLANO-MESTRE.md` §3: o ciclo completo Slack/GitHub →
-clarificação → **Coder único** em sandbox → L1 → PR determinístico → review humano → merge
-humano, durável e auditável. **Não fazem parte da Fase 1**: split Planner/Tester/Reviewer
-(Fase 2), gate de aprovação de plano por risk class (Fase 2), Jira (Fase 2), L2 fresh-context
-review (Fase 2), previews Argo CD / evidência Playwright (Fase 3), skill registry (Fases 2/4).
+Per `plano-desenvolvimento/00-PLANO-MESTRE.md` §3: the full cycle Slack/GitHub →
+clarification → **single Coder** in a sandbox → L1 → deterministic PR → human review → human
+merge, durable and auditable. **Not part of Phase 1**: Planner/Tester/Reviewer split
+(Phase 2), plan-approval gate by risk class (Phase 2), Jira (Phase 2), L2 fresh-context
+review (Phase 2), Argo CD previews / Playwright evidence (Phase 3), skill registry (Phases 2/4).
 
 ## Stack
 
-- **Linguagem: Python 3.11+** em todos os serviços (containers usam `python:3.11-slim`; não
-  depende da versão do host). Motivo: OpenHands SDK e LiteLLM são nativos em Python — minimiza
-  atrito de integração entre o runtime de sandbox e o model gateway.
-- Empacotamento: `pyproject.toml` (PEP 621) + `setuptools`, sem Poetry/uv (P7 — boring-first,
-  menos uma dependência de tooling).
-- Validação de dados: **pydantic v2**.
-- Orquestração durável: **Temporal** (Python SDK), self-hosted via docker-compose local.
-- Banco: **Postgres 16**. Migrações SQL puras e numeradas (ver abaixo), aplicadas por
-  `make migrate` (script simples em `scripts/migrate.py`, sem framework de migration).
-- Testes: **pytest**, com fixtures que sobem contra o Postgres/Temporal do `docker-compose.yml`
-  (nunca mocks para as garantias de durabilidade/idempotência — são o próprio ponto do sistema).
-- HTTP: **FastAPI** para qualquer serviço que recebe webhooks.
+- **Language: Python 3.11+** across all services (containers use `python:3.11-slim`; not
+  dependent on the host version). Rationale: the OpenHands SDK and LiteLLM are Python-native —
+  this minimizes integration friction between the sandbox runtime and the model gateway.
+- Packaging: `pyproject.toml` (PEP 621) + `setuptools`, no Poetry/uv (P7 — boring-first,
+  one fewer tooling dependency).
+- Data validation: **pydantic v2**.
+- Durable orchestration: **Temporal** (Python SDK), self-hosted via local docker-compose.
+- Database: **Postgres 16**. Plain, numbered SQL migrations (see below), applied by
+  `make migrate` (a simple script in `scripts/migrate.py`, no migration framework).
+- Tests: **pytest**, with fixtures that run against the Postgres/Temporal from
+  `docker-compose.yml` (never mocks for the durability/idempotency guarantees — those are the
+  whole point of the system).
+- HTTP: **FastAPI** for any service that receives webhooks.
 
-## Propriedade de diretórios (nenhum agente edita fora do seu escopo)
+## Directory ownership (no agent edits outside its scope)
 
-| Diretório | Workstream | Conteúdo |
+| Directory | Workstream | Contents |
 |---|---|---|
-| `packages/contracts/` | Fundação (não editar sem avisar o arquiteto) | `ConversationEvent`, `WorkItem`/`DseTaskRequest`/`DseTaskStatus`, `PlanArtifact` (stub), contrato de consumo do gateway, biblioteca de comentário mutável único por surface |
-| `packages/dse_audit/` | Fundação (mínimo) → **WS-F estende** | Cliente de escrita do audit ledger + queries de reconstrução/export |
-| `packages/dse_identity/` | Fundação (mínimo) → **WS-F estende na Fase 2** | Resolução `platform_user_id` → principal único |
-| `services/adapter-slack/` | **WS-A** | Inbound (menções/replies/botões) + outbound (status message única editada in-place) |
-| `services/adapter-github/` | **WS-A** | Inbound (issues/PR comments) + outbound (status comment único) via GitHub App |
-| `services/ingest-gateway/` | **WS-A** | Gateway transacional (outbox), dispatcher (`SELECT…FOR UPDATE SKIP LOCKED` → `StartWorkflow`), 4 defesas (assinatura, TOCTOU snapshot, sanitização, idempotência), correlação Path A/B, steering allowlist fallback |
-| `services/orchestrator/` | **WS-B** | Worker Temporal, workflow da máquina de estados §9.3, pause points, budgets, checkpoint/recovery, controles de operador, suíte de chaos |
-| `services/sandbox-runtime/` | **WS-C** | Lifecycle do sandbox (provision/teardown/checkpoint) como Activities, driver Docker rootless, interface de substrato + adapter OpenHands, sessão Coder |
-| `services/egress-proxy/` | **WS-C** (WS-F assina o aceite de política) | Proxy default-deny + injeção de credenciais efêmeras |
-| `services/model-gateway/` | **WS-D** | Config LiteLLM, tier Bedrock/PrivateLink como allowlist entry, virtual keys por tenant/task/stage, contrato de consumo |
-| `services/validation/` | **WS-E** | Pipeline L1 (lint/typecheck/test/build + SAST/secret-scan + diff-budget/forbidden-paths), PR finalizer idempotente, consumo mínimo de status checks (L3 fatiado) |
-| `services/platform/` | **WS-F** | Wiring Vault/ESO, IaC skeleton (`infra/`), parâmetros de fairness/budget por tenant, scaffolding da suíte de isolamento, observabilidade |
+| `packages/contracts/` | Foundation (do not edit without notifying the architect) | `ConversationEvent`, `WorkItem`/`DseTaskRequest`/`DseTaskStatus`, `PlanArtifact` (stub), gateway consumption contract, single-mutable-comment-per-surface library |
+| `packages/dse_audit/` | Foundation (minimal) → **WS-F extends** | Audit ledger write client + reconstruction/export queries |
+| `packages/dse_identity/` | Foundation (minimal) → **WS-F extends in Phase 2** | `platform_user_id` → single principal resolution |
+| `services/adapter-slack/` | **WS-A** | Inbound (mentions/replies/buttons) + outbound (single status message edited in place) |
+| `services/adapter-github/` | **WS-A** | Inbound (issues/PR comments) + outbound (single status comment) via GitHub App |
+| `services/ingest-gateway/` | **WS-A** | Transactional gateway (outbox), dispatcher (`SELECT…FOR UPDATE SKIP LOCKED` → `StartWorkflow`), 4 defenses (signature, TOCTOU snapshot, sanitization, idempotency), Path A/B correlation, steering allowlist fallback |
+| `services/orchestrator/` | **WS-B** | Temporal worker, §9.3 state-machine workflow, pause points, budgets, checkpoint/recovery, operator controls, chaos suite |
+| `services/sandbox-runtime/` | **WS-C** | Sandbox lifecycle (provision/teardown/checkpoint) as Activities, rootless Docker driver, substrate interface + OpenHands adapter, Coder session |
+| `services/egress-proxy/` | **WS-C** (WS-F signs off on the policy) | Default-deny proxy + ephemeral credential injection |
+| `services/model-gateway/` | **WS-D** | LiteLLM config, Bedrock/PrivateLink tier as an allowlist entry, virtual keys per tenant/task/stage, consumption contract |
+| `services/validation/` | **WS-E** | L1 pipeline (lint/typecheck/test/build + SAST/secret-scan + diff-budget/forbidden-paths), idempotent PR finalizer, minimal status-check consumption (sliced L3) |
+| `services/platform/` | **WS-F** | Vault/ESO wiring, IaC skeleton (`infra/`), per-tenant fairness/budget parameters, isolation-suite scaffolding, observability |
 
-**Regra de ouro:** cada workstream só cria/edita arquivos dentro do seu próprio diretório
-(mais o arquivo de migração e o fragment de docker-compose reservados abaixo). Se precisar de
-algo em `packages/contracts` que não existe, adicione um campo/tipo novo sem remover ou renomear
-o que já existe — funções e classes públicas listadas neste documento são um contrato estável.
+**Golden rule:** each workstream only creates/edits files inside its own directory (plus the
+migration file and docker-compose fragment reserved below). If you need something in
+`packages/contracts` that does not exist, add a new field/type without removing or renaming
+what already exists — the public functions and classes listed in this document are a stable
+contract.
 
-## Higiene de commits — uma frente = um commit
+## Commit hygiene — one workstream = one commit
 
-Regras nascidas do sprint de fatiamento (plano 09, 2026-07-23), quando ~2.900
-linhas de 6 frentes distintas se acumularam num único working tree:
+Rules born out of the slicing sprint (plano 09, 2026-07-23), when ~2,900 lines
+from 6 distinct workstreams piled up in a single working tree:
 
-- **Uma frente de trabalho = um commit** (feature, correção operacional,
-  hardening de infra, i18n — cada uma separada). Revert e `git bisect` são
-  parte do desenho do sistema, não luxo.
-- **Arquivo que o CI referencia NUNCA fica untracked**: se `ci.yml`, o chart
-  Helm ou a matriz de testes apontam para um arquivo, ele entra no MESMO
-  commit que criou a referência (um clone limpo tem que passar no CI sempre).
-- **Fixture gerada/mutada por teste nunca é rastreada** — regenere via código
-  idempotente (padrão `ensure_repo` do preview gitops) e ignore o diretório.
-- Mudança cosmética (i18n, rename em massa) nunca no mesmo commit que mudança
-  de comportamento.
+- **One line of work = one commit** (feature, operational fix, infra
+  hardening, i18n — each one separate). Revert and `git bisect` are part of
+  the system design, not a luxury.
+- **A file the CI references is NEVER left untracked**: if `ci.yml`, the Helm
+  chart, or the test matrix points at a file, it goes into the SAME commit
+  that created the reference (a clean clone must always pass CI).
+- **A fixture generated/mutated by a test is never tracked** — regenerate it
+  with idempotent code (the `ensure_repo` pattern from the preview gitops) and
+  gitignore the directory.
+- A cosmetic change (i18n, mass rename) never lands in the same commit as a
+  behavior change.
 
-## Migrações — numeração reservada (evita colisão em paralelo)
+## Migrations — reserved numbering (avoids collisions in parallel)
 
-`migrations/0001_foundation.sql` já existe (work_items, ingest_events, audit_log particionado
-append-only, principals/identity_links). Se seu workstream precisar de tabela própria na Fase 1,
-use exclusivamente o arquivo abaixo (não edite o 0001):
+`migrations/0001_foundation.sql` already exists (work_items, ingest_events, partitioned
+append-only audit_log, principals/identity_links). If your workstream needs its own table in
+Phase 1, use exclusively the file below (do not edit 0001):
 
-| Arquivo | Workstream |
+| File | Workstream |
 |---|---|
 | `migrations/0002_wsa.sql` | WS-A |
 | `migrations/0003_wsb.sql` | WS-B |
 | `migrations/0004_wsc.sql` | WS-C |
-| `migrations/0005_wsd.sql` | WS-D (ex.: tabela de virtual keys emitidas) |
-| `migrations/0006_wse.sql` | WS-E (ex.: tabela de validation runs) |
-| `migrations/0007_wsf.sql` | WS-F (ex.: tenant_config — budgets/fairness/kill switches) |
+| `migrations/0005_wsd.sql` | WS-D (e.g. issued virtual keys table) |
+| `migrations/0006_wse.sql` | WS-E (e.g. validation runs table) |
+| `migrations/0007_wsf.sql` | WS-F (e.g. tenant_config — budgets/fairness/kill switches) |
 
-Rode `make migrate` para aplicar todas as migrações em ordem (idempotente — usa uma tabela
-`schema_migrations` para não reaplicar).
+Run `make migrate` to apply all migrations in order (idempotent — it uses a `schema_migrations`
+table so nothing is reapplied).
 
-**Numeração (plano 09, Fase 4):** prefixo numérico é ÚNICO — o CI falha em
-colisão nova (`tests/test_ci_tooling.py::test_migration_numeric_prefixes_are_unique`).
-A colisão histórica `0020_wsc4`/`0020_wse4` está congelada (já aplicada em
-ambientes reais; nunca renumere migração aplicada). Antes de criar uma
-migração, use o menor número livre acima do maior existente.
+**Numbering (plano 09, Phase 4):** the numeric prefix is UNIQUE — CI fails on a
+new collision (`tests/test_ci_tooling.py::test_migration_numeric_prefixes_are_unique`).
+The historical `0020_wsc4`/`0020_wse4` collision is frozen (already applied in
+real environments; never renumber an applied migration). Before creating a
+migration, use the lowest free number above the highest existing one.
 
-## docker-compose — cada workstream escreve seu próprio fragment
+## docker-compose — each workstream writes its own fragment
 
-`docker-compose.yml` (fundação) já sobe: `postgres`, `temporal` (+ `temporal-ui`), `redis`,
-`vault` (dev mode). **Não edite este arquivo.** Se seu serviço precisa rodar em container,
-crie `docker-compose.wsX.yml` (ex.: `docker-compose.wsa.yml`) com apenas os seus serviços,
-conectados à rede externa `dse_net` (já declarada na fundação). O `Makefile` já faz o merge de
-todos os fragments existentes em `make up`.
+`docker-compose.yml` (foundation) already brings up: `postgres`, `temporal` (+ `temporal-ui`),
+`redis`, `vault` (dev mode). **Do not edit this file.** If your service needs to run in a
+container, create `docker-compose.wsX.yml` (e.g. `docker-compose.wsa.yml`) with only your own
+services, attached to the external network `dse_net` (already declared in the foundation). The
+`Makefile` already merges every existing fragment in `make up`.
 
-Portas reservadas (evite conflito):
+Reserved ports (avoid conflicts):
 
-| Porta | Serviço |
+| Port | Service |
 |---|---|
 | 5432 | Postgres |
 | 7233 / 8088 | Temporal frontend / Temporal UI |
@@ -110,155 +113,155 @@ Portas reservadas (evite conflito):
 | 8801 | adapter-slack (WS-A) |
 | 8802 | adapter-github (WS-A) |
 | 8803 | ingest-gateway (WS-A) |
-| 8805 | sandbox-runtime control API (WS-C, se exposta) |
+| 8805 | sandbox-runtime control API (WS-C, if exposed) |
 | 8806 | egress-proxy (WS-C) |
-| 8807 | validation / PR finalizer webhook receiver (WS-E, se exposto) |
+| 8807 | validation / PR finalizer webhook receiver (WS-E, if exposed) |
 | 8900 | orchestrator health endpoint (WS-B) |
 
-## Contratos já publicados (não reinvente — importe)
+## Already-published contracts (do not reinvent — import)
 
-- `dse_contracts.conversation_event.ConversationEvent` — evento normalizado único que todo
-  adapter produz (FR-01/§10.2). Campos: `event_id` (sha256 platform+thread+message),
+- `dse_contracts.conversation_event.ConversationEvent` — the single normalized event every
+  adapter produces (FR-01/§10.2). Fields: `event_id` (sha256 platform+thread+message),
   `platform`, `kind` (`task_request|clarification_answer|approval|review_comment|steering`),
-  `source_ref` (thread_ts/ticket/pr), `actor` (platform_user_id + principal resolvido),
+  `source_ref` (thread_ts/ticket/pr), `actor` (platform_user_id + resolved principal),
   `content_snapshot`, `received_at`, `signature_verified`.
-- `dse_contracts.work_item.WorkItem`, `DseTaskRequest`, `DseTaskStatus` — schema de §10.3 e a
-  API pública (status grosseiro: `running|blocked|done|failed`) de FR-01-04 na tabela.
-- `dse_contracts.plan_artifact.PlanArtifact` — stub do artefato de plano (steps, files,
-  diff_budget, test_plan, risk_class) — usado já na Fase 1 pelo diff-budget enforcement do
-  WS-E mesmo sem sessão Planner separada (o Coder da Fase 1 preenche um `PlanArtifact` mínimo
-  antes de implementar).
-- `dse_contracts.gateway_contract` — contrato de consumo do model-gateway: base URL única,
-  headers obrigatórios (`tenant_id`, `work_item_id`, `stage`, `task_class`, `data_class`),
-  formato de erro de recusa de política/budget.
-- `dse_contracts.mutable_comment.MutableCommentWriter` — biblioteca compartilhada de
-  "exatamente 1 comentário/mensagem de status por surface, editado in-place, crash-consistent"
-  (WSA-E3-T2/E4-T2, reutilizada por WSE-E3-T7). Adapters do WS-A e o PR finalizer do WS-E
-  usam a mesma classe com back-ends diferentes (Slack API / GitHub API / Jira API).
-- `dse_audit.client.emit(actor, action, work_item_id, tenant_id, details)` — único caminho de
-  escrita no audit ledger. Nunca escreva em `audit_log` por fora desta função.
-- `dse_identity.resolve_principal(platform, platform_user_id, display_name=None)` — resolve
-  (e, se necessário, cria) o principal único de um usuário visto pela primeira vez numa
-  plataforma. Fase 1: resolução simples por auto-registro (sem SSO/SCIM — isso é ADR-22,
-  Fase 2/WSF-E3-T3). Toda superfície deve chamar isto antes de gravar `actor` em qualquer lugar.
+- `dse_contracts.work_item.WorkItem`, `DseTaskRequest`, `DseTaskStatus` — the §10.3 schema and
+  the public API (coarse status: `running|blocked|done|failed`) of FR-01-04 in the table.
+- `dse_contracts.plan_artifact.PlanArtifact` — plan artifact stub (steps, files,
+  diff_budget, test_plan, risk_class) — already used in Phase 1 by WS-E's diff-budget
+  enforcement even without a separate Planner session (the Phase 1 Coder fills in a minimal
+  `PlanArtifact` before implementing).
+- `dse_contracts.gateway_contract` — model-gateway consumption contract: single base URL,
+  required headers (`tenant_id`, `work_item_id`, `stage`, `task_class`, `data_class`),
+  error format for policy/budget refusals.
+- `dse_contracts.mutable_comment.MutableCommentWriter` — shared library for
+  "exactly 1 status comment/message per surface, edited in place, crash-consistent"
+  (WSA-E3-T2/E4-T2, reused by WSE-E3-T7). The WS-A adapters and the WS-E PR finalizer use the
+  same class with different back-ends (Slack API / GitHub API / Jira API).
+- `dse_audit.client.emit(actor, action, work_item_id, tenant_id, details)` — the only write
+  path into the audit ledger. Never write to `audit_log` outside this function.
+- `dse_identity.resolve_principal(platform, platform_user_id, display_name=None)` — resolves
+  (and, if necessary, creates) the single principal for a user seen for the first time on a
+  platform. Phase 1: simple auto-registration resolution (no SSO/SCIM — that is ADR-22,
+  Phase 2/WSF-E3-T3). Every surface must call this before writing `actor` anywhere.
 
-## Princípios não-negociáveis (P1-P8 da proposta) — todo código deve respeitar
+## Non-negotiable principles (P1-P8 from the proposal) — all code must respect them
 
-- **P1 deterministic-or-human**: nenhuma decisão de fluxo (aprovar, mergear, abrir PR,
-  transicionar estado) é tomada por um LLM. Código determinístico ou humano nomeado, sempre.
-- **P3 no producer approves its own work**: nenhuma sessão de agente pode aprovar/mergear o
-  próprio diff.
-- **P6 decline-never-truncate**: excedeu budget/cap → falha limpa em fronteira, nunca corta
-  no meio. Nunca "silenciar" um erro.
-- **P8 evidence over assertion**: toda decisão consequente gera uma linha no audit ledger.
+- **P1 deterministic-or-human**: no flow decision (approve, merge, open a PR, transition state)
+  is made by an LLM. Deterministic code or a named human, always.
+- **P3 no producer approves its own work**: no agent session may approve/merge its own diff.
+- **P6 decline-never-truncate**: budget/cap exceeded → clean failure at a boundary, never a cut
+  mid-stream. Never "silence" an error.
+- **P8 evidence over assertion**: every consequential decision produces a line in the audit
+  ledger.
 
-## Ambiente Python para build/teste em paralelo
+## Python environment for building/testing in parallel
 
-A fundação já validou `packages/*` num venv em `.venv/` (Python 3.12, via
-`python3.12 -m venv .venv`). **Cada workstream cria o próprio venv isolado**
+The foundation already validated `packages/*` in a venv at `.venv/` (Python 3.12, via
+`python3.12 -m venv .venv`). **Each workstream creates its own isolated venv**
 (`.venv-wsa`, `.venv-wsb`, `.venv-wsc`, `.venv-wsd`, `.venv-wse`, `.venv-wsf`
-na raiz do repo) para instalar suas dependências e rodar `pytest` sem
-interferir em instalações concorrentes de outro workstream — 6 builds andam
-em paralelo neste momento. Exemplo:
+at the repo root) to install its dependencies and run `pytest` without
+interfering with another workstream's concurrent installs — 6 builds are
+running in parallel right now. Example:
 
 ```
 python3.12 -m venv .venv-wsa
 source .venv-wsa/bin/activate
-pip install -e ../../packages/contracts -e ../../packages/dse_audit -e ../../packages/dse_identity  # ajuste o path
-pip install -e .   # o pyproject.toml do seu próprio service
+pip install -e ../../packages/contracts -e ../../packages/dse_audit -e ../../packages/dse_identity  # adjust the path
+pip install -e .   # your own service's pyproject.toml
 pip install pytest
 pytest -q
 ```
 
-Infra já está no ar (`docker compose up -d` já rodou: Postgres em `localhost:5432`
-com a migração `0001_foundation.sql` aplicada, Temporal em `localhost:7233`,
-Redis em `localhost:6379`, Vault dev em `localhost:8200` com root token
-`dse_dev_root`). Não rode `make up`/`make down` você mesmo (derrubaria a infra
-para os outros workstreams rodando em paralelo) — apenas conecte nela. Se
-precisar de uma tabela própria, escreva-a em `migrations/000X_wsY.sql`
-(seu número reservado) e aplique você mesmo com
+Infra is already up (`docker compose up -d` has already run: Postgres at `localhost:5432`
+with migration `0001_foundation.sql` applied, Temporal at `localhost:7233`,
+Redis at `localhost:6379`, Vault dev at `localhost:8200` with root token
+`dse_dev_root`). Do not run `make up`/`make down` yourself (that would tear down the infra
+for the other workstreams running in parallel) — just connect to it. If you
+need your own table, write it into `migrations/000X_wsY.sql`
+(your reserved number) and apply it yourself with
 `DSE_DATABASE_URL=postgresql://dse:dse_dev_only@localhost:5432/dse python3 scripts/migrate.py`
-(idempotente, só aplica o que for novo).
+(idempotent, only applies what is new).
 
-## Fase 2 ("Judgment & queue") — escopo e reservas
+## Phase 2 ("Judgment & queue") — scope and reservations
 
-A Fase 1 está completa e integrada (ver `docs/PHASE1-STATUS.md` e o adendo
-`../plano-desenvolvimento/01-ADENDO-FASE2-POS-FASE1.md`). A Fase 2 adiciona:
-split Planner/Tester/Reviewer (WS-C), gate de aprovação de plano por risk
-class + rejection path + budgets (WS-B), adapter Jira + mapeamento de tenant +
-webhook de merge + roteamento de signal por status (WS-A), policy/budget no
-call time + kill switch de gateway (WS-D), L2 fresh-context (WS-E), access
-bundles + ADR-22/SSO design + suíte de isolamento multi-tenant + queue board
-(WS-F). **Continua fora de escopo até a Fase 3/4:** previews Argo CD,
-evidência Playwright/vídeo, artifact store, promoção de skills (só bootstrap
-do registry na Fase 2).
+Phase 1 is complete and integrated (see `docs/PHASE1-STATUS.md` and the addendum
+`../plano-desenvolvimento/01-ADENDO-FASE2-POS-FASE1.md`). Phase 2 adds:
+Planner/Tester/Reviewer split (WS-C), plan-approval gate by risk class +
+rejection path + budgets (WS-B), Jira adapter + tenant mapping +
+merge webhook + signal routing by status (WS-A), policy/budget at call time
++ gateway kill switch (WS-D), L2 fresh-context (WS-E), access
+bundles + ADR-22/SSO design + multi-tenant isolation suite + queue board
+(WS-F). **Still out of scope until Phase 3/4:** Argo CD previews,
+Playwright/video evidence, artifact store, skill promotion (only registry
+bootstrap in Phase 2).
 
-Contratos novos já publicados na fundação (importe, não redefina):
-`SIGNAL_PLAN_APPROVAL` (payload documentado em `constants.py`),
+New contracts already published in the foundation (import, do not redefine):
+`SIGNAL_PLAN_APPROVAL` (payload documented in `constants.py`),
 `ACTIVITY_RUN_PLANNER_TURN` / `ACTIVITY_RUN_TESTER_TURN` /
-`ACTIVITY_RUN_L2_REVIEW`, `L2Verdict`, `PrRef.compare_url` (opcional,
-`pr_number` agora opcional — exatamente um dos dois presente),
+`ACTIVITY_RUN_L2_REVIEW`, `L2Verdict`, `PrRef.compare_url` (optional,
+`pr_number` now optional — exactly one of the two present),
 `OTEL_ATTR_TASK_CLASS`.
 
-Migrações reservadas da Fase 2 (mesma regra da Fase 1 — um arquivo por WS):
+Phase 2 reserved migrations (same rule as Phase 1 — one file per WS):
 
-| Arquivo | Workstream |
+| File | Workstream |
 |---|---|
-| `migrations/0008_wsa2.sql` | WS-A (ex.: tenant_platform_bindings) |
+| `migrations/0008_wsa2.sql` | WS-A (e.g. tenant_platform_bindings) |
 | `migrations/0009_wsb2.sql` | WS-B |
-| `migrations/0010_wsc2.sql` | WS-C (ex.: skill_registry, retrieval index) |
-| `migrations/0011_wsd2.sql` | WS-D (ex.: model_policies) |
+| `migrations/0010_wsc2.sql` | WS-C (e.g. skill_registry, retrieval index) |
+| `migrations/0011_wsd2.sql` | WS-D (e.g. model_policies) |
 | `migrations/0012_wse2.sql` | WS-E |
-| `migrations/0013_wsf2.sql` | WS-F (ex.: dse_access_bundles) |
+| `migrations/0013_wsf2.sql` | WS-F (e.g. dse_access_bundles) |
 
-Portas novas reservadas: **8890** = queue board do admin console (WS-F).
+Newly reserved ports: **8890** = admin console queue board (WS-F).
 
-Nota de infra: o cluster Temporal da fundação foi atualizado de
-`auto-setup:1.24` para a maior versão disponível no registro (drill de
-upgrade WSB-E1-T5). Priority & Fairness nativo (1.31+) NÃO está disponível —
-fairness na Fase 2 é worker-side (caps de concorrência por tenant lidos de
-`tenant_config`), atrás de interface trocável quando o servidor suportar.
+Infra note: the foundation's Temporal cluster was upgraded from
+`auto-setup:1.24` to the highest version available in the registry (upgrade
+drill WSB-E1-T5). Native Priority & Fairness (1.31+) is NOT available —
+fairness in Phase 2 is worker-side (per-tenant concurrency caps read from
+`tenant_config`), behind a swappable interface for when the server supports it.
 
-## Fase 3 ("Evidence") — escopo e reservas
+## Phase 3 ("Evidence") — scope and reservations
 
-Fases 1+2 completas e integradas (399 testes — ver `docs/PHASE2-STATUS.md` e o adendo
-`../plano-desenvolvimento/02-ADENDO-FASE3-POS-FASE2.md`). A Fase 3 adiciona: L3 completo
-(reflection + targeted re-runs), preview environments por PR via Argo CD ApplicationSet,
-vídeo `@demo` Playwright, artifact store Garage (links expirantes + quarentena + log de
-acesso), visual diff, debounce de evidência (ADR-26), Playwright na imagem do sandbox +
-convenção `demos/<workitem-id>/` (WSC-E3-T4b), segundo substrato (Claude Agent SDK),
-failover intra-tier + bateria completa de chaos, ADR-28 completo (rotação agendada +
-secrets de preview via ESO), retenção por classificação. **Fora de escopo até a Fase 4:**
-promoção de skills, merge-base hardening, red-team.
+Phases 1+2 complete and integrated (399 tests — see `docs/PHASE2-STATUS.md` and the addendum
+`../plano-desenvolvimento/02-ADENDO-FASE3-POS-FASE2.md`). Phase 3 adds: full L3
+(reflection + targeted re-runs), per-PR preview environments via Argo CD ApplicationSet,
+Playwright `@demo` video, Garage artifact store (expiring links + quarantine + access
+log), visual diff, evidence debounce (ADR-26), Playwright in the sandbox image +
+`demos/<workitem-id>/` convention (WSC-E3-T4b), second substrate (Claude Agent SDK),
+intra-tier failover + full chaos battery, complete ADR-28 (scheduled rotation +
+preview secrets via ESO), retention by classification. **Out of scope until Phase 4:**
+skill promotion, merge-base hardening, red-team.
 
-**Gate de entrada JÁ EXECUTADO pela fundação:**
-- Models de sessão (Planner/Tester/L2) PROMOVIDOS a `dse_contracts.activities`
-  (`sandbox_runtime.activities` re-importa) com testes de regressão de boundary em
-  `packages/contracts/tests/test_activity_boundaries.py` — **regra nova: ao mudar um call
-  site no workflow, atualize o payload correspondente nesses testes NO MESMO PR.**
-  `RunL2ReviewInput` agora tem `extra="forbid"` (P3 estrutural no decode).
-- Contratos de evidência da Fase 3 JÁ DEFINIDOS na fundação (importe, não redefina):
+**Entry gate ALREADY EXECUTED by the foundation:**
+- Session models (Planner/Tester/L2) PROMOTED to `dse_contracts.activities`
+  (`sandbox_runtime.activities` re-imports them) with boundary regression tests in
+  `packages/contracts/tests/test_activity_boundaries.py` — **new rule: when you change a call
+  site in the workflow, update the corresponding payload in those tests IN THE SAME PR.**
+  `RunL2ReviewInput` now has `extra="forbid"` (structural P3 at decode time).
+- Phase 3 evidence contracts ALREADY DEFINED in the foundation (import, do not redefine):
   `ACTIVITY_RUN_DEMO_EVIDENCE`/`PUBLISH_ARTIFACT`/`TRIGGER_PREVIEW`/`RUN_VISUAL_DIFF` +
   models `RunDemoEvidenceInput`/`DemoEvidenceResult`/`PublishArtifactInput`/`ArtifactRef`/
   `TriggerPreviewInput`/`PreviewRef`/`RunVisualDiffInput`/`VisualDiffResult`.
-- **Cluster K8s local no ar**: k3d `dse-preview` (2 nós, rede `dse_net` — pods alcançam
-  Vault/model-gateway/Garage pelo nome de container) com **Argo CD v2.13.3** instalado e
-  Available no namespace `argocd` (ApplicationSet controller incluído). Setup idempotente:
-  `infra/k8s-local/setup-k3d-argocd.sh`. kubecontext: `k3d-dse-preview`. ESO é instalado
-  pelo WS-F via helm (comando no rodapé do script). NÃO delete o cluster.
+- **Local K8s cluster up**: k3d `dse-preview` (2 nodes, network `dse_net` — pods reach
+  Vault/model-gateway/Garage by container name) with **Argo CD v2.13.3** installed and
+  Available in the `argocd` namespace (ApplicationSet controller included). Idempotent setup:
+  `infra/k8s-local/setup-k3d-argocd.sh`. kubecontext: `k3d-dse-preview`. ESO is installed
+  by WS-F via helm (command at the bottom of the script). DO NOT delete the cluster.
 
-Migrações reservadas da Fase 3: `0014_wsb3.sql`, `0015_wsc3.sql`, `0016_wsd3.sql`,
-`0017_wse3.sql`, `0018_wsf3.sql` (WS-A não tem tarefas na Fase 3).
+Phase 3 reserved migrations: `0014_wsb3.sql`, `0015_wsc3.sql`, `0016_wsd3.sql`,
+`0017_wse3.sql`, `0018_wsf3.sql` (WS-A has no tasks in Phase 3).
 
-Portas novas reservadas: **3900/3903** = Garage S3 API/admin (WS-E declara o serviço no
-`docker-compose.wse.yml` — fragment ainda não existe, criar); **8091** = port-forward do
-Argo CD UI (sob demanda, não fixo).
+Newly reserved ports: **3900/3903** = Garage S3 API/admin (WS-E declares the service in
+`docker-compose.wse.yml` — the fragment does not exist yet, create it); **8091** = Argo CD UI
+port-forward (on demand, not fixed).
 
-## Como rodar localmente
+## How to run locally
 
 ```
-make up        # sobe infra (postgres, temporal, redis, vault) + fragments de cada workstream
-make migrate   # aplica todas as migrações em ordem
-make test      # roda a suíte de testes de todos os serviços (requer `make up` rodando)
-make down      # derruba tudo
+make up        # brings up infra (postgres, temporal, redis, vault) + each workstream's fragments
+make migrate   # applies all migrations in order
+make test      # runs the test suite for all services (requires `make up` running)
+make down      # tears everything down
 ```

@@ -1,37 +1,37 @@
-# Overlay da VPS piloto (2 vCPU / 8 GB) — plano 09, Fase 5. Copie para
-# values-vps-secrets.yaml, preencha os segredos e criptografe com SOPS.
-# Aplica POR CIMA de values-pilot.yaml (que traz os gates fail-closed).
+# Pilot VPS overlay (2 vCPU / 8 GB) — plan 09, Phase 5. Copy to
+# values-vps-secrets.yaml, fill in the secrets and encrypt it with SOPS.
+# Applies ON TOP OF values-pilot.yaml (which brings the fail-closed gates).
 
 tenant:
   id: "SEU-TENANT"
 
 global:
-  imageRegistry: "ghcr.io/SUA-ORG/"   # imagens do workflow release, por digest
+  imageRegistry: "ghcr.io/SUA-ORG/"   # release-workflow images, by digest
 
 runtime:
   inProcess: false
   agentSubstrate: claude-agent
-  sandboxRuntimeClassName: gvisor      # instalado pelo bootstrap-k3s.sh
+  sandboxRuntimeClassName: gvisor      # installed by bootstrap-k3s.sh
 
-# Postgres GERENCIADO fora da VPS (PITR/restore de graça). O StatefulSet
-# interno fica desligado.
+# MANAGED Postgres outside the VPS (PITR/restore for free). The internal
+# StatefulSet stays off.
 postgres:
   enabled: false
   auth:
-    existingSecret: dse-postgres-managed   # criado a partir do SOPS
+    existingSecret: dse-postgres-managed   # created from SOPS
 
-# Vault server fora do piloto: secrets nativos K8s populados via SOPS.
+# Vault server out of scope for the pilot: native K8s secrets populated via SOPS.
 vault:
   enabled: false
 
-# Topologia A: sem model-server local; Teams desligado.
+# Topology A: no local model-server; Teams off.
 modelServer:
   enabled: false
 adapters:
   teams:
     enabled: false
 
-# Anti-starvation na VPS 2 vCPU (regra dura do plano 09):
+# Anti-starvation on the 2 vCPU VPS (hard rule from plan 09):
 orchestrator:
   resources:
     requests: { cpu: "500m", memory: "512Mi" }
@@ -41,5 +41,6 @@ temporal:
     requests: { cpu: "400m", memory: "768Mi" }
     limits: { cpu: "1", memory: "1536Mi" }
 
-# Sandbox: 1 tarefa por vez, pod capado (o turno espera modelo — rede, não CPU)
-# concorrência é config do worker (DSE_SANDBOX_MAX_CONCURRENT=1 no configmap).
+# Sandbox: 1 task at a time, capped pod (the turn waits on the model — network,
+# not CPU); concurrency is worker config (DSE_SANDBOX_MAX_CONCURRENT=1 in the
+# configmap).

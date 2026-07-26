@@ -1,34 +1,34 @@
--- Fintex DSE — Fase 3 — WS-B (Orquestracao Temporal)
--- Dono: WS-B. Arquivo reservado (ver CONVENTIONS.md, tabela de migracoes da
--- Fase 3) — nao editar fora do WS-B.
+-- Fintex DSE — Phase 3 — WS-B (Temporal orchestration)
+-- Owner: WS-B. Reserved file (see CONVENTIONS.md, Phase 3 migrations table) —
+-- do not edit outside WS-B.
 --
--- work_item_evidence: projecao DURAVEL e consultavel do estado do pipeline de
--- evidencia (Fase 3 — preview Argo CD + demo Playwright + visual diff, ADR-26/
--- ADR-27). O audit_log (append-only) guarda o historico completo de cada
--- refresh; esta tabela materializa o estado ATUAL (1 linha por work_item,
--- upsert idempotente pelo workflow) para o queue board (WS-F) e operadores
--- responderem "qual o preview/evidencia mais recente deste PR?" sem varrer o
--- ledger.
+-- work_item_evidence: DURABLE and queryable projection of the state of the
+-- evidence pipeline (Phase 3 — Argo CD preview + Playwright demo + visual diff,
+-- ADR-26/ADR-27). The audit_log (append-only) keeps the full history of every
+-- refresh; this table materializes the CURRENT state (1 row per work_item,
+-- idempotent upsert by the workflow) so that the queue board (WS-F) and
+-- operators can answer "what is the latest preview/evidence for this PR?"
+-- without scanning the ledger.
 --
--- P8: o audit_log continua a fonte da verdade imutavel; toda transicao aqui e
--- espelhada por um dse_audit.emit(...) no workflow (acoes preview_triggered,
+-- P8: the audit_log remains the immutable source of truth; every transition here
+-- is mirrored by a dse_audit.emit(...) in the workflow (actions preview_triggered,
 -- demo_evidence_completed, visual_diff_completed, evidence_degraded,
 -- evidence_skipped_backend_only, evidence_refresh_declined_cap).
 
 CREATE TABLE IF NOT EXISTS work_item_evidence (
     work_item_id        TEXT PRIMARY KEY,
     tenant_id           TEXT NOT NULL,
-    -- PreviewRef.status do contrato: created | skipped_backend_only | degraded
-    -- (NULL = pipeline nunca rodou ou falhou antes do trigger_preview retornar)
+    -- PreviewRef.status from the contract: created | skipped_backend_only | degraded
+    -- (NULL = the pipeline never ran, or failed before trigger_preview returned)
     preview_status      TEXT,
     preview_url         TEXT,
     demo_passed         BOOLEAN,                -- DemoEvidenceResult.passed
-    video_artifact_key  TEXT,                   -- chave no artifact store (Garage, WS-E)
+    video_artifact_key  TEXT,                   -- key in the artifact store (Garage, WS-E)
     trace_artifact_key  TEXT,
-    visual_baseline_key TEXT,                   -- baseline do visual diff (1o run cria)
-    refresh_count       INTEGER NOT NULL DEFAULT 0,  -- refreshes ALEM do initial (ADR-26, capado)
-    -- initial | fix_cycle | fix_cycle_ci_red | human_request (debounce ADR-26:
-    -- refresh SO por commit que muda comportamento ou pedido humano explicito)
+    visual_baseline_key TEXT,                   -- visual diff baseline (the 1st run creates it)
+    refresh_count       INTEGER NOT NULL DEFAULT 0,  -- refreshes BEYOND the initial one (ADR-26, capped)
+    -- initial | fix_cycle | fix_cycle_ci_red | human_request (ADR-26 debounce:
+    -- refresh ONLY on a commit that changes behavior or on an explicit human request)
     last_refresh_reason TEXT,
     detail              TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),

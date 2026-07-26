@@ -1,21 +1,22 @@
-"""WS-A adapter Microsoft Teams (PROVISÃO, Fase 4) — inbound (Activity ->
-ConversationEvent pelas 4 defesas) e outbound (status message única, editada
-in-place, via `MutableCommentWriter` com backend Teams).
+"""WS-A Microsoft Teams adapter (PROVISIONED, Phase 4) — inbound (Activity ->
+ConversationEvent through the 4 defenses) and outbound (a single status message,
+edited in-place, via `MutableCommentWriter` with the Teams backend).
 
-Adapter 100% stateless — mesma convenção de Slack/GitHub/Jira. Toda a lógica de
-admissão/correlação/defesas vem de `ingest_gateway`; a normalização Teams vive em
-`adapter_teams.events`.
+100% stateless adapter — same convention as Slack/GitHub/Jira. All
+admission/correlation/defense logic comes from `ingest_gateway`; Teams
+normalization lives in `adapter_teams.events`.
 
-Pipeline inbound, na ordem (as "4 defesas" do WSA-E2):
-  1. verify_teams_signature (HMAC do outgoing webhook)   -> 401 se falhar
-  2. content_snapshot congelado do próprio payload (TOCTOU) -> automático em events
-  3. sanitize_content (unicode invisível + redação de secret)
-  4. idempotência: event_id determinístico -> dedup em admit/record_signal
+Inbound pipeline, in order (the "4 defenses" of WSA-E2):
+  1. verify_teams_signature (outgoing webhook HMAC)           -> 401 on failure
+  2. content_snapshot frozen from the payload itself (TOCTOU) -> automatic in events
+  3. sanitize_content (invisible unicode + secret redaction)
+  4. idempotency: deterministic event_id -> dedup in admit/record_signal
 
-Guard de ATIVAÇÃO: enquanto a fundação não expõe `Platform.teams`, o endpoint
-verifica a assinatura (defesa real) e então retorna 501 `teams_not_activated`
-ANTES de qualquer escrita (evita violar os CHECKs de plataforma de work_items/
-identity_links). Ligar Teams é 1 linha no enum + activation.sql — sem tocar aqui.
+ACTIVATION guard: while the foundation does not expose `Platform.teams`, the
+endpoint verifies the signature (a real defense) and then returns 501
+`teams_not_activated` BEFORE any write (avoids violating the platform CHECKs on
+work_items/identity_links). Turning Teams on is 1 line in the enum +
+activation.sql — with no changes here.
 """
 from __future__ import annotations
 
@@ -136,8 +137,8 @@ async def teams_messages(request: Request):
     body = await request.body()
     authorization = request.headers.get("Authorization")
 
-    # Defesa #1: assinatura (HMAC do outgoing webhook). Sempre verificada,
-    # mesmo antes da ativação — é a fronteira de confiança.
+    # Defense #1: signature (outgoing webhook HMAC). Always verified, even before
+    # activation — this is the trust boundary.
     check = verify_teams_signature(
         shared_secret=get_teams_shared_secret(), body=body, authorization_header=authorization
     )
@@ -148,8 +149,8 @@ async def teams_messages(request: Request):
     if activity.get("type") != "message":
         return {"ok": True, "path": "ignored_non_message"}
 
-    # Guard de ativação ANTES de qualquer escrita (evita violar CHECKs de
-    # plataforma). Falha limpa e explicativa (P6), com audit (P8).
+    # Activation guard BEFORE any write (avoids violating the platform CHECKs).
+    # Clean, explanatory failure (P6), with audit (P8).
     if not is_activated():
         audit_emit(
             actor="system:adapter-teams",
@@ -159,7 +160,7 @@ async def teams_messages(request: Request):
         )
         return JSONResponse(status_code=501, content={"ok": False, "error": str(TeamsNotActivated())})
 
-    # --- Caminho pós-ativação (exercitado quando a fundação expõe Platform.teams) ---
+    # --- Post-activation path (exercised once the foundation exposes Platform.teams) ---
     user_id, display = events.actor_of(activity)
     principal = resolve_principal("teams", user_id, display)
     tenant_id = _resolve_tenant_for(activity)
@@ -172,17 +173,18 @@ class StatusCommentRequest(BaseModel):
     conversation_id: str
     service_url: str
     body: str
-    actor: str  # principal resolvido de quem/o-que disparou (ex.: "system:orchestrator")
+    actor: str  # resolved principal of who/what triggered it (e.g. "system:orchestrator")
 
 
 @app.post("/internal/status-comment")
 def upsert_status_comment(req: StatusCommentRequest) -> dict:
-    """Exatamente 1 mensagem de status por WorkItem, editada in-place — chamado
-    pelo orchestrator (WS-B) a cada transição relevante. Usa a MESMA
-    `MutableCommentWriter` dos outros adapters (backend Teams).
+    """Exactly 1 status message per WorkItem, edited in-place — called by the
+    orchestrator (WS-B) on every relevant transition. Uses the SAME
+    `MutableCommentWriter` as the other adapters (Teams backend).
 
-    O outbound NÃO depende do enum `Platform.teams` (a surface é só a string
-    "teams") — logo é plenamente funcional/testável já, com `FakeTeamsClient`."""
+    Outbound does NOT depend on the `Platform.teams` enum (the surface is just the
+    string "teams") — so it is already fully functional/testable, with
+    `FakeTeamsClient`."""
     service_url = req.service_url or get_default_service_url()
     client = build_real_teams_client(get_teams_app_id(), get_teams_app_password())
     backend = TeamsCommentBackend(client)

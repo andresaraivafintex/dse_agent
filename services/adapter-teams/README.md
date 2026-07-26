@@ -1,63 +1,63 @@
-# adapter-teams (WS-A, Fase 4) — PROVISÃO, não ativado
+# adapter-teams (WS-A, Phase 4) — PROVISIONED, not activated
 
-Adapter Microsoft Teams espelhando `adapter-slack`/`adapter-github`/`adapter-jira`
-(a estrutura desses três é o molde). Entregue **completo e testado**, porém
-deliberadamente **não ativado**: ligar Teams é uma decisão de negócio/roadmap
-(Fase 4+), e a ativação exige uma mudança de **fundação** que este workstream
-não faz nesta sessão (convivência com 4 agentes em paralelo — não editamos
-`packages/*` nem as migrações 0001-0019).
+Microsoft Teams adapter mirroring `adapter-slack`/`adapter-github`/`adapter-jira`
+(those three are the mold). Delivered **complete and tested**, but
+deliberately **not activated**: turning Teams on is a business/roadmap decision
+(Phase 4+), and activation requires a **foundation** change that this workstream
+does not make in this session (4 agents running in parallel — we do not edit
+`packages/*` nor migrations 0001-0019).
 
-Porta reservada: **8808** (8801 slack, 8802 github, 8803 gateway, 8804 jira já
-em uso; 8808 é o próximo livre do bloco WS-A).
+Reserved port: **8808** (8801 slack, 8802 github, 8803 gateway, 8804 jira are already
+taken; 8808 is the next free one in the WS-A block).
 
-## O que está implementado (real)
+## What is implemented (real)
 
-- **Inbound** (`POST /teams/messages`) — Activity do Bot Framework/outgoing
-  webhook normalizada para `ConversationEvent` passando pelas **4 defesas** de
-  intake, na ordem:
-  1. `verify_teams_signature` (HMAC do outgoing webhook — ver abaixo). 401 + audit se falhar.
-  2. `content_snapshot` congelado do próprio payload (defesa TOCTOU) — `events.clean_text`.
-  3. `sanitize_content` do gateway (unicode invisível + redação de secret).
-  4. idempotência: `event_id` determinístico (`events.compute_event_id`) →
-     dedup em `admit_work_item`/`record_signal_event` via `UNIQUE`.
-  Depois: `correlate()` decide Path A (new_task) / Path B (signal) / unauthorized
-  — exatamente o mesmo caminho dos outros adapters.
-- **Outbound** (`POST /internal/status-comment`) — **exatamente 1 mensagem de
-  status por WorkItem, editada in-place**, via a MESMA
-  `dse_contracts.mutable_comment.MutableCommentWriter` dos outros adapters, com
-  `TeamsCommentBackend` (backend novo). NÃO depende da ativação (a surface é só
-  a string `"teams"`) — plenamente funcional e testado já.
-- **Verificação de assinatura** (`ingest_gateway.security.verify_teams_signature`):
-  esquema HMAC do **Microsoft Teams outgoing webhook** — o secret é entregue em
-  Base64; a cada POST o Teams envia `Authorization: HMAC <base64(HMAC_SHA256(
-  decoded_secret, raw_body))>`. Verificação em tempo constante sobre o corpo
-  BRUTO. (O canal Bot Framework "completo" autentica por JWT Bearer contra o
-  metadata OpenID da Microsoft — documentado como passo de ativação do canal;
-  o HMAC do outgoing webhook é o análogo direto de Slack/Jira e é o coberto.)
-- **Transporte outbound real**: `backend.RealTeamsClient` fala o Bot Framework
-  Connector REST (token client_credentials do AAD → POST/PUT de activities).
-  Sem app registration/tenant real nesta sessão, `FakeTeamsClient` substitui o
-  transporte nos testes — a lógica de `TeamsCommentBackend` é 100% real.
+- **Inbound** (`POST /teams/messages`) — a Bot Framework/outgoing-webhook Activity
+  normalized into a `ConversationEvent`, passing through the **4 intake defenses**,
+  in order:
+  1. `verify_teams_signature` (outgoing-webhook HMAC — see below). 401 + audit on failure.
+  2. `content_snapshot` frozen from the payload itself (TOCTOU defense) — `events.clean_text`.
+  3. the gateway's `sanitize_content` (invisible unicode + secret redaction).
+  4. idempotency: deterministic `event_id` (`events.compute_event_id`) →
+     dedup in `admit_work_item`/`record_signal_event` via `UNIQUE`.
+  Then: `correlate()` decides Path A (new_task) / Path B (signal) / unauthorized
+  — exactly the same path as the other adapters.
+- **Outbound** (`POST /internal/status-comment`) — **exactly 1 status message
+  per WorkItem, edited in place**, via the SAME
+  `dse_contracts.mutable_comment.MutableCommentWriter` as the other adapters, with
+  `TeamsCommentBackend` (a new backend). It does NOT depend on activation (the surface is just
+  the string `"teams"`) — fully functional and already tested.
+- **Signature verification** (`ingest_gateway.security.verify_teams_signature`):
+  the **Microsoft Teams outgoing webhook** HMAC scheme — the secret is delivered
+  Base64-encoded; on every POST, Teams sends `Authorization: HMAC <base64(HMAC_SHA256(
+  decoded_secret, raw_body))>`. Constant-time verification over the RAW
+  body. (The "full" Bot Framework channel authenticates with a JWT Bearer against
+  Microsoft's OpenID metadata — documented as a channel activation step;
+  the outgoing-webhook HMAC is the direct analogue of Slack/Jira and is what is covered.)
+- **Real outbound transport**: `backend.RealTeamsClient` speaks the Bot Framework
+  Connector REST API (AAD client_credentials token → POST/PUT of activities).
+  With no real app registration/tenant in this session, `FakeTeamsClient` replaces the
+  transport in the tests — `TeamsCommentBackend`'s logic is 100% real.
 
-## O que falta para ATIVAR (bloqueio de fundação, decisão de negócio)
+## What is missing to ACTIVATE (foundation blocker, business decision)
 
-Exatamente dois passos aditivos (nenhuma mudança neste serviço):
+Exactly two additive steps (no change in this service):
 
-1. **Código** — `Platform.teams = "teams"` no enum de
-   `packages/contracts/dse_contracts/conversation_event.py` (1 linha aditiva).
-2. **Migração** — aplicar `activation.sql` (relax aditivo dos CHECKs
-   `work_items.source` e `identity_links.platform` para incluir `'teams'`).
+1. **Code** — `Platform.teams = "teams"` in the enum in
+   `packages/contracts/dse_contracts/conversation_event.py` (1 additive line).
+2. **Migration** — apply `activation.sql` (additive relaxation of the
+   `work_items.source` and `identity_links.platform` CHECKs to include `'teams'`).
 
-`platform_compat.is_activated()` detecta esse estado em runtime (sem hard-code):
-enquanto não ativado, `/health` reporta `{"activated": false}` e `/teams/messages`
-verifica a assinatura (defesa real) e então retorna **501 `teams_not_activated`**
-ANTES de qualquer escrita (evita violar os CHECKs de plataforma). Depois da
-ativação, o mesmo endpoint roda o pipeline completo (`correlate`/`admit`) sem
-outra mudança. Além do código, ativar em produção exige um **tenant Teams real**
-+ app registration (Azure Bot) + secrets no Vault (`dse/teams/webhook`,
+`platform_compat.is_activated()` detects that state at runtime (no hard-coding):
+while not activated, `/health` reports `{"activated": false}` and `/teams/messages`
+verifies the signature (a real defense) and then returns **501 `teams_not_activated`**
+BEFORE any write (avoiding a platform CHECK violation). After
+activation, the same endpoint runs the full pipeline (`correlate`/`admit`) with no
+further change. Beyond code, activating in production requires a **real Teams tenant**
++ app registration (Azure Bot) + secrets in Vault (`dse/teams/webhook`,
 `dse/teams/bot`).
 
-## Rodar os testes (infra real)
+## Running the tests (real infra)
 
 ```
 cd /Users/saraiva/Documents/DSE/fase1
@@ -66,9 +66,9 @@ pip install -e services/adapter-teams
 cd services/adapter-teams && pytest -q
 ```
 
-Cobertura: `test_normalization.py` (extração + 4 defesas ao nível de função),
-`test_outbound.py` (1-mensagem-por-tarefa via FakeTeamsClient + persistência
-stateless), `test_inbound_pipeline.py` (corpus de forgery HMAC → 401; assinada
-válida → 501 gated + audit), `test_activation.py` (o guard de ativação como
-teste executável). A assinatura HMAC do Teams também tem corpus próprio em
+Coverage: `test_normalization.py` (extraction + the 4 defenses at function level),
+`test_outbound.py` (one-message-per-task via FakeTeamsClient + stateless
+persistence), `test_inbound_pipeline.py` (HMAC forgery corpus → 401; validly
+signed → 501 gated + audit), `test_activation.py` (the activation guard as an
+executable test). The Teams HMAC signature also has its own corpus in
 `services/ingest-gateway/tests/test_security.py`.

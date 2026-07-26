@@ -1,38 +1,38 @@
-# Prova de isolamento sob gVisor — evidência do gate pilotReadiness.sandboxIsolationVerified
+# gVisor isolation proof — evidence for the pilotReadiness.sandboxIsolationVerified gate
 
-Executada em 2026-07-24 na VPS piloto (172.172.235.228, Ubuntu 24.04, k3s
+Executed on 2026-07-24 on the pilot VPS (172.172.235.228, Ubuntu 24.04, k3s
 v1.31.4+k3s1, containerd v1.7.23-k3s2, gVisor/runsc via RuntimeClass `gvisor`).
-Pod endurecido igual ao `build_pod_manifest` (runAsNonRoot 10001, cap drop ALL,
-readOnlyRootFilesystem, seccomp RuntimeDefault, SA token não montado).
+Pod hardened identically to `build_pod_manifest` (runAsNonRoot 10001, cap drop ALL,
+readOnlyRootFilesystem, seccomp RuntimeDefault, SA token not mounted).
 
-## O que foi provado (comandos via `kubectl exec` no pod real)
+## What was proved (commands run via `kubectl exec` in the real pod)
 
-1. **O kernel É o gVisor, não o do host.**
+1. **The kernel IS gVisor, not the host's.**
    `uname -a` → `Linux dse-gvisor-proof 4.19.0-gvisor #1 SMP ... x86_64`
-   (host roda `6.17.0-1020-azure`). Isolamento de SO real — as syscalls do
-   agente passam pelo runsc, não pelo kernel do nó.
+   (the host runs `6.17.0-1020-azure`). Real OS-level isolation — the agent's
+   syscalls go through runsc, not the node's kernel.
 
-2. **Fluxo completo do turno DENTRO do pod isolado** (as ops do runner):
-   - `--op bootstrap` → workspace git criado, `created:true`, sha real.
-   - `--stage coder` (fake) → escreveu `src/proof.py` + `JUNK_REPORT.md`.
-   - `--op post_turn` → `pruned:["JUNK_REPORT.md"]`, commit feito (sha mudou).
+2. **Full turn flow INSIDE the isolated pod** (the runner ops):
+   - `--op bootstrap` → git workspace created, `created:true`, real sha.
+   - `--stage coder` (fake) → wrote `src/proof.py` + `JUNK_REPORT.md`.
+   - `--op post_turn` → `pruned:["JUNK_REPORT.md"]`, commit made (sha changed).
 
-3. **Escape negado pelo SISTEMA OPERACIONAL, não por toolset:**
-   - turno tentando escrever `/pwned.txt` →
+3. **Escape denied by the OPERATING SYSTEM, not by the toolset:**
+   - a turn attempting to write `/pwned.txt` →
      `error_kind:"substrate_error"`, `PermissionError [Errno 13]`.
-   - `touch /pwned2` → `Permission denied` (rootfs read-only).
-   - `id` → `uid=10001(dse)` (não-root).
+   - `touch /pwned2` → `Permission denied` (read-only rootfs).
+   - `id` → `uid=10001(dse)` (non-root).
 
-## Correção de infra incorporada ao bootstrap
+## Infra fix folded into the bootstrap
 
-O handler runsc do containerd do k3s exige `config.toml.tmpl` com o plugin
-`io.containerd.grpc.v1.cri` (não `config-v3.toml.tmpl` / `cri.v1.runtime`);
-com o path errado o Pod fica em ContainerCreating com "no runtime for runsc
-is configured". `bootstrap-k3s.sh` já corrigido.
+k3s's containerd runsc handler requires `config.toml.tmpl` with the
+`io.containerd.grpc.v1.cri` plugin (not `config-v3.toml.tmpl` / `cri.v1.runtime`);
+with the wrong path the Pod sits in ContainerCreating with "no runtime for runsc
+is configured". `bootstrap-k3s.sh` is already fixed.
 
-## Consequência para os gates
+## Consequence for the gates
 
-Esta é a evidência externa que o chart Helm exige para
-`pilotReadiness.sandboxIsolationVerified`. A promoção do flag para `true`
-permanece sendo do pipeline de release (após anexar esta prova ao artefato do
-release), como o desenho do chart determina — nunca editada à mão no values.
+This is the external evidence the Helm chart requires for
+`pilotReadiness.sandboxIsolationVerified`. Promoting the flag to `true`
+remains the release pipeline's job (after attaching this proof to the release
+artifact), as the chart's design dictates — never hand-edited in the values.

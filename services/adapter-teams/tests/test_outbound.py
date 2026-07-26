@@ -1,8 +1,9 @@
-"""Outbound: exatamente 1 mensagem de status por WorkItem, editada in-place via
-`MutableCommentWriter` + `TeamsCommentBackend`. Sem tenant Teams real:
-`FakeTeamsClient` substitui o transporte Bot Framework — a lógica
-(`MutableCommentWriter`, `TeamsCommentBackend`, `PgCommentStateStore`) é 100%
-real. NÃO depende do enum `Platform.teams` (a surface é só a string "teams").
+"""Outbound: exactly 1 status message per WorkItem, edited in-place via
+`MutableCommentWriter` + `TeamsCommentBackend`. With no real Teams tenant,
+`FakeTeamsClient` replaces the Bot Framework transport — the logic
+(`MutableCommentWriter`, `TeamsCommentBackend`, `PgCommentStateStore`) is 100%
+real. Does NOT depend on the `Platform.teams` enum (the surface is just the
+string "teams").
 """
 from __future__ import annotations
 
@@ -27,8 +28,8 @@ def _make_work_item(tenant_id: str) -> str:
     work_item_id = f"wi_out_{uuid.uuid4().hex[:12]}"
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
-        # source='slack' aqui de propósito: o work_item é criado por outra
-        # surface; o outbound Teams só posta o status (independe do source).
+        # source='slack' here on purpose: the work_item is created by another
+        # surface; the Teams outbound only posts the status (source-independent).
         cur.execute(
             "INSERT INTO work_items (id, tenant_id, source, source_ref, requester, idempotency_key) "
             "VALUES (%s,%s,'slack','{}'::jsonb,'usr_test',%s)",
@@ -74,7 +75,7 @@ def test_subsequent_updates_edit_in_place_never_send_new(tenant_id, monkeypatch)
     for body in ["Task started", "Task running (1/3)", "Task done"]:
         assert _post(wi, body).status_code == 200
 
-    # exatamente 1 send inicial + 2 updates — NUNCA 3 sends.
+    # exactly 1 initial send + 2 updates — NEVER 3 sends.
     assert len(fake.send_calls) == 1
     assert len(fake.update_calls) == 2
     assert fake.update_calls[-1]["text"] == "Task done"
@@ -83,8 +84,9 @@ def test_subsequent_updates_edit_in_place_never_send_new(tenant_id, monkeypatch)
 
 
 def test_status_ref_persisted_across_process_restart_simulation(tenant_id, monkeypatch):
-    """Adapter 100% stateless: o comment_ref persiste no Postgres (comment_state),
-    então trocar o client (simular restart) continua editando, não reenvia."""
+    """100% stateless adapter: the comment_ref persists in Postgres
+    (comment_state), so swapping the client (simulating a restart) keeps editing
+    instead of re-sending."""
     shared = FakeTeamsClient()
     monkeypatch.setattr(app_module, "build_real_teams_client", lambda app_id, pw: shared)
 

@@ -23,36 +23,43 @@ data:
   DSE_REDIS_HOST: {{ include "dse.fullname" . }}-redis
   DSE_REDIS_PORT: "6379"
   VAULT_ADDR: {{ .Values.secrets.vaultAddr | quote }}
-  # FQDN (não nome curto): o Pod de sandbox roda em runtime.sandboxNamespace,
-  # cujos search domains não acham o Service de egress-proxy em global.namespace.
-  # Sem o FQDN, o HTTP(S)_PROXY do Pod dá NXDOMAIN e o clone in-pod falha.
+  # FQDN, not the short name: the sandbox Pod runs in runtime.sandboxNamespace,
+  # whose search domains do not find the egress-proxy Service in global.namespace.
+  # Without the FQDN the Pod's HTTP(S)_PROXY gets NXDOMAIN and the in-pod clone fails.
   DSE_EGRESS_PROXY_URL: "http://{{ include "dse.fullname" . }}-egress-proxy.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.egressProxy.port }}"
-  # FQDN (não nome curto): o orchestrator e o Pod de sandbox têm HTTPS_PROXY=
-  # egress-proxy + NO_PROXY=.svc,.cluster.local. Com nome curto a chamada ao
-  # model-gateway é sequestrada pelo proxy (host interno fora da allowlist) →
-  # 502 body vazio, o Planner devolve plano vazio e o turno escala. O FQDN casa
-  # o NO_PROXY e a chamada vai direta ao Service.
+  # FQDN, not the short name: the orchestrator and the sandbox Pod carry
+  # HTTPS_PROXY=egress-proxy + NO_PROXY=.svc,.cluster.local. With a short name the
+  # call to the model-gateway is hijacked by the proxy (internal host outside the
+  # allowlist) → 502 with an empty body, the Planner returns an empty plan and the
+  # turn escalates. The FQDN matches NO_PROXY and the call goes straight to the Service.
   DSE_MODEL_GATEWAY_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_BASE_URL: "http://{{ include "dse.fullname" . }}-model-gateway.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.modelGateway.port }}"
   DSE_MODEL_GATEWAY_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.modelGateway.allowFixture | quote }}
-  # URLs dos adapters p/ o post_tracking_comment (status de volta ao Slack/GitHub
-  # via /internal/status-comment). FQDN (não nome curto) por 2 motivos: (1) o
-  # default do código é "http://adapter-slack:8801" — nome errado (o Service é
-  # dse-<...>-adapter-slack) E sem .svc; (2) o orchestrator tem HTTPS_PROXY —
-  # nome curto é sequestrado pelo egress-proxy (403). O FQDN casa o NO_PROXY.
+  # Adapter URLs for post_tracking_comment (status back to Slack/GitHub via
+  # /internal/status-comment). FQDN, not the short name, for 2 reasons: (1) the
+  # code default is "http://adapter-slack:8801" — wrong name (the Service is
+  # dse-<...>-adapter-slack) AND missing .svc; (2) the orchestrator has HTTPS_PROXY —
+  # a short name is hijacked by the egress-proxy (403). The FQDN matches NO_PROXY.
   DSE_ADAPTER_GITHUB_URL: "http://{{ include "dse.fullname" . }}-adapter-github.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.adapters.github.port }}"
   DSE_ADAPTER_SLACK_URL: "http://{{ include "dse.fullname" . }}-adapter-slack.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.adapters.slack.port }}"
+  {{- if .Values.adapters.jira.enabled }}
+  # FQDN, not the short name: a short name is not in NO_PROXY (.svc,
+  # .cluster.local), so the request would be hijacked by the egress proxy and
+  # come back 403 — the exact failure that silenced the GitHub and Slack status
+  # comments before.
+  DSE_ADAPTER_JIRA_URL: "http://{{ include "dse.fullname" . }}-adapter-jira.{{ .Values.global.namespace }}.svc.cluster.local:{{ .Values.adapters.jira.port }}"
+  {{- end }}
   DSE_SANDBOX_INPROCESS: {{ ternary "1" "0" .Values.runtime.inProcess | quote }}
   DSE_SANDBOX_LOCAL_FALLBACK_ALLOWED: {{ ternary "1" "0" .Values.runtime.localFallbackAllowed | quote }}
   DSE_SANDBOX_RUNTIME_CLASS: {{ .Values.runtime.sandboxRuntimeClassName | quote }}
   DSE_CODER_SUBSTRATE: {{ .Values.runtime.agentSubstrate | quote }}
-  # Driver do sandbox + config do provisionamento K8s (consumidos por
-  # sandbox_runtime.driver.select_sandbox_driver e k8s_driver.K8sSandboxConfig).
+  # Sandbox driver + K8s provisioning config (consumed by
+  # sandbox_runtime.driver.select_sandbox_driver and k8s_driver.K8sSandboxConfig).
   DSE_SANDBOX_DRIVER: {{ .Values.runtime.sandboxDriver | quote }}
   DSE_SANDBOX_K8S_NAMESPACE: {{ .Values.runtime.sandboxNamespace | quote }}
   DSE_AGENT_RUNNER_IMAGE: {{ include "dse.image" (dict "root" $ "repository" .Values.runtime.agentRunnerImage.repository "tag" .Values.runtime.agentRunnerImage.tag "digest" .Values.runtime.agentRunnerImage.digest) | quote }}
-  # SA que o POD de sandbox roda como (sem RBAC) — igual ao objeto criado em
-  # deploy/k8s/sandbox-isolation.yaml. NÃO é a SA do worker (essa tem o RBAC).
+  # SA the sandbox POD runs as (no RBAC) — same as the object created in
+  # deploy/k8s/sandbox-isolation.yaml. NOT the worker's SA (that one holds the RBAC).
   DSE_SANDBOX_SERVICE_ACCOUNT: "dse-sandbox-runner"
   DSE_SANDBOX_CPU_LIMIT: {{ .Values.runtime.sandboxCpuLimit | quote }}
   DSE_SANDBOX_MEM_LIMIT: {{ .Values.runtime.sandboxMemLimit | quote }}
@@ -66,9 +73,20 @@ data:
   DSE_EGRESS_REPO_HOST: {{ .Values.egressProxy.repoHost | quote }}
   DSE_EGRESS_CREDENTIAL_BROKER_ENABLED: {{ ternary "1" "0" .Values.egressProxy.credentialBroker.enabled | quote }}
   DSE_EGRESS_CREDENTIAL_ALLOW_FIXTURE: {{ ternary "1" "0" .Values.egressProxy.credentialBroker.allowFixture | quote }}
-  # Compatível com a implementação atual. O arquivo abaixo continua montado
-  # para a futura política estrita; o gate de piloto não o declara verificado.
+  # Compatible with the current implementation. The file below stays mounted
+  # for the future strict policy; the pilot gate does not declare it verified.
   DSE_EGRESS_ALLOW_HOSTS: {{ join "," $allowHosts | quote }}
+  {{- if .Values.preview.enabled }}
+  DSE_PREVIEW_MODE: {{ .Values.preview.mode | quote }}
+  DSE_PREVIEW_APPLY: {{ .Values.preview.apply | quote }}
+  DSE_PREVIEW_KUBE_CONTEXT: {{ .Values.preview.kubeContext | quote }}
+  DSE_PREVIEW_SOURCE_IMAGE: {{ .Values.preview.sourceImage | quote }}
+  DSE_PREVIEW_SOURCE_PORT: {{ .Values.preview.sourcePort | quote }}
+  DSE_PREVIEW_EXTERNAL_HOST: {{ .Values.preview.externalHostTemplate | quote }}
+  DSE_PREVIEW_INGRESS_CLASS: {{ .Values.preview.ingressClass | quote }}
+  DSE_PREVIEW_TTL_SECONDS: {{ .Values.preview.ttlSeconds | quote }}
+  DSE_PREVIEW_MAX_CONCURRENT: {{ .Values.preview.maxConcurrent | quote }}
+  {{- end }}
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://{{ include "dse.fullname" . }}-otel-collector:4317"
 ---
 apiVersion: v1
@@ -80,8 +98,8 @@ metadata:
     {{- include "dse.labels" . | nindent 4 }}
 data:
   allowlist.yaml: |
-    # Consumido pelo egress-proxy (WS-C) como fonte de verdade da política
-    # default-deny — WS-F assina o aceite desta lista (WSF-E2).
+    # Consumed by the egress-proxy (WS-C) as the source of truth for the
+    # default-deny policy — WS-F signs off on this list (WSF-E2).
     hosts:
       {{- range .Values.egressProxy.allowlist }}
       - host: {{ .host | quote }}

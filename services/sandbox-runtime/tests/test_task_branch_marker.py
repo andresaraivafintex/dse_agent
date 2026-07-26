@@ -1,5 +1,6 @@
-"""Plano 08 §F (F6): o marcador .dse-task-branch NÃO deve vazar para o commit
-(logo, nunca aparece no PR do cliente). Hermético — só git local, sem docker."""
+"""Plano 08 §F (F6): the .dse-task-branch marker must NOT leak into the commit
+(hence it never shows up in the customer's PR). Hermetic — local git only, no
+docker."""
 from __future__ import annotations
 
 import subprocess
@@ -23,9 +24,9 @@ def test_marker_written_but_not_tracked(tmp_path):
     provision_checkpoint_repo(bare, branch)
     init_task_workspace(ws, bare, branch)
 
-    # o marcador existe em disco (resume/checkpoint dependem dele)...
+    # the marker exists on disk (resume/checkpoint depend on it)...
     assert (Path(ws) / ".dse-task-branch").read_text() == branch
-    # ...mas o git NUNCA o rastreia (não vaza para o PR) — F6.
+    # ...but git NEVER tracks it (it does not leak into the PR) — F6.
     assert ".dse-task-branch" not in _tracked(ws)
 
 
@@ -36,15 +37,15 @@ def test_real_file_is_committed_but_marker_still_excluded(tmp_path):
     provision_checkpoint_repo(bare, branch)
     init_task_workspace(ws, bare, branch)
 
-    # o Coder edita um arquivo real
+    # the Coder edits a real file
     (Path(ws) / "app.py").write_text("print('hi')\n")
     session = ScopedGitSession(workspace_dir=ws, branch=branch)
     session.ensure_identity()
     session.commit("feat: app")
 
     tracked = _tracked(ws)
-    assert "app.py" in tracked                      # mudança real vai pro commit
-    assert ".dse-task-branch" not in tracked        # marcador continua excluído
+    assert "app.py" in tracked                      # the real change makes it into the commit
+    assert ".dse-task-branch" not in tracked        # the marker stays excluded
 
 
 def test_write_marker_is_idempotent_on_exclude(tmp_path):
@@ -53,5 +54,5 @@ def test_write_marker_is_idempotent_on_exclude(tmp_path):
     for _ in range(3):
         write_task_branch_marker(ws, "dse/wi-789")
     exclude = (Path(ws) / ".git" / "info" / "exclude").read_text()
-    # uma única entrada, mesmo chamando várias vezes (não duplica)
+    # a single entry, even when called several times (no duplication)
     assert exclude.split().count(".dse-task-branch") == 1

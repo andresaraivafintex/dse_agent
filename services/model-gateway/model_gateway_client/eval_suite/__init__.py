@@ -1,22 +1,22 @@
-"""Suite de avaliação Tier-2 do model-gateway (WSD-E5-T1).
+"""Model-gateway Tier-2 evaluation suite (WSD-E5-T1).
 
-DONO (owner nomeado — gap 6 do plano): WS-D (model-gateway). Contato de
-manutenção: o time do model-gateway é responsável por manter `cases.yaml`
-atualizado conforme novos modelos entram no `litellm_config.yaml`.
+OWNER (named owner — gap 6 of the plan): WS-D (model-gateway). Maintenance
+contact: the model-gateway team is responsible for keeping `cases.yaml` up to
+date as new models land in `litellm_config.yaml`.
 
-O que é: um harness pequeno, REAL e rodável que dispara um conjunto de prompts
-de referência contra os modelos configurados no gateway e reporta pass/fail +
-custo + latência por caso. NÃO é o Tier-2 air-gapped serving completo (Fase 4)
-— é a estrutura mínima de eval pedida agora, para que "trocar de modelo" ou
-"subir uma versão do LiteLLM" tenha um gate objetivo antes de promover.
+What it is: a small, REAL, runnable harness that fires a set of reference
+prompts against the models configured in the gateway and reports pass/fail +
+cost + latency per case. It is NOT the full air-gapped Tier-2 serving (Phase 4)
+— it is the minimum eval structure asked for now, so that "swapping a model" or
+"bumping a LiteLLM version" has an objective gate before promotion.
 
-Rodar:
-    python -m model_gateway_client.eval_suite            # todos os modelos alcançáveis
+Run:
+    python -m model_gateway_client.eval_suite            # every reachable model
     python -m model_gateway_client.eval_suite --model eco/echo-model
 
-Modelos não alcançáveis (ex.: os aliases `bedrock/*` sem AWS nesta sessão) são
-reportados como SKIPPED, não como falha — o harness distingue "modelo errou a
-asserção" de "modelo indisponível na infra atual".
+Unreachable models (e.g. the `bedrock/*` aliases with no AWS in this session)
+are reported as SKIPPED, not as failures — the harness distinguishes "the model
+got the assertion wrong" from "the model is unavailable on the current infra".
 """
 from __future__ import annotations
 

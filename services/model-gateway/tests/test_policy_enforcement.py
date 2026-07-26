@@ -1,11 +1,11 @@
-"""WSD-E2-T1: motor de política per-stage/per-tenant enforçado no call time.
+"""WSD-E2-T1: per-stage/per-tenant policy engine enforced at call time.
 
-Testes REAIS contra Postgres + LiteLLM/echo reais. Provam:
-  - resolução por especificidade/coringa e default permissivo;
-  - deny tipado (GatewayErrorResponse{policy_denied}) numa chamada a modelo não
-    permitido, com linha de audit (P8);
-  - hot-reload (mudar a linha da tabela muda a decisão sem redeploy);
-  - carregar política declarativa de um arquivo YAML.
+REAL tests against real Postgres + LiteLLM/echo. They prove:
+  - resolution by specificity/wildcard and the permissive default;
+  - a typed deny (GatewayErrorResponse{policy_denied}) on a call to a
+    disallowed model, with an audit row (P8);
+  - hot-reload (changing the table row changes the decision with no redeploy);
+  - loading declarative policy from a YAML file.
 """
 from __future__ import annotations
 
@@ -72,21 +72,22 @@ def test_no_policy_is_permissive(unique_ids):
 
 def test_specificity_beats_wildcard(unique_ids):
     t = unique_ids["tenant_id"]
-    # Coringa de STAGE dentro do MESMO tenant (nunca um tenant '*' global — isso
-    # poluiria a decisão de todos os outros testes/tenants no Postgres real).
+    # STAGE wildcard within the SAME tenant (never a global '*' tenant — that
+    # would pollute the decision for every other test/tenant on the real
+    # Postgres).
     _insert_policy(t, "*", ["fallback/model"])
     _insert_policy(t, "coder", ["strong/model"], preferred="strong/model", priority=0)
     d = resolve_policy(t, "coder")
     assert d.allowed_models == ["strong/model"]
     assert d.preferred_model == "strong/model"
-    # stage não coberto por linha específica cai no coringa de stage do tenant
+    # a stage with no specific row falls back to the tenant's stage wildcard
     d2 = resolve_policy(t, "reviewer")
     assert d2.allowed_models == ["fallback/model"]
 
 
 def test_call_to_disallowed_model_is_denied_and_audited(unique_ids):
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    # política só permite um modelo que NÃO é o echo
+    # policy only permits a model that is NOT the echo one
     _insert_policy(t, "coder", ["bedrock/anthropic.claude-3-5-sonnet"])
     key = mint_virtual_key(t, wi, Stage.coder, models=[ECHO])
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
@@ -115,14 +116,14 @@ def test_allowed_model_passes_through(unique_ids):
 
 def test_hot_reload_changes_decision_without_redeploy(unique_ids):
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    _insert_policy(t, "coder", ["other/model"])  # nega echo
+    _insert_policy(t, "coder", ["other/model"])  # denies echo
     key = mint_virtual_key(t, wi, Stage.coder, models=[ECHO])
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
         with pytest.raises(GatewayCallError):
             chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "x"}])
-        # operador atualiza a política (mesma linha, mesmo processo, sem redeploy)
-        _insert_policy(t, "coder", [ECHO])  # clear_cache dentro do helper simula TTL
+        # operator updates the policy (same row, same process, no redeploy)
+        _insert_policy(t, "coder", [ECHO])  # clear_cache inside the helper simulates the TTL
         r = chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "x"}])
         assert r.content.startswith("ECHO[")
     finally:

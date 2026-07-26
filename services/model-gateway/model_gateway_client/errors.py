@@ -1,26 +1,25 @@
-"""Exceções do model_gateway_client. P6 decline-never-truncate: qualquer
-falha (chamada admin do LiteLLM, chamada de modelo, lookup de virtual key)
-propaga como exceção clara em fronteira — nunca é engolida ou "consertada"
-silenciosamente."""
+"""model_gateway_client exceptions. P6 decline-never-truncate: any failure
+(LiteLLM admin call, model call, virtual key lookup) propagates as an explicit
+exception at the boundary — never swallowed or silently "fixed"."""
 from __future__ import annotations
 
 from typing import Any
 
 
 class ModelGatewayError(Exception):
-    """Erro genérico ao falar com o model-gateway (admin API ou chamada de modelo)."""
+    """Generic error while talking to the model-gateway (admin API or model call)."""
 
 
 class VirtualKeyNotFoundError(ModelGatewayError):
-    """`revoke_virtual_key` chamado com uma key que este processo/tabela
-    `virtual_keys` não reconhece — não adivinhamos, falhamos limpo."""
+    """`revoke_virtual_key` was called with a key this process / the
+    `virtual_keys` table does not recognize — we do not guess, we fail clean."""
 
 
 class GatewayCallError(ModelGatewayError):
-    """O gateway respondeu com erro (policy denial / budget exhausted /
+    """The gateway answered with an error (policy denial / budget exhausted /
     model unavailable — `dse_contracts.gateway_contract.GatewayErrorResponse`
-    — ou qualquer HTTP não-2xx). Contém o corpo original para quem for tratar
-    o erro decidir o que fazer (nunca decidido por um LLM — P1)."""
+    — or any non-2xx HTTP). Carries the original body so whoever handles the
+    error decides what to do (never decided by an LLM — P1)."""
 
     def __init__(self, status_code: int, body: dict[str, Any]):
         self.status_code = status_code

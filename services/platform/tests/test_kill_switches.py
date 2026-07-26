@@ -1,4 +1,4 @@
-"""WSF-E6-T2 — kill switches nos 4 escopos + quarentena. Postgres real."""
+"""WSF-E6-T2 — kill switches across the 4 scopes + quarantine. Real Postgres."""
 from __future__ import annotations
 
 import uuid
@@ -57,7 +57,7 @@ def test_global_scope_blocks_all_tenants(tenant):
         block = is_admission_blocked(tenant)
         assert block is not None and block.scope == "global"
     finally:
-        # não deixar o global ligado (afetaria outros testes/tenants)
+        # never leave the global switch on (it would affect other tests/tenants)
         set_global_kill_switch(enabled=False, reason=None, actor="system:test")
     assert get_global_kill_switch()[0] is False
 
@@ -67,7 +67,7 @@ def test_global_precedence_over_tenant(tenant):
     set_tenant_kill_switch(tenant, enabled=True, reason="t", actor="system:test")
     try:
         set_global_kill_switch(enabled=True, reason="g", actor="system:test")
-        # global é mais amplo -> aparece primeiro
+        # global is broader -> it wins
         assert is_admission_blocked(tenant).scope == "global"
     finally:
         set_global_kill_switch(enabled=False, reason=None, actor="system:test")

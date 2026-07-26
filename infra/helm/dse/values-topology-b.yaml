@@ -1,47 +1,47 @@
-# Fintex DSE — overlay da TOPOLOGIA B (WSF-E5-T3, Fase 4).
+# Fintex DSE — TOPOLOGY B overlay (WSF-E5-T3, Phase 4).
 #
-# Uso:
+# Usage:
 #   helm template dse-<tenant> infra/helm/dse \
 #       -f infra/helm/dse/values.yaml \
 #       -f infra/helm/dse/values-topology-b.yaml \
 #       -f values-<tenant>.yaml
 #
-# Topologia B = o TIER MAIS ESTRITO: TUDO roda dentro do VPC do cliente, sem
-# NENHUMA dependência externa gerenciada nem compartilhada — nem Temporal
-# Cloud, nem Postgres gerenciado (RDS/CloudSQL), nem Vault externo, nem
-# provider de modelo externo. Difere da topologia A (que PERMITE apontar para
-# serviços gerenciados/compartilhados em produção) por proibir todos eles.
+# Topology B = the STRICTEST TIER: EVERYTHING runs inside the customer's VPC,
+# with NO managed or shared external dependency at all — no Temporal Cloud, no
+# managed Postgres (RDS/CloudSQL), no external Vault, no external model
+# provider. It differs from topology A (which ALLOWS pointing at managed/shared
+# services in production) by forbidding all of them.
 #
-# Consequência de custo: cada cliente recebe uma STACK STANDALONE COMPLETA —
-# o custo operacional NÃO amortiza entre clientes (NFR-08 × N). Ver
-# infra/helm/dse/TOPOLOGY-B.md para o detalhamento.
+# Cost consequence: every customer gets a COMPLETE STANDALONE STACK — the
+# operational cost does NOT amortize across customers (NFR-08 × N). See
+# infra/helm/dse/TOPOLOGY-B.md for the breakdown.
 #
-# Este arquivo contém APENAS os overrides que diferem do values.yaml base;
-# o que não aparece aqui herda o default (que já é self-hosted).
+# This file contains ONLY the overrides that differ from the base values.yaml;
+# anything not listed here inherits the default (which is already self-hosted).
 
-# --- Postgres: self-managed in-cluster OBRIGATÓRIO (nada de RDS/CloudSQL). ---
-# Em topologia B o cliente assume PITR/backup deste StatefulSet dentro do VPC.
+# --- Postgres: self-managed in-cluster MANDATORY (no RDS/CloudSQL). ---
+# Under topology B the customer owns PITR/backup of this StatefulSet inside the VPC.
 postgres:
   enabled: true
   persistence:
     enabled: true
-    size: 50Gi            # maior: é o único Postgres, sem serviço gerenciado atrás
+    size: 50Gi            # larger: it is the only Postgres, with no managed service behind it
   resources:
     requests: { cpu: "500m", memory: "1Gi" }
     limits: { cpu: "2", memory: "4Gi" }
 
-# --- Temporal: self-hosted in-cluster (NÃO Temporal Cloud). ---
+# --- Temporal: self-hosted in-cluster (NOT Temporal Cloud). ---
 temporal:
   enabled: true
   ui:
-    enabled: true         # console de orquestração TAMBÉM dentro do VPC
+    enabled: true         # the orchestration console ALSO stays inside the VPC
   resources:
     requests: { cpu: "500m", memory: "1Gi" }
     limits: { cpu: "2", memory: "4Gi" }
 
-# --- Vault: in-cluster, NUNCA apontando para um Vault externo/compartilhado. ---
-# devMode continua PROIBIDO em produção — usar um Vault HA in-VPC (unseal
-# gerenciado pelo cliente). externallyManaged=false força o Vault do chart.
+# --- Vault: in-cluster, NEVER pointing at an external/shared Vault. ---
+# devMode remains FORBIDDEN in production — use an in-VPC HA Vault (unseal
+# managed by the customer). externallyManaged=false forces the chart's Vault.
 vault:
   externallyManaged: false
   devMode: false
@@ -49,40 +49,40 @@ vault:
 secrets:
   vaultAddr: "http://dse-vault:8200"
   externalSecrets:
-    enabled: true         # ESO in-cluster; secretStore aponta para o Vault in-VPC
+    enabled: true         # ESO in-cluster; secretStore points at the in-VPC Vault
     secretStoreRef: "dse-vault-backend"
 
-# --- Egress: allowlist SÓ interna. Nenhum host público (nem *.amazonaws.com). ---
-# O único destino de modelo é o model-server in-cluster (via model-gateway);
-# git/registry devem ser espelhos internos do cliente. Ajustar por cliente.
+# --- Egress: INTERNAL-ONLY allowlist. No public host (not even *.amazonaws.com). ---
+# The only model destination is the in-cluster model-server (through the
+# model-gateway); git/registry must be the customer's internal mirrors. Adjust per customer.
 egressProxy:
   enabled: true
   allowlist:
     - host: "git.internal"
       port: 443
-      purpose: "git remote interno (GitHub Enterprise/GitLab on-prem espelhado no VPC)"
+      purpose: "internal git remote (GitHub Enterprise/on-prem GitLab mirrored in the VPC)"
     - host: "registry.internal"
       port: 443
-      purpose: "espelho interno de pacotes (nada de pypi.org/npmjs.org público)"
-  # NOTA: nenhuma entry de api.github.com/slack.com/*.amazonaws.com — em
-  # air-gapped esses hosts são inalcançáveis por construção. Se o cliente
-  # exigir Slack, é uma exceção explícita revisada pelo red-team (§4 do
-  # RED-TEAM-PROGRAM.md), não um default.
+      purpose: "internal package mirror (no public pypi.org/npmjs.org)"
+  # NOTE: no entry for api.github.com/slack.com/*.amazonaws.com — in an
+  # air-gapped setup those hosts are unreachable by construction. If the customer
+  # requires Slack, it is an explicit exception reviewed by the red team (§4 of
+  # RED-TEAM-PROGRAM.md), not a default.
 
-# --- Model gateway: consome o model-server LOCAL, sem provider externo. ---
+# --- Model gateway: consumes the LOCAL model-server, no external provider. ---
 modelGateway:
   enabled: true
 
-# --- Model server air-gapped LIGADO (a diferença estrutural da topologia B). ---
+# --- Air-gapped model server ON (the structural difference of topology B). ---
 modelServer:
   enabled: true
   replicas: 1
-  gpu: 1                  # produção air-gapped: GPU dedicada in-VPC
+  gpu: 1                  # air-gapped production: dedicated in-VPC GPU
 
-# --- NetworkPolicy default-deny de egress OBRIGATÓRIO (defesa em profundidade). ---
+# --- Egress default-deny NetworkPolicy MANDATORY (defence in depth). ---
 networkPolicy:
   enabled: true
 
-# --- Ingress interno apenas (sem exposição pública). ---
+# --- Internal Ingress only (no public exposure). ---
 ingress:
   enabled: false

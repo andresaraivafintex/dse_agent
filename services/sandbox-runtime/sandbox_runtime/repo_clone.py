@@ -1,16 +1,17 @@
-"""S4 (Fase 5): clone do repositório-alvo REAL no workspace do sandbox.
+"""S4 (Fase 5): clone of the REAL target repository into the sandbox workspace.
 
-Decisão de arquitetura (risco #3 do plano de integração): o clone acontece no
-CONTROL PLANE (a Activity `provision_sandbox` roda no orchestrator, confiável),
-com um installation token de GitHub App minto aqui e IMEDIATAMENTE removido do
-`git config` — o workspace resultante contém o CÓDIGO real, nunca o token. O
-sandbox monta esse workspace; a invariante "nenhuma credencial no sandbox"
-(P2/ADR-12) é preservada porque o token só existe em memória do control plane
-durante o clone e nunca é escrito de forma persistente.
+Architecture decision (risk #3 of the integration plan): the clone happens in
+the CONTROL PLANE (the `provision_sandbox` Activity runs in the orchestrator,
+which is trusted), using a GitHub App installation token minted here and
+IMMEDIATELY stripped from `git config` — the resulting workspace contains the
+real CODE, never the token. The sandbox mounts that workspace; the "no
+credentials inside the sandbox" invariant (P2/ADR-12) is preserved because the
+token only lives in control-plane memory during the clone and is never
+persisted.
 
-O caminho de produção (egress-proxy injetando a credencial na borda para o
-próprio sandbox clonar) tem um gap conhecido em CONNECT-tunnel (Fase 3); este
-clone-no-control-plane é o caminho de PoC honesto e explicitado.
+The production path (egress-proxy injecting the credential at the edge so the
+sandbox itself clones) has a known gap in CONNECT-tunnel (Fase 3); this
+clone-in-the-control-plane is the honest, explicitly stated PoC path.
 """
 from __future__ import annotations
 
@@ -29,22 +30,22 @@ class RepoCloneError(RuntimeError):
 def _run(args: list[str], cwd: str | None = None) -> str:
     r = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     if r.returncode != 0:
-        # NUNCA logar o comando cru (pode conter o token na URL) — só o stderr.
-        raise RepoCloneError(f"git falhou (exit={r.returncode}): {r.stderr[-300:]}")
+        # NEVER log the raw command (it may carry the token in the URL) — stderr only.
+        raise RepoCloneError(f"git failed (exit={r.returncode}): {r.stderr[-300:]}")
     return r.stdout
 
 
 def mint_installation_token() -> str | None:
-    """Minta um installation access token curto a partir das credenciais de
-    GitHub App no ambiente do control plane (GITHUB_APP_ID/PRIVATE_KEY/
-    INSTALLATION_ID — as mesmas que o orchestrator já injeta do Vault).
-    Retorna None se não configurado (modo fixture/teste)."""
+    """Mint a short-lived installation access token from the GitHub App
+    credentials in the control-plane environment (GITHUB_APP_ID/PRIVATE_KEY/
+    INSTALLATION_ID — the same ones the orchestrator already injects from
+    Vault). Returns None when not configured (fixture/test mode)."""
     app_id = os.environ.get("GITHUB_APP_ID")
     private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY")
     installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID")
     if not (app_id and private_key and installation_id):
         return None
-    import jwt  # PyJWT — só quando realmente configurado
+    import jwt  # PyJWT — only when actually configured
     import httpx
 
     now = int(time.time())
@@ -60,7 +61,7 @@ def mint_installation_token() -> str | None:
                      "X-GitHub-Api-Version": "2022-11-28"},
         )
         resp.raise_for_status()
-        # GitHub retorna o installation token na chave "token".
+        # GitHub returns the installation token under the "token" key.
         return resp.json()["token"]
 
 
@@ -68,38 +69,40 @@ def clone_repo_into(
     *, workspace_dir: str, repo: str, base_branch: str, task_branch: str,
     bare_repo_path: str, token: str | None,
 ) -> bool:
-    """Clona `github.com/<repo>` (base_branch) no workspace, cria o branch da
-    tarefa a partir dele, re-aponta `origin` para o bare repo local (destino
-    dos checkpoints) e faz push. Retorna True se clonou o repo real; False se
-    não havia token (o caller cai para o init de workspace vazio).
+    """Clone `github.com/<repo>` (base_branch) into the workspace, create the
+    task branch from it, re-point `origin` at the local bare repo (the
+    checkpoint destination) and push. Returns True if the real repo was cloned;
+    False if there was no token (the caller falls back to the empty-workspace
+    init).
 
-    O token entra SÓ na URL de clone e é apagado logo após (set-url para o bare
-    repo) — verificável: `.git/config` do workspace não contém o token."""
+    The token appears ONLY in the clone URL and is wiped right after (set-url to
+    the bare repo) — verifiable: the workspace's `.git/config` does not contain
+    the token."""
     if not token:
         return False
     Path(workspace_dir).parent.mkdir(parents=True, exist_ok=True)
     if Path(workspace_dir).exists():
-        # provisionamento idempotente: se já clonado, não repetir
+        # idempotent provisioning: if already cloned, do not redo it
         return True
     host = _GITHUB_API.replace("https://api.", "").replace("/", "") or "github.com"
     if host == "github.com":  # api.github.com -> github.com
         host = "github.com"
     clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
     _run(["git", "clone", "--branch", base_branch, "--depth", "50", clone_url, workspace_dir])
-    # SCRUB: remove a URL tokenizada do config imediatamente, apontando origin
-    # para o bare repo local (checkpoints). O token não persiste em lugar nenhum.
+    # SCRUB: drop the tokenized URL from the config immediately, pointing origin
+    # at the local bare repo (checkpoints). The token persists nowhere.
     _run(["git", "remote", "set-url", "origin", bare_repo_path], cwd=workspace_dir)
     _run(["git", "checkout", "-b", task_branch], cwd=workspace_dir)
-    from .scoped_git import ScopedGitSession, write_task_branch_marker  # git de escopo limitado
+    from .scoped_git import ScopedGitSession, write_task_branch_marker  # scope-limited git
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=task_branch)
     session.ensure_identity()
-    write_task_branch_marker(workspace_dir, task_branch)  # F6: excluído do commit
+    write_task_branch_marker(workspace_dir, task_branch)  # F6: excluded from the commit
     session.push()
     return True
 
 
 def token_absent_from_config(workspace_dir: str) -> bool:
-    """Prova da invariante: o token não está no git config do workspace."""
+    """Proof of the invariant: the token is not in the workspace's git config."""
     cfg = Path(workspace_dir) / ".git" / "config"
     if not cfg.exists():
         return True

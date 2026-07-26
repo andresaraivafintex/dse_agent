@@ -1,10 +1,11 @@
-"""WS-A adapter Microsoft Teams — PROVISÃO (Fase 4, escopo órfão).
+"""WS-A Microsoft Teams adapter — PROVISIONED (Phase 4, orphan scope).
 
-Espelha adapter-slack/adapter-github/adapter-jira: inbound (mensagem/menção
-Teams -> ConversationEvent pelas 4 defesas de intake) e outbound (mensagem de
-status única, editada in-place, via `MutableCommentWriter` com backend Teams).
+Mirrors adapter-slack/adapter-github/adapter-jira: inbound (Teams
+message/mention -> ConversationEvent through the 4 intake defenses) and outbound
+(a single status message, edited in-place, via `MutableCommentWriter` with the
+Teams backend).
 
-NÃO ATIVADO: a decisão de ligar Teams é de negócio/roadmap (Fase 4+). O único
-bloqueio de código para ativação é a fundação (`Platform`/CHECKs de plataforma
-em packages/contracts + migrações 0001), que este workstream não edita nesta
-sessão. Ver README.md e activation.sql."""
+NOT ACTIVATED: turning Teams on is a business/roadmap decision (Phase 4+). The
+only code-level blocker for activation is the foundation (`Platform`/platform
+CHECKs in packages/contracts + migrations 0001), which this workstream does not
+edit in this session. See README.md and activation.sql."""

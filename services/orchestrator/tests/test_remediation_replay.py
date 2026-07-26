@@ -1,21 +1,21 @@
-"""Remediação — invariante de evolução de payload + determinismo de replay
-(spec canônica §5).
+"""Remediation — payload evolution invariant + replay determinism (canonical
+spec §5).
 
-Duas garantias que faltavam ao sprint 1 (achado da auditoria pós-S7):
+Two guarantees that sprint 1 lacked (finding from the post-S7 audit):
 
-1. **Auto-cura de input a partir do system of record.** Quem inicia o workflow
-   pode passar só o `work_item_id` (string) — o caminho `_coerce_input`
-   resolve o estado do Postgres via `load_work_item`. Isto é o mesmo mecanismo
-   que cura um workflow em voo cujo payload histórico não tem um campo novo:
-   o valor vem do banco, não é inventado por default/fixture.
+1. **Input self-healing from the system of record.** Whoever starts the workflow
+   may pass only the `work_item_id` (string) — the `_coerce_input` path resolves
+   the state from Postgres via `load_work_item`. This is the same mechanism that
+   heals an in-flight workflow whose historical payload lacks a new field: the
+   value comes from the database, it is not invented by a default/fixture.
 
-2. **Determinismo de replay.** A história de eventos de uma execução real é
-   re-executada com `Replayer` contra a definição ATUAL do workflow. Qualquer
-   mudança futura que quebre a determinística (reordenar comandos, remover um
-   `patched()`, mudar shape de payload sem compat) falha AQUI — que é
-   exatamente o teste que a spec §5 exige ("a replay test using a history
-   written by the previous shape"). A história capturada é salva como fixture
-   versionada para servir de "shape anterior" na próxima mudança.
+2. **Replay determinism.** The event history of a real execution is re-executed
+   with `Replayer` against the CURRENT workflow definition. Any future change
+   that breaks determinism (reordering commands, removing a `patched()`,
+   changing payload shape without compat) fails HERE — which is exactly the test
+   spec §5 requires ("a replay test using a history written by the previous
+   shape"). The captured history is saved as a versioned fixture to serve as the
+   "previous shape" on the next change.
 """
 from __future__ import annotations
 
@@ -40,9 +40,9 @@ _FIXTURE_DIR = Path(__file__).parent / "histories"
 
 @pytest.mark.asyncio
 async def test_string_start_input_self_heals_from_db(time_skipping_env):
-    """Start com `work_item_id` string (não a dataclass): o workflow resolve
-    o estado do Postgres em vez de falhar por input incompleto — o mesmo
-    caminho que cura payloads históricos sem o campo novo."""
+    """Start with the `work_item_id` string (not the dataclass): the workflow
+    resolves the state from Postgres instead of failing on an incomplete input —
+    the same path that heals historical payloads missing the new field."""
     work_item_id = new_work_item_id("selfheal")
     insert_work_item(work_item_id)
     state = FakeControlPlane()
@@ -54,7 +54,7 @@ async def test_string_start_input_self_heals_from_db(time_skipping_env):
         workflows=[WorkItemLifecycleWorkflow],
         activities=list(LOCAL_ACTIVITIES) + build_fake_activities(state),
     ):
-        # input é a STRING, não WorkItemLifecycleInput — exercita _coerce_input.
+        # the input is the STRING, not WorkItemLifecycleInput — exercises _coerce_input.
         result = await time_skipping_env.client.execute_workflow(
             WorkItemLifecycleWorkflow.run,
             work_item_id,
@@ -63,11 +63,12 @@ async def test_string_start_input_self_heals_from_db(time_skipping_env):
         )
 
     actions = read_audit_actions(work_item_id)
-    # Prova de que o ramo string resolveu do banco e o workflow REALMENTE rodou
-    # (não poderia auditar intake sem ter carregado o WorkItem do Postgres).
+    # Proof that the string branch resolved from the database and the workflow
+    # REALLY ran (it could not audit intake without loading the WorkItem from
+    # Postgres).
     assert "intake_started" in actions
-    # Sem critério de aceite/conteúdo, o gate de completude (S2) estaciona em
-    # clarificação — um estado REAL do ciclo de vida, não um erro de input.
+    # With no acceptance criteria/content, the completeness gate (S2) parks on
+    # clarification — a REAL lifecycle state, not an input error.
     assert result.status in {
         WorkItemStatus.needs_clarification.value,
         WorkItemStatus.escalated.value,
@@ -76,14 +77,14 @@ async def test_string_start_input_self_heals_from_db(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_workflow_history_replays_deterministically(time_skipping_env):
-    """Executa um workflow real, captura sua história de eventos e a re-executa
-    com o Replayer contra a definição atual. Falha se houver não-determinismo.
-    A história é salva como fixture versionada (shape atual) para a próxima
-    mudança replayá-la como 'shape anterior' (spec §5)."""
+    """Runs a real workflow, captures its event history and re-executes it with
+    the Replayer against the current definition. Fails on any non-determinism.
+    The history is saved as a versioned fixture (current shape) so the next
+    change can replay it as the 'previous shape' (spec §5)."""
     work_item_id = new_work_item_id("replay")
     insert_work_item(work_item_id)
-    # Caminho curto e determinístico: plano sem expected_files -> escalated,
-    # poucas activities, história pequena e estável.
+    # Short, deterministic path: a plan with no expected_files -> escalated, few
+    # activities, small and stable history.
     state = FakeControlPlane(plan_expected_files=[])
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
 
@@ -103,7 +104,7 @@ async def test_workflow_history_replays_deterministically(time_skipping_env):
         handle = time_skipping_env.client.get_workflow_handle(work_item_id)
         history = await handle.fetch_history()
 
-    # 1) Replay da história recém-capturada contra a definição ATUAL.
+    # 1) Replay the freshly captured history against the CURRENT definition.
     replayer = Replayer(
         workflows=[WorkItemLifecycleWorkflow],
         data_converter=pydantic_data_converter,
@@ -112,8 +113,8 @@ async def test_workflow_history_replays_deterministically(time_skipping_env):
         WorkflowHistory.from_json(work_item_id, _history_to_json(history))
     )
 
-    # 2) Persiste a fixture versionada (shape atual) — a próxima mudança de
-    # shape replaya ESTA história como o "shape anterior" exigido pela spec §5.
+    # 2) Persist the versioned fixture (current shape) — the next shape change
+    # replays THIS history as the "previous shape" required by spec §5.
     _FIXTURE_DIR.mkdir(exist_ok=True)
     fixture = _FIXTURE_DIR / "escalated_empty_plan.json"
     if not fixture.exists():
@@ -122,12 +123,12 @@ async def test_workflow_history_replays_deterministically(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_committed_history_fixture_still_replays(time_skipping_env):
-    """Se há uma fixture de história de um shape ANTERIOR versionada, ela deve
-    continuar replayável contra a definição atual — a trava de regressão real
-    da spec §5. Skip limpo enquanto a fixture ainda não foi capturada."""
+    """If a versioned history fixture of a PREVIOUS shape exists, it must stay
+    replayable against the current definition — the real regression lock from
+    spec §5. Clean skip while the fixture has not been captured yet."""
     fixture = _FIXTURE_DIR / "escalated_empty_plan.json"
     if not fixture.exists():
-        pytest.skip("fixture de história ainda não capturada (roda o teste de replay antes)")
+        pytest.skip("history fixture not captured yet (run the replay test first)")
     events = json.loads(fixture.read_text())
     replayer = Replayer(
         workflows=[WorkItemLifecycleWorkflow],
@@ -153,9 +154,9 @@ def _replay_input(work_item_id: str):
 
 
 def _history_to_json(history) -> dict:
-    """`WorkflowHistory.to_json()` não existe em todas as versões; serializa via
-    o proto JSON de cada evento, no formato que `WorkflowHistory.from_json`
-    aceita ({"events": [...]})."""
+    """`WorkflowHistory.to_json()` does not exist on every version; serialize via
+    each event's proto JSON, in the format `WorkflowHistory.from_json` accepts
+    ({"events": [...]})."""
     from google.protobuf.json_format import MessageToDict
 
     return {"events": [MessageToDict(e) for e in history.events]}

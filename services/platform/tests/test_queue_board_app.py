@@ -1,6 +1,6 @@
-"""WSF-E6-T3 — UI do queue board (FastAPI). Exercita SSO gate, projeção §9.3 na
-página, e um controle end-to-end (form POST -> OperatorConsole -> FakeSignalSender
-+ audit). Usa TestClient (httpx) — sem servidor externo."""
+"""WSF-E6-T3 — queue board UI (FastAPI). Exercises the SSO gate, the §9.3
+projection on the page, and one control end-to-end (form POST -> OperatorConsole
+-> FakeSignalSender + audit). Uses TestClient (httpx) — no external server."""
 from __future__ import annotations
 
 import uuid
@@ -82,7 +82,7 @@ def test_tenant_page_shows_all_states(client, idp):
     _login(client, idp)
     r = client.get(f"/board/tenant/{tenant}")
     assert r.status_code == 200
-    # todos os estados §9.3 renderizados como seções
+    # every §9.3 state rendered as a section
     for state in ["new", "needs_clarification", "implementing", "pr_ready", "done", "escalated"]:
         assert state in r.text
 
@@ -112,7 +112,7 @@ def test_offboarded_operator_denied_mid_session(client, idp):
     sub = f"sub-{uuid.uuid4().hex[:8]}"
     tok = idp.mint_id_token(subject=sub, audience=AUDIENCE, name="Temp")
     client.post("/login", data={"id_token": tok})
-    # descobre o principal e offboarda
+    # find the principal and offboard it
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -121,7 +121,7 @@ def test_offboarded_operator_denied_mid_session(client, idp):
     finally:
         conn.close()
     offboard(principal, reason="revoked", actor="system:test")
-    # a sessão (cookie) ainda existe, mas o re-check por request bloqueia
+    # the session (cookie) still exists, but the per-request re-check blocks it
     r = client.get("/board")
     assert r.status_code == 403
 

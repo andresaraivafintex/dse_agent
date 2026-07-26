@@ -1,14 +1,15 @@
-"""WSC-E4-T3 — esteira de promoção governada (EXIT da Fase 4).
+"""WSC-E4-T3 — governed promotion pipeline (Fase 4 EXIT).
 
-Contra Postgres real. Cobre:
-  - o caminho de saída COMPLETO: candidate → eval(pass) → approved (com
-    approver) → canary → active → rollback demonstrado (o ponteiro volta à
-    versão anterior E a skill some do Planner);
-  - o teste ADVERSARIAL P1/P3: promote_skill(to_status=active/approved,
-    approver=None|system:*) RECUSA por construção (levanta ApproverRequired);
-  - gates estruturais: candidate→approved sem eval passante bloqueia
-    (EvalGateNotPassed); transição fora da máquina levanta IllegalTransition;
-  - o índice único parcial garante no máximo UMA versão servida por skill.
+Against real Postgres. Covers:
+  - the COMPLETE exit path: candidate → eval(pass) → approved (with an
+    approver) → canary → active → rollback demonstrated (the pointer goes back
+    to the previous version AND the skill disappears from the Planner);
+  - the ADVERSARIAL P1/P3 test: promote_skill(to_status=active/approved,
+    approver=None|system:*) REFUSES by construction (raises ApproverRequired);
+  - structural gates: candidate→approved without a passing eval is blocked
+    (EvalGateNotPassed); a transition outside the machine raises
+    IllegalTransition;
+  - the partial unique index guarantees at most ONE served version per skill.
 """
 from __future__ import annotations
 
@@ -37,11 +38,12 @@ def _served(pg_conn, tenant):
 
 
 def _pass_eval(pg_conn, tenant, skill_key, version):
-    """Registra um eval PASSANTE (injetado, determinístico) para destravar o
-    gate candidate→approved."""
+    """Records a PASSING eval (injected, deterministic) to unlock the
+    candidate→approved gate."""
     cases = [sp.EvalCase(label="positive", pattern_key=f"pat-{skill_key}")]
-    # o candidate materializado tem pattern_key = skill_key sem prefixo 'auto-';
-    # aqui o candidate é criado direto no teste com pattern_key conhecido.
+    # the materialized candidate has pattern_key = skill_key without the 'auto-'
+    # prefix; here the candidate is created directly in the test with a known
+    # pattern_key.
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT pattern_key FROM skill_registry WHERE tenant_id=%s AND skill_key=%s AND version=%s",
@@ -69,26 +71,26 @@ def _make_candidate(pg_conn, tenant, skill_key, version, body):
 
 
 # ---------------------------------------------------------------------------
-# EXIT test — fluxo completo + rollback restaura a versão anterior.
+# EXIT test — full flow + rollback restores the previous version.
 # ---------------------------------------------------------------------------
 def test_full_pipeline_then_rollback_restores_previous(pg_conn, tenant):
     key = "auto-payments-guard"
 
-    # --- v1 sobe a esteira inteira até active ---
+    # --- v1 climbs the whole pipeline up to active ---
     _make_candidate(pg_conn, tenant, key, 1, body="guidance v1")
     _pass_eval(pg_conn, tenant, key, 1)
     sp.promote(tenant, key, 1, "approved", approver=HUMAN, conn=pg_conn)
-    sp.promote(tenant, key, 1, "canary", conn=pg_conn)   # canary = shadow, não servido
+    sp.promote(tenant, key, 1, "canary", conn=pg_conn)   # canary = shadow, not served
     served_canary = _served(pg_conn, tenant)
-    assert key not in served_canary, "canary NÃO é servido ao Planner de produção"
+    assert key not in served_canary, "a canary is NOT served to the production Planner"
     sp.promote(tenant, key, 1, "active", approver=HUMAN, conn=pg_conn)
 
     served = _served(pg_conn, tenant)
     assert key in served and served[key].body == "guidance v1"
 
-    # --- v2 sobe e SUPLANTA a v1 (rebaixa a servida anterior ao ENTRAR no
-    # conjunto servido, i.e. no passo 'approved' — o índice único parcial
-    # nunca deixa duas versões servidas coexistirem). ---
+    # --- v2 climbs and SUPERSEDES v1 (it demotes the previously served version
+    # upon ENTERING the served set, i.e. at the 'approved' step — the partial
+    # unique index never lets two served versions coexist). ---
     _make_candidate(pg_conn, tenant, key, 2, body="guidance v2")
     _pass_eval(pg_conn, tenant, key, 2)
     out = sp.promote(tenant, key, 2, "approved", approver=HUMAN, conn=pg_conn)
@@ -97,8 +99,8 @@ def test_full_pipeline_then_rollback_restores_previous(pg_conn, tenant):
     sp.promote(tenant, key, 2, "active", approver=HUMAN, conn=pg_conn)
 
     served = _served(pg_conn, tenant)
-    assert key in served and served[key].body == "guidance v2", "Planner agora vê a v2"
-    # invariante estrutural: só UMA versão servida da skill.
+    assert key in served and served[key].body == "guidance v2", "the Planner now sees v2"
+    # structural invariant: only ONE served version of the skill.
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM skill_registry "
@@ -107,12 +109,12 @@ def test_full_pipeline_then_rollback_restores_previous(pg_conn, tenant):
         )
         assert cur.fetchone()[0] == 1
 
-    # --- ROLLBACK: v2 active → rolled_back; o ponteiro volta para a v1 ---
-    roll = sp.promote(tenant, key, 2, "rolled_back", reason="regressão em prod", conn=pg_conn)
+    # --- ROLLBACK: v2 active → rolled_back; the pointer goes back to v1 ---
+    roll = sp.promote(tenant, key, 2, "rolled_back", reason="regression in prod", conn=pg_conn)
     assert roll.restored_version == 1
 
     served = _served(pg_conn, tenant)
-    assert key in served and served[key].body == "guidance v1", "rollback devolveu o ponteiro à v1"
+    assert key in served and served[key].body == "guidance v1", "the rollback moved the pointer back to v1"
 
     with pg_conn.cursor() as cur:
         cur.execute(
@@ -125,8 +127,8 @@ def test_full_pipeline_then_rollback_restores_previous(pg_conn, tenant):
 
 
 def test_rollback_without_previous_removes_from_planner(pg_conn, tenant):
-    """Rollback de uma skill sem versão anterior: ela simplesmente SOME do
-    Planner (failure mode 13, caso base)."""
+    """Rollback of a skill with no previous version: it simply DISAPPEARS from
+    the Planner (failure mode 13, base case)."""
     key = "auto-solo"
     _make_candidate(pg_conn, tenant, key, 1, body="only version")
     _pass_eval(pg_conn, tenant, key, 1)
@@ -137,11 +139,11 @@ def test_rollback_without_previous_removes_from_planner(pg_conn, tenant):
 
     roll = sp.promote(tenant, key, 1, "rolled_back", conn=pg_conn)
     assert roll.restored_version is None
-    assert key not in _served(pg_conn, tenant), "após rollback a skill some do Planner"
+    assert key not in _served(pg_conn, tenant), "after a rollback the skill disappears from the Planner"
 
 
 # ---------------------------------------------------------------------------
-# ADVERSARIAL — P1/P3 não-negociável: sem aprovador humano, é impossível.
+# ADVERSARIAL — P1/P3 non-negotiable: without a human approver, it is impossible.
 # ---------------------------------------------------------------------------
 def test_promote_to_active_without_approver_refuses(pg_conn, tenant):
     key = "auto-adv"
@@ -152,7 +154,7 @@ def test_promote_to_active_without_approver_refuses(pg_conn, tenant):
 
     with pytest.raises(sp.ApproverRequired):
         sp.promote(tenant, key, 1, "active", approver=None, conn=pg_conn)
-    # e a skill NÃO foi ativada (o estado não mudou).
+    # and the skill was NOT activated (the state did not change).
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT status FROM skill_registry WHERE tenant_id=%s AND skill_key=%s AND version=1",
@@ -170,7 +172,7 @@ def test_promote_to_approved_without_approver_refuses(pg_conn, tenant):
 
 
 def test_system_actor_cannot_approve(pg_conn, tenant):
-    """P3: nenhuma skill se auto-promove — um ator system:* não é aprovador."""
+    """P3: no skill promotes itself — a system:* actor is not an approver."""
     key = "auto-adv3"
     _make_candidate(pg_conn, tenant, key, 1, body="x")
     _pass_eval(pg_conn, tenant, key, 1)
@@ -181,7 +183,7 @@ def test_system_actor_cannot_approve(pg_conn, tenant):
 def test_candidate_to_approved_blocked_without_passing_eval(pg_conn, tenant):
     key = "auto-noeval"
     _make_candidate(pg_conn, tenant, key, 1, body="x")
-    # sem eval registrado → gate bloqueia por construção, mesmo com aprovador.
+    # no eval recorded → the gate blocks by construction, even with an approver.
     with pytest.raises(sp.EvalGateNotPassed):
         sp.promote(tenant, key, 1, "approved", approver=HUMAN, conn=pg_conn)
 
@@ -190,6 +192,6 @@ def test_illegal_transition_refused(pg_conn, tenant):
     key = "auto-illegal"
     _make_candidate(pg_conn, tenant, key, 1, body="x")
     _pass_eval(pg_conn, tenant, key, 1)
-    # candidate → active direto não existe na máquina de estados.
+    # candidate → active directly does not exist in the state machine.
     with pytest.raises(sp.IllegalTransition):
         sp.promote(tenant, key, 1, "active", approver=HUMAN, conn=pg_conn)

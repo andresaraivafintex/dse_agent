@@ -1,21 +1,22 @@
-"""WSE-E5-T13 — visual diff self-hosted (Pillow pixel-diff com threshold).
-Implementa a Activity `run_visual_diff` do contrato (`ACTIVITY_RUN_VISUAL_DIFF`,
-input `RunVisualDiffInput`, retorno `VisualDiffResult`).
+"""WSE-E5-T13 — self-hosted visual diff (Pillow pixel-diff with threshold).
+Implements the contract's `run_visual_diff` Activity (`ACTIVITY_RUN_VISUAL_DIFF`,
+input `RunVisualDiffInput`, returns `VisualDiffResult`).
 
-Decisão (P5 cheapest-first / P7 boring-first, documentada): comparação de
-pixels com Pillow, 100% local — NENHUM SaaS de visual review. Uma ferramenta
-dedicada (Argos/Percy/Chromatic ou o próprio `toHaveScreenshot` do Playwright
-com baseline git) é o UPGRADE PATH quando a heurística de pixel puro começar a
-dar falso-positivo com anti-aliasing/fonts — a fronteira é só esta função.
+Decision (P5 cheapest-first / P7 boring-first, documented): pixel comparison with
+Pillow, 100% local — NO visual-review SaaS. A dedicated tool (Argos/Percy/
+Chromatic, or Playwright's own `toHaveScreenshot` with a git baseline) is the
+UPGRADE PATH once the pure-pixel heuristic starts producing false positives with
+anti-aliasing/fonts — the boundary is just this function.
 
-Baseline vive no ARTIFACT STORE (Garage, WSE-E5-T12), kind `visual_baseline`:
-  - primeiro run (base_screenshot_key=None) => publica o candidato como
-    baseline e retorna `baseline_created=True` (passed=True — não há com o
-    que comparar; comparação começa no run seguinte).
-  - runs seguintes => baixa a baseline do Garage, compara pixel a pixel
-    (tolerância por canal para ruído de encoding), gera uma imagem de diff
-    (pixels mudados em vermelho sobre o candidato esmaecido) e a publica como
-    kind `visual_diff` quando o threshold é excedido.
+The baseline lives in the ARTIFACT STORE (Garage, WSE-E5-T12), kind
+`visual_baseline`:
+  - first run (base_screenshot_key=None) => publishes the candidate as the
+    baseline and returns `baseline_created=True` (passed=True — there is nothing
+    to compare against; comparison starts on the next run).
+  - subsequent runs => downloads the baseline from Garage, compares pixel by
+    pixel (per-channel tolerance for encoding noise), generates a diff image
+    (changed pixels in red over the faded candidate) and publishes it as kind
+    `visual_diff` when the threshold is exceeded.
 """
 from __future__ import annotations
 
@@ -35,16 +36,16 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("dse_validation.evidence.visual_diff")
 
-# tolerância por canal (0-255) — absorve ruído de compressão sem mascarar
-# mudança visual real; determinístico e documentado.
+# per-channel tolerance (0-255) — absorbs compression noise without masking a
+# real visual change; deterministic and documented.
 CHANNEL_TOLERANCE = 8
-BASELINE_TTL_SECONDS = 30 * 24 * 3600  # baseline dura mais que evidência efêmera
+BASELINE_TTL_SECONDS = 30 * 24 * 3600  # the baseline outlives ephemeral evidence
 
 
 def compare_images(baseline_path: str | Path, candidate_path: str | Path,
                    diff_out_path: str | Path) -> float:
-    """Retorna o % de pixels mudados (0-100) e escreve a imagem de diff.
-    Tamanhos diferentes => 100% (mudança estrutural, nunca 'adivinha')."""
+    """Returns the % of changed pixels (0-100) and writes the diff image.
+    Different sizes => 100% (structural change, never a 'guess')."""
     from PIL import Image, ImageChops
 
     base = Image.open(baseline_path).convert("RGB")
@@ -54,14 +55,14 @@ def compare_images(baseline_path: str | Path, candidate_path: str | Path,
         return 100.0
 
     diff = ImageChops.difference(base, cand)
-    # máscara: pixel mudado se QUALQUER canal excede a tolerância
+    # mask: a pixel is changed if ANY channel exceeds the tolerance
     gray = diff.convert("L")
     mask = gray.point(lambda v: 255 if v > CHANNEL_TOLERANCE else 0)
-    changed = mask.histogram()[255]  # nº de pixels marcados (mask é L 0/255)
+    changed = mask.histogram()[255]  # number of marked pixels (mask is L 0/255)
     total = mask.size[0] * mask.size[1]
     changed_pct = (changed / total) * 100.0 if total else 0.0
 
-    # diff visual: candidato esmaecido + pixels mudados em vermelho
+    # visual diff: faded candidate + changed pixels in red
     faded = Image.blend(cand, Image.new("RGB", cand.size, (255, 255, 255)), 0.6)
     red = Image.new("RGB", cand.size, (220, 20, 20))
     overlay = Image.composite(red, faded, mask)
@@ -77,7 +78,7 @@ def run_visual_diff_core(
 ) -> VisualDiffResult:
     cfg = cfg or GarageConfig()
 
-    # primeiro run: cria a baseline no artifact store e retorna.
+    # first run: creates the baseline in the artifact store and returns.
     if inp.base_screenshot_key is None:
         ref = publish_artifact_core(
             PublishArtifactInput(
@@ -101,7 +102,7 @@ def run_visual_diff_core(
             diff_artifact_key=ref.store_key, baseline_created=True,
         )
 
-    # runs seguintes: baixa a baseline do Garage e compara de verdade.
+    # subsequent runs: downloads the baseline from Garage and actually compares.
     bucket = bucket_for_tenant(inp.tenant_id, cfg)
     client = s3_client(cfg)
     with tempfile.TemporaryDirectory(prefix="dse-visual-diff-") as tmp:

@@ -1,8 +1,8 @@
-"""WSB-E3-T4 — loop de review humano: `changes_requested` volta ao Coder no
-MESMO branch/PR (nao recria sandbox nem PR), re-valida L1, re-finaliza o
-MESMO PR; `approved` so vira Done apos um segundo sinal `merged_by_human`
-explicito. Nenhum path deste arquivo (ou do workflow) chama merge — isso e
-verificado estaticamente em `test_no_automatic_merge_path`.
+"""WSB-E3-T4 — human review loop: `changes_requested` goes back to the Coder on
+the SAME branch/PR (it does not recreate the sandbox or the PR), re-validates
+L1, re-finalizes the SAME PR; `approved` only becomes Done after a second
+explicit `merged_by_human` signal. No path in this file (or in the workflow)
+calls merge — that is checked statically in `test_no_automatic_merge_path`.
 """
 from __future__ import annotations
 
@@ -46,20 +46,20 @@ async def test_changes_requested_cycles_back_to_coder_same_pr(time_skipping_env)
         first_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
 
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
-        await asyncio.sleep(0.2)  # deixa o ciclo de fix rodar
+        await asyncio.sleep(0.2)  # let the fix cycle run
         await wait_for_status(handle, {"review_ready"})
 
         second_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
-        assert second_pr_number == first_pr_number  # MESMO PR, nunca recria
+        assert second_pr_number == first_pr_number  # SAME PR, never recreated
 
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    assert state.provision_calls == 1  # sandbox nunca reprovisionado
-    assert state.finalize_calls == 2  # 1 inicial + 1 re-finalize apos changes_requested
-    assert state.coder_turn_calls == 2  # 1 inicial + 1 no ciclo de fix
+    assert state.provision_calls == 1  # sandbox never reprovisioned
+    assert state.finalize_calls == 2  # 1 initial + 1 re-finalize after changes_requested
+    assert state.coder_turn_calls == 2  # 1 initial + 1 in the fix cycle
 
     actions = read_audit_actions(work_item_id)
     assert "changes_requested" in actions
@@ -95,14 +95,14 @@ async def test_ci_red_triggers_fix_before_waking_human(time_skipping_env):
     assert result.status == WorkItemStatus.done.value
     actions = read_audit_actions(work_item_id)
     assert "ci_red_retrying" in actions
-    assert state.coder_turn_calls == 2  # 1 inicial + 1 apos CI red
+    assert state.coder_turn_calls == 2  # 1 initial + 1 after CI red
 
 
 @pytest.mark.asyncio
 async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
-    """Prova que `approved` sozinho NAO basta — o workflow so termina apos
-    `merged_by_human` (P3: nenhuma sessao de agente mergeia o proprio
-    trabalho; so um humano, via sinal explicito, aciona o Done)."""
+    """Proves that `approved` alone is NOT enough — the workflow only finishes
+    after `merged_by_human` (P3: no agent session merges its own work; only a
+    human, via an explicit signal, triggers Done)."""
     work_item_id = new_work_item_id("waitmerge")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -122,12 +122,12 @@ async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
         await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
 
-        # Confirma (via query/audit, NAO via handle.result() com timeout —
-        # o ambiente de time-skipping avancaria o relogio virtual ate o
-        # default de 10 anos assim que ficasse ocioso esperando so um sinal,
-        # o que faria `result()` "completar" prematuramente por timeout de
-        # execucao em vez de provar o que queremos) que o workflow esta
-        # parado em `approved_awaiting_merge`, sem NENHUM merge automatico.
+        # Confirm (via query/audit, NOT via handle.result() with a timeout —
+        # the time-skipping environment would advance the virtual clock to the
+        # 10-year default as soon as it went idle waiting on just a signal,
+        # which would make `result()` "complete" prematurely on an execution
+        # timeout instead of proving what we want) that the workflow is parked
+        # on `approved_awaiting_merge`, with NO automatic merge.
         actions_before: list[str] = []
         for _ in range(100):
             actions_before = read_audit_actions(work_item_id)
@@ -147,10 +147,10 @@ async def test_approved_waits_for_explicit_merge_signal(time_skipping_env):
 
 
 def test_no_automatic_merge_path_in_source():
-    """Auditavel estaticamente (grep): nenhuma chamada a API de merge do
-    GitHub em lugar nenhum do codigo do workflow/worker do WS-B."""
-    # Padroes de CHAMADA de verdade (nao prosa em comentario/docstring):
-    # `.merge(`, `merge_pull_request(`, ou uma URL de API `/merge` entre aspas.
+    """Statically auditable (grep): no call to the GitHub merge API anywhere in
+    the WS-B workflow/worker code."""
+    # Real CALL patterns (not prose in a comment/docstring): `.merge(`,
+    # `merge_pull_request(`, or a quoted `/merge` API URL.
     src_dir = Path(__file__).resolve().parent.parent / "src" / "dse_orchestrator"
     pattern = re.compile(r"\.merge\s*\(|merge_pull_request\s*\(|[\"']\S*/merge[\"']")
     offenders = []
@@ -158,9 +158,9 @@ def test_no_automatic_merge_path_in_source():
         for lineno, line in enumerate(path.read_text().splitlines(), start=1):
             stripped = line.strip()
             if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'''"):
-                continue  # comentarios/docstrings podem falar SOBRE nao mergear
+                continue  # comments/docstrings may talk ABOUT not merging
             if pattern.search(line):
                 offenders.append(f"{path}:{lineno}: {stripped}")
-    assert not offenders, f"encontrada possivel chamada de merge automatico: {offenders}"
+    assert not offenders, f"found a possible automatic merge call: {offenders}"
 
 

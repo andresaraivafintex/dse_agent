@@ -1,11 +1,10 @@
-"""Fixtures compartilhadas dos testes do WS-D.
+"""Shared fixtures for the WS-D tests.
 
-Estes testes rodam contra a infra REAL (Postgres em localhost:5432, Vault
-dev em localhost:8200, e o LiteLLM proxy + modelo eco subidos via
-`docker-compose.wsd.yml`, ver README "Como rodar os testes"). Nada aqui é
-mockado — a garantia que estamos provando (virtual key emitida de verdade,
-revogada de verdade, linha de audit gravada de verdade) é o próprio ponto do
-sistema (P8).
+These tests run against REAL infra (Postgres on localhost:5432, dev Vault on
+localhost:8200, and the LiteLLM proxy + echo model brought up via
+`docker-compose.wsd.yml`, see README "Como rodar os testes"). Nothing here is
+mocked — the guarantee we are proving (a virtual key actually issued, actually
+revoked, an audit row actually written) is the whole point of the system (P8).
 """
 from __future__ import annotations
 
@@ -14,9 +13,9 @@ import uuid
 
 import pytest
 
-# Defaults que casam com docker-compose.wsd.yml / docker-compose.yml da
-# fundação — só aplicados se a env var ainda não estiver setada, então
-# quem quiser rodar contra outra infra (CI, outra máquina) pode sobrescrever.
+# Defaults matching the foundation's docker-compose.wsd.yml /
+# docker-compose.yml — only applied when the env var is not already set, so
+# anyone running against other infra (CI, another machine) can override them.
 os.environ.setdefault("DSE_MODEL_GATEWAY_BASE_URL", "http://localhost:4000")
 os.environ.setdefault("DSE_LITELLM_MASTER_KEY", "sk-dse-local-dev-master-key")
 os.environ.setdefault("VAULT_ADDR", "http://localhost:8200")
@@ -31,9 +30,9 @@ ECHO_MODEL = "eco/echo-model"
 
 @pytest.fixture
 def unique_ids():
-    """IDs únicos por teste — os testes rodam contra Postgres/LiteLLM reais
-    e compartilhados, então nunca reusar tenant/work_item fixos evita que um
-    teste veja resíduo de outro."""
+    """Unique IDs per test — the tests run against real, shared
+    Postgres/LiteLLM, so never reusing fixed tenant/work_item values keeps one
+    test from seeing another's leftovers."""
     suffix = uuid.uuid4().hex[:10]
     return {
         "tenant_id": f"tenant-test-{suffix}",
@@ -43,9 +42,9 @@ def unique_ids():
 
 @pytest.fixture(autouse=True)
 def _clear_span_recorder():
-    """Cada teste começa com o recorder de spans em memória limpo (evita
-    contaminação entre testes de telemetry/cost_export, que leem o buffer
-    inteiro do processo)."""
+    """Every test starts with a clean in-memory span recorder (avoids
+    cross-contamination between telemetry/cost_export tests, which read the
+    process's whole buffer)."""
     from model_gateway_client import telemetry
 
     telemetry.clear_recorded_spans()

@@ -1,36 +1,37 @@
-"""Fixture `@demo` determinístico (WSC-E3-T4b-c, adendo 02 / ADR-27).
+"""Deterministic `@demo` fixture (WSC-E3-T4b-c, adendo 02 / ADR-27).
 
-Template do teste de demonstração Playwright que o Tester autora na convenção
-`demos/<work_item_id>/` (ver `toolsets.demo_dir_for`). É um fixture no mesmo
-espírito do `FakeSubstrate`: o AUTOR do teste é roteirizado (nenhum LLM), mas
-tudo que ele produz é real — página HTML estática servida localmente (via
-`webServer` do Playwright: `python3 -m http.server`), spec `@demo` real,
-execução `npx playwright test --grep @demo` real dentro do container da
-imagem `dse-sandbox-base:wsc3`, vídeo real gravado pelo chromium headless.
+Template of the Playwright demonstration test the Tester authors under the
+`demos/<work_item_id>/` convention (see `toolsets.demo_dir_for`). It is a
+fixture in the same spirit as `FakeSubstrate`: the test AUTHOR is scripted (no
+LLM), but everything it produces is real — a static HTML page served locally
+(via Playwright's `webServer`: `python3 -m http.server`), a real `@demo` spec,
+a real `npx playwright test --grep @demo` run inside a container of the
+`dse-sandbox-base:wsc3` image, and a real video recorded by headless chromium.
 
-Quem executa é o pipeline de evidência do WS-E (`RunDemoEvidenceInput` do
-contrato da fundação — `demo_dir` default deriva de `demos/<work_item_id>/`):
+The executor is WS-E's evidence pipeline (`RunDemoEvidenceInput` from the
+foundation contract — the `demo_dir` default derives from
+`demos/<work_item_id>/`):
 
     cd <workspace>/demos/<work_item_id> && npx playwright test --grep @demo
 
-Notas de formato/ambiente (combinadas com o WS-E):
-  - O vídeo gravado pelo Playwright é **.webm** (formato nativo do gravador
-    do chromium). O plano fala "mp4"; transcodificação webm→mp4 (se exigida
-    pela superfície de exibição) é pós-processamento do pipeline do WS-E —
-    o Playwright não produz mp4 nativamente. Documentado, não escondido.
-  - `chromiumSandbox: false`: o sandbox de user-namespaces do chromium não
-    funciona sob `--cap-drop ALL`; a contenção é a do container do
-    docker_driver (rootless, read-only, sem rede), não a do browser.
-  - `DSE_DEMO_BASE_URL` (opcional): quando o WS-B/WS-E têm um preview real
-    (`TriggerPreview` → `PreviewRef.url`), exportam esta env e o spec navega
-    para lá em vez da página estática local — mesmo spec, mesma tag.
+Format/environment notes (agreed with WS-E):
+  - The video Playwright records is **.webm** (chromium's native recorder
+    format). The plan says "mp4"; webm→mp4 transcoding (if the display surface
+    requires it) is post-processing in WS-E's pipeline — Playwright does not
+    produce mp4 natively. Documented, not hidden.
+  - `chromiumSandbox: false`: chromium's user-namespace sandbox does not work
+    under `--cap-drop ALL`; the containment is the docker_driver container's
+    (rootless, read-only, no network), not the browser's.
+  - `DSE_DEMO_BASE_URL` (optional): when WS-B/WS-E have a real preview
+    (`TriggerPreview` → `PreviewRef.url`), they export this env and the spec
+    navigates there instead of the local static page — same spec, same tag.
 """
 from __future__ import annotations
 
 from .toolsets import demo_dir_for
 
 # ---------------------------------------------------------------------------
-# Conteúdo do template — arquivos que o Tester escreve em demos/<work_item_id>/
+# Template content — files the Tester writes into demos/<work_item_id>/
 # ---------------------------------------------------------------------------
 
 _INDEX_HTML = """<!doctype html>
@@ -47,13 +48,13 @@ _INDEX_HTML = """<!doctype html>
   </head>
   <body>
     <h1 id="title">DSE demo fixture</h1>
-    <p>Página estática determinística usada pelo teste <code>@demo</code>.</p>
-    <button id="increment">incrementar</button>
+    <p>Deterministic static page used by the <code>@demo</code> test.</p>
+    <button id="increment">increment</button>
     <output id="count">0</output>
     <script>
-      // Cada clique muda contador E fundo — frames visivelmente distintos no
-      // vídeo de evidência (um vídeo de página imóvel comprime a ~nada e não
-      // demonstra nada a um humano).
+      // Every click changes the counter AND the background — visibly distinct
+      // frames in the evidence video (a video of a static page compresses to
+      // ~nothing and demonstrates nothing to a human).
       const hues = ['#ffffff', '#ffe9c7', '#c7f0ff', '#d8ffc7', '#ffd0e0'];
       document.getElementById('increment').addEventListener('click', () => {
         const el = document.getElementById('count');
@@ -66,9 +67,9 @@ _INDEX_HTML = """<!doctype html>
 </html>
 """
 
-_PLAYWRIGHT_CONFIG_JS = """// Config do fixture @demo (WSC-E3-T4b). Executado com:
+_PLAYWRIGHT_CONFIG_JS = """// Config of the @demo fixture (WSC-E3-T4b). Run with:
 //   npx playwright test --grep @demo
-// dentro do container da imagem dse-sandbox-base:wsc3 (toolchain pinada lá).
+// inside the dse-sandbox-base:wsc3 image container (toolchain pinned there).
 const { defineConfig } = require('@playwright/test');
 
 const baseURL = process.env.DSE_DEMO_BASE_URL || 'http://127.0.0.1:8931';
@@ -81,18 +82,18 @@ module.exports = defineConfig({
   reporter: [['list']],
   use: {
     baseURL,
-    video: 'on', // evidência: vídeo .webm real de cada teste
-    trace: 'on', // trace zip — vira playwright_trace no artifact store
+    video: 'on', // evidence: a real .webm video of every test
+    trace: 'on', // trace zip — becomes playwright_trace in the artifact store
     headless: true,
-    // chromiumSandbox: ver docstring do módulo; --disable-dev-shm-usage
-    // porque o /dev/shm default do container (64MB) é pequeno demais para o
-    // chromium — usa /tmp (tmpfs do sandbox) em vez disso.
+    // chromiumSandbox: see the module docstring; --disable-dev-shm-usage
+    // because the container's default /dev/shm (64MB) is far too small for
+    // chromium — it uses /tmp (the sandbox tmpfs) instead.
     launchOptions: { chromiumSandbox: false, args: ['--disable-dev-shm-usage'] },
   },
-  // Página estática SERVIDA LOCALMENTE (não file://): python3 -m http.server
-  // existe na imagem base (python:3.11-slim). Quando DSE_DEMO_BASE_URL
-  // aponta para um preview real, o webServer local não é usado pelo spec,
-  // mas continua inofensivo (sobe e ninguém navega para ele).
+  // Static page SERVED LOCALLY (not file://): python3 -m http.server exists
+  // in the base image (python:3.11-slim). When DSE_DEMO_BASE_URL points at a
+  // real preview, the local webServer is not used by the spec, but it stays
+  // harmless (it starts and nobody navigates to it).
   webServer: {
     command: 'python3 -m http.server 8931 --bind 127.0.0.1 --directory .',
     url: 'http://127.0.0.1:8931/index.html',
@@ -102,16 +103,16 @@ module.exports = defineConfig({
 });
 """
 
-_DEMO_SPEC_JS = """// Spec @demo do fixture determinístico (WSC-E3-T4b). A tag @demo no título
-// é o contrato de descoberta: o pipeline de evidência roda --grep @demo.
+_DEMO_SPEC_JS = """// @demo spec of the deterministic fixture (WSC-E3-T4b). The @demo tag in the
+// title is the discovery contract: the evidence pipeline runs --grep @demo.
 const { test, expect } = require('@playwright/test');
 
-test('fixture da tarefa renderiza e responde a interação @demo', async ({ page }) => {
+test('task fixture renders and responds to interaction @demo', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('#title')).toHaveText('DSE demo fixture');
-  // Pausas curtas entre interações: o vídeo de evidência precisa ser
-  // assistível por um humano (frames distintos, ritmo visível), não um
-  // borrão de milissegundos.
+  // Short pauses between interactions: the evidence video has to be
+  // watchable by a human (distinct frames, visible pace), not a
+  // millisecond-long blur.
   for (const expected of ['1', '2', '3']) {
     await page.waitForTimeout(400);
     await page.click('#increment');
@@ -123,10 +124,10 @@ test('fixture da tarefa renderiza e responde a interação @demo', async ({ page
 
 
 def demo_fixture_files(work_item_id: str) -> dict[str, str]:
-    """Mapa path relativo (na convenção `demos/<work_item_id>/`) → conteúdo.
-    É isto que o Tester roteirizado escreve via `write_file` (passando pelo
-    `TesterToolset.check` — o teste de conformidade prova que o toolset
-    permite exatamente estes paths e nada fora deles)."""
+    """Map of relative path (under the `demos/<work_item_id>/` convention) →
+    content. This is what the scripted Tester writes via `write_file` (going
+    through `TesterToolset.check` — the conformance test proves the toolset
+    allows exactly these paths and nothing outside them)."""
     d = demo_dir_for(work_item_id)
     return {
         f"{d}index.html": _INDEX_HTML,
@@ -136,9 +137,9 @@ def demo_fixture_files(work_item_id: str) -> dict[str, str]:
 
 
 def demo_authoring_script(work_item_id: str) -> list[dict[str, str]]:
-    """Script de autoria (formato do `authoring_script` de
-    `_run_tester_turn_impl`) que materializa o fixture — o autor roteirizado
-    do teste `@demo`, análogo ao FakeSubstrate do Coder."""
+    """Authoring script (in the `authoring_script` format of
+    `_run_tester_turn_impl`) that materializes the fixture — the scripted author
+    of the `@demo` test, analogous to the Coder's FakeSubstrate."""
     return [
         {"tool": "write_file", "path": path, "content": content}
         for path, content in demo_fixture_files(work_item_id).items()

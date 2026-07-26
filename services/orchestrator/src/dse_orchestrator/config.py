@@ -1,10 +1,10 @@
-"""Configuracao do orquestrador (WS-B) via env var — nunca hardcoded, para que
-testes possam acelerar timers/caps sem editar codigo (WSB-E3-T1).
+"""Orchestrator (WS-B) configuration via env var — never hardcoded, so that
+tests can speed up timers/caps without editing code (WSB-E3-T1).
 
-Todos os valores tem um default de producao razoavel; os testes de
-`temporalio.testing` (time-skipping) passam valores curtos via
-`WorkItemLifecycleInput`/dataclasses de config explicitos em vez de mutar
-variaveis de ambiente no meio do processo (mais seguro para paralelismo).
+Every value has a sane production default; the `temporalio.testing`
+(time-skipping) tests pass short values via `WorkItemLifecycleInput`/explicit
+config dataclasses instead of mutating environment variables mid-process
+(safer under parallelism).
 """
 from __future__ import annotations
 
@@ -35,41 +35,42 @@ def _csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class OrchestratorConfig:
-    """Caps e timers configuraveis (Fase 1: sem fairness/budget — isso e WSB-E4/Fase 2)."""
+    """Configurable caps and timers (Phase 1: no fairness/budget — that is WSB-E4/Phase 2)."""
 
-    # WSB-E3-T1 — gate de clarificacao
+    # WSB-E3-T1 — clarification gate
     clarification_round_cap: int = 3
     clarification_reminder_hours: float = 24.0
     clarification_escalation_days: float = 3.0
 
-    # WSB-E2-T3 — loop de fix apos L1 falhar
+    # WSB-E2-T3 — fix loop after L1 fails
     coder_retry_cap: int = 3
 
     # WSB-E5-T1 — checkpoint/rebuild
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
 
-    # Fase 2 — WSB-E3-T2/T3 (gate de aprovacao de plano) + WSB-E2 (L2).
-    # POLITICA de quais classes de risco exigem aprovacao humana (P1: vive
-    # fora do modelo, aqui na config do operador). CSV em
+    # Phase 2 — WSB-E3-T2/T3 (plan approval gate) + WSB-E2 (L2).
+    # POLICY for which risk classes require human approval (P1: lives outside
+    # the model, here in the operator's config). CSV in
     # DSE_REQUIRE_APPROVAL_RISK_CLASSES (default "high").
     require_approval_risk_classes: tuple[str, ...] = ("high",)
-    plan_round_cap: int = 3   # re_plan capado (rejection path)
-    l2_retry_cap: int = 2     # objecoes do L2 -> Coder, capadas
+    plan_round_cap: int = 3   # capped re_plan (rejection path)
+    l2_retry_cap: int = 2     # L2 objections -> Coder, capped
 
-    # Fase 3 — WSB-E4-T2 (ADR-26): caps de iteracao + debounce de refresh de
-    # evidencia. Configuraveis por env (sem redeploy — o dispatcher preenche o
-    # input do workflow por WorkItem; por-tenant e possivel lendo tenant_config
-    # antes de chamar apply_to_input).
-    review_round_cap: int = 20            # rounds de review humano/CI-red, capados
-    evidence_debounce_seconds: float = 300.0  # janela p/ agrupar comentarios (prod)
-    evidence_refresh_cap: int = 5         # refreshes de evidencia alem do inicial
+    # Phase 3 — WSB-E4-T2 (ADR-26): iteration caps + evidence refresh debounce.
+    # Configurable via env (no redeploy — the dispatcher fills the workflow
+    # input per WorkItem; per-tenant is possible by reading tenant_config
+    # before calling apply_to_input).
+    review_round_cap: int = 20            # capped human-review/CI-red rounds
+    evidence_debounce_seconds: float = 300.0  # window to batch comments (prod)
+    evidence_refresh_cap: int = 5         # evidence refreshes beyond the initial one
 
-    # timeouts de activity (segundos) — generosos porque Coder/L1 podem ser lentos;
-    # heartbeat permite deteccao de worker morto sem esperar o timeout inteiro.
+    # activity timeouts (seconds) — generous because Coder/L1 can be slow;
+    # the heartbeat allows detecting a dead worker without waiting out the
+    # whole timeout.
     activity_start_to_close_seconds: float = 3600.0
-    # ~1 min de detecção de worker morto (spec §6); o substrato emite beats
-    # periódicos, então este teto curto não expira turnos longos legítimos.
+    # ~1 min to detect a dead worker (spec §6); the substrate emits periodic
+    # beats, so this short ceiling does not expire legitimately long turns.
     activity_heartbeat_seconds: float = 60.0
     activity_schedule_to_close_seconds: float = 7200.0
     activity_retry_cap: int = 3
@@ -104,11 +105,11 @@ DEFAULT_CONFIG = OrchestratorConfig()
 
 
 def apply_to_input(input, cfg: "OrchestratorConfig | None" = None):
-    """Preenche os campos de cap/timer de um `WorkItemLifecycleInput` a
-    partir de `cfg` (default: `OrchestratorConfig.from_env()`). Chamado por
-    quem inicia o workflow (ex.: o dispatcher do WS-A, ou `worker.py`/scripts
-    de exemplo deste servico) — nunca pelo proprio workflow (env-var nao e
-    lida dentro do sandbox de workflow)."""
+    """Fill the cap/timer fields of a `WorkItemLifecycleInput` from `cfg`
+    (default: `OrchestratorConfig.from_env()`). Called by whoever starts the
+    workflow (e.g. the WS-A dispatcher, or this service's `worker.py`/example
+    scripts) — never by the workflow itself (env vars are not read inside the
+    workflow sandbox)."""
     cfg = cfg or OrchestratorConfig.from_env()
     input.clarification_round_cap = cfg.clarification_round_cap
     input.clarification_reminder_hours = cfg.clarification_reminder_hours

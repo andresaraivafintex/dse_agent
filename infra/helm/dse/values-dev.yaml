@@ -1,5 +1,5 @@
-# Overlay explícito para desenvolvimento local. Mantém as conveniências do
-# values.yaml base e nunca deve ser usado como input de um release de piloto.
+# Explicit overlay for local development. Keeps the conveniences of the base
+# values.yaml and must never be used as input to a pilot release.
 deploymentProfile: development
 
 runtime:

@@ -1,6 +1,6 @@
-"""WSD-E3-T1: cada chamada de modelo gera um span OTel com os atributos
-`dse_contracts.constants.OTEL_ATTR_*`, preenchidos a partir da resposta REAL
-do LiteLLM (custo/tokens não são recalculados por nós)."""
+"""WSD-E3-T1: every model call produces an OTel span with the
+`dse_contracts.constants.OTEL_ATTR_*` attributes, filled from LiteLLM's REAL
+response (cost/tokens are not recomputed by us)."""
 from __future__ import annotations
 
 from dse_contracts.constants import (
@@ -54,14 +54,14 @@ def test_chat_completion_emits_span_with_contract_attributes(unique_ids):
 
 
 def test_span_recorded_even_on_gateway_error(unique_ids):
-    """Erros também devem ficar rastreáveis (span com status ERROR), não só
-    o caminho feliz — senão observabilidade de denial fica cega."""
+    """Errors must stay traceable too (span with ERROR status), not just the
+    happy path — otherwise denial observability is blind."""
     from model_gateway_client.errors import GatewayCallError
 
     tenant_id = unique_ids["tenant_id"]
     work_item_id = unique_ids["work_item_id"]
     key = mint_virtual_key(tenant_id, work_item_id, Stage.coder, models=["eco/echo-model"])
-    revoke_virtual_key(key)  # torna a key inválida de propósito
+    revoke_virtual_key(key)  # makes the key invalid on purpose
 
     headers = GatewayCallHeaders(tenant_id=tenant_id, work_item_id=work_item_id, stage=Stage.coder)
     import pytest

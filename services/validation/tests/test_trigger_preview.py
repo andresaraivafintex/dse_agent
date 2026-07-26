@@ -1,11 +1,11 @@
-"""WSE-E4-T10 — previews por PR. Duas camadas de teste:
+"""WSE-E4-T10 — per-PR previews. Two layers of tests:
 
-  1. Lógica determinística (paths-filter FR-20, caps ADR-26, degraded em
-     falha) — rápida, contra Postgres real (nunca toca o cluster).
-  2. Integração REAL contra o cluster k3d `dse-preview` (Argo CD v2.13.3 +
-     ApplicationSet + git smart HTTP do docker-compose.wse.yml): namespace
-     criado, URL respondendo, TTL destruindo via reaper GitOps. Marcada como
-     o teste mais lento da suíte (~2-4min) — é o exit criterion da fase.
+  1. Deterministic logic (FR-20 paths-filter, ADR-26 caps, degraded on failure)
+     — fast, against real Postgres (never touches the cluster).
+  2. REAL integration against the `dse-preview` k3d cluster (Argo CD v2.13.3 +
+     ApplicationSet + git smart HTTP from docker-compose.wse.yml): namespace
+     created, URL responding, TTL destroying it via the GitOps reaper. Flagged as
+     the slowest test in the suite (~2-4min) — it is the phase's exit criterion.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ DEPLOYABLE_GLOBS = [
 
 
 # ---------------------------------------------------------------------------
-# 1a. paths-filter FR-20 (determinístico puro)
+# 1a. FR-20 paths-filter (purely deterministic)
 # ---------------------------------------------------------------------------
 def test_backend_only_files_do_not_touch_ui():
     assert not is_ui_touching(["api/handler.py", "README.md", "migrations/0001.sql"], DEFAULT_GLOBS)
@@ -45,9 +45,9 @@ def test_backend_only_files_do_not_touch_ui():
 
 def test_ui_globs_match_expected_shapes():
     assert is_ui_touching(["frontend/app.tsx"], DEFAULT_GLOBS)
-    assert is_ui_touching(["ui/components/button/index.js"], DEFAULT_GLOBS)  # ui/** aninhado
-    assert is_ui_touching(["styles/app.css"], DEFAULT_GLOBS)  # **/*.css com diretório
-    assert is_ui_touching(["app.css"], DEFAULT_GLOBS)  # **/*.css na RAIZ (ajuste documentado)
+    assert is_ui_touching(["ui/components/button/index.js"], DEFAULT_GLOBS)  # nested ui/**
+    assert is_ui_touching(["styles/app.css"], DEFAULT_GLOBS)  # **/*.css inside a directory
+    assert is_ui_touching(["app.css"], DEFAULT_GLOBS)  # **/*.css at the ROOT (documented tweak)
     assert not is_ui_touching([], DEFAULT_GLOBS)
 
 
@@ -59,22 +59,22 @@ def test_glob_semantics_documented():
 
 
 def test_docs_only_pr_skips_and_counts_as_success(work_item_id, tenant_id):
-    # Plano 08 §D: só docs (nem UI nem serviço deployável) → pula, conta como
-    # sucesso, NUNCA bloqueia. (Antes um .py backend também pulava; agora ele
-    # ganha preview — ver test_backend_service_change_now_previews.)
+    # plano 08 §D: docs only (neither UI nor a deployable service) → skip, counts
+    # as success, NEVER blocks. (Previously a backend .py also skipped; now it
+    # gets a preview — see test_backend_service_change_now_previews.)
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
             pr_number=11, files_changed=["docs/x.md", "README.md", "CHANGELOG.md"],
         )
     )
-    assert ref.status == "skipped_backend_only"  # conta como sucesso, NUNCA bloqueia
+    assert ref.status == "skipped_backend_only"  # counts as success, NEVER blocks
     row = db.get_preview(work_item_id)
     assert row["status"] == "skipped_backend_only"
 
 
 # ---------------------------------------------------------------------------
-# Plano 08 §D — decisão de previewabilidade (ui | deployable | none)
+# plano 08 §D — previewability decision (ui | deployable | none)
 # ---------------------------------------------------------------------------
 def test_preview_decision_ui_has_precedence():
     kind, hits = preview_decision(["frontend/app.tsx", "api/main.py"], DEFAULT_GLOBS, DEPLOYABLE_GLOBS)
@@ -92,10 +92,10 @@ def test_preview_decision_docs_only_is_none():
 
 
 def test_deploys_preview_gate_disabled_skips_without_touching_cluster(work_item_id, tenant_id):
-    # repo não marcado deploys_preview → skipped_disabled no passo 0 (antes de
-    # qualquer contato com o cluster). Prova: kube_context inválido, sem erro.
+    # repo not flagged deploys_preview → skipped_disabled at step 0 (before any
+    # contact with the cluster). Proof: invalid kube_context, no error.
     cfg = PreviewConfig()
-    cfg.kube_context = "context-invalido-prova-que-nao-toca-cluster"
+    cfg.kube_context = "invalid-context-proves-it-does-not-touch-the-cluster"
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
@@ -108,11 +108,11 @@ def test_deploys_preview_gate_disabled_skips_without_touching_cluster(work_item_
 
 
 def test_backend_service_change_now_previews_reaches_provision(work_item_id, tenant_id, tmp_path):
-    # D2: um PR de serviço backend (.py) NÃO é mais pulado como backend-only —
-    # ele passa o paths-filter e chega ao provisionamento (que degrada aqui, sem
-    # cluster; o ponto é que NÃO parou em skipped_backend_only).
+    # D2: a backend service PR (.py) is NO LONGER skipped as backend-only — it
+    # passes the paths-filter and reaches provisioning (which degrades here, with
+    # no cluster; the point is that it did NOT stop at skipped_backend_only).
     cfg = PreviewConfig()
-    cfg.kube_context = "k3d-cluster-que-nao-existe"
+    cfg.kube_context = "k3d-cluster-that-does-not-exist"
     cfg.repo_dir = str(tmp_path / "repo")
     cfg.sync_timeout_s = 5
     ref = trigger_preview_core(
@@ -122,7 +122,7 @@ def test_backend_service_change_now_previews_reaches_provision(work_item_id, ten
         ),
         cfg=cfg,
     )
-    assert ref.status == "degraded"  # chegou ao provisionamento (não pulou)
+    assert ref.status == "degraded"  # reached provisioning (did not skip)
     assert ref.status != "skipped_backend_only"
 
 
@@ -130,14 +130,14 @@ def test_external_url_is_browser_reachable_when_configured():
     cfg = PreviewConfig()
     cfg.external_host_template = "https://{namespace}.preview.dse.local"
     assert cfg.preview_url_for("preview-wi-1") == "https://preview-wi-1.preview.dse.local"
-    # sem template → DNS interno (link ainda aparece no PR — D1 — mas não clicável)
+    # no template → internal DNS (the link still shows up on the PR — D1 — but is not clickable)
     cfg2 = PreviewConfig()
     cfg2.external_host_template = ""
     assert cfg2.preview_url_for("preview-wi-1").endswith(".svc.cluster.local")
 
 
 # ---------------------------------------------------------------------------
-# Plano 08 §D — D3 (Ingress) + D4 (imagem do PR) nos manifests
+# plano 08 §D — D3 (Ingress) + D4 (PR image) in the manifests
 # ---------------------------------------------------------------------------
 def _manifests(cfg, **kw):
     from datetime import datetime, timedelta, timezone
@@ -151,7 +151,7 @@ def test_ingress_generated_with_hostname_from_template():
     cfg.external_host_template = "http://{namespace}.preview.localhost:8081"
     m = _manifests(cfg)
     assert "ingress.yaml" in m
-    assert "host: preview-wi-x.preview.localhost" in m["ingress.yaml"]  # sem scheme/porta
+    assert "host: preview-wi-x.preview.localhost" in m["ingress.yaml"]  # no scheme/port
     assert "ingressClassName: traefik" in m["ingress.yaml"]
 
 
@@ -162,15 +162,15 @@ def test_no_ingress_without_external_host():
 
 
 def test_label_values_respect_k8s_63_char_limit():
-    """Disparo real (issue #2 → PR #10): work_item_id `wi_`+64 hex = 67 chars
-    virava valor de label e o k8s REJEITAVA o namespace (label value ≤ 63) —
-    o preview degradava sem URL. O id completo vai na annotation; a label é
-    truncada."""
+    """Real run (issue #2 → PR #10): a work_item_id of `wi_`+64 hex = 67 chars
+    became a label value and k8s REJECTED the namespace (label value ≤ 63) — the
+    preview degraded with no URL. The full id goes in the annotation; the label is
+    truncated."""
     import re
     from datetime import datetime, timedelta, timezone
     from dse_validation.preview.argocd import build_manifests
 
-    wi = "wi_" + "a" * 64  # 67 chars, como o id real
+    wi = "wi_" + "a" * 64  # 67 chars, like the real id
     cfg = PreviewConfig()
     exp = datetime.now(timezone.utc) + timedelta(seconds=600)
     m = build_manifests("preview-wi-x", wi, "tenant_dev", exp, 600, cfg)
@@ -179,7 +179,7 @@ def test_label_values_respect_k8s_63_char_limit():
     for name, manifest in m.items():
         for val in label_re.findall(manifest):
             assert len(val) <= 63, f"label em {name} tem {len(val)} chars (>63)"
-    # o id COMPLETO tem que estar preservado na annotation do namespace
+    # the FULL id must be preserved in the namespace's annotation
     assert f'dse.fintex/work-item-id: "{wi}"' in m["namespace.yaml"]
 
 
@@ -189,22 +189,22 @@ def test_pr_image_and_app_port_flow_into_deployment():
     m = _manifests(cfg, image="k3d-dse-registry:5510/dse-preview/wallet:abc123")
     assert "image: k3d-dse-registry:5510/dse-preview/wallet:abc123" in m["deployment.yaml"]
     assert "containerPort: 3000" in m["deployment.yaml"]
-    assert "targetPort: 3000" in m["service.yaml"]  # Service publica 80 → app_port
+    assert "targetPort: 3000" in m["service.yaml"]  # Service publishes 80 → app_port
 
 
 def test_build_pr_image_fail_safe_reasons(tmp_path, monkeypatch):
     from dse_validation.preview.pr_image import build_pr_image
     cfg = PreviewConfig()
-    # flag desligada → placeholder
+    # flag off → placeholder
     cfg.build_image = False
     ref, reason, port = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
     assert ref is None and reason == "build_disabled" and port is None
-    # ligada mas sem workspace → placeholder com motivo
+    # on but with no workspace → placeholder with a reason
     cfg.build_image = True
     monkeypatch.setenv("DSE_SANDBOX_STATE_DIR", str(tmp_path))
     ref, reason, port = build_pr_image(work_item_id="wi-nope", repo="a/b", head_sha="s", cfg=cfg)
     assert ref is None and reason.startswith("workspace_not_found")
-    # workspace sem Dockerfile E sem package.json → placeholder (não é Node)
+    # workspace with no Dockerfile AND no package.json → placeholder (not Node)
     ws = tmp_path / "wi-nodf" / "workspace"
     ws.mkdir(parents=True)
     ref, reason, port = build_pr_image(work_item_id="wi-nodf", repo="a/b", head_sha="s", cfg=cfg)
@@ -212,8 +212,8 @@ def test_build_pr_image_fail_safe_reasons(tmp_path, monkeypatch):
 
 
 def test_synthesize_node_dockerfile_for_app_without_dockerfile(tmp_path):
-    """Decisão do operador (2026-07-22): app Node sem Dockerfile → o DSE
-    sintetiza um Dockerfile padrão (não toca no repo) e detecta a porta 3000."""
+    """Operator decision (2026-07-22): a Node app with no Dockerfile → DSE
+    synthesizes a default Dockerfile (without touching the repo) and detects port 3000."""
     import json as _json
     from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
 
@@ -230,7 +230,7 @@ def test_synthesize_node_dockerfile_for_app_without_dockerfile(tmp_path):
     assert f"ENV PORT={_DEFAULT_NODE_PORT}" in content
     assert f"EXPOSE {_DEFAULT_NODE_PORT}" in content
     assert 'CMD ["npm", "start"]' in content
-    # arquivo TEMPORÁRIO — fora do workspace (não polui o git da tarefa)
+    # TEMPORARY file — outside the workspace (does not pollute the task's git)
     assert str(ws) not in path
     import os as _os
     _os.remove(path)
@@ -253,12 +253,12 @@ def test_synthesize_falls_back_to_node_main_without_start_script(tmp_path):
 def test_synthesize_returns_none_when_not_node(tmp_path):
     from dse_validation.preview.pr_image import _synthesize_node_dockerfile, _DEFAULT_NODE_PORT
     ws = tmp_path / "ws"
-    ws.mkdir()  # sem package.json
+    ws.mkdir()  # no package.json
     assert _synthesize_node_dockerfile(str(ws), _DEFAULT_NODE_PORT) is None
 
 
 # ---------------------------------------------------------------------------
-# D1 — link do preview NA DESCRIÇÃO do PR (não como comentário, nem só na issue)
+# D1 — preview link IN THE PR's DESCRIPTION (not as a comment, nor only on the issue)
 # ---------------------------------------------------------------------------
 _PR_BODY_BASE = (
     "### Fintex DSE — automatically generated PR\n\n"
@@ -280,8 +280,8 @@ class _FakePrBodyClient:
 
 
 def test_preview_link_written_into_pr_body_after_evidence(monkeypatch):
-    """Pedido do operador (2026-07-22): o link do preview na DESCRIÇÃO do PR,
-    como `- **Preview**: <url>`, logo após a bala de evidência L1."""
+    """Operator request (2026-07-22): the preview link goes in the PR's
+    DESCRIPTION, as `- **Preview**: <url>`, right after the L1 evidence bullet."""
     import dse_validation.preview.argocd as arg
     import dse_validation.github.client as gc
 
@@ -295,14 +295,14 @@ def test_preview_link_written_into_pr_body_after_evidence(monkeypatch):
     arg._put_preview_link_in_pr_body(inp, url, "deployable", actor="system:test")
     body = fake.body
     assert f"- **Preview**: {url}" in body
-    # posicionado logo após a evidência L1
+    # positioned right after the L1 evidence
     ev = body.index("- **Test evidence (L1)**:")
     pv = body.index("- **Preview**:")
     assert ev < pv
 
 
 def test_preview_link_in_body_is_idempotent(monkeypatch):
-    """Re-disparo (fix cycle) REESCREVE a mesma linha — não duplica."""
+    """A re-trigger (fix cycle) REWRITES the same line — it does not duplicate it."""
     import dse_validation.preview.argocd as arg
     import dse_validation.github.client as gc
 
@@ -314,7 +314,7 @@ def test_preview_link_in_body_is_idempotent(monkeypatch):
     )
     arg._put_preview_link_in_pr_body(inp, "http://old.localhost", "deployable", actor="t")
     arg._put_preview_link_in_pr_body(inp, "http://new.localhost", "deployable", actor="t")
-    assert fake.body.count("- **Preview**:") == 1  # uma linha só
+    assert fake.body.count("- **Preview**:") == 1  # a single line
     assert "http://new.localhost" in fake.body and "http://old.localhost" not in fake.body
 
 
@@ -328,20 +328,20 @@ def test_preview_link_body_noop_without_pr_number(monkeypatch):
         files_changed=["src/store.js"],
     )
     arg._put_preview_link_in_pr_body(inp, "http://x", "deployable", actor="t")
-    assert fake.body == _PR_BODY_BASE  # pr_number=0 → não toca no corpo
+    assert fake.body == _PR_BODY_BASE  # pr_number=0 → does not touch the body
 
 
 # ---------------------------------------------------------------------------
-# 1b. caps de concorrência por tenant (ADR-26, dia 1)
+# 1b. per-tenant concurrency caps (ADR-26, day 1)
 # ---------------------------------------------------------------------------
 def test_concurrency_cap_evicts_oldest_lru(work_item_id, tenant_id, tmp_path):
-    """Cap cheio => eviction LRU: o preview mais ANTIGO cede o slot para o PR
-    novo (decisão operador 2026-07-23). O gate do cap deixa de degradar quando
-    há o que evictar — aqui o fluxo passa do cap e degrada só DEPOIS, no
-    provisionamento (kube_context inexistente), provando a liberação da vaga."""
+    """Cap full => LRU eviction: the OLDEST preview yields its slot to the new PR
+    (operator decision 2026-07-23). The cap gate stops degrading when there is
+    something to evict — here the flow gets past the cap and only degrades LATER,
+    at provisioning (nonexistent kube_context), proving the slot was freed."""
     db.set_preview_cap(tenant_id, 2)
-    # duas linhas "created" ativas do MESMO tenant (contagem real no Postgres);
-    # -0 é a mais antiga (created_at menor) — a candidata à eviction.
+    # two active "created" rows for the SAME tenant (real count in Postgres);
+    # -0 is the oldest (smaller created_at) — the eviction candidate.
     for i in range(2):
         db.upsert_preview(
             work_item_id=f"{work_item_id}-{i}", tenant_id=tenant_id, pr_number=i,
@@ -349,8 +349,8 @@ def test_concurrency_cap_evicts_oldest_lru(work_item_id, tenant_id, tmp_path):
         )
     assert db.count_active_previews(tenant_id) == 2
     cfg = PreviewConfig()
-    cfg.repo_dir = str(tmp_path / "preview-repo")  # gitops real em repo temporário
-    cfg.kube_context = "k3d-cluster-que-nao-existe"
+    cfg.repo_dir = str(tmp_path / "preview-repo")  # real gitops in a temp repo
+    cfg.kube_context = "k3d-cluster-that-does-not-exist"
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
@@ -358,17 +358,17 @@ def test_concurrency_cap_evicts_oldest_lru(work_item_id, tenant_id, tmp_path):
         ),
         cfg=cfg,
     )
-    # o mais antigo foi reaped (slot liberado); o mais novo continua ativo
+    # the oldest was reaped (slot freed); the newest is still active
     assert db.get_preview(f"{work_item_id}-0")["status"] == "reaped"
     assert db.get_preview(f"{work_item_id}-1")["status"] == "created"
-    # e o fluxo PASSOU do gate do cap (degraded aqui vem do cluster inexistente)
+    # and the flow got PAST the cap gate (degraded here comes from the nonexistent cluster)
     assert ref.status == "degraded"
     assert "cap" not in ref.detail
 
 
 def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, tmp_path, monkeypatch):
-    """Se a remoção GitOps falhar, a eviction é best-effort e o gate degrada
-    como antes (failure mode 9 — preview nunca bloqueia o PR)."""
+    """If the GitOps removal fails, the eviction is best-effort and the gate
+    degrades as before (failure mode 9 — a preview never blocks the PR)."""
     db.set_preview_cap(tenant_id, 1)
     db.upsert_preview(
         work_item_id=f"{work_item_id}-old", tenant_id=tenant_id, pr_number=1,
@@ -377,9 +377,9 @@ def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, t
     from dse_validation.preview import gitops as gitops_mod
 
     def _boom(repo_dir, name):
-        raise RuntimeError("git indisponível")
+        raise RuntimeError("git unavailable")
 
-    # argocd resolve `gitops.remove_preview_dir` na chamada — patch no módulo basta.
+    # argocd resolves `gitops.remove_preview_dir` at call time — patching the module is enough.
     monkeypatch.setattr(gitops_mod, "remove_preview_dir", _boom)
     ref = trigger_preview_core(
         TriggerPreviewInput(
@@ -389,14 +389,14 @@ def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, t
     )
     assert ref.status == "degraded"
     assert "cap" in ref.detail
-    # o antigo continua ativo — nada foi marcado reaped sem remoção real
+    # the old one is still active — nothing was marked reaped without a real removal
     assert db.get_preview(f"{work_item_id}-old")["status"] == "created"
 
 
 def test_cap_zero_blocks_immediately_without_touching_cluster(work_item_id, tenant_id):
     db.set_preview_cap(tenant_id, 0)
     cfg = PreviewConfig()
-    cfg.kube_context = "context-inexistente-prova-que-nao-toca-o-cluster"
+    cfg.kube_context = "nonexistent-context-proves-it-does-not-touch-the-cluster"
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
@@ -404,16 +404,16 @@ def test_cap_zero_blocks_immediately_without_touching_cluster(work_item_id, tena
         ),
         cfg=cfg,
     )
-    assert ref.status == "degraded"  # e não levantou erro de kubectl => nunca chamou o cluster
+    assert ref.status == "degraded"  # and it raised no kubectl error => it never called the cluster
 
 
 # ---------------------------------------------------------------------------
-# 1c. failure mode 9 — falha de preview => degraded (PR nunca bloqueia)
+# 1c. failure mode 9 — preview failure => degraded (the PR is never blocked)
 # ---------------------------------------------------------------------------
 def test_cluster_failure_degrades_instead_of_blocking(work_item_id, tenant_id, tmp_path):
     cfg = PreviewConfig()
-    cfg.kube_context = "k3d-cluster-que-nao-existe"
-    cfg.repo_dir = str(tmp_path / "repo")  # repo isolado (não polui o real)
+    cfg.kube_context = "k3d-cluster-that-does-not-exist"
+    cfg.repo_dir = str(tmp_path / "repo")  # isolated repo (does not pollute the real one)
     cfg.sync_timeout_s = 5
     ref = trigger_preview_core(
         TriggerPreviewInput(
@@ -423,19 +423,19 @@ def test_cluster_failure_degrades_instead_of_blocking(work_item_id, tenant_id, t
         cfg=cfg,
     )
     assert ref.status == "degraded"
-    assert ref.detail  # razão explícita (P6/P8)
+    assert ref.detail  # explicit reason (P6/P8)
     row = db.get_preview(work_item_id)
     assert row["status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
-# 2. Integração REAL contra o cluster k3d (exit criterion da fase)
+# 2. REAL integration against the k3d cluster (the phase's exit criterion)
 # ---------------------------------------------------------------------------
 def _k3d_cluster_available() -> bool:
-    """Exige a capacidade COMPLETA: cluster k3d ativo E Argo CD instalado
-    (o teste materializa uma Application de verdade). No runner CI não há
-    cluster; num k3d sem Argo CD também pula — a prova roda só no ambiente
-    completo (dev/VPS com Argo CD)."""
+    """Requires the FULL capability: an active k3d cluster AND Argo CD installed
+    (the test materializes a real Application). There is no cluster on the CI
+    runner; on a k3d without Argo CD it also skips — the proof only runs in the
+    complete environment (dev/VPS with Argo CD)."""
     import shutil
     import subprocess
 
@@ -452,10 +452,10 @@ def _k3d_cluster_available() -> bool:
 
 @pytest.mark.skipif(not _k3d_cluster_available(), reason="requer cluster k3d ativo (Argo CD)")
 def test_preview_e2e_real_cluster_create_serve_and_ttl_reap(work_item_id, tenant_id):
-    """Contra o cluster k3d REAL: (a) ApplicationSet do Argo CD materializa o
-    namespace efêmero com Deployment+Service; (b) a URL do preview responde
-    HTTP 200; (c) TTL vencido => reaper GitOps remove do git e o namespace é
-    DESTRUÍDO (prune + finalizer). ~2-4min."""
+    """Against the REAL k3d cluster: (a) Argo CD's ApplicationSet materializes the
+    ephemeral namespace with Deployment+Service; (b) the preview URL answers
+    HTTP 200; (c) TTL expired => the GitOps reaper removes it from git and the
+    namespace is DESTROYED (prune + finalizer). ~2-4min."""
     ref = trigger_preview_core(
         TriggerPreviewInput(
             work_item_id=work_item_id, tenant_id=tenant_id, repo="acme/app",
@@ -468,10 +468,10 @@ def test_preview_e2e_real_cluster_create_serve_and_ttl_reap(work_item_id, tenant
     assert ref.namespace == namespace
     assert ref.url and namespace in ref.url
 
-    # (b) URL respondendo de verdade (probe curl in-cluster contra o Service)
+    # (b) URL really responding (in-cluster curl probe against the Service)
     assert get_preview_http_status(namespace) == 200
 
-    # (c) TTL: força expiração no estado durável e roda o reaper determinístico
+    # (c) TTL: force expiration in the durable state and run the deterministic reaper
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -485,7 +485,7 @@ def test_preview_e2e_real_cluster_create_serve_and_ttl_reap(work_item_id, tenant
 
     reaped = reap_expired_previews()
     assert work_item_id in reaped
-    wait_namespace_gone(namespace, timeout_s=240)  # namespace destruído de verdade
+    wait_namespace_gone(namespace, timeout_s=240)  # namespace really destroyed
 
     row = db.get_preview(work_item_id)
     assert row["status"] == "reaped" and row["reaped_at"] is not None

@@ -1,12 +1,12 @@
--- Fintex DSE — Fase 1 — WS-F (Segurança, compliance, plataforma e operações)
--- Dono: WS-F. Arquivo reservado (ver CONVENTIONS.md) — não editar fora do WS-F.
+-- Fintex DSE — Phase 1 — WS-F (Security, compliance, platform and operations)
+-- Owner: WS-F. Reserved file (see CONVENTIONS.md) — do not edit outside WS-F.
 --
--- tenant_config: parâmetros de fairness/budget/kill-switch por tenant, lidos
--- pelo orchestrator (WS-B) e pelo model-gateway (WS-D) antes de admitir/rodar
--- trabalho para um tenant. Fase 1: schema mínimo suficiente para o
--- kill-switch manual e o budget cap mensal por tenant (NFR de fairness fica
--- para Fase 2 — campo `fairness` já reservado como JSONB para não precisar de
--- nova migração quando isso for implementado).
+-- tenant_config: fairness/budget/kill-switch parameters per tenant, read by the
+-- orchestrator (WS-B) and by the model-gateway (WS-D) before admitting/running
+-- work for a tenant. Phase 1: the minimum schema sufficient for the manual
+-- kill-switch and the monthly budget cap per tenant (the fairness NFR is left
+-- for Phase 2 — the `fairness` field is already reserved as JSONB so that no
+-- new migration is needed when that is implemented).
 
 CREATE TABLE IF NOT EXISTS tenant_config (
     tenant_id            TEXT PRIMARY KEY,
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS tenant_config (
     max_concurrent_work_items INTEGER NOT NULL DEFAULT 5,
     kill_switch_enabled  BOOLEAN NOT NULL DEFAULT false,
     kill_switch_reason   TEXT,
-    fairness             JSONB NOT NULL DEFAULT '{}'::jsonb, -- reservado p/ Fase 2 (per-tenant weighting)
+    fairness             JSONB NOT NULL DEFAULT '{}'::jsonb, -- reserved for Phase 2 (per-tenant weighting)
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -24,9 +24,9 @@ CREATE TRIGGER trg_tenant_config_updated_at
     BEFORE UPDATE ON tenant_config
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Auditoria de mudanças de kill-switch/budget é feita pelo caller via
--- dse_audit.emit(...) no mesmo request/transação — esta tabela guarda apenas
--- o estado atual, não o histórico (o histórico vive no audit_log).
+-- Auditing of kill-switch/budget changes is done by the caller via
+-- dse_audit.emit(...) in the same request/transaction — this table holds only
+-- the current state, not the history (the history lives in audit_log).
 
 GRANT SELECT, INSERT, UPDATE ON tenant_config TO dse_app;
 

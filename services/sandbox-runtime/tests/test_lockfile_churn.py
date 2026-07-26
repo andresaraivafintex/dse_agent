@@ -1,10 +1,11 @@
-"""Guard-rails do 2º disparo real (2026-07-22): churn de lockfile e
-idempotência de autoria do Tester.
+"""Guard-rails from the 2nd real run (2026-07-22): lockfile churn and Tester
+authoring idempotency.
 
-O run wi_bacdce7 reprovou APENAS em diff_budget porque o npm reescreveu 16
-linhas de package-lock.json ao rodar os testes (sem mudança de dependência) e
-o commit determinístico levou o churn para o diff. No fix cycle, o Tester
-autorava um teste NOVO a cada ciclo — o diff só crescia e o loop não convergia.
+Run wi_bacdce7 failed ONLY on diff_budget because npm rewrote 16 lines of
+package-lock.json while running the tests (with no dependency change) and the
+deterministic commit carried the churn into the diff. In the fix cycle, the
+Tester authored a NEW test every cycle — the diff only grew and the loop never
+converged.
 """
 from __future__ import annotations
 
@@ -50,18 +51,18 @@ def test_lockfile_churn_sem_manifesto_e_restaurado(repo):
 
 
 def test_lockfile_com_manifesto_mudado_fica(repo):
-    # dependência declarada mudou junto: o par lockfile+manifesto é legítimo
+    # the declared dependency changed alongside it: the lockfile+manifest pair is legitimate
     with open(os.path.join(repo, "package.json"), "w") as fh:
         fh.write('{"name": "app", "dependencies": {"left-pad": "^1.0.0"}}\n')
     with open(os.path.join(repo, "package-lock.json"), "a") as fh:
-        fh.write('/* resolução nova */\n')
+        fh.write('/* new resolution */\n')
     assert _restore_lockfile_churn(repo) == []
     porcelain = _git(repo, "status", "--porcelain")
     assert "package-lock.json" in porcelain and "package.json" in porcelain
 
 
 def test_lockfile_novo_untracked_sem_manifesto_e_removido(repo):
-    # ex.: repo sem yarn.lock; rodar yarn cria um do nada
+    # e.g. a repo with no yarn.lock; running yarn creates one out of nowhere
     with open(os.path.join(repo, "yarn.lock"), "w") as fh:
         fh.write("# gerado\n")
     assert _restore_lockfile_churn(repo) == ["yarn.lock"]
@@ -81,8 +82,8 @@ def test_tester_reusa_testes_de_commits_anteriores(repo):
     with open(os.path.join(repo, "test", "delete.test.js"), "w") as fh:
         fh.write("// teste autorado\n")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "tester(wi_x): cobre remoção por id")
-    # commit de coder no meio não conta
+    _git(repo, "commit", "-q", "-m", "tester(wi_x): covers removal by id")
+    # a coder commit in between does not count
     with open(os.path.join(repo, "app.js"), "w") as fh:
         fh.write("// fix\n")
     _git(repo, "add", "-A")

@@ -1,13 +1,13 @@
-"""WSE-E2 — camada L2 (Reviewer de contexto fresco) do WS-E.
+"""WSE-E2 — WS-E's L2 layer (fresh-context Reviewer).
 
-A SESSÃO Reviewer em si (a chamada de modelo com contexto fresco) é construída
-pelo WS-C (WSC-E3-T5) e registrada como a Activity `ACTIVITY_RUN_L2_REVIEW`.
-Este pacote é a ORQUESTRAÇÃO que o WS-E é dono (adendo Fase 2, WSE-E2-T4/T5):
+The Reviewer SESSION itself (the model call with fresh context) is built by
+WS-C (WSC-E3-T5) and registered as the `ACTIVITY_RUN_L2_REVIEW` Activity.
+This package is the ORCHESTRATION that WS-E owns (Phase 2 addendum, WSE-E2-T4/T5):
 
-  - `session`   — Protocol da sessão L2 + fake determinístico + resolução
-                  defensiva da implementação do WS-C (que roda em paralelo).
-  - `l2_review` — orquestra 1 turno L2 (cheapest-first: só depois do L1 verde,
-                  antes do CI — P5), registra veredito + custo (P8).
-  - `fix_loop`  — lógica determinística do loop bounded L2->Coder (P1/P6):
-                  quando reenviar ao Coder, quando escalar a operador.
+  - `session`   — L2 session Protocol + deterministic fake + defensive
+                  resolution of the WS-C implementation (which lands in parallel).
+  - `l2_review` — orchestrates 1 L2 turn (cheapest-first: only after L1 is green,
+                  before CI — P5), records verdict + cost (P8).
+  - `fix_loop`  — deterministic logic of the bounded L2->Coder loop (P1/P6):
+                  when to send back to the Coder, when to escalate to an operator.
 """

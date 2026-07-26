@@ -1,15 +1,15 @@
-"""WSB-E1-T1/T2/T4 — worker Temporal do Fintex DSE.
+"""WSB-E1-T1/T2/T4 — Fintex DSE Temporal worker.
 
-Conecta em `localhost:7233` (ou `DSE_TEMPORAL_ADDRESS`), registra
-`WorkItemLifecycleWorkflow` e as Activities locais do WS-B (audit,
-persistencia de status, checklist de clarificacao), tenta importar
-(defensivamente) as Activities cross-workstream de WS-C (sandbox-runtime) e
-WS-E (validation) quando existirem, e expoe um health endpoint HTTP em
-`:8900` (`DSE_ORCHESTRATOR_HEALTH_PORT`).
+Connects to `localhost:7233` (or `DSE_TEMPORAL_ADDRESS`), registers
+`WorkItemLifecycleWorkflow` and the WS-B local Activities (audit, status
+persistence, clarification checklist), defensively tries to import the
+cross-workstream Activities from WS-C (sandbox-runtime) and WS-E (validation)
+when they exist, and exposes an HTTP health endpoint on `:8900`
+(`DSE_ORCHESTRATOR_HEALTH_PORT`).
 
-Worker Versioning (WSB-E1-T2): `--build-id`/`DSE_WORKER_BUILD_ID` fixam o
-build id deste processo. Ver `RUNBOOK.md` para o procedimento de
-drain-and-cutover ao trocar de build id em producao.
+Worker Versioning (WSB-E1-T2): `--build-id`/`DSE_WORKER_BUILD_ID` pin this
+process's build id. See `RUNBOOK.md` for the drain-and-cutover procedure when
+changing build id in production.
 """
 from __future__ import annotations
 
@@ -44,18 +44,17 @@ logger = logging.getLogger("dse_orchestrator.worker")
 
 
 def _load_cross_workstream_activities() -> list[Any]:
-    """Import defensivo: enquanto WS-C/WS-E ainda nao publicaram suas
-    Activities reais, o worker sobe mesmo assim (so com as Activities
-    locais); quando existirem, sao carregadas e registradas automaticamente.
+    """Defensive import: while WS-C/WS-E have not published their real
+    Activities yet, the worker still starts (with the local Activities only);
+    once they exist, they are loaded and registered automatically.
 
-    Modulo/funcao esperados por cada workstream (ver README.md, secao
-    "Integracao com WS-C e WS-E" para o contrato completo assumido):
-      - WS-C: `sandbox_runtime.activities` — deve expor uma lista
-        `ACTIVITIES` (ou funcoes individuais) implementando
-        `provision_sandbox`, `run_coder_turn`, `checkpoint_sandbox`,
-        `rebuild_sandbox`, `teardown_sandbox` (nomes de
-        `dse_contracts.activities`).
-      - WS-E: `validation.activities` — idem para `run_l1_pipeline`,
+    Module/function expected from each workstream (see README.md, section
+    "Integracao com WS-C e WS-E" for the full assumed contract):
+      - WS-C: `sandbox_runtime.activities` — must expose an `ACTIVITIES` list
+        (or individual functions) implementing `provision_sandbox`,
+        `run_coder_turn`, `checkpoint_sandbox`, `rebuild_sandbox`,
+        `teardown_sandbox` (names from `dse_contracts.activities`).
+      - WS-E: `validation.activities` — same for `run_l1_pipeline`,
         `finalize_pr`, `post_tracking_comment`, `consume_ci_status`.
     """
     found: list[Any] = []
@@ -64,9 +63,9 @@ def _load_cross_workstream_activities() -> list[Any]:
             mod = importlib.import_module(module_name)
         except ImportError as exc:
             logger.warning(
-                "Activities cross-workstream de '%s' ainda nao disponiveis (%s); "
+                "cross-workstream Activities of '%s' are not available yet (%s); "
                 "worker sobe sem elas — workflows que as chamarem ficarao "
-                "pendentes na Activity ate o worker ser reiniciado com o modulo presente.",
+                "pending in the Activity until the worker is restarted with the module present.",
                 module_name, exc,
             )
             continue
@@ -76,16 +75,16 @@ def _load_cross_workstream_activities() -> list[Any]:
             logger.info("Registradas %d activities de '%s'", len(activities), module_name)
         else:
             logger.warning(
-                "'%s' importado mas nao expoe `ACTIVITIES` (lista); nada registrado.",
+                "'%s' imported but does not expose `ACTIVITIES` (a list); nothing registered.",
                 module_name,
             )
     return found
 
 
 def _start_health_server(port: int, build_id: str) -> None:
-    """Servidor HTTP minimo (sem depender do worker rodar dentro do mesmo
-    loop asyncio) — usa `http.server` em thread daemon para nao competir com
-    o event loop do worker Temporal por I/O."""
+    """Minimal HTTP server (does not depend on the worker running in the same
+    asyncio loop) — uses `http.server` on a daemon thread so it does not
+    compete with the Temporal worker's event loop for I/O."""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
@@ -115,12 +114,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--build-id",
         default=os.environ.get("DSE_WORKER_BUILD_ID", "dev"),
-        help="Build id fixo deste deploy (Worker Versioning — ver RUNBOOK.md).",
+        help="Fixed build id of this deploy (Worker Versioning — see RUNBOOK.md).",
     )
     parser.add_argument(
         "--temporal-address",
         default=os.environ.get("DSE_TEMPORAL_ADDRESS", "localhost:7233"),
-        help="Endereco do Temporal frontend.",
+        help="Address of the Temporal frontend.",
     )
     parser.add_argument(
         "--health-port",
@@ -131,29 +130,29 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--use-worker-versioning",
         action="store_true",
         default=os.environ.get("DSE_WORKER_USE_VERSIONING", "false").lower() == "true",
-        help="Ativa Worker Deployment Versioning (moderno, PINNED). Requer o server "
-             "com deployment versioning habilitado + cutover via CLI. Ver RUNBOOK.md.",
+        help="Enables Worker Deployment Versioning (modern, PINNED). Requires the "
+             "server with deployment versioning enabled + cutover via CLI. See RUNBOOK.md.",
     )
     parser.add_argument(
         "--deployment-name",
         default=os.environ.get("DSE_WORKER_DEPLOYMENT_NAME", "dse-orchestrator"),
-        help="Nome do Worker Deployment (F5). O par (deployment, build_id) é a versão.",
+        help="Worker Deployment name (F5). The (deployment, build_id) pair is the version.",
     )
     parser.add_argument(
         "--fairness-mode",
         default=os.environ.get("DSE_FAIRNESS_MODE", "worker-side"),
         choices=["worker-side", "native", "off"],
-        help="WSB-E1-T3: 'worker-side' (caps de concorrencia por tenant lidos de "
-             "tenant_config, default nesta versao do Temporal), 'native' (delega ao "
-             "server P&F — so 1.31+), 'off' (sem gating).",
+        help="WSB-E1-T3: 'worker-side' (per-tenant concurrency caps read from "
+             "tenant_config, the default on this Temporal version), 'native' (delegates "
+             "to the server P&F — 1.31+ only), 'off' (no gating).",
     )
     return parser.parse_args(argv)
 
 
 def _build_fairness_interceptor(mode: str):
-    """WSB-E1-T3 — monta o interceptor de fairness conforme o modo. Interface
-    trocavel: quando o server suportar P&F nativo (1.31+), use `native` (no-op
-    no worker) e adicione `fairness_key=tenant_id` nas ActivityOptions."""
+    """WSB-E1-T3 — build the fairness interceptor for the given mode. Swappable
+    interface: once the server supports native P&F (1.31+), use `native` (no-op
+    on the worker) and add `fairness_key=tenant_id` to the ActivityOptions."""
     if mode == "off":
         return None
     if mode == "native":
@@ -163,20 +162,21 @@ def _build_fairness_interceptor(mode: str):
 
 
 def build_deployment_config(deployment_name: str, build_id: str) -> WorkerDeploymentConfig:
-    """Plano 08 §F (F5) — Worker Versioning OPERACIONAL via a API MODERNA (Worker
-    Deployment Versioning), NÃO a version-set clássica (deprecada e desligada por
-    default nos servers atuais).
+    """Plan 08 §F (F5) — OPERATIONAL Worker Versioning via the MODERN API (Worker
+    Deployment Versioning), NOT the classic version-set (deprecated and off by
+    default on current servers).
 
-    Este worker se anuncia como a versão `(deployment_name, build_id)` do
-    deployment. `default_versioning_behavior=PINNED`: cada workflow fica GRUDADO
-    na versão em que começou — é o que dá o drain-and-cutover seguro (workflows
-    em voo terminam na versão antiga; só os NOVOS vão para a versão corrente).
+    This worker announces itself as the deployment's `(deployment_name, build_id)`
+    version. `default_versioning_behavior=PINNED`: each workflow stays STUCK to
+    the version it started on — that is what gives the safe drain-and-cutover
+    (in-flight workflows finish on the old version; only NEW ones go to the
+    current version).
 
-    O cutover ("tornar esta versão a corrente") é um passo de OPERAÇÃO
-    deliberado — `temporal worker-deployment set-current-version` (CLI) ou o
-    console do Temporal — NUNCA automático no boot (evita cutover acidental a
-    cada restart). Ver RUNBOOK.md §Worker-Versioning. Build_id pinado ao SHA/tag
-    da imagem (compose)."""
+    The cutover ("make this version the current one") is a deliberate OPS step —
+    `temporal worker-deployment set-current-version` (CLI) or the Temporal
+    console — NEVER automatic at boot (avoids an accidental cutover on every
+    restart). See RUNBOOK.md §Worker-Versioning. Build_id pinned to the image
+    SHA/tag (compose)."""
     return WorkerDeploymentConfig(
         version=WorkerDeploymentVersion(deployment_name=deployment_name, build_id=build_id),
         use_worker_versioning=True,
@@ -212,18 +212,18 @@ async def run_worker(argv: list[str] | None = None) -> None:
         interceptors=interceptors,
     )
     if args.use_worker_versioning:
-        # F5 (moderno): a versão vem do deployment_config; NÃO passar o build_id
-        # clássico junto (conflita com deployment versioning).
+        # F5 (modern): the version comes from deployment_config; do NOT also pass
+        # the classic build_id (it conflicts with deployment versioning).
         worker_kwargs["deployment_config"] = build_deployment_config(
             args.deployment_name, args.build_id
         )
         logger.info(
             "Worker Deployment Versioning ATIVO: deployment=%s version=%s (PINNED). "
-            "Cutover é passo de operação (temporal worker-deployment set-current-version).",
+            "Cutover is an operations step (temporal worker-deployment set-current-version).",
             args.deployment_name, args.build_id,
         )
     else:
-        # sem versioning: mantém o build_id clássico só p/ rótulo/health.
+        # no versioning: keep the classic build_id just as a label/health field.
         worker_kwargs["build_id"] = args.build_id
 
     worker = Worker(**worker_kwargs)
@@ -235,7 +235,7 @@ async def run_worker(argv: list[str] | None = None) -> None:
     stop_event = asyncio.Event()
 
     def _handle_signal() -> None:
-        logger.info("Sinal de shutdown recebido — drenando worker (graceful).")
+        logger.info("Shutdown signal received — draining the worker (graceful).")
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -244,7 +244,7 @@ async def run_worker(argv: list[str] | None = None) -> None:
             try:
                 loop.add_signal_handler(getattr(signal, sig_name), _handle_signal)
             except (NotImplementedError, RuntimeError):
-                pass  # plataformas sem suporte (ex.: Windows) — segue sem handler
+                pass  # unsupported platforms (e.g. Windows) — continue without a handler
 
     async with worker:
         await stop_event.wait()

@@ -1,17 +1,17 @@
-"""Entrypoint standalone do egress-proxy — usado tanto por
-`docker-compose.wsc.yml` (serviço `egress-proxy`, porta 8806) quanto pelo
-container "pelado" (`python:3.11-slim` + bind mount, sem pip install) usado
-no teste de isolamento de rede (`tests/test_network_isolation.py`).
+"""Standalone entrypoint for the egress-proxy — used both by
+`docker-compose.wsc.yml` (service `egress-proxy`, port 8806) and by the "bare"
+container (`python:3.11-slim` + bind mount, no pip install) used in the network
+isolation test (`tests/test_network_isolation.py`).
 
-Depende só de stdlib + o pacote `egress_proxy` em si (que por sua vez tem
-import opcional de `dse_audit` — ver `proxy.py`). Configuração 100% via env
-var para poder rodar num container sem argumentos de CLI:
+Depends only on stdlib + the `egress_proxy` package itself (which in turn has an
+optional import of `dse_audit` — see `proxy.py`). Configuration is 100% via env
+vars so it can run in a container with no CLI arguments:
 
-  DSE_EGRESS_PORT                 porta de escuta (default 8806)
-  DSE_EGRESS_TENANT_ID            tenant_id para audit
-  DSE_EGRESS_WORK_ITEM_ID         work_item_id para audit (opcional)
-  DSE_EGRESS_ALLOW_HOSTS          lista "host[:port],host2[:port2],..." extra
-                                  além do allowlist padrão derivado do WorkItem
+  DSE_EGRESS_PORT                 listen port (default 8806)
+  DSE_EGRESS_TENANT_ID            tenant_id for audit
+  DSE_EGRESS_WORK_ITEM_ID         work_item_id for audit (optional)
+  DSE_EGRESS_ALLOW_HOSTS          extra "host[:port],host2[:port2],..." list on
+                                  top of the default WorkItem-derived allowlist
   DSE_EGRESS_MODEL_GATEWAY_HOST   default "model-gateway"
   DSE_EGRESS_MODEL_GATEWAY_PORT   default 4000
   DSE_EGRESS_REPO_HOST            default "github.com"

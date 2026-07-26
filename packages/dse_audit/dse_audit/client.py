@@ -1,12 +1,13 @@
-"""Único caminho de escrita no audit ledger (WSF-E1-T1). Nenhum outro módulo do
-monorepo deve executar `INSERT INTO audit_log` diretamente — importe `emit`.
+"""The only write path into the audit ledger (WSF-E1-T1). No other module in the
+monorepo may run `INSERT INTO audit_log` directly — import `emit` instead.
 
-Mínimo da fundação: grava usando a role `dse_app` (sem UPDATE/DELETE grant —
-ver migrations/0001_foundation.sql). WS-F estende este pacote na Fase 1 com:
-  - queries de reconstrução por WorkItem (`dse_audit.queries`)
-  - export compliance-grade por tenant/período
-  - garantir que a partição do tenant existe antes do primeiro insert
-(ver services/platform/README.md para o que falta).
+Foundation minimum: writes using the `dse_app` role (which has no UPDATE/DELETE
+grant — see migrations/0001_foundation.sql). WS-F extends this package in Fase 1
+with:
+  - per-WorkItem reconstruction queries (`dse_audit.queries`)
+  - compliance-grade export per tenant/time range
+  - ensuring the tenant's partition exists before the first insert
+(see services/platform/README.md for what is still missing).
 """
 from __future__ import annotations
 
@@ -36,15 +37,16 @@ def emit(
     details: dict[str, Any] | None = None,
     conn=None,
 ) -> None:
-    """Grava uma linha imutável no audit_log.
+    """Writes an immutable row into audit_log.
 
-    `actor` é sempre um principal resolvido (via dse_identity) ou uma string
-    `system:<component>` (ex.: `system:ingest-gateway`, `system:egress-proxy`)
-    — nunca um platform_user_id bruto (P8: evidência precisa ser atribuível).
+    `actor` is always a resolved principal (via dse_identity) or a
+    `system:<component>` string (e.g. `system:ingest-gateway`,
+    `system:egress-proxy`) — never a raw platform_user_id (P8: evidence must be
+    attributable).
 
-    Se `conn` for passado, participa da transação do caller (útil quando o
-    evento de audit deve ser atômico com outra escrita); caso contrário abre e
-    fecha sua própria conexão/transação.
+    If `conn` is passed, this joins the caller's transaction (useful when the
+    audit event must be atomic with another write); otherwise it opens and closes
+    its own connection/transaction.
     """
     owns_conn = conn is None
     if owns_conn:

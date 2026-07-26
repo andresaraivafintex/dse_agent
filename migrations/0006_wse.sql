@@ -1,20 +1,21 @@
--- Fintex DSE — Fase 1 — WS-E (validação L1 + PR finalizer)
--- Dono: WS-E (services/validation). Não editar 0001_foundation.sql; este arquivo
--- é o único que WS-E toca no diretório migrations/.
+-- Fintex DSE — Phase 1 — WS-E (L1 validation + PR finalizer)
+-- Owner: WS-E (services/validation). Do not edit 0001_foundation.sql; this file
+-- is the only one WS-E touches inside the migrations/ directory.
 --
--- Tabelas:
---   validation_runs   — 1 linha por execução do pipeline L1 (WSE-E1), evidência
---                        de "passed"/findings além do audit_log genérico (P8).
---   wse_pr_tracking   — 1 linha por WorkItem com PR aberto (WSE-E3-T6):
---                        garante EXATAMENTE 1 PR por work_item_id mesmo se o
---                        processo do finalizer morrer entre criar o PR na API
---                        do GitHub e persistir o pr_number aqui (o finalizer
---                        sempre confere a API do GitHub por head=branch antes
---                        de criar, além desta tabela — defesa em profundidade).
---   wse_comment_refs  — CommentStateStore (dse_contracts.mutable_comment) para
---                        o backend GitHub do PR finalizer (WSE-E3-T7).
---   wse_ci_status     — último status de CI conhecido por WorkItem/PR
---                        (WSE-E4-T9a), consumido pelo workflow do WS-B.
+-- Tables:
+--   validation_runs   — 1 row per run of the L1 pipeline (WSE-E1), evidence of
+--                        "passed"/findings beyond the generic audit_log (P8).
+--   wse_pr_tracking   — 1 row per WorkItem with an open PR (WSE-E3-T6):
+--                        guarantees EXACTLY 1 PR per work_item_id even if the
+--                        finalizer process dies between creating the PR on the
+--                        GitHub API and persisting the pr_number here (the
+--                        finalizer always checks the GitHub API by head=branch
+--                        before creating, in addition to this table — defense
+--                        in depth).
+--   wse_comment_refs  — CommentStateStore (dse_contracts.mutable_comment) for
+--                        the GitHub backend of the PR finalizer (WSE-E3-T7).
+--   wse_ci_status     — last known CI status per WorkItem/PR
+--                        (WSE-E4-T9a), consumed by the WS-B workflow.
 
 CREATE TABLE IF NOT EXISTS validation_runs (
     id            BIGSERIAL PRIMARY KEY,

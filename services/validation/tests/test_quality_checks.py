@@ -1,6 +1,6 @@
-"""WSE-E1-T1 — prova que lint/typecheck/test/build rodam de verdade (subprocess
-real de ruff/mypy/pytest/compileall via LocalFakeSandbox) e que o parsing é
-estruturado (conta issues/erros, não só olha o exit code)."""
+"""WSE-E1-T1 — proves that lint/typecheck/test/build actually run (real
+ruff/mypy/pytest/compileall subprocesses via LocalFakeSandbox) and that parsing is
+structured (counts issues/errors, does not just look at the exit code)."""
 from __future__ import annotations
 
 from dse_contracts import GateStatus
@@ -30,7 +30,7 @@ def test_typecheck_check_runs_real_mypy(sandbox):
     cfg = L1Config.for_test_repo()
     finding = typecheck_check(sandbox, cfg)
     assert finding.check == "typecheck"
-    # repo fixture não tem erro de tipo declarado -> deve passar
+    # the fixture repo has no declared type error -> must pass
     assert finding.passed is True
 
 
@@ -39,7 +39,7 @@ def test_typecheck_check_fails_on_real_type_error(sandbox, git_repo):
     cfg = L1Config.for_test_repo()
     finding = typecheck_check(sandbox, cfg)
     assert finding.passed is False
-    assert "erro" in finding.detail.lower()
+    assert "error" in finding.detail.lower()
 
 
 def test_test_check_runs_real_pytest_and_passes(sandbox):
@@ -77,7 +77,7 @@ def test_unknown_command_is_reported_not_silently_skipped(sandbox):
     finding = lint_check(sandbox, cfg)
     assert finding.passed is False
     assert finding.status == GateStatus.ERROR
-    assert "não encontrado" in finding.detail
+    assert "not found" in finding.detail
 
 
 def test_empty_commands_are_not_configured_never_green(sandbox):

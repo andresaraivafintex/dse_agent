@@ -1,9 +1,9 @@
-"""WSC-E3-T1: interface de substrato + adapters.
+"""WSC-E3-T1: substrate interface + adapters.
 
-`test_openhands_substrate_wiring` prova que a construção real do
-`openhands-sdk` aponta SEMPRE para o model-gateway (nunca para um SDK de
-provider) — sem exercitar um turno completo (que exigiria o model-gateway
-do WS-D de pé + inferência real, fora do escopo desta suíte; ver README)."""
+`test_openhands_substrate_wiring` proves that the real `openhands-sdk`
+construction ALWAYS points at the model-gateway (never at a provider SDK) —
+without exercising a full turn (which would require WS-D's model-gateway up +
+real inference, outside this suite's scope; see README)."""
 from __future__ import annotations
 
 
@@ -52,7 +52,7 @@ def test_openhands_substrate_wiring_routes_through_model_gateway_only():
     except ImportError:
         import pytest
 
-        pytest.skip("openhands-sdk não instalado neste venv")
+        pytest.skip("openhands-sdk not installed in this venv")
 
     from sandbox_runtime.substrate import OpenHandsSubstrate
 
@@ -66,8 +66,8 @@ def test_openhands_substrate_wiring_routes_through_model_gateway_only():
         gateway_base_url="http://localhost:4000",
     )
 
-    # O LLM real do OpenHands SDK tem que apontar pro model-gateway, nunca
-    # para um provider (api.anthropic.com/api.openai.com/bedrock-runtime.*).
+    # The OpenHands SDK's real LLM has to point at the model-gateway, never at
+    # a provider (api.anthropic.com/api.openai.com/bedrock-runtime.*).
     assert substrate._llm.base_url == "http://localhost:4000"
     assert substrate._llm.api_key.get_secret_value() == "vk-test-not-a-real-secret" if hasattr(
         substrate._llm.api_key, "get_secret_value"

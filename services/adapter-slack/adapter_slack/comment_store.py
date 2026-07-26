@@ -1,6 +1,6 @@
-"""`CommentStateStore` (dse_contracts.mutable_comment) persistido em Postgres
-(`comment_state`, migrations/0002_wsa.sql) — mantém o adapter 100%
-stateless (nenhum comment_ref vive em memória do processo)."""
+"""`CommentStateStore` (dse_contracts.mutable_comment) persisted in Postgres
+(`comment_state`, migrations/0002_wsa.sql) — keeps the adapter 100%
+stateless (no comment_ref ever lives in the process's memory)."""
 from __future__ import annotations
 
 from ingest_gateway.db import get_connection

@@ -1,8 +1,8 @@
-"""Cascata de resolução de repo (Relatório 07 C2 / Fase B).
+"""Repo resolution cascade (Report 07 C2 / Phase B).
 
-Prova a ordem de precedência e — crucial — que ambiguidade/ausência devolve
-(None, None) para o workflow PERGUNTAR (nunca adivinhar). Roda contra o
-Postgres real (padrão das suítes); usa um tenant sintético isolado.
+Proves the precedence order and — crucially — that ambiguity/absence returns
+(None, None) so the workflow ASKS (never guesses). Runs against the real
+Postgres (the standard for these suites); uses an isolated synthetic tenant.
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _bind(tenant, platform, btype, value, repo, branch="main"):
 
 def test_parse_explicit_repo():
     assert parse_explicit_repo("faz X no repo=org/x branch=dev") == ("org/x", "dev")
-    assert parse_explicit_repo("nada aqui") == (None, None)
+    assert parse_explicit_repo("nothing here") == (None, None)
 
 
 def test_rung1_explicit_override_beats_binding(tenant):
@@ -55,7 +55,7 @@ def test_rung1_explicit_override_beats_binding(tenant):
         )
     finally:
         conn.close()
-    assert repo == "org/explicit"  # explícito ganha do binding do canal
+    assert repo == "org/explicit"  # explicit beats the channel binding
 
 
 def test_rung2_channel_binding(tenant):
@@ -82,11 +82,11 @@ def test_component_beats_project_jira(tenant):
         )
     finally:
         conn.close()
-    assert repo == "org/payments"  # component (mais fino) ganha do project
+    assert repo == "org/payments"  # component (finer) beats project
 
 
 def test_rung4_single_repo_default(tenant):
-    # tenant com UM repo distinto em qualquer binding -> default sem sinal
+    # tenant with ONE distinct repo across any binding -> default with no signal
     _bind(tenant, "slack", "channel", "C_A", "org/only")
     conn = psycopg2.connect(DSN)
     try:
@@ -100,7 +100,7 @@ def test_rung4_single_repo_default(tenant):
 
 
 def test_ambiguous_returns_none_for_clarification(tenant):
-    # dois repos distintos, nenhum sinal casa -> NÃO adivinha
+    # two distinct repos, no signal matches -> does NOT guess
     _bind(tenant, "slack", "channel", "C_A", "org/a")
     _bind(tenant, "slack", "channel", "C_B", "org/b")
     conn = psycopg2.connect(DSN)
@@ -119,7 +119,7 @@ def test_empty_tenant_returns_none(tenant):
     try:
         repo, branch = resolve_repo(
             conn, tenant_id=tenant, platform="slack",
-            signals={"text": "sem binding nenhum", "channel": "C_X"},
+            signals={"text": "no binding at all", "channel": "C_X"},
         )
     finally:
         conn.close()

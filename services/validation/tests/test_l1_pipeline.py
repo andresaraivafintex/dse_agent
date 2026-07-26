@@ -1,6 +1,6 @@
-"""WSE-E1 — integração dos 3 sub-tarefas (T1+T2+T3) num único `L1Result`.
-Persiste em `validation_runs` (Postgres REAL) e emite audit (via dse_audit
-real, Postgres REAL) — prova P8 (evidência) fim a fim."""
+"""WSE-E1 — integration of the 3 sub-tasks (T1+T2+T3) into a single `L1Result`.
+Persists to `validation_runs` (REAL Postgres) and emits audit (via real
+dse_audit, REAL Postgres) — proves P8 (evidence) end to end."""
 from __future__ import annotations
 
 import psycopg2
@@ -51,7 +51,7 @@ def test_l1_pipeline_fails_clean_when_one_check_fails(
     assert result.passed is False
     test_finding = next(f for f in result.findings if f.check == "test")
     assert test_finding.passed is False
-    # os outros checks continuam rodando e reportando (não corta no meio, P6)
+    # the other checks keep running and reporting (no short-circuit midway, P6)
     assert len(result.findings) == 8
 
 
@@ -90,7 +90,7 @@ def test_l1_pipeline_persists_validation_run_and_audit_row(
                 (work_item_id,),
             )
             audit_row = cur.fetchone()
-        assert audit_row is not None, "P8: toda decisão consequente deve gerar linha em audit_log"
+        assert audit_row is not None, "P8: every consequential decision must produce an audit_log row"
     finally:
         conn.close()
 
@@ -99,8 +99,8 @@ def test_l1_pipeline_missing_trusted_manifest_is_not_green(
     sandbox, git_repo, work_item_id, tenant_id, git_sha
 ):
     (git_repo / ".dse" / "validation.json").unlink()
-    # O manifesto era confiável no commit anterior. Um novo base SHA sem ele
-    # representa um repositório que ainda não configurou o L1.
+    # The manifest was trusted at the previous commit. A new base SHA without it
+    # represents a repository that has not configured L1 yet.
     import subprocess
 
     subprocess.run(["git", "add", "-A"], cwd=git_repo, check=True)

@@ -1,17 +1,17 @@
-"""WSB-E4-T2 (Fase 3, ADR-26) — iteration caps + debounce de refresh de
-evidencia. Tudo 100% deterministico (P1): contagem, comparacao e timers
-duraveis do Temporal — nenhum LLM decide refresh/cap.
+"""WSB-E4-T2 (Phase 3, ADR-26) — iteration caps + evidence refresh debounce.
+Everything 100% deterministic (P1): counting, comparison and Temporal's durable
+timers — no LLM decides a refresh/cap.
 
-- Todo `while` do workflow tem cap testado: clarificacao
-  (test_clarification_gate), fix L1 (test_lifecycle_happy_path), objecoes L2 e
-  re_plan (test_phase2_sequence/test_plan_approval_gate) e — novo aqui —
-  rounds de REVIEW (`review_round_cap`).
-- Debounce (ADR-26): re-gerar evidencia SO quando um commit novo muda
-  comportamento (fix cycle executado) OU a pedido humano explicito (signal
-  `refresh_evidence`). 6 comentarios de review numa janela geram no maximo
-  1 refresh — provado com o ambiente de time-skipping (janela virtual).
-- Cap de refreshes (`evidence_refresh_cap`): excedido -> declina LIMPO e
-  auditado (P6), sem bloquear o PR.
+- Every `while` in the workflow has a tested cap: clarification
+  (test_clarification_gate), L1 fix (test_lifecycle_happy_path), L2 objections
+  and re_plan (test_phase2_sequence/test_plan_approval_gate) and — new here —
+  REVIEW rounds (`review_round_cap`).
+- Debounce (ADR-26): regenerate evidence ONLY when a new commit changes behavior
+  (a fix cycle ran) OR on an explicit human request (`refresh_evidence` signal).
+  6 review comments in one window produce at most 1 refresh — proven with the
+  time-skipping environment (virtual window).
+- Refresh cap (`evidence_refresh_cap`): exceeded -> CLEAN, audited decline (P6),
+  without blocking the PR.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from conftest import insert_work_item, new_work_item_id, read_audit_actions, wai
 from fakes import FakeControlPlane, build_fake_activities
 
 
-async def _wait_until(predicate, attempts: int = 400, msg: str = "condicao nunca ficou true"):
+async def _wait_until(predicate, attempts: int = 400, msg: str = "condition never became true"):
     for _ in range(attempts):
         if predicate():
             return
@@ -47,9 +47,9 @@ def _wf_input(work_item_id: str, **kw) -> WorkItemLifecycleInput:
 
 @pytest.mark.asyncio
 async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_skipping_env):
-    """ADR-26 (aceitacao literal do enunciado): 6 comentarios de review numa
-    janela de debounce -> UM ciclo de fix + UM refresh de evidencia (nunca 6
-    rebuilds). Janela virtual de 60s acelerada pelo time-skipping."""
+    """ADR-26 (literal acceptance criterion from the statement): 6 review
+    comments in one debounce window -> ONE fix cycle + ONE evidence refresh
+    (never 6 rebuilds). Virtual 60s window fast-forwarded by time-skipping."""
     work_item_id = new_work_item_id("deb6")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -64,24 +64,24 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
             _wf_input(work_item_id, evidence_debounce_seconds=60.0),
             id=work_item_id, task_queue=task_queue)
 
-        # espera a fase de implementacao (mesma execucao que o review loop —
-        # sem continue_as_new entre elas, sinais nao se perdem) e manda os 6
-        # comentarios ANTES de o loop de review consumi-los: chegam como um
-        # unico lote pendente.
+        # wait for the implementation phase (same execution as the review loop
+        # — no continue_as_new between them, so signals are not lost) and send
+        # the 6 comments BEFORE the review loop consumes them: they arrive as a
+        # single pending batch.
         await wait_for_status(handle, {"implementing", "validating", "review_ready"})
         for i in range(6):
             await handle.signal("review_comment",
                                 {"verdict": "changes_requested", "comment": f"ajuste {i}"})
 
-        # 1 lote -> 1 fix cycle -> 1 re-finalize do MESMO PR. A janela de
-        # debounce e um timer DURAVEL de 60s virtuais: avancamos o relogio do
-        # servidor de time-skipping em passos ate o timer disparar (o
-        # auto-skip so acontece quando o cliente espera handle.result()).
+        # 1 batch -> 1 fix cycle -> 1 re-finalize of the SAME PR. The debounce
+        # window is a DURABLE timer of 60 virtual seconds: we advance the
+        # time-skipping server's clock in steps until the timer fires (auto-skip
+        # only happens while the client is awaiting handle.result()).
         for _ in range(120):
             if state.finalize_calls >= 2:
                 break
             await time_skipping_env.sleep(2)
-        assert state.finalize_calls >= 2, "fix cycle do lote nunca re-finalizou o PR"
+        assert state.finalize_calls >= 2, "the batch fix cycle never re-finalized the PR"
         await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
@@ -89,23 +89,24 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    # 6 comentarios -> UM unico turno de fix do Coder (1 inicial + 1 fix)
+    # 6 comments -> a SINGLE Coder fix turn (1 initial + 1 fix)
     assert state.coder_turn_calls == 2
-    # e NO MAXIMO 1 refresh de evidencia (1 inicial + 1 pos-fix = 2 previews)
+    # and AT MOST 1 evidence refresh (1 initial + 1 post-fix = 2 previews)
     assert state.trigger_preview_calls == 2
     assert state.demo_evidence_calls == 2
-    assert state.finalize_calls == 2  # MESMO PR re-finalizado uma vez
+    assert state.finalize_calls == 2  # SAME PR re-finalized once
 
     actions = read_audit_actions(work_item_id)
     assert "review_comments_debounced" in actions
-    # exatamente 1 evento de fix e 1 refresh alem do initial
+    # exactly 1 fix event and 1 refresh beyond the initial one
     assert actions.count("coder_fix_applied") == 1
 
 
 @pytest.mark.asyncio
 async def test_review_comments_alone_never_refresh_evidence(time_skipping_env):
-    """ADR-26, o outro lado: `approved` (comentario que NAO gera commit) nao
-    re-gera evidencia — refresh so por fix cycle ou pedido humano explicito."""
+    """ADR-26, the other side: `approved` (a comment that produces NO commit)
+    does not regenerate evidence — a refresh only comes from a fix cycle or an
+    explicit human request."""
     work_item_id = new_work_item_id("norefresh")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -125,14 +126,14 @@ async def test_review_comments_alone_never_refresh_evidence(time_skipping_env):
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    assert state.trigger_preview_calls == 1  # SO a evidencia inicial
+    assert state.trigger_preview_calls == 1  # ONLY the initial evidence
 
 
 @pytest.mark.asyncio
 async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skipping_env):
-    """ADR-26: signal `refresh_evidence` (pedido humano explicito) e o unico
-    gatilho de refresh sem commit novo — re-roda o pipeline UMA vez, sem
-    nenhum turno extra do Coder."""
+    """ADR-26: the `refresh_evidence` signal (explicit human request) is the
+    only refresh trigger without a new commit — it re-runs the pipeline ONCE,
+    with no extra Coder turn."""
     work_item_id = new_work_item_id("humref")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -146,15 +147,15 @@ async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skippi
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
-        # espera a evidencia INICIAL rodar (o status pr_ready e gravado antes
-        # do pipeline; um refresh enviado antes do pipeline iniciar seria
-        # legitimamente absorvido por ele — semantica do debounce)
+        # wait for the INITIAL evidence to run (the pr_ready status is written
+        # before the pipeline; a refresh sent before the pipeline starts would
+        # legitimately be absorbed by it — debounce semantics)
         await _wait_until(lambda: state.trigger_preview_calls >= 1,
-                          msg="evidencia inicial nunca rodou")
+                          msg="the initial evidence run never happened")
 
         await handle.signal("refresh_evidence", {})
         await _wait_until(lambda: state.trigger_preview_calls >= 2,
-                          msg="refresh humano nunca disparou o pipeline")
+                          msg="the human refresh never triggered the pipeline")
 
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -162,15 +163,15 @@ async def test_human_refresh_evidence_signal_triggers_single_refresh(time_skippi
 
     assert result.status == WorkItemStatus.done.value
     assert state.trigger_preview_calls == 2
-    assert state.coder_turn_calls == 1  # refresh humano NAO roda Coder
+    assert state.coder_turn_calls == 1  # a human refresh does NOT run the Coder
     actions = read_audit_actions(work_item_id)
     assert "evidence_refresh_requested_by_human" in actions
 
 
 @pytest.mark.asyncio
 async def test_review_round_cap_escalates_never_loops_forever(time_skipping_env):
-    """WSB-E4-T2: o loop de review e capado por `review_round_cap` — esgotado,
-    escala (nunca um loop infinito por construcao)."""
+    """WSB-E4-T2: the review loop is capped by `review_round_cap` — once
+    exhausted it escalates (never an infinite loop, by construction)."""
     work_item_id = new_work_item_id("revcap")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -185,27 +186,27 @@ async def test_review_round_cap_escalates_never_loops_forever(time_skipping_env)
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
 
-        # round 1: dentro do cap — fix normal
+        # round 1: within the cap — normal fix
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r1"})
         await _wait_until(lambda: state.finalize_calls >= 2,
-                          msg="primeiro fix cycle nunca completou")
+                          msg="the first fix cycle never completed")
         await wait_for_status(handle, {"review_ready"})
 
-        # round 2: estoura o cap -> escalated
+        # round 2: exceeds the cap -> escalated
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r2"})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.escalated.value
     assert "review_round_cap_exhausted" in (result.detail or "")
-    assert state.coder_turn_calls == 2  # inicial + round 1; round 2 nunca rodou
+    assert state.coder_turn_calls == 2  # initial + round 1; round 2 never ran
     actions = read_audit_actions(work_item_id)
     assert "escalated" in actions
 
 
 @pytest.mark.asyncio
 async def test_evidence_refresh_cap_declines_cleanly_without_blocking(time_skipping_env):
-    """ADR-26: refreshes alem de `evidence_refresh_cap` sao DECLINADOS limpo
-    (auditado, P6) — a evidencia fica stale mas o PR nunca e bloqueado."""
+    """ADR-26: refreshes beyond `evidence_refresh_cap` are DECLINED cleanly
+    (audited, P6) — the evidence goes stale but the PR is never blocked."""
     work_item_id = new_work_item_id("refcap")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -221,22 +222,22 @@ async def test_evidence_refresh_cap_declines_cleanly_without_blocking(time_skipp
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
         await _wait_until(lambda: state.trigger_preview_calls >= 1,
-                          msg="evidencia inicial nunca rodou")
+                          msg="the initial evidence run never happened")
 
-        # refresh 1: dentro do cap
+        # refresh 1: within the cap
         await handle.signal("refresh_evidence", {})
         await _wait_until(lambda: state.trigger_preview_calls >= 2,
-                          msg="refresh 1 nunca rodou")
+                          msg="refresh 1 never ran")
 
-        # refresh 2: alem do cap -> declinado e auditado, pipeline NAO roda
+        # refresh 2: beyond the cap -> declined and audited, the pipeline does NOT run
         await handle.signal("refresh_evidence", {})
         await _wait_until(
             lambda: "evidence_refresh_declined_cap" in read_audit_actions(work_item_id),
-            msg="declinio do cap nunca foi auditado")
+            msg="the cap decline was never audited")
 
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
 
-    assert result.status == WorkItemStatus.done.value  # nunca bloqueia (P6)
-    assert state.trigger_preview_calls == 2  # initial + 1 refresh; o 2o declinado
+    assert result.status == WorkItemStatus.done.value  # never blocks (P6)
+    assert state.trigger_preview_calls == 2  # initial + 1 refresh; the 2nd declined

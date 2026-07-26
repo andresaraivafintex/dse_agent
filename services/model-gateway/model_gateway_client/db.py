@@ -1,5 +1,5 @@
-"""Conexão Postgres para a tabela `virtual_keys` (migrations/0005_wsd.sql).
-Não usa nenhum ORM — psycopg2 puro, mesma convenção de `dse_audit.client`."""
+"""Postgres connection for the `virtual_keys` table (migrations/0005_wsd.sql).
+No ORM here — plain psycopg2, same convention as `dse_audit.client`."""
 from __future__ import annotations
 
 import psycopg2

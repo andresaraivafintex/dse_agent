@@ -1,16 +1,16 @@
-"""Classificação determinística de caminhos (P1) — compartilhada.
+"""Deterministic path classification (P1) — shared.
 
-`is_test_path` era do sandbox-runtime (TesterToolset); promovida ao contrato
-porque o plan_compliance do L1 também precisa dela: o Tester escreve testes POR
-DESIGN em paths de teste, e o plano (Planner) nunca os lista — arquivos de
-teste não podem contar como "fora do plano" (achado do disparo real 2026-07-22:
-o L1 reprovaria toda tarefa com teste novo).
+`is_test_path` used to belong to sandbox-runtime (TesterToolset); it was
+promoted to the contract because the L1 plan_compliance also needs it: the
+Tester writes tests BY DESIGN under test paths, and the plan (Planner) never
+lists them — test files cannot count as "out of plan" (found on a real run
+2026-07-22: L1 would fail every task that added a new test).
 """
 from __future__ import annotations
 
 import re
 
-# Cobre os layouts comuns: pytest (`tests/`, `test_*.py`, `*_test.py`,
+# Covers the common layouts: pytest (`tests/`, `test_*.py`, `*_test.py`,
 # `conftest.py`), jest/vitest/node:test (`*.test.ts`, `*.spec.ts`,
 # `__tests__/`, `test/`), go (`*_test.go`).
 _TEST_PATH_RES = [
@@ -29,60 +29,60 @@ def is_test_path(path: str) -> bool:
     return any(rx.search(p) for rx in _TEST_PATH_RES)
 
 
-# --- Artefatos DESCARTÁVEIS do runtime/CLI (prune pós-Coder) ----------------
-# Desde que `expected_files` virou ADVISORY no L1 (o Planner adivinha os
-# arquivos pelo TEXTO da issue, ANTES de ler o código — decisão do operador,
-# ver a memória l1-expected-files-advisory), o prune pós-Coder NÃO pode mais
-# apagar "tudo que está fora do plano": um arquivo-fonte NOVO e legítimo que o
-# fix precisou criar ficaria fora de `expected_files` e sumiria silenciosamente
-# antes do commit. `is_disposable_artifact` restringe o prune a LIXO óbvio
-# (log/scratch/backup e o relatório espontâneo que o CLI escreve sobre o próprio
-# trabalho, ex.: BUG_FIX_REPORT.md).
+# --- DISPOSABLE runtime/CLI artifacts (post-Coder prune) --------------------
+# Ever since `expected_files` became ADVISORY in L1 (the Planner guesses the
+# files from the TEXT of the issue, BEFORE reading the code — operator
+# decision, see the l1-expected-files-advisory memory), the post-Coder prune
+# can NO LONGER delete "everything outside the plan": a NEW and legitimate
+# source file the fix had to create would fall outside `expected_files` and
+# vanish silently before the commit. `is_disposable_artifact` restricts the
+# prune to obvious GARBAGE (log/scratch/backup and the spontaneous report the
+# CLI writes about its own work, e.g. BUG_FIX_REPORT.md).
 #
-# INVARIANTE (coberta em packages/contracts/tests/test_paths.py): NUNCA
-# classifica um arquivo-fonte como descartável. A assimetria é deliberada — na
-# dúvida, MANTÉM: um lixo que escapa fica no diff (pego pelo orçamento de linhas
-# do L1 / revisão humana); uma fonte apagada por engano quebra o fix sem deixar
-# rastro no diff.
+# INVARIANT (covered in packages/contracts/tests/test_paths.py): NEVER
+# classifies a source file as disposable. The asymmetry is deliberate — when in
+# doubt, KEEP: garbage that slips through stays in the diff (caught by the L1
+# line budget / human review); a source file deleted by mistake breaks the fix
+# without leaving a trace in the diff.
 
-# Extensões que são lixo de runtime por definição (jamais código-fonte).
+# Extensions that are runtime garbage by definition (never source code).
 _DISPOSABLE_EXTS = frozenset({
     ".log", ".tmp", ".temp", ".bak", ".orig", ".rej",
     ".swp", ".swo", ".pyc", ".pyo", ".pid",
 })
 
-# Basenames exatos de lixo de SO/editor/processo.
+# Exact basenames of OS/editor/process garbage.
 _DISPOSABLE_BASENAMES = frozenset({
     ".ds_store", "thumbs.db", "desktop.ini", "nohup.out",
 })
 
-# SÓ arquivos de doc/texto podem ser podados pela convenção de NOME de relatório
-# (um .py/.js/.ts nunca entra por esta regra — é o que blinda a fonte).
+# ONLY doc/text files can be pruned by the report NAME convention (a
+# .py/.js/.ts never matches through this rule — that is what shields source).
 _REPORT_DOC_EXTS = frozenset({".md", ".markdown", ".txt", ".rst"})
 
-# Palavras que denunciam um relatório espontâneo do CLI (BUG_FIX_REPORT.md,
-# IMPLEMENTATION_SUMMARY.md, CHANGES_WALKTHROUGH.txt…). Curada de propósito:
-# NÃO inclui README/CHANGELOG/CONTRIBUTING/LICENSE/requirements — documentos e
-# manifestos legítimos e mantidos, que devem sobreviver.
+# Words that give away a spontaneous CLI report (BUG_FIX_REPORT.md,
+# IMPLEMENTATION_SUMMARY.md, CHANGES_WALKTHROUGH.txt…). Curated on purpose: it
+# does NOT include README/CHANGELOG/CONTRIBUTING/LICENSE/requirements —
+# legitimate, maintained documents and manifests, which must survive.
 _REPORT_NAME_KEYWORDS = ("REPORT", "SUMMARY", "WALKTHROUGH", "FINDINGS", "VERIFICATION")
 
 
 def is_disposable_artifact(path: str) -> bool:
-    """True se `path` é um artefato DESCARTÁVEL óbvio do runtime/CLI — log,
-    scratch, backup, lixo de SO/editor, ou um relatório espontâneo que o CLI
-    escreve sobre o próprio trabalho (BUG_FIX_REPORT.md).
+    """True if `path` is an obvious DISPOSABLE runtime/CLI artifact — log,
+    scratch, backup, OS/editor garbage, or a spontaneous report the CLI writes
+    about its own work (BUG_FIX_REPORT.md).
 
-    Usado pelo prune pós-Coder para apagar SÓ lixo. Ver a nota acima sobre a
-    invariante anti-fonte e a assimetria de manter-em-dúvida — em particular,
-    a heurística de nome-de-relatório só se aplica a extensões de doc/texto,
-    então nenhum arquivo-fonte (independente do nome) é jamais descartável.
+    Used by the post-Coder prune to delete ONLY garbage. See the note above on
+    the anti-source invariant and the keep-when-in-doubt asymmetry — in
+    particular, the report-name heuristic only applies to doc/text extensions,
+    so no source file (whatever its name) is ever disposable.
     """
     p = path.replace("\\", "/")
     base = p.rsplit("/", 1)[-1]
     if base.lower() in _DISPOSABLE_BASENAMES:
         return True
     stem, dot, ext = base.rpartition(".")
-    if not dot:  # sem extensão (Makefile, LICENSE, Dockerfile…) — nunca lixo
+    if not dot:  # no extension (Makefile, LICENSE, Dockerfile…) — never garbage
         return False
     ext = "." + ext.lower()
     if ext in _DISPOSABLE_EXTS:
@@ -93,11 +93,11 @@ def is_disposable_artifact(path: str) -> bool:
     return False
 
 
-# Lockfile -> manifesto que o declara. Rodar o gerenciador de pacotes (npm test,
-# poetry run…) reescreve metadados do lockfile SEM mudança de dependência
-# (achado do disparo real 2026-07-22: npm mudou 16 linhas de package-lock.json
-# e o diff_budget reprovou a tarefa como "mudança fora do plano"). Churn de
-# lockfile só é mudança REAL quando o manifesto par também mudou.
+# Lockfile -> manifest that declares it. Running the package manager (npm test,
+# poetry run…) rewrites lockfile metadata WITHOUT any dependency change (found
+# on a real run 2026-07-22: npm changed 16 lines of package-lock.json and
+# diff_budget failed the task as an "out of plan change"). Lockfile churn is
+# only a REAL change when the paired manifest changed too.
 LOCKFILE_MANIFESTS: dict[str, str] = {
     "package-lock.json": "package.json",
     "npm-shrinkwrap.json": "package.json",
@@ -115,8 +115,8 @@ LOCKFILE_MANIFESTS: dict[str, str] = {
 
 
 def lockfile_manifest_for(path: str) -> str | None:
-    """Se `path` é um lockfile conhecido, retorna o path do manifesto par
-    (mesmo diretório); senão None."""
+    """If `path` is a known lockfile, returns the path of the paired manifest
+    (same directory); otherwise None."""
     p = path.replace("\\", "/")
     manifest = LOCKFILE_MANIFESTS.get(p.rsplit("/", 1)[-1])
     if manifest is None:
@@ -126,8 +126,8 @@ def lockfile_manifest_for(path: str) -> str | None:
 
 
 def is_lockfile_churn(path: str, files_changed: list[str] | set[str]) -> bool:
-    """True quando `path` é lockfile e o manifesto par NÃO está no diff —
-    churn mecânico do gerenciador de pacotes, não uma mudança declarável."""
+    """True when `path` is a lockfile and the paired manifest is NOT in the
+    diff — mechanical package-manager churn, not a declarable change."""
     manifest = lockfile_manifest_for(path)
     if manifest is None:
         return False

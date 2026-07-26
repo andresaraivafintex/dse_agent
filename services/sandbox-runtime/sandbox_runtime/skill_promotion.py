@@ -1,36 +1,36 @@
-"""Pipeline de promoção de skill (WSC-E4-T2 + T3) — Fase 4.
+"""Skill promotion pipeline (WSC-E4-T2 + T3) — Fase 4.
 
-Duas metades, ambas DETERMINÍSTICAS (P1 — nenhuma decisão de fluxo por LLM):
+Two halves, both DETERMINISTIC (P1 — no flow decision made by an LLM):
 
-  1. **Captura de episódios + materialização de candidates (T2).** As três
-     "sources at launch" (§10.17) gravam episódios em `skill_episode`:
-     `clarification` (WS-B), `ci_repair` e `review_feedback` (WS-E). Quando um
-     `pattern_key` acumula `SUM(occurrence_n) >= threshold` (config, não LLM),
-     `materialize_candidates` cria uma skill em `skill_registry` com
-     `status='candidate'`, `version` incrementada e proveniência completa. Um
-     candidate NÃO é servido ao Planner (só {approved, active} são) e NÃO se
-     auto-promove — precisa de eval + aprovação humana (P3).
+  1. **Episode capture + candidate materialization (T2).** The three "sources at
+     launch" (§10.17) record episodes in `skill_episode`: `clarification`
+     (WS-B), `ci_repair` and `review_feedback` (WS-E). When a `pattern_key`
+     accumulates `SUM(occurrence_n) >= threshold` (config, not an LLM),
+     `materialize_candidates` creates a skill in `skill_registry` with
+     `status='candidate'`, an incremented `version` and full provenance. A
+     candidate is NOT served to the Planner (only {approved, active} are) and
+     does NOT self-promote — it needs an eval + human approval (P3).
 
-  2. **Esteira de promoção governada (T3).** Máquina de estados explícita
+  2. **Governed promotion pipeline (T3).** Explicit state machine
      candidate → approved → canary → active (+ rollback active/canary →
-     rolled_back). Invariantes NÃO-NEGOCIÁVEIS, por construção (não há code
-     path que as viole — levantam exceção ANTES de qualquer escrita):
-       - P1/P3: transição para {approved, active} exige `approver` humano
-         resolvido e não-vazio (`ApproverRequired`); um `system:*` nunca aprova
-         (nenhuma skill se auto-promove).
-       - candidate → approved exige um eval PASSANTE (negative_regressions=0)
-         registrado em `skill_eval` — a promoção fica bloqueada por construção
-         se o replay regrediu num caso negativo (`EvalGateNotPassed`).
-       - transição ilegal na máquina de estados levanta `IllegalTransition`.
-     Rollback é mudança de PONTEIRO em uma transação (failure mode 13): a
-     versão ativa vira `rolled_back` e a versão servida anterior volta a
-     `active` — em segundos, sem reprocessar nada. O índice único parcial
-     `uq_skill_registry_one_served` garante estruturalmente que nunca existam
-     duas versões servidas da mesma skill.
+     rolled_back). NON-NEGOTIABLE invariants, by construction (there is no code
+     path that violates them — they raise BEFORE any write):
+       - P1/P3: a transition into {approved, active} requires a resolved,
+         non-empty human `approver` (`ApproverRequired`); a `system:*` never
+         approves (no skill self-promotes).
+       - candidate → approved requires a PASSING eval (negative_regressions=0)
+         recorded in `skill_eval` — the promotion is blocked by construction if
+         the replay regressed on a negative case (`EvalGateNotPassed`).
+       - an illegal transition in the state machine raises `IllegalTransition`.
+     Rollback is a POINTER change within one transaction (failure mode 13): the
+     active version becomes `rolled_back` and the previously served version goes
+     back to `active` — in seconds, reprocessing nothing. The partial unique
+     index `uq_skill_registry_one_served` structurally guarantees there are never
+     two served versions of the same skill.
 
-Toda transição consequente grava em `dse_audit.emit` com a identidade do
-aprovador (P8). Postgres real, falha limpa se indisponível (P6) — nunca
-degrada silenciosamente para "sem skills".
+Every consequential transition writes to `dse_audit.emit` with the approver's
+identity (P8). Real Postgres, clean failure when unavailable (P6) — it never
+silently degrades to "no skills".
 """
 from __future__ import annotations
 
@@ -48,19 +48,19 @@ _DSN = os.environ.get(
     os.environ.get("DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"),
 )
 
-# Fontes válidas de episódio (bate com o CHECK da migração 0019).
+# Valid episode sources (matches the CHECK in migration 0019).
 EPISODE_SOURCES = ("clarification", "ci_repair", "review_feedback")
 
-# Limiar de materialização — CONFIG, não LLM (P1). Quantas occurrences do mesmo
-# pattern_key até virar candidate.
+# Materialization threshold — CONFIG, not an LLM (P1). How many occurrences of
+# the same pattern_key before it becomes a candidate.
 DEFAULT_CANDIDATE_THRESHOLD = int(os.environ.get("DSE_SKILL_CANDIDATE_THRESHOLD", "3"))
 
-# O que o Planner de PRODUÇÃO enxerga. candidate/canary/draft/rolled_back/retired
-# NUNCA são servidos. canary = shadow (sem seleção de subconjunto canário nesta
-# fase — documentado no README).
+# What the PRODUCTION Planner sees. candidate/canary/draft/rolled_back/retired
+# are NEVER served. canary = shadow (no canary-subset selection at this phase —
+# documented in the README).
 SERVED_STATUSES = ("approved", "active")
 
-# Máquina de estados governada. Mapa from_status -> {to_status permitidos}.
+# Governed state machine. Map from_status -> {allowed to_status}.
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "candidate": {"approved"},
     "approved": {"canary", "active", "retired"},
@@ -68,50 +68,50 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "active": {"rolled_back"},
 }
 
-# Transições que exigem um aprovador HUMANO nomeado (P1/P3 — não-negociável).
+# Transitions that require a named HUMAN approver (P1/P3 — non-negotiable).
 APPROVER_REQUIRED_TO = {"approved", "active"}
 
 
 class SkillPromotionUnavailable(Exception):
-    """Postgres indisponível na esteira — falha limpa (P6)."""
+    """Postgres unavailable in the pipeline — clean failure (P6)."""
 
 
 class ApproverRequired(Exception):
-    """Tentativa de promover para approved/active sem aprovador humano válido.
-    Levantada ANTES de qualquer escrita — promoção sem humano é impossível por
-    construção (P1/P3)."""
+    """An attempt to promote to approved/active without a valid human approver.
+    Raised BEFORE any write — promotion without a human is impossible by
+    construction (P1/P3)."""
 
 
 class EvalGateNotPassed(Exception):
-    """candidate → approved sem um eval passante registrado (negative_regressions=0).
-    Bloqueio por construção (P3 — o candidate não se aprova sozinho)."""
+    """candidate → approved with no recorded passing eval (negative_regressions=0).
+    Blocked by construction (P3 — a candidate does not approve itself)."""
 
 
 class IllegalTransition(Exception):
-    """Transição fora da máquina de estados governada."""
+    """A transition outside the governed state machine."""
 
 
 class SkillNotFound(Exception):
-    """(tenant, skill_key, version) inexistente."""
+    """(tenant, skill_key, version) does not exist."""
 
 
 def _connect(dsn: str | None = None):
     try:
         return psycopg2.connect(dsn or _DSN)
     except Exception as exc:  # noqa: BLE001
-        raise SkillPromotionUnavailable(f"skill_promotion: Postgres indisponível: {exc}") from exc
+        raise SkillPromotionUnavailable(f"skill_promotion: Postgres unavailable: {exc}") from exc
 
 
 def _is_human_principal(approver: str | None) -> bool:
-    """Aprovador precisa ser um principal humano resolvido — não vazio e não um
-    ator de sistema (P3: nenhuma skill se auto-promove por um `system:*`)."""
+    """The approver must be a resolved human principal — non-empty and not a
+    system actor (P3: no skill self-promotes through a `system:*`)."""
     if not approver or not approver.strip():
         return False
     return not approver.strip().startswith("system:")
 
 
 # ===========================================================================
-# WSC-E4-T2 — captura de episódios + materialização de candidates
+# WSC-E4-T2 — episode capture + candidate materialization
 # ===========================================================================
 def record_episode(
     tenant_id: str,
@@ -123,15 +123,15 @@ def record_episode(
     provenance: dict[str, Any] | None = None,
     conn=None,
 ) -> int:
-    """Grava um episódio de aprendizado (uma occurrence de um `pattern_key`).
-    Determinístico e append-only — NÃO cria/ativa skill nenhuma aqui, é só o
-    insumo governável. Retorna o id do episódio."""
+    """Record a learning episode (one occurrence of a `pattern_key`).
+    Deterministic and append-only — it creates/activates NO skill here, it is
+    only the governable raw input. Returns the episode id."""
     if source not in EPISODE_SOURCES:
-        raise ValueError(f"source inválida: {source!r} (esperado {EPISODE_SOURCES})")
+        raise ValueError(f"invalid source: {source!r} (expected {EPISODE_SOURCES})")
     if not tenant_id or not tenant_id.strip():
-        raise ValueError("tenant_id é obrigatório")
+        raise ValueError("tenant_id is mandatory")
     if not pattern_key or not pattern_key.strip():
-        raise ValueError("pattern_key é obrigatório")
+        raise ValueError("pattern_key is mandatory")
 
     owns = conn is None
     if owns:
@@ -155,8 +155,8 @@ def record_episode(
 
 
 def pattern_occurrence_counts(tenant_id: str, *, conn=None) -> dict[str, int]:
-    """SUM(occurrence_n) por pattern_key do tenant. Base determinística do
-    limiar de materialização."""
+    """SUM(occurrence_n) per pattern_key for the tenant. The deterministic basis
+    of the materialization threshold."""
     owns = conn is None
     if owns:
         conn = _connect()
@@ -178,7 +178,7 @@ def pattern_occurrence_counts(tenant_id: str, *, conn=None) -> dict[str, int]:
 
 
 def _candidate_skill_key(pattern_key: str) -> str:
-    """skill_key determinístico de um pattern materializado (P1)."""
+    """Deterministic skill_key for a materialized pattern (P1)."""
     return f"auto-{pattern_key}"
 
 
@@ -191,8 +191,8 @@ def _next_version(cur, tenant_id: str, skill_key: str) -> int:
 
 
 def _has_live_version(cur, tenant_id: str, skill_key: str) -> bool:
-    """Já existe versão desta skill em estado 'vivo' (não rolled_back/retired)?
-    Se sim, não re-materializa (idempotência da esteira)."""
+    """Does a version of this skill already exist in a 'live' state (not
+    rolled_back/retired)? If so, do not re-materialize (pipeline idempotency)."""
     cur.execute(
         """
         SELECT 1 FROM skill_registry
@@ -245,16 +245,16 @@ def materialize_candidates(
     conn=None,
     body_builder=None,
 ) -> list[MaterializedCandidate]:
-    """WSC-E4-T2. Para cada pattern_key com occurrences >= threshold que ainda
-    não tem versão viva, materializa uma skill CANDIDATE (status='candidate',
-    version incrementada, proveniência dos episódios). 100% determinístico — o
-    corpo é um template (`body_builder`, injetável), NUNCA gerado por LLM aqui.
-    Idempotente: rodar de novo não duplica candidates.
+    """WSC-E4-T2. For every pattern_key with occurrences >= threshold that has no
+    live version yet, materialize a CANDIDATE skill (status='candidate',
+    incremented version, provenance from the episodes). 100% deterministic — the
+    body is a template (`body_builder`, injectable), NEVER LLM-generated here.
+    Idempotent: running it again does not duplicate candidates.
 
-    created_by = 'system:skill-promotion' de propósito: um candidate é uma
-    PROPOSTA da máquina; só vira servível depois de eval + aprovação humana
-    (P3). (A regra "created_by nunca system:*" da 0010 vale para os seeds já
-    APROVADOS por humano, não para candidates propostos pela esteira.)"""
+    created_by = 'system:skill-promotion' on purpose: a candidate is the
+    machine's PROPOSAL; it only becomes servable after an eval + human approval
+    (P3). (Migration 0010's "created_by is never system:*" rule applies to the
+    seeds already human-APPROVED, not to candidates proposed by the pipeline.)"""
     thr = DEFAULT_CANDIDATE_THRESHOLD if threshold is None else threshold
     builder = body_builder or _default_candidate_body
 
@@ -312,26 +312,26 @@ def materialize_candidates(
 
 
 def _default_candidate_body(pattern_key: str, provenance: dict[str, Any]):
-    """Template determinístico do corpo do candidate (P1). Retorna
+    """Deterministic template for the candidate's body (P1). Returns
     (title, body, category, applies_to)."""
-    sources = ", ".join(sorted(provenance.get("by_source", {}).keys())) or "desconhecida"
-    title = f"Padrão recorrente: {pattern_key}"
+    sources = ", ".join(sorted(provenance.get("by_source", {}).keys())) or "unknown"
+    title = f"Recurring pattern: {pattern_key}"
     body = (
-        f"Skill CANDIDATE materializada automaticamente do pattern_key "
-        f"'{pattern_key}' (fontes: {sources}). Requer eval + aprovação humana "
-        f"antes de ser servida ao Planner. Proveniência completa em provenance."
+        f"CANDIDATE skill materialized automatically from pattern_key "
+        f"'{pattern_key}' (sources: {sources}). Requires eval + human approval "
+        f"before being served to the Planner. Full provenance in provenance."
     )
     return title, body, "auto", ["default"]
 
 
 # ===========================================================================
-# WSC-E4-T3 — eval do candidate (replay contra o eval set histórico)
+# WSC-E4-T3 — candidate eval (replay against the historical eval set)
 # ===========================================================================
 @dataclass
 class EvalCase:
-    """Um caso do eval set. `label` = 'positive' (a skill DEVERIA ajudar/disparar)
-    ou 'negative' (a skill NÃO deve disparar). `pattern_key`/`text` descrevem o
-    caso — o matcher determinístico decide se a skill dispara."""
+    """One eval-set case. `label` = 'positive' (the skill SHOULD help/fire) or
+    'negative' (the skill must NOT fire). `pattern_key`/`text` describe the case
+    — the deterministic matcher decides whether the skill fires."""
 
     label: str  # 'positive' | 'negative'
     pattern_key: str
@@ -352,12 +352,12 @@ class EvalOutcome:
 def build_eval_set_from_episodes(
     tenant_id: str, candidate_pattern_key: str, *, conn=None
 ) -> list[EvalCase]:
-    """Constrói um eval set a partir dos episódios do tenant:
-      - POSITIVOS: episódios com o MESMO pattern_key do candidate (casos onde a
-        skill ajudaria — ela deve disparar);
-      - NEGATIVOS: episódios de OUTROS pattern_keys (casos onde a skill NÃO deve
-        disparar — se disparar, é uma regressão).
-    Determinístico e tenant-scoped."""
+    """Build an eval set from the tenant's episodes:
+      - POSITIVES: episodes with the SAME pattern_key as the candidate (cases
+        where the skill would help — it must fire);
+      - NEGATIVES: episodes from OTHER pattern_keys (cases where the skill must
+        NOT fire — if it does, that is a regression).
+    Deterministic and tenant-scoped."""
     owns = conn is None
     if owns:
         conn = _connect()
@@ -380,9 +380,9 @@ def build_eval_set_from_episodes(
 
 
 def _skill_fires(candidate_pattern_key: str, case: EvalCase) -> bool:
-    """Matcher determinístico: a skill materializada do `candidate_pattern_key`
-    dispara num caso cujo pattern_key é igual. (Trigger simples e auditável;
-    substituível por um matcher mais rico atrás desta mesma função.)"""
+    """Deterministic matcher: the skill materialized from `candidate_pattern_key`
+    fires on a case whose pattern_key is equal. (A simple, auditable trigger;
+    replaceable by a richer matcher behind this same function.)"""
     return case.pattern_key == candidate_pattern_key
 
 
@@ -395,14 +395,14 @@ def evaluate_candidate(
     eval_cases: list[EvalCase] | None = None,
     write_row: bool = True,
 ) -> EvalOutcome:
-    """Replay do candidate contra o eval set (positivos + negativos),
-    determinístico. `negative_regressions > 0` ⇒ `passed=False` (bloqueia
-    promoção por construção). Grava a trilha em `skill_eval` (P8)."""
+    """Replay the candidate against the eval set (positives + negatives),
+    deterministically. `negative_regressions > 0` ⇒ `passed=False` (blocks
+    promotion by construction). Writes the trail to `skill_eval` (P8)."""
     owns = conn is None
     if owns:
         conn = _connect()
     try:
-        # pattern_key do candidate (fonte de verdade: a linha materializada).
+        # The candidate's pattern_key (source of truth: the materialized row).
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT pattern_key FROM skill_registry "
@@ -431,8 +431,8 @@ def evaluate_candidate(
             elif c.label == "negative" and fired:
                 negative_regressions += 1
 
-        # score = recall nos positivos (0..1); só informativo. O GATE é
-        # negative_regressions == 0 E pelo menos um positive_hit.
+        # score = recall over the positives (0..1); informational only. The GATE
+        # is negative_regressions == 0 AND at least one positive_hit.
         score = (positive_hits / n_pos) if n_pos else 0.0
         passed = negative_regressions == 0 and positive_hits > 0
         detail = (
@@ -482,7 +482,7 @@ def evaluate_candidate(
 
 
 # ===========================================================================
-# WSC-E4-T3 — promoção governada (state machine + rollback por ponteiro)
+# WSC-E4-T3 — governed promotion (state machine + pointer rollback)
 # ===========================================================================
 @dataclass
 class TransitionOutcome:
@@ -490,8 +490,8 @@ class TransitionOutcome:
     version: int
     from_status: str
     to_status: str
-    restored_version: int | None = None  # versão que voltou a active no rollback
-    superseded_version: int | None = None  # versão servida anterior rebaixada na ativação
+    restored_version: int | None = None  # version restored to active on rollback
+    superseded_version: int | None = None  # previously served version demoted on activation
 
 
 def _current_status(cur, tenant_id: str, skill_key: str, version: int) -> str:
@@ -520,8 +520,8 @@ def _has_passing_eval(cur, tenant_id: str, skill_key: str, version: int) -> bool
 
 
 def _served_version(cur, tenant_id: str, skill_key: str, exclude_version: int) -> int | None:
-    """A versão atualmente SERVIDA (approved/active) da skill, se houver, que
-    não seja `exclude_version`. Há no máximo uma (índice único parcial)."""
+    """The skill's currently SERVED version (approved/active), if any, other than
+    `exclude_version`. There is at most one (partial unique index)."""
     cur.execute(
         """
         SELECT version FROM skill_registry
@@ -555,22 +555,22 @@ def promote(
     reason: str = "",
     conn=None,
 ) -> TransitionOutcome:
-    """Transição de estado GOVERNADA (WSC-E4-T3). Uma transação; ordem das
-    escritas respeita o índice único parcial de "uma versão servida".
+    """GOVERNED state transition (WSC-E4-T3). One transaction; the write order
+    respects the "one served version" partial unique index.
 
-    Invariantes por construção (levantam ANTES de escrever):
-      - to_status in {approved, active} sem approver humano ⇒ ApproverRequired.
-      - candidate → approved sem eval passante ⇒ EvalGateNotPassed.
-      - transição fora de ALLOWED_TRANSITIONS ⇒ IllegalTransition.
+    Invariants by construction (they raise BEFORE writing):
+      - to_status in {approved, active} without a human approver ⇒ ApproverRequired.
+      - candidate → approved without a passing eval ⇒ EvalGateNotPassed.
+      - a transition outside ALLOWED_TRANSITIONS ⇒ IllegalTransition.
 
-    Rollback (to_status='rolled_back'): a versão vira rolled_back e a versão
-    servida anterior (registrada em provenance.supersedes) volta a active —
-    mudança de PONTEIRO em segundos (failure mode 13)."""
-    # --- Gate P1/P3: aprovador humano ANTES de qualquer escrita. ---
+    Rollback (to_status='rolled_back'): the version becomes rolled_back and the
+    previously served version (recorded in provenance.supersedes) goes back to
+    active — a POINTER change in seconds (failure mode 13)."""
+    # --- P1/P3 gate: human approver BEFORE any write. ---
     if to_status in APPROVER_REQUIRED_TO and not _is_human_principal(approver):
         raise ApproverRequired(
-            f"promoção para '{to_status}' exige aprovador humano nomeado "
-            f"(recebido: {approver!r}) — P1/P3, impossível por construção"
+            f"promotion to '{to_status}' requires a named human approver "
+            f"(received: {approver!r}) — P1/P3, impossible by construction"
         )
 
     owns = conn is None
@@ -583,15 +583,15 @@ def promote(
             allowed = ALLOWED_TRANSITIONS.get(from_status, set())
             if to_status not in allowed:
                 raise IllegalTransition(
-                    f"{skill_key} v{version}: transição {from_status!r} -> {to_status!r} "
-                    f"não permitida (permitidas: {sorted(allowed)})"
+                    f"{skill_key} v{version}: transition {from_status!r} -> {to_status!r} "
+                    f"not allowed (allowed: {sorted(allowed)})"
                 )
 
             if from_status == "candidate" and to_status == "approved":
                 if not _has_passing_eval(cur, tenant_id, skill_key, version):
                     raise EvalGateNotPassed(
-                        f"{skill_key} v{version}: candidate -> approved bloqueado — "
-                        f"nenhum eval passante (negative_regressions=0) registrado"
+                        f"{skill_key} v{version}: candidate -> approved blocked — "
+                        f"no passing eval (negative_regressions=0) recorded"
                     )
 
             outcome = TransitionOutcome(
@@ -600,12 +600,13 @@ def promote(
             )
 
             if to_status in SERVED_STATUSES:
-                # Entrar no conjunto SERVIDO ({approved, active}): rebaixa a
-                # versão servida anterior (se houver, e for outra) ANTES de
-                # servir esta — o índice único parcial `uq_..._one_served`
-                # nunca vê duas versões servidas da mesma skill. A versão
-                # suplantada vira 'retired' e fica registrada em
-                # provenance.supersedes para o rollback devolver o ponteiro.
+                # Entering the SERVED set ({approved, active}): demote the
+                # previously served version (if any, and if it is a different
+                # one) BEFORE serving this one — the partial unique index
+                # `uq_..._one_served` never sees two served versions of the same
+                # skill. The superseded version becomes 'retired' and is recorded
+                # in provenance.supersedes so the rollback can hand the pointer
+                # back.
                 prev = _served_version(cur, tenant_id, skill_key, exclude_version=version)
                 if prev is not None:
                     _set_status(cur, tenant_id, skill_key, prev, "retired")
@@ -619,8 +620,8 @@ def promote(
                 _set_status(cur, tenant_id, skill_key, version, to_status)
 
             elif to_status == "rolled_back":
-                # Rollback por ponteiro: primeiro tira esta de servida, depois
-                # restaura a versão que ela suplantou (se houver) a active.
+                # Pointer rollback: first take this one out of served, then
+                # restore the version it superseded (if any) to active.
                 _set_status(cur, tenant_id, skill_key, version, "rolled_back")
                 cur.execute(
                     "SELECT provenance->>'supersedes' "
@@ -630,8 +631,8 @@ def promote(
                 sup = cur.fetchone()[0]
                 if sup is not None:
                     restored = int(sup)
-                    # Só restaura se a versão suplantada ainda existir e estiver
-                    # rebaixada (retired) — volta a ser o ponteiro servido.
+                    # Only restore if the superseded version still exists and is
+                    # demoted (retired) — it becomes the served pointer again.
                     cur.execute(
                         "SELECT status FROM skill_registry "
                         "WHERE tenant_id = %s AND skill_key = %s AND version = %s FOR UPDATE",
@@ -642,7 +643,7 @@ def promote(
                         _set_status(cur, tenant_id, skill_key, restored, "active")
                         outcome.restored_version = restored
             else:
-                # approved / canary: transição simples de status.
+                # approved / canary: a plain status transition.
                 _set_status(cur, tenant_id, skill_key, version, to_status)
 
             audit_emit(

@@ -1,10 +1,10 @@
-"""Ticks por repo do console (migração 0029 — skill_registry.repo_scope).
+"""Per-repo ticks from the console (migration 0029 — skill_registry.repo_scope).
 
-Cobre, sem depender de Postgres (fake conn com as 7 colunas da query):
-  - semântica de `enabled_for_repo`: NULL=global, "*"=todos, lista=membership,
-    []=nenhum;
-  - `read_approved_skills(repo=...)` filtra pelos ticks;
-  - `repo=None` (legado) não filtra nada — compat com chamadas existentes.
+Covers, without depending on Postgres (fake conn with the query's 7 columns):
+  - `enabled_for_repo` semantics: NULL=global, "*"=all, list=membership,
+    []=none;
+  - `read_approved_skills(repo=...)` filters by the ticks;
+  - `repo=None` (legacy) filters nothing — compat with existing callers.
 """
 from __future__ import annotations
 
@@ -41,10 +41,10 @@ def _row(key, repo_scope):
 
 
 _ROWS = [
-    _row("global-null", None),            # nativa do fase1 (sem coluna) — global
-    _row("all-star", ["*"]),              # tickada para todos
+    _row("global-null", None),            # native to fase1 (no column) — global
+    _row("all-star", ["*"]),              # ticked for all
     _row("only-wallet", ["acme/wallet-svc"]),
-    _row("nowhere", []),                  # sem tick — não roda em repo algum
+    _row("nowhere", []),                  # no tick — runs on no repo at all
 ]
 
 

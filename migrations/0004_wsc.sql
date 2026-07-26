@@ -1,16 +1,16 @@
--- WS-C — sandbox-runtime / egress-proxy (Fase 1, WSC-E1/E2).
--- Dono: WS-C. Não editar 0001_foundation.sql — este arquivo é aditivo.
+-- WS-C — sandbox-runtime / egress-proxy (Phase 1, WSC-E1/E2).
+-- Owner: WS-C. Do not edit 0001_foundation.sql — this file is additive.
 --
--- `sandbox_leases`: bookkeeping durável de containers de sandbox por tarefa
--- (complementa os labels do Docker — útil para reconciliação/dashboards
--- fora do próprio Docker, e para o WS-F correlacionar custo de infra por
--- tenant). Não é a fonte de verdade de estado do container (o Docker é);
--- é só um log de eventos de lifecycle.
+-- `sandbox_leases`: durable bookkeeping of sandbox containers per task
+-- (complements the Docker labels — useful for reconciliation/dashboards
+-- outside Docker itself, and for WS-F to correlate infra cost per tenant).
+-- It is NOT the source of truth for container state (Docker is); it is just
+-- a lifecycle event log.
 --
--- `egress_credential_leases`: evidência do SLO de revogação de credencial
--- efêmera (WSC-E2-T2, "até 60s") — cada linha é uma credencial mintada pelo
--- egress-proxy, com issued_at/revoked_at, para poder provar em auditoria
--- (P8) que nenhuma credencial ficou viva além do fim da tarefa.
+-- `egress_credential_leases`: evidence of the ephemeral credential revocation
+-- SLO (WSC-E2-T2, "within 60s") — each row is a credential minted by the
+-- egress-proxy, with issued_at/revoked_at, so that we can prove in an audit
+-- (P8) that no credential stayed alive beyond the end of the task.
 
 CREATE TABLE IF NOT EXISTS sandbox_leases (
     id               BIGSERIAL PRIMARY KEY,

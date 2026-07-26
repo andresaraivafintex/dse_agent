@@ -1,19 +1,19 @@
--- Fintex DSE — Fase 1 — WS-D (model-gateway / LiteLLM)
--- Dono: WS-D. Rastreia virtual keys emitidas pelo LiteLLM proxy por
--- tenant/work_item/stage (WSD-E1-T3). Fonte de verdade para "quem tem uma
--- credencial de modelo viva agora" — o LiteLLM guarda a key em si (ou em
--- memória, se rodando sem `database_url` próprio — ver README), esta tabela
--- é o registro do lado do DSE para auditoria/reconciliação e para permitir
--- revogar por work_item mesmo sem guardar a key em claro.
+-- Fintex DSE — Phase 1 — WS-D (model-gateway / LiteLLM)
+-- Owner: WS-D. Tracks virtual keys issued by the LiteLLM proxy per
+-- tenant/work_item/stage (WSD-E1-T3). Source of truth for "who holds a live
+-- model credential right now" — LiteLLM stores the key itself (or in memory,
+-- if running without its own `database_url` — see README); this table is the
+-- DSE-side record for audit/reconciliation and to allow revoking per work_item
+-- without storing the key in clear text.
 
 CREATE TABLE IF NOT EXISTS virtual_keys (
     id                 BIGSERIAL PRIMARY KEY,
     tenant_id          TEXT NOT NULL,
     work_item_id       TEXT NOT NULL,
     stage              TEXT NOT NULL,          -- dse_contracts.gateway_contract.Stage
-    key_alias          TEXT NOT NULL UNIQUE,   -- alias determinístico enviado ao LiteLLM (não é a key em si)
-    key_hash           TEXT NOT NULL UNIQUE,   -- sha256(virtual key) — permite lookup em revoke() sem guardar a key em claro
-    key_prefix         TEXT NOT NULL,          -- primeiros caracteres da virtual key (não segredo completo, só p/ debug humano)
+    key_alias          TEXT NOT NULL UNIQUE,   -- deterministic alias sent to LiteLLM (not the key itself)
+    key_hash           TEXT NOT NULL UNIQUE,   -- sha256(virtual key) — allows lookup in revoke() without storing the key in clear text
+    key_prefix         TEXT NOT NULL,          -- first characters of the virtual key (not the full secret, only for human debugging)
     status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
     issued_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     revoked_at         TIMESTAMPTZ

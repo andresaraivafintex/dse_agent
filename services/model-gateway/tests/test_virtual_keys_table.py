@@ -1,6 +1,6 @@
-"""Prova que `mint_virtual_key`/`revoke_virtual_key` mantêm a tabela
-`virtual_keys` (migrations/0005_wsd.sql) como registro fiel do lado do DSE —
-Postgres real, sem mock (P8: reconciliação precisa ser possível de verdade).
+"""Proves `mint_virtual_key`/`revoke_virtual_key` keep the `virtual_keys` table
+(migrations/0005_wsd.sql) as a faithful record on the DSE side — real Postgres,
+no mock (P8: reconciliation has to be genuinely possible).
 """
 from __future__ import annotations
 

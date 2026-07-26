@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# WSF-E2-T3b(b) — External Secrets Operator no cluster k3d local (Fase 3).
+# WSF-E2-T3b(b) — External Secrets Operator on the local k3d cluster (Phase 3).
 #
-# Instala o ESO REAL (helm, versão PINADA — P7/NFR-09: upgrade é ato
-# explícito, nunca "latest") no cluster `dse-preview` criado pela fundação
-# (infra/k8s-local/setup-k3d-argocd.sh) e configura o caminho de secrets de
-# preview do ADR-28:
+# Installs the REAL ESO (helm, PINNED version — P7/NFR-09: upgrading is an
+# explicit act, never "latest") on the `dse-preview` cluster created by the
+# foundation (infra/k8s-local/setup-k3d-argocd.sh) and configures ADR-28's
+# preview secrets path:
 #
-#   Vault (compose, dse_net) --token escopado--> ClusterSecretStore `dse-vault`
-#     --> ExternalSecret em namespace de preview --> Secret k8s materializado
+#   Vault (compose, dse_net) --scoped token--> ClusterSecretStore `dse-vault`
+#     --> ExternalSecret in a preview namespace --> materialized k8s Secret
 #
-# Contrato para o WS-E (previews por PR, WSE-E4-T10): referencie
+# Contract for WS-E (per-PR previews, WSE-E4-T10): reference
 #   secretStoreRef: { kind: ClusterSecretStore, name: dse-vault }
-# e grave os secrets do preview no Vault sob `secret/dse/preview/<...>`.
-# O token que o ESO usa é ESCOPADO por policy a esse prefixo (dse-preview-read)
-# — um preview não consegue ler secrets de serviço (dse/slack, dse/github-app,
-# etc.) nem de outro mount. Nenhum root token entra no cluster.
+# and write the preview secrets into Vault under `secret/dse/preview/<...>`.
+# The token ESO uses is SCOPED by policy to that prefix (dse-preview-read)
+# — a preview cannot read service secrets (dse/slack, dse/github-app,
+# etc.) nor anything from another mount. No root token enters the cluster.
 #
-# Idempotente: pode rodar de novo; pula o que já existe.
+# Idempotent: safe to re-run; it skips whatever already exists.
 set -euo pipefail
 
-ESO_CHART_VERSION="${DSE_ESO_CHART_VERSION:-2.8.0}"   # pinado (P7)
+ESO_CHART_VERSION="${DSE_ESO_CHART_VERSION:-2.8.0}"   # pinned (P7)
 ESO_NS="external-secrets"
 KUBE_CONTEXT="${DSE_KUBE_CONTEXT:-k3d-dse-preview}"
-VAULT_ADDR_HOST="${VAULT_ADDR:-http://localhost:8200}"     # visto do host (este script)
-VAULT_ADDR_CLUSTER="http://vault:8200"                     # visto dos pods (rede dse_net)
+VAULT_ADDR_HOST="${VAULT_ADDR:-http://localhost:8200}"     # as seen from the host (this script)
+VAULT_ADDR_CLUSTER="http://vault:8200"                     # as seen from the pods (dse_net network)
 VAULT_TOKEN="${VAULT_TOKEN:-${VAULT_DEV_ROOT_TOKEN:-dse_dev_root}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -41,19 +41,19 @@ helm upgrade --install external-secrets external-secrets/external-secrets \
 kubectl -n "${ESO_NS}" wait --for=condition=Available deployment --all --timeout=300s
 
 echo "==> 3/5 policy + token escopados no Vault (dse-preview-read)"
-# Policy: só leitura sob secret/data|metadata/dse/preview/* — nunca o mount todo.
+# Policy: read-only under secret/data|metadata/dse/preview/* — never the whole mount.
 curl -sf -X PUT -H "X-Vault-Token: ${VAULT_TOKEN}" \
   -d '{"policy":"path \"secret/data/dse/preview/*\" { capabilities = [\"read\"] }\npath \"secret/metadata/dse/preview/*\" { capabilities = [\"read\", \"list\"] }"}' \
   "${VAULT_ADDR_HOST}/v1/sys/policies/acl/dse-preview-read" >/dev/null
 
 if kubectl -n "${ESO_NS}" get secret dse-vault-token >/dev/null 2>&1; then
-  echo "    secret dse-vault-token já existe — pulando mint (use --rotate p/ trocar)"
+  echo "    secret dse-vault-token already exists — skipping mint (use --rotate to replace)"
   if [[ "${1:-}" == "--rotate" ]]; then
     kubectl -n "${ESO_NS}" delete secret dse-vault-token
   fi
 fi
 if ! kubectl -n "${ESO_NS}" get secret dse-vault-token >/dev/null 2>&1; then
-  # Token periódico órfão (renova sozinho dentro do period; sem TTL infinito).
+  # Orphan periodic token (renews itself within the period; no infinite TTL).
   ESO_VAULT_TOKEN="$(curl -sf -X POST -H "X-Vault-Token: ${VAULT_TOKEN}" \
     -d '{"policies":["dse-preview-read"],"period":"768h","no_parent":true,"display_name":"eso-dse-preview"}' \
     "${VAULT_ADDR_HOST}/v1/auth/token/create-orphan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["auth"]["client_token"])')"
@@ -67,7 +67,7 @@ kubectl apply -f "${SCRIPT_DIR}/eso/cluster-secret-store.yaml"
 kubectl wait --for=condition=Ready clustersecretstore/dse-vault --timeout=120s
 
 echo "==> 5/5 exemplo: ExternalSecret num namespace de preview"
-# Semeia o secret de exemplo no Vault (idempotente — sobrescreve a versão).
+# Seeds the example secret into Vault (idempotent — it overwrites the version).
 curl -sf -X POST -H "X-Vault-Token: ${VAULT_TOKEN}" \
   -d '{"data":{"database_url":"postgresql://preview:preview@postgres:5432/preview_example","api_key":"preview-example-not-a-real-key"}}' \
   "${VAULT_ADDR_HOST}/v1/secret/data/dse/preview/example" >/dev/null

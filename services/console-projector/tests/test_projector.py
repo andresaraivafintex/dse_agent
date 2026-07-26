@@ -1,8 +1,8 @@
-"""Projector (Plano 06 F0) — contrato dos mapas + projeção real no Postgres.
+"""Projector (Plano 06 F0) — map contract + real projection against Postgres.
 
-Roda contra o Postgres da infra (como as demais suítes): semeia um WorkItem
-sintético + outbox + audit + ledger, roda `run_once` e valida o read model.
-Idempotência: segunda passada não duplica nada (replay inofensivo).
+Runs against the infra Postgres (like the other suites): seeds a synthetic
+WorkItem + outbox + audit + ledger, runs `run_once` and validates the read model.
+Idempotency: a second pass duplicates nothing (replay is harmless).
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ _SUPER_DSN = DSN.replace("dse_app:dse_app_dev_only", "dse:dse_dev_only")
 
 
 def _cleanup(wi_id: str) -> None:
-    """Teardown com o role de migração (dse_app não deleta ledger — correto,
-    o read model herda a disciplina do SoR). Melhor-esforço."""
+    """Teardown using the migration role (dse_app cannot delete from the ledger —
+    correct: the read model inherits the SoR's discipline). Best-effort."""
     try:
         conn = psycopg2.connect(_SUPER_DSN)
     except Exception:
@@ -49,7 +49,7 @@ def _cleanup(wi_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# contrato dos mapas — muda o enum de um lado, quebra AQUI (não em produção)
+# map contract — change the enum on one side and it breaks HERE, not in production
 # ---------------------------------------------------------------------------
 
 _CONSOLE_STATUSES = {
@@ -66,8 +66,8 @@ _CONSOLE_EVENT_TYPES = {
 def test_every_fase1_status_has_console_mapping():
     for status in WorkItemStatus:
         mapped, _phase = map_status(status.value)
-        assert mapped in _CONSOLE_STATUSES, f"{status.value} -> {mapped} fora do vocabulário"
-    # e nada além do enum real vive no mapa (mapa não acumula lixo)
+        assert mapped in _CONSOLE_STATUSES, f"{status.value} -> {mapped} outside the vocabulary"
+    # and nothing beyond the real enum lives in the map (no stale entries)
     assert set(STATUS_MAP) == {s.value for s in WorkItemStatus}
 
 
@@ -83,7 +83,7 @@ def test_split_title():
 
 
 # ---------------------------------------------------------------------------
-# projeção real
+# real projection
 # ---------------------------------------------------------------------------
 
 def _seed(conn, wi_id: str) -> None:
@@ -127,7 +127,7 @@ def test_projects_work_item_timeline_and_runs_idempotently():
     try:
         _seed(conn, wi_id)
         drain(conn)
-        drain(conn)  # idempotência: replay não duplica
+        drain(conn)  # idempotency: replay does not duplicate
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
@@ -139,7 +139,7 @@ def test_projects_work_item_timeline_and_runs_idempotently():
             assert wi["title"] == "Titulo da tarefa"
             assert wi["source_id"] == "acme/repo#42"
             assert float(wi["budget_usd"]) == 5.0
-            # last_event veio do audit mais recente
+            # last_event came from the most recent audit row
             assert "coder turn completed" in (wi["last_event"] or "")
 
             cur.execute(
@@ -155,8 +155,8 @@ def test_projects_work_item_timeline_and_runs_idempotently():
                 "WHERE work_item_id = %s", (wi_id,)
             )
             runs = cur.fetchone()
-            # DUAS fontes de custo (ledger + audit coder_turn_completed) e
-            # nenhuma duplicata na segunda passada (idempotencia por run_key).
+            # TWO cost sources (ledger + audit coder_turn_completed) and no
+            # duplicates on the second pass (idempotency keyed by run_key).
             assert runs["n"] == 2
             assert float(runs["cost"]) == pytest.approx(2.46)
     finally:
@@ -189,13 +189,13 @@ def test_status_transition_reprojects():
 
 
 def test_cost_rollup_reconciles_with_ledger():
-    """Plano 08 §E: o rollup de custo bate EXATAMENTE com o ledger (a verdade de
-    custo, P8) para o tenant. Reconciliação — se divergir, o CI quebra AQUI."""
+    """Plano 08 §E: the cost rollup matches the ledger EXACTLY (the cost truth,
+    P8) for the tenant. Reconciliation — if they diverge, CI breaks HERE."""
     conn = psycopg2.connect(DSN)
     wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
     try:
-        _seed(conn, wi_id)  # 1 linha no ledger: cost 1.23, model anthropic/claude
-        # mais uma chamada de modelo no MESMO work item (agrega na mesma célula)
+        _seed(conn, wi_id)  # 1 ledger row: cost 1.23, model anthropic/claude
+        # one more model call on the SAME work item (aggregates into the same cell)
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO model_call_ledger (tenant_id, work_item_id, stage, task_class, "
@@ -205,7 +205,7 @@ def test_cost_rollup_reconciles_with_ledger():
             )
         conn.commit()
         drain(conn)
-        drain(conn)  # idempotência: recompute total não duplica
+        drain(conn)  # idempotency: a full recompute does not duplicate
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT COALESCE(sum(cost_usd),0) AS c FROM console_rm.cost_rollup WHERE tenant_id='crm-test'")
@@ -213,8 +213,8 @@ def test_cost_rollup_reconciles_with_ledger():
             cur.execute(
                 "SELECT COALESCE(sum(cost_usd),0) AS c FROM model_call_ledger WHERE tenant_id='crm-test'")
             ledger_cost = float(cur.fetchone()["c"])
-            assert rollup_cost == pytest.approx(ledger_cost)  # reconciliação exata
-            # a célula do nosso repo/model existe e soma as 2 chamadas (1.23+0.77)
+            assert rollup_cost == pytest.approx(ledger_cost)  # exact reconciliation
+            # our repo/model cell exists and sums both calls (1.23+0.77)
             cur.execute(
                 "SELECT run_count, cost_usd FROM console_rm.cost_rollup "
                 "WHERE tenant_id='crm-test' AND repo='acme/repo' AND model='anthropic/claude'")
@@ -227,7 +227,7 @@ def test_cost_rollup_reconciles_with_ledger():
 
 
 def test_task_class_projected_into_view():
-    """§E: task_class do work_item chega na view (gráficos 'por categoria')."""
+    """§E: the work_item's task_class reaches the view (the 'by category' charts)."""
     conn = psycopg2.connect(DSN)
     wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
     try:
@@ -247,8 +247,8 @@ def test_task_class_projected_into_view():
 
 
 def test_projects_evidence_preview_into_view():
-    """Plano 08 §D (D5): o preview_status/url de work_item_evidence chega na
-    work_items_view (o painel mostra o link do preview ao lado do PR)."""
+    """Plano 08 §D (D5): preview_status/url from work_item_evidence reaches
+    work_items_view (the dashboard shows the preview link next to the PR)."""
     conn = psycopg2.connect(DSN)
     wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
     try:
@@ -262,7 +262,7 @@ def test_projects_evidence_preview_into_view():
             )
         conn.commit()
         drain(conn)
-        drain(conn)  # idempotência
+        drain(conn)  # idempotency
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT preview_status, preview_url, demo_passed, video_artifact_key "

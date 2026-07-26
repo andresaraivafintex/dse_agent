@@ -1,11 +1,12 @@
-"""WSC-E4-T3: prova que `eval_skill_candidate` e `promote_skill` são Activities
-de verdade do Temporal Python SDK (registro via `@activity.defn(name=...)`) e
-que o contrato (`dse_contracts`) atravessa a fronteira Activity intacto.
+"""WSC-E4-T3: proves that `eval_skill_candidate` and `promote_skill` are real
+Temporal Python SDK Activities (registered via `@activity.defn(name=...)`) and
+that the contract (`dse_contracts`) crosses the Activity boundary intact.
 
-Usa `temporalio.testing.ActivityEnvironment` (harness oficial do SDK, não mock)
-contra Postgres real — mesma disciplina de `test_temporal_activity_wiring.py`.
-Monkeypatcha o DSN do módulo `skill_promotion` para a role de teste (dse), já
-que as Activities de produção abrem a própria conexão (não recebem `conn`).
+Uses `temporalio.testing.ActivityEnvironment` (the SDK's official harness, not a
+mock) against real Postgres — same discipline as
+`test_temporal_activity_wiring.py`. Monkeypatches the `skill_promotion` module's
+DSN to the test role (dse), since the production Activities open their own
+connection (they do not receive `conn`).
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def test_activity_names_match_the_contract():
 
 @pytest.fixture()
 def tenant(pg_conn, pg_dsn, monkeypatch):
-    # As Activities abrem a própria conexão via sp._DSN — aponta para a role de teste.
+    # The Activities open their own connection via sp._DSN — point it at the test role.
     monkeypatch.setattr(sp, "_DSN", pg_dsn)
     t = f"act-{uuid.uuid4().hex[:10]}"
     yield t
@@ -58,7 +59,7 @@ def test_eval_and_promote_through_real_activity_environment(pg_conn, tenant):
     env = ActivityEnvironment()
     key = "auto-wiring"
     _make_candidate(pg_conn, tenant, key, 1)
-    # Um episódio com o pattern do candidate → positivo no eval set derivado do DB.
+    # One episode with the candidate's pattern → a positive in the eval set derived from the DB.
     sp.record_episode(tenant, "ci_repair", f"pat-{key}", conn=pg_conn)
 
     eval_res = asyncio.run(
@@ -80,8 +81,9 @@ def test_eval_and_promote_through_real_activity_environment(pg_conn, tenant):
 
 
 def test_promote_activity_refuses_without_approver(pg_conn, tenant):
-    """Adversarial através da Activity real: to_status=active sem approver
-    PROPAGA a recusa (ApproverRequired) — não há retorno ok=False silencioso."""
+    """Adversarial through the real Activity: to_status=active without an
+    approver PROPAGATES the refusal (ApproverRequired) — there is no silent
+    ok=False return."""
     env = ActivityEnvironment()
     key = "auto-wiring-adv"
     _make_candidate(pg_conn, tenant, key, 1)

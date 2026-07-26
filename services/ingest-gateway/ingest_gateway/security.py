@@ -1,14 +1,14 @@
-"""WSA-E2-T1 — Verificação de assinatura (defesa #1 do pipeline de intake).
+"""WSA-E2-T1 — Signature verification (defense #1 of the intake pipeline).
 
-Nenhum evento downstream (ConversationEvent, admit_work_item, correlate) roda
-sem `signature_verified=True`. Este módulo é puro (sem I/O) para ser
-fácil de testar com um corpus de forgery — os adapters chamam estas funções
-ANTES de qualquer outra coisa e retornam 401 + `dse_audit.emit(...)` se falhar.
+No downstream event (ConversationEvent, admit_work_item, correlate) runs
+without `signature_verified=True`. This module is pure (no I/O) so it is easy
+to test against a forgery corpus — the adapters call these functions BEFORE
+anything else and return 401 + `dse_audit.emit(...)` on failure.
 
-Leitura de segredo: hoje via env var (`SLACK_SIGNING_SECRET`,
-`GITHUB_WEBHOOK_SECRET`) — isto é temporário. Quando o backend de secrets do
-WS-F (`services/platform/`, WSF-E2-T3a) existir, os adapters devem trocar
-para lê-lo de lá (import opcional/defensivo, ver adapter_slack/config.py e
+Secret loading: today via env var (`SLACK_SIGNING_SECRET`,
+`GITHUB_WEBHOOK_SECRET`) — this is temporary. Once the WS-F secrets backend
+(`services/platform/`, WSF-E2-T3a) exists, the adapters must switch to reading
+it from there (optional/defensive import, see adapter_slack/config.py and
 adapter_github/config.py).
 """
 from __future__ import annotations
@@ -20,12 +20,12 @@ import hmac
 import time
 from typing import NamedTuple
 
-REPLAY_WINDOW_SECONDS = 5 * 60  # 5 minutos (WSA-E2-T1)
+REPLAY_WINDOW_SECONDS = 5 * 60  # 5 minutes (WSA-E2-T1)
 
 
 class SignatureCheck(NamedTuple):
     verified: bool
-    reason: str  # "ok" | motivo de rejeição (para audit row)
+    reason: str  # "ok" | rejection reason (for the audit row)
 
 
 def verify_slack_signature(
@@ -36,8 +36,8 @@ def verify_slack_signature(
     signature_header: str | None,
     now: float | None = None,
 ) -> SignatureCheck:
-    """HMAC-SHA256 do signing secret sobre `v0:{timestamp}:{body}` (Slack
-    Events API), com proteção de replay pela janela de timestamp.
+    """HMAC-SHA256 of the signing secret over `v0:{timestamp}:{body}` (Slack
+    Events API), with replay protection via the timestamp window.
     """
     if not signing_secret:
         return SignatureCheck(False, "missing_signing_secret")
@@ -69,7 +69,7 @@ def verify_github_signature(
     body: bytes,
     signature_header: str | None,
 ) -> SignatureCheck:
-    """HMAC-SHA256 do webhook secret sobre o corpo bruto (`X-Hub-Signature-256`)."""
+    """HMAC-SHA256 of the webhook secret over the raw body (`X-Hub-Signature-256`)."""
     if not webhook_secret:
         return SignatureCheck(False, "missing_webhook_secret")
     if not signature_header:
@@ -92,27 +92,27 @@ def verify_teams_signature(
     body: bytes,
     authorization_header: str | None,
 ) -> SignatureCheck:
-    """WSA (Fase 4, provisão adapter Teams) — HMAC do Microsoft Teams
+    """WSA (Phase 4, Teams adapter provision) — HMAC of the Microsoft Teams
     *outgoing webhook*.
 
-    Esquema de assinatura do Teams (documentado pela Microsoft): ao registrar
-    um outgoing webhook, o Teams devolve um `securityToken` codificado em
-    Base64. A cada POST, o Teams envia o header
+    Teams signature scheme (documented by Microsoft): when an outgoing webhook
+    is registered, Teams returns a Base64-encoded `securityToken`. On every
+    POST, Teams sends the header
     `Authorization: HMAC <base64(HMAC_SHA256(decoded_secret, raw_body))>`.
-    A verificação: decodifica o secret de Base64 -> bytes da chave, calcula o
-    HMAC-SHA256 sobre o corpo BRUTO (não reparseado — defesa TOCTOU), codifica
-    o digest em Base64 e compara em tempo constante com o valor do header.
+    Verification: decode the secret from Base64 -> key bytes, compute the
+    HMAC-SHA256 over the RAW body (not reparsed — TOCTOU defense), Base64-encode
+    the digest and compare it in constant time with the header value.
 
-    Diferente de Slack/GitHub/Jira (hex no header), o Teams usa Base64 tanto no
-    secret quanto na assinatura — por isso um verificador próprio. Sem tenant
-    Teams real nesta sessão, o secret é lido de env/Vault (ver
-    `adapter_teams.config`); a LÓGICA é a de produção.
+    Unlike Slack/GitHub/Jira (hex in the header), Teams uses Base64 both for the
+    secret and for the signature — hence a dedicated verifier. With no real
+    Teams tenant in this session, the secret is read from env/Vault (see
+    `adapter_teams.config`); the LOGIC is the production one.
 
-    Nota: o canal Bot Framework "completo" (Azure Bot Service) autentica por
-    JWT Bearer validado contra o metadata OpenID da Microsoft — mais pesado e
-    dependente de rede. Para a provisão, o esquema HMAC do outgoing webhook é
-    o análogo direto de Slack/Jira e é o que este verificador cobre; o JWT
-    Bearer fica documentado como o passo de ativação do canal Bot Framework.
+    Note: the "full" Bot Framework channel (Azure Bot Service) authenticates via
+    a JWT Bearer validated against Microsoft's OpenID metadata — heavier and
+    network-dependent. For this provision, the outgoing webhook HMAC scheme is
+    the direct analogue of Slack/Jira and is what this verifier covers; the JWT
+    Bearer is documented as the activation step for the Bot Framework channel.
     """
     if not shared_secret:
         return SignatureCheck(False, "missing_shared_secret")
@@ -145,15 +145,15 @@ def verify_jira_signature(
     body: bytes,
     signature_header: str | None,
 ) -> SignatureCheck:
-    """WSA-E5-T1 — HMAC-SHA256 do webhook secret sobre o corpo bruto do
-    webhook Jira Cloud (`X-Hub-Signature`, formato `sha256=<hex>`, o mesmo
-    esquema do GitHub). Jira Cloud assina o payload com o segredo registrado
-    ao criar o webhook via a REST API de webhooks dinâmicos.
+    """WSA-E5-T1 — HMAC-SHA256 of the webhook secret over the raw body of the
+    Jira Cloud webhook (`X-Hub-Signature`, format `sha256=<hex>`, the same
+    scheme as GitHub). Jira Cloud signs the payload with the secret registered
+    when the webhook was created via the dynamic webhooks REST API.
 
-    Sem um site Jira real registrado nesta sessão, o segredo é lido de
-    `JIRA_WEBHOOK_SECRET` (env) como fallback do Vault (ver
-    `adapter_jira.config`). A lógica é idêntica à de produção — só faltam as
-    credenciais reais.
+    With no real Jira site registered in this session, the secret is read from
+    `JIRA_WEBHOOK_SECRET` (env) as a fallback for Vault (see
+    `adapter_jira.config`). The logic is identical to production — only the
+    real credentials are missing.
     """
     if not webhook_secret:
         return SignatureCheck(False, "missing_webhook_secret")

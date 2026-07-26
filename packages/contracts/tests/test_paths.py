@@ -1,9 +1,10 @@
-"""Classificação de caminhos descartáveis (`is_disposable_artifact`).
+"""Classification of disposable paths (`is_disposable_artifact`).
 
-Reconciliação de 2026-07-22: como `expected_files` virou advisory no L1 (ver a
-decisão do operador), o prune pós-Coder passou a apagar SÓ lixo óbvio do CLI, em
-vez de "tudo fora do plano". A invariante central — que blinda a correção — é
-que NENHUM arquivo-fonte é jamais classificado como descartável.
+Reconciliation of 2026-07-22: since `expected_files` became advisory in L1 (see
+the operator decision), the post-Coder prune now deletes ONLY obvious CLI
+garbage, instead of "everything outside the plan". The central invariant — the
+one that shields the fix — is that NO source file is ever classified as
+disposable.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import pytest
 from dse_contracts.paths import is_disposable_artifact
 
 
-# Os dois casos do enunciado, explícitos.
+# The two cases from the statement, spelled out.
 def test_relatorio_espontaneo_do_cli_e_descartavel():
     assert is_disposable_artifact("BUG_FIX_REPORT.md") is True
 
@@ -21,9 +22,9 @@ def test_arquivo_fonte_novo_legitimo_nao_e_descartavel():
     assert is_disposable_artifact("src/novo-modulo.js") is False
 
 
-# --- INVARIANTE anti-fonte: nenhuma extensão de código é descartável, nem
-# quando o NOME parece relatório (report.py, summary.js…). É isto que garante
-# que o prune nunca apaga a correção. ---------------------------------------
+# --- Anti-source INVARIANT: no code extension is disposable, not even when
+# the NAME looks like a report (report.py, summary.js…). This is what
+# guarantees the prune never deletes the fix. -------------------------------
 _SOURCE_EXTS = [
     "py", "js", "jsx", "ts", "tsx", "mjs", "cjs", "go", "rs", "java", "rb",
     "php", "c", "cc", "cpp", "h", "hpp", "cs", "kt", "swift", "scala", "sql",
@@ -35,7 +36,7 @@ _SOURCE_EXTS = [
 @pytest.mark.parametrize("ext", _SOURCE_EXTS)
 def test_nenhuma_extensao_de_fonte_e_descartavel(ext):
     assert is_disposable_artifact(f"src/modulo.{ext}") is False
-    # Nem com nome de relatório — a heurística de nome só vale p/ doc/texto.
+    # Not even with a report name — the name heuristic only applies to doc/text.
     assert is_disposable_artifact(f"REPORT.{ext}") is False
     assert is_disposable_artifact(f"pkg/IMPLEMENTATION_SUMMARY.{ext}") is False
 
@@ -87,7 +88,7 @@ def test_relatorios_de_doc_sao_descartaveis(path):
         "CONTRIBUTING.md",
         "docs/architecture.md",
         "docs/api.md",
-        "requirements.txt",  # NUNCA — é manifesto de dependências
+        "requirements.txt",  # NEVER — it is a dependency manifest
         "notes/getting-started.md",
         "LICENSE",
         "Makefile",

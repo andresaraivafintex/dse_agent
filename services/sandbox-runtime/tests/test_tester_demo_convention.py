@@ -1,14 +1,15 @@
-"""WSC-E3-T4b (b)+(c): convenção `demos/<work_item_id>/` no TesterToolset e
-autoria do fixture `@demo` pelo Tester roteirizado.
+"""WSC-E3-T4b (b)+(c): the `demos/<work_item_id>/` convention in the
+TesterToolset and authoring of the `@demo` fixture by the scripted Tester.
 
-Prova (contra sandbox/git reais, mesmo harness da suíte da Fase 2):
-  - o Tester ESCREVE em `demos/<work_item_id>/` (path permitido adicional);
-  - continua BLOQUEADO fora: código de produção, `demos/` de OUTRO work item,
-    e path traversal para fora do prefixo — tudo `ToolPermissionError`;
-  - o fixture `@demo` (template commitado em `sandbox_runtime.demo_fixture`)
-    é materializado pelo Tester e commitado deterministicamente no branch da
-    tarefa (é o que o pipeline do WS-E executa — ver
-    tests/test_demo_playwright_in_sandbox.py para a execução real).
+Proves (against real sandbox/git, same harness as the Fase 2 suite):
+  - the Tester WRITES under `demos/<work_item_id>/` (an additional allowed
+    path);
+  - it stays BLOCKED elsewhere: production code, ANOTHER work item's `demos/`,
+    and path traversal out of the prefix — all `ToolPermissionError`;
+  - the `@demo` fixture (template committed in `sandbox_runtime.demo_fixture`)
+    is materialized by the Tester and committed deterministically onto the task
+    branch (this is what the WS-E pipeline executes — see
+    tests/test_demo_playwright_in_sandbox.py for the real execution).
 """
 from __future__ import annotations
 
@@ -36,15 +37,15 @@ from sandbox_runtime.toolsets import (
 )
 
 WI = "wi-demo-conv-1"
-OTHER_WI = "wi-outra-tarefa"
+OTHER_WI = "wi-other-task"
 
 
 # ---------------------------------------------------------------------------
-# Unidade: escopo do path de demo
+# Unit: demo path scope
 # ---------------------------------------------------------------------------
 def test_demo_dir_convention_matches_contract_default():
-    """`RunDemoEvidenceInput.demo_dir` (contrato da fundação) documenta o
-    default derivado `demos/<work_item_id>/` — a convenção daqui é a mesma."""
+    """`RunDemoEvidenceInput.demo_dir` (the foundation contract) documents the
+    derived default `demos/<work_item_id>/` — the convention here is the same."""
     assert demo_dir_for(WI) == f"demos/{WI}/"
 
 
@@ -54,7 +55,7 @@ def test_is_demo_path_scoped_to_own_work_item():
     assert not is_demo_path(f"demos/{OTHER_WI}/demo.spec.js", WI)
     assert not is_demo_path("demos/demo.spec.js", WI)
     assert not is_demo_path(f"demos/{WI}/../../src/app.py", WI)  # traversal
-    assert not is_demo_path(f"demos/{WI}/x.js", "")  # sem work item, sem demo write
+    assert not is_demo_path(f"demos/{WI}/x.js", "")  # no work item, no demo write
 
 
 def _check(toolset: TesterToolset, path: str) -> None:
@@ -63,10 +64,10 @@ def _check(toolset: TesterToolset, path: str) -> None:
 
 def test_toolset_allows_demo_dir_and_blocks_everything_else():
     ts = TesterToolset(work_item_id=WI)
-    # permitido: test paths (Fase 2) + demos/<este work item>/ (Fase 3)
+    # allowed: test paths (Fase 2) + demos/<this work item>/ (Fase 3)
     _check(ts, "tests/test_x.py")
     _check(ts, f"demos/{WI}/demo.spec.js")
-    # bloqueado: produção, demos de outro work item, traversal
+    # blocked: production, another work item's demos, traversal
     with pytest.raises(ToolPermissionError):
         _check(ts, "src/handler.py")
     with pytest.raises(ToolPermissionError):
@@ -76,19 +77,19 @@ def test_toolset_allows_demo_dir_and_blocks_everything_else():
 
 
 def test_toolset_without_work_item_blocks_all_demo_writes():
-    """Construtor sem argumento (call sites da Fase 2): test paths continuam
-    funcionando, e NENHUM write em `demos/` é permitido — nem mesmo um que
-    pareça test path (`*.spec.js`): o namespace de evidência é escopado por
-    work item, e sessão sem work item não tem escopo nenhum lá."""
+    """Constructor without arguments (Fase 2 call sites): test paths keep
+    working, and NO write under `demos/` is allowed — not even one that looks
+    like a test path (`*.spec.js`): the evidence namespace is scoped per work
+    item, and a session without a work item has no scope there at all."""
     ts = TesterToolset()
     _check(ts, "tests/test_x.py")
-    _check(ts, "src/app.spec.js")  # regra genérica da Fase 2 fora de demos/
+    _check(ts, "src/app.spec.js")  # generic Fase 2 rule, outside demos/
     with pytest.raises(ToolPermissionError):
         _check(ts, f"demos/{WI}/demo.spec.js")
 
 
 # ---------------------------------------------------------------------------
-# Integração: Tester autora o fixture @demo e commita (sandbox/git reais)
+# Integration: the Tester authors the @demo fixture and commits (real sandbox/git)
 # ---------------------------------------------------------------------------
 def test_tester_authors_demo_fixture_and_commits(work_item_id, state_dir):
     tenant = "tenant-t"
@@ -106,11 +107,11 @@ def test_tester_authors_demo_fixture_and_commits(work_item_id, state_dir):
         workspace, bare = _paths_for(work_item_id)
         for rel in expected_paths:
             content = (open(f"{workspace}/{rel}").read())
-            assert content, f"{rel} vazio no workspace"
+            assert content, f"{rel} empty in the workspace"
         spec = open(f"{workspace}/demos/{work_item_id}/demo.spec.js").read()
-        assert "@demo" in spec, "spec do fixture precisa carregar a tag @demo (contrato --grep do WS-E)"
+        assert "@demo" in spec, "the fixture spec must carry the @demo tag (WS-E --grep contract)"
 
-        # commit determinístico real no branch da tarefa
+        # real deterministic commit on the task branch
         log = subprocess.run(
             ["git", "log", "--oneline", f"dse/{work_item_id}"],
             cwd=bare, check=True, capture_output=True, text=True,
@@ -130,7 +131,7 @@ def test_tester_still_blocked_outside_demo_and_test_paths(work_item_id, state_di
     tenant = "tenant-t"
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant)))
     try:
-        # demos/ de OUTRO work item — bloqueado mesmo com a convenção ativa.
+        # ANOTHER work item's demos/ — blocked even with the convention active.
         with pytest.raises(ToolPermissionError):
             asyncio.run(
                 _run_tester_turn_impl(
@@ -140,11 +141,11 @@ def test_tester_still_blocked_outside_demo_and_test_paths(work_item_id, state_di
                     ],
                 )
             )
-        # produção — continua bloqueado (regressão da Fase 2).
+        # production — still blocked (Fase 2 regression).
         with pytest.raises(ToolPermissionError):
             asyncio.run(
                 _run_tester_turn_impl(
-                    RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="produção"),
+                    RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="production"),
                     authoring_script=[
                         {"tool": "write_file", "path": "src/app.py", "content": "x = 1"},
                     ],

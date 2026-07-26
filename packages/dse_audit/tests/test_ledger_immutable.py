@@ -1,7 +1,7 @@
-"""Plano 08 §F (F3) — ledger append-only: a role de app NUNCA muta audit_log
-nem model_call_ledger; nem por UPDATE/DELETE (REVOKE + trigger) nem por
-TRUNCATE (REVOKE). Prova de defesa em profundidade: mesmo COM o grant, o
-trigger aborta. Superuser tem break-glass (DR/retenção/limpeza)."""
+"""Plano 08 §F (F3) — append-only ledger: the app role NEVER mutates audit_log
+or model_call_ledger; not via UPDATE/DELETE (REVOKE + trigger) nor via TRUNCATE
+(REVOKE). Proof of defense in depth: even WITH the grant, the trigger aborts.
+Superuser keeps break-glass access (DR/retention/cleanup)."""
 from __future__ import annotations
 
 import uuid
@@ -16,7 +16,7 @@ SUPER_DSN = "postgresql://dse:dse_dev_only@localhost:5432/dse"
 @pytest.fixture
 def seeded_audit():
     tid = f"f3-{uuid.uuid4().hex[:8]}"
-    # semeia via app (dse_app TEM INSERT — append é permitido)
+    # seed via the app role (dse_app DOES have INSERT — appending is allowed)
     app = psycopg2.connect(APP_DSN)
     with app.cursor() as cur:
         cur.execute(
@@ -27,7 +27,7 @@ def seeded_audit():
     app.commit()
     app.close()
     yield tid
-    # limpeza via superuser (break-glass permitido)
+    # cleanup via superuser (break-glass is allowed)
     sup = psycopg2.connect(SUPER_DSN)
     with sup.cursor() as cur:
         cur.execute("DELETE FROM audit_log WHERE tenant_id = %s", (tid,))
@@ -53,8 +53,8 @@ def test_app_cannot_update_or_delete_or_truncate_audit_log(seeded_audit):
 
 
 def test_trigger_blocks_even_with_grant(seeded_audit):
-    """Defesa em profundidade: se dse_app receber UPDATE/DELETE por engano, o
-    TRIGGER ainda aborta (o REVOKE sozinho não cobriria esse caso)."""
+    """Defense in depth: if dse_app is ever granted UPDATE/DELETE by mistake, the
+    TRIGGER still aborts (the REVOKE alone would not cover that case)."""
     sup = psycopg2.connect(SUPER_DSN)
     with sup.cursor() as cur:
         cur.execute("GRANT UPDATE, DELETE ON audit_log TO dse_app")
@@ -64,7 +64,7 @@ def test_trigger_blocks_even_with_grant(seeded_audit):
         with pytest.raises(psycopg2.Error) as exc:
             with app.cursor() as cur:
                 cur.execute("UPDATE audit_log SET actor='hacker' WHERE tenant_id=%s", (seeded_audit,))
-        assert "append-only" in str(exc.value)  # veio do trigger, não do REVOKE
+        assert "append-only" in str(exc.value)  # came from the trigger, not the REVOKE
         app.rollback()
         app.close()
     finally:

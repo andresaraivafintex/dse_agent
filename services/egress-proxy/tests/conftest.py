@@ -18,9 +18,9 @@ def free_port() -> int:
 
 
 class RunningProxy:
-    """Roda um `EgressProxy` real (asyncio) num thread em background, com seu
-    próprio event loop — permite que os testes usem sockets/`http.client`
-    síncronos comuns contra `localhost:port`, sem precisar de pytest-asyncio."""
+    """Runs a real `EgressProxy` (asyncio) in a background thread, with its own
+    event loop — this lets the tests use ordinary synchronous
+    sockets/`http.client` against `localhost:port`, with no pytest-asyncio."""
 
     def __init__(self, allowlist: Allowlist, *, tenant_id: str, work_item_id: str, credential_broker=None):
         self.port = free_port()
@@ -57,14 +57,14 @@ def work_item_id():
 
 @pytest.fixture()
 def upstream_server():
-    """Servidor HTTP real e simples (`http.server`) rodando em background,
-    usado como "host permitido" nos testes de allowlist."""
+    """Real, simple HTTP server (`http.server`) running in the background, used
+    as the "allowed host" in the allowlist tests."""
     import http.server
 
     port = free_port()
 
     class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *_args):  # silencia stdout do teste
+        def log_message(self, *_args):  # silences the test stdout
             pass
 
         def do_GET(self):

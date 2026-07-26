@@ -1,7 +1,7 @@
-"""WSA-E4-T2 — outbound: exatamente 1 status comment por issue/PR, editado
-in-place, sob identidade GitHub App. `FakeGithubClient` documentado
-substitui o transporte HTTP real; `GithubCommentBackend`/
-`MutableCommentWriter` são 100% reais."""
+"""WSA-E4-T2 — outbound: exactly 1 status comment per issue/PR, edited
+in-place, under the GitHub App identity. The documented `FakeGithubClient`
+replaces the real HTTP transport; `GithubCommentBackend`/
+`MutableCommentWriter` are 100% real."""
 from __future__ import annotations
 
 import uuid

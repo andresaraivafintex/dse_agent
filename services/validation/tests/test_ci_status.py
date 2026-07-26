@@ -1,6 +1,6 @@
-"""WSE-E4-T9a — consumo mínimo de status checks do PR. `FakeGitHubClient`
-fornece os check-runs (sem GitHub App real nesta sessão); a persistência em
-`wse_ci_status` é REAL Postgres."""
+"""WSE-E4-T9a — minimal consumption of PR status checks. `FakeGitHubClient`
+supplies the check-runs (no real GitHub App in this session); persistence to
+`wse_ci_status` is REAL Postgres."""
 from __future__ import annotations
 
 from dse_validation import db

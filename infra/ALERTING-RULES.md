@@ -1,16 +1,16 @@
 # Alerting rules — Fintex DSE (WSF-E7-T1)
 
-Dono: WS-F. Nenhum backend de alerting real (PagerDuty/Opsgenie/Alertmanager
-com receivers configurados) está provisionado nesta sessão de dev — este
-documento é o substituto aceitável (conforme escopo da tarefa) até que um
-backend real seja escolhido pelo cliente/programa. As regras abaixo são
-especificadas contra os atributos de span/métrica que os outros serviços já
-emitem ou devem emitir (contrato: `dse_contracts.constants.OTEL_ATTR_*`),
-de forma que qualquer backend real (Grafana/Datadog/Honeycomb/Alertmanager)
-possa implementá-las diretamente traduzindo a condição para sua sintaxe de
-query nativa.
+Owner: WS-F. No real alerting backend (PagerDuty/Opsgenie/Alertmanager
+with configured receivers) is provisioned in this dev session — this
+document is the accepted substitute (per the task's scope) until a real
+backend is chosen by the client/program. The rules below are specified against
+the span/metric attributes that the other services already emit or are expected to emit
+(contract: `dse_contracts.constants.OTEL_ATTR_*`),
+so that any real backend (Grafana/Datadog/Honeycomb/Alertmanager)
+can implement them directly by translating the condition into its native
+query syntax.
 
-Todas as regras assumem os atributos já publicados em
+All rules assume the attributes already published in
 `packages/contracts/dse_contracts/constants.py`:
 
 ```
@@ -23,107 +23,107 @@ OTEL_ATTR_TOKENS_IN  = "dse.tokens_in"
 OTEL_ATTR_TOKENS_OUT = "dse.tokens_out"
 ```
 
-## 1. Exaustão de budget (por tenant)
+## 1. Budget exhaustion (per tenant)
 
-- **Condição**: soma de `dse.cost_usd` (spans com esse atributo, emitidos
-  pelo model-gateway a cada chamada LLM) agrupada por `dse.tenant_id`, numa
-  janela deslizante de 30 dias, ultrapassa `tenant_config.monthly_budget_usd`
+- **Condition**: the sum of `dse.cost_usd` (spans carrying that attribute, emitted
+  by the model-gateway on every LLM call) grouped by `dse.tenant_id`, over a
+  30-day sliding window, exceeds `tenant_config.monthly_budget_usd`
   (Postgres, `migrations/0007_wsf.sql`).
-- **Severidade**:
-  - **Warning** em 80% do budget — notifica o owner do tenant (canal
-    Slack interno do programa, não o cliente ainda).
-  - **Critical** em 100% do budget — dispara o `kill_switch_enabled` do
-    tenant (`tenant_config`) via ação automatizada determinística (P1: a
-    decisão de bloquear é uma regra de threshold em código, nunca um LLM) e
-    gera uma linha em `audit_log` (`action='budget_exhausted_kill_switch'`,
-    via `dse_audit.emit`, ator `system:budget-monitor`).
-- **Fonte de dados real hoje**: nenhum exporter de métrica está agregando
-  isto ainda (o `otel-collector` deste repo só faz `debug` export/stdout —
-  ver `infra/otel-collector-config.yaml`). Produção: adicionar um exporter
-  Prometheus/otlphttp + uma regra de recording/alerting real.
+- **Severity**:
+  - **Warning** at 80% of budget — notifies the tenant owner (the program's
+    internal Slack channel, not the client yet).
+  - **Critical** at 100% of budget — trips the tenant's `kill_switch_enabled`
+    (`tenant_config`) via a deterministic automated action (P1: the
+    decision to block is a threshold rule in code, never an LLM) and
+    writes a row to `audit_log` (`action='budget_exhausted_kill_switch'`,
+    via `dse_audit.emit`, actor `system:budget-monitor`).
+- **Real data source today**: no metric exporter is aggregating
+  this yet (this repo's `otel-collector` only does `debug` export/stdout —
+  see `infra/otel-collector-config.yaml`). Production: add a
+  Prometheus/otlphttp exporter + a real recording/alerting rule.
 
-## 2. Egress denies não resolvidos
+## 2. Unresolved egress denies
 
-- **Condição**: toda negação do egress-proxy (WS-C) gera uma linha de
-  `audit_log` (`action` esperado: `egress_denied` ou equivalente —
-  contrato exato a fechar com WS-C na integração). Alerta dispara quando
-  existem **N ou mais negações do mesmo `work_item_id`/tenant em uma janela
-  de 5 minutos sem uma ação de operador subsequente** (ex.: pause manual,
-  escalonamento) — indica possível tentativa ativa de exfiltração ou
-  sandbox com bug fazendo retry indefinido contra um host bloqueado.
-- **Severidade**: Critical — este é literalmente a contenção estrutural
-  contra a classe de ataque nº 1 do plano mestre (prompt injection
-  indireta levando a exfiltração via egress); uma negação isolada é
-  esperada (é o proxy funcionando), mas um padrão de negações repetidas e
-  não investigadas é o sinal de alerta real.
-- **Verificação real disponível hoje**: `dse_audit.reconstruct_work_item_history(work_item_id)`
-  (WSF-E1-T2, `packages/dse_audit/dse_audit/queries.py`) já permite
-  consultar manualmente todas as ações de um WorkItem, incluindo negações
-  de egress, assim que o WS-C começar a gravá-las — nenhum código adicional
-  necessário no lado de consulta.
+- **Condition**: every egress-proxy denial (WS-C) produces an
+  `audit_log` row (expected `action`: `egress_denied` or equivalent —
+  the exact contract to be settled with WS-C at integration). The alert fires when
+  there are **N or more denials for the same `work_item_id`/tenant within a
+  5-minute window with no subsequent operator action** (e.g. a manual pause,
+  an escalation) — this indicates a possible active exfiltration attempt or a
+  buggy sandbox retrying indefinitely against a blocked host.
+- **Severity**: Critical — this is literally the structural containment
+  against attack class #1 of the master plan (indirect prompt
+  injection leading to exfiltration via egress); an isolated denial is
+  expected (that is the proxy working), but a pattern of repeated,
+  uninvestigated denials is the real warning sign.
+- **Verification available today**: `dse_audit.reconstruct_work_item_history(work_item_id)`
+  (WSF-E1-T2, `packages/dse_audit/dse_audit/queries.py`) already allows
+  querying all of a WorkItem's actions manually, including egress
+  denials, as soon as WS-C starts writing them — no additional code
+  is needed on the query side.
 
-## 3. Aproximação do limite de history do Temporal — **ATIVADA (Fase 3)**
+## 3. Approaching the Temporal history limit — **ENABLED (Phase 3)**
 
-> **Status: regra ATIVA no collector** (não mais só especificação). Pipeline
-> dedicada `metrics/history_alert` em `infra/otel-collector-config.yaml`:
-> um `filter` (OTTL) descarta tudo abaixo do threshold, um `transform` marca
-> o que sobra com `dse.alert=temporal_history_threshold_exceeded` +
-> `dse.alert_severity=warning|critical`, e o exporter `debug/history_alert`
-> imprime — a presença da linha no stdout do collector É o alerta (MVP).
-> Prova real: `services/platform/tests/test_history_alert.py` (envia OTLP
-> real acima/abaixo do threshold e verifica o canal).
+> **Status: rule ACTIVE in the collector** (no longer just a specification). A dedicated
+> `metrics/history_alert` pipeline in `infra/otel-collector-config.yaml`:
+> a `filter` (OTTL) drops everything below the threshold, a `transform` tags
+> what remains with `dse.alert=temporal_history_threshold_exceeded` +
+> `dse.alert_severity=warning|critical`, and the `debug/history_alert` exporter
+> prints it — the presence of the line in the collector's stdout IS the alert (MVP).
+> Real proof: `services/platform/tests/test_history_alert.py` (sends real OTLP
+> above/below the threshold and checks the channel).
 >
-> **Contrato de nome de métrica com o WS-B** (emit_history_metric): o filtro
-> aceita `dse.workflow.history_length`/`temporal_workflow_event_history_length`
-> (nº de eventos) e `dse.workflow.history_size_bytes`/
-> `temporal_workflow_event_history_size` (bytes). Thresholds ativos:
-> eventos ≥ 35.840 (70% de 51.200) = warning, ≥ 46.080 (90%) = critical;
-> bytes ≥ 36.700.160 (70% de 50MB) = warning, ≥ 47.185.920 (90%) = critical.
-> Recomendação: pinar UM nome canônico em `dse_contracts.constants` na
-> próxima janela de contrato (pedido registrado; não editamos a fundação
-> unilateralmente).
+> **Metric-name contract with WS-B** (emit_history_metric): the filter
+> accepts `dse.workflow.history_length`/`temporal_workflow_event_history_length`
+> (event count) and `dse.workflow.history_size_bytes`/
+> `temporal_workflow_event_history_size` (bytes). Active thresholds:
+> events ≥ 35,840 (70% of 51,200) = warning, ≥ 46,080 (90%) = critical;
+> bytes ≥ 36,700,160 (70% of 50MB) = warning, ≥ 47,185,920 (90%) = critical.
+> Recommendation: pin ONE canonical name in `dse_contracts.constants` in the
+> next contract window (request filed; we do not edit the foundation
+> unilaterally).
 >
-> **Upgrade para alerting real (documentado, não escondido):** manter
-> `filter/history_alert` + `transform/history_alert` e trocar o exporter
-> `debug/history_alert` por `prometheusremotewrite` (+ regra de alerta no
-> Alertmanager) ou pelo exporter nativo do backend do cliente. Nenhuma
-> mudança em quem emite.
+> **Upgrade to real alerting (documented, not hidden):** keep
+> `filter/history_alert` + `transform/history_alert` and swap the
+> `debug/history_alert` exporter for `prometheusremotewrite` (+ an alert rule in
+> Alertmanager) or for the native exporter of the client's backend. No
+> change on the emitting side.
 
-- **Condição**: Temporal recomenda manter o event history de um workflow
-  abaixo de ~10.000 eventos / 50MB (limites hard em ~51.200 eventos / 50MB
-  por padrão do cluster) — um `WorkItemLifecycleWorkflow` de longa duração
-  (múltiplas rodadas de clarificação/steering) pode se aproximar disso.
-  Alerta quando `temporal_workflow_event_history_size` (métrica nativa do
-  Temporal SDK/servidor) ultrapassa 70% do limite configurado para QUALQUER
-  workflow com `dse.work_item_id` ativo.
-- **Severidade**: Warning em 70%, Critical em 90% — dar tempo para o
-  workflow fazer `Continue-As-New` (mitigação estrutural, responsabilidade
-  do WS-B no design do workflow) antes de atingir o hard limit (que causaria
-  falha do workflow).
-- **Fonte de dados real**: Temporal expõe isto nativamente via sua própria
-  métrica interna (`temporal_workflow_event_history_size` em `histogram`,
-  disponível no endpoint de métricas do frontend/history service) — não
-  depende de nenhuma instrumentação adicional do WS-D, é o próprio servidor
-  Temporal que emite. Produção: scrape isso via Prometheus (o
-  `docker-compose.yml` da fundação não expõe métricas Prometheus do
-  Temporal ainda — adicionar `--metrics-port` e o scrape config no upgrade
-  do otel-collector fica registrado aqui como TODO explícito, não
-  escondido).
+- **Condition**: Temporal recommends keeping a workflow's event history
+  below ~10,000 events / 50MB (hard limits at ~51,200 events / 50MB
+  by cluster default) — a long-running `WorkItemLifecycleWorkflow`
+  (multiple clarification/steering rounds) can approach that.
+  Alert when `temporal_workflow_event_history_size` (a native metric of the
+  Temporal SDK/server) exceeds 70% of the configured limit for ANY
+  workflow with an active `dse.work_item_id`.
+- **Severity**: Warning at 70%, Critical at 90% — leaving time for the
+  workflow to `Continue-As-New` (structural mitigation, WS-B's
+  responsibility in the workflow design) before hitting the hard limit
+  (which would fail the workflow).
+- **Real data source**: Temporal exposes this natively via its own
+  internal metric (`temporal_workflow_event_history_size` as a `histogram`,
+  available on the frontend/history service metrics endpoint) — it does
+  not depend on any additional WS-D instrumentation, the Temporal server
+  itself emits it. Production: scrape it via Prometheus (the foundation's
+  `docker-compose.yml` does not expose Temporal's Prometheus metrics
+  yet — adding `--metrics-port` and the scrape config during the
+  otel-collector upgrade is recorded here as an explicit TODO, not
+  hidden).
 
-## O que falta para produção (honesto, não escondido)
+## What is missing for production (honest, not hidden)
 
-- Nenhum backend de alerting real está conectado — isto é documentação de
-  regras, não alertas ativos. Integração real requer: (a) escolher o
-  backend do cliente (Grafana Alerting / Datadog Monitors / Alertmanager);
-  (b) trocar o exporter `debug` do `otel-collector` por um exporter real
-  (`prometheusremotewrite`, `otlphttp`, ou o exporter nativo do backend
-  escolhido); (c) traduzir as 3 regras acima para a sintaxe de query do
-  backend escolhido.
-- A regra 1 (budget) depende de `tenant_config.monthly_budget_usd` já
-  existir (feito, `migrations/0007_wsf.sql`) mas NENHUM serviço grava
-  `dse.cost_usd` a partir de custo real de provider ainda (depende do WS-D
-  ter uma chamada Bedrock real instrumentada — sem conta AWS/Bedrock
-  provisionada nesta sessão, WS-D usa o tier `eco/echo-model` local).
-- A regra 2 depende do WS-C nomear e gravar o `action` exato de negação de
-  egress no audit_log — o nome exato (`egress_denied` vs outro) precisa ser
-  confirmado na integração (não inventado unilateralmente aqui).
+- No real alerting backend is connected — this is rule documentation,
+  not active alerts. Real integration requires: (a) choosing the
+  client's backend (Grafana Alerting / Datadog Monitors / Alertmanager);
+  (b) swapping the `otel-collector`'s `debug` exporter for a real exporter
+  (`prometheusremotewrite`, `otlphttp`, or the native exporter of the chosen
+  backend); (c) translating the 3 rules above into the chosen backend's
+  query syntax.
+- Rule 1 (budget) depends on `tenant_config.monthly_budget_usd` already
+  existing (done, `migrations/0007_wsf.sql`) but NO service writes
+  `dse.cost_usd` from a real provider cost yet (it depends on WS-D
+  having a real instrumented Bedrock call — with no AWS/Bedrock account
+  provisioned in this session, WS-D uses the local `eco/echo-model` tier).
+- Rule 2 depends on WS-C naming and writing the exact egress-denial
+  `action` in the audit_log — the exact name (`egress_denied` vs something else) must be
+  confirmed at integration (not invented unilaterally here).

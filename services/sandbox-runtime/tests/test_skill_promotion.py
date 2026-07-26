@@ -1,14 +1,15 @@
-"""WSC-E4-T2 — captura de episódios e materialização de skill candidates.
+"""WSC-E4-T2 — episode capture and materialization of skill candidates.
 
-Contra Postgres real (migrações 0019 + 0020 aplicadas). Prova:
-  - as 3 sources gravam episódios em skill_episode;
-  - materialização é DETERMINÍSTICA por limiar (config, não LLM) — só dispara
-    quando occurrences >= threshold;
-  - o candidate nasce status='candidate' com version incrementada + proveniência,
-    e NÃO é servido ao Planner (só {approved,active} são);
-  - materialização é idempotente (não duplica candidates);
-  - o eval do candidate produz score/contagens e grava em skill_eval; um caso
-    negativo que dispara conta como negative_regression e reprova (passed=False).
+Against real Postgres (migrations 0019 + 0020 applied). Proves:
+  - the 3 sources write episodes into skill_episode;
+  - materialization is DETERMINISTIC by threshold (config, not LLM) — it only
+    fires when occurrences >= threshold;
+  - the candidate is born with status='candidate', an incremented version +
+    provenance, and is NOT served to the Planner (only {approved,active} are);
+  - materialization is idempotent (it does not duplicate candidates);
+  - the candidate eval produces a score/counts and writes to skill_eval; a
+    negative case that fires counts as a negative_regression and fails the eval
+    (passed=False).
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ def test_materialize_creates_candidate_at_threshold(pg_conn, tenant):
     assert c.version == 1
     assert c.pattern_key == "pat-hit"
 
-    # nasce como candidate, com proveniência e version — e NÃO é servido ao Planner.
+    # born as a candidate, with provenance and version — and NOT served to the Planner.
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT status, version, pattern_key, provenance->>'materialized_from' "
@@ -73,7 +74,7 @@ def test_materialize_creates_candidate_at_threshold(pg_conn, tenant):
     assert prov_src == "skill_episode"
 
     served = {s.skill_key for s in read_approved_skills(tenant, conn=pg_conn)}
-    assert "auto-pat-hit" not in served, "candidate NÃO pode ser servido ao Planner"
+    assert "auto-pat-hit" not in served, "a candidate must NOT be served to the Planner"
 
 
 def test_materialize_is_idempotent(pg_conn, tenant):
@@ -82,7 +83,7 @@ def test_materialize_is_idempotent(pg_conn, tenant):
     first = sp.materialize_candidates(tenant, threshold=3, conn=pg_conn)
     second = sp.materialize_candidates(tenant, threshold=3, conn=pg_conn)
     assert len(first) == 1
-    assert second == [], "não deve re-materializar um candidate já vivo"
+    assert second == [], "must not re-materialize a candidate that is already live"
     with pg_conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM skill_registry WHERE tenant_id=%s AND skill_key=%s",
@@ -92,8 +93,8 @@ def test_materialize_is_idempotent(pg_conn, tenant):
 
 
 def test_eval_from_episodes_passes_when_no_negative_regression(pg_conn, tenant):
-    # pattern alvo (positivos) + um pattern diferente (negativos): a skill de
-    # 'pat-target' NÃO dispara nos episódios de 'pat-other' → 0 regressões.
+    # target pattern (positives) + a different pattern (negatives): the
+    # 'pat-target' skill does NOT fire on 'pat-other' episodes → 0 regressions.
     for _ in range(3):
         sp.record_episode(tenant, "ci_repair", "pat-target", conn=pg_conn)
     sp.record_episode(tenant, "ci_repair", "pat-other", conn=pg_conn)
@@ -111,7 +112,7 @@ def test_eval_from_episodes_passes_when_no_negative_regression(pg_conn, tenant):
             (tenant, "auto-pat-target"),
         )
         row = cur.fetchone()
-    assert row == (True, 0), "trilha de eval gravada em skill_eval"
+    assert row == (True, 0), "eval trail recorded in skill_eval"
 
 
 def test_eval_fails_on_negative_regression(pg_conn, tenant):
@@ -119,8 +120,8 @@ def test_eval_fails_on_negative_regression(pg_conn, tenant):
         sp.record_episode(tenant, "ci_repair", "pat-reg", conn=pg_conn)
     sp.materialize_candidates(tenant, threshold=3, conn=pg_conn)
 
-    # eval set injetado com um NEGATIVO que compartilha o pattern_key do
-    # candidate → a skill dispara onde não devia → regressão → reprova.
+    # eval set injected with a NEGATIVE that shares the candidate's pattern_key
+    # → the skill fires where it should not → regression → eval fails.
     cases = [
         sp.EvalCase(label="positive", pattern_key="pat-reg"),
         sp.EvalCase(label="negative", pattern_key="pat-reg"),

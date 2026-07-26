@@ -1,21 +1,22 @@
-"""Fase 4 (WS-B wiring) — três entregas do loop hardening & learning:
+"""Phase 4 (WS-B wiring) — three deliverables of loop hardening & learning:
 
-1. **Merge-base no review loop (WSE-E6-T16).** No caminho changes_requested,
-   ANTES de re-rodar o Coder, o workflow chama ACTIVITY_UPDATE_BASE_BRANCH com
-   `first_human_review_done=True` (o humano ja revisou -> nunca rebase, so
-   merge-base -> zero threads orfas). Conflito nao-resolvivel -> escala a
-   humano (nunca resolve a forca, P6). As fakes decodificam o payload com o
-   MODEL REAL do contrato (UpdateBaseBranchInput) e retornam
-   UpdateBaseBranchResult — se o call site derivar do contrato, quebra aqui.
+1. **Merge-base in the review loop (WSE-E6-T16).** On the changes_requested
+   path, BEFORE re-running the Coder, the workflow calls
+   ACTIVITY_UPDATE_BASE_BRANCH with `first_human_review_done=True` (the human
+   already reviewed -> never rebase, only merge-base -> zero orphaned threads).
+   An unresolvable conflict -> escalate to a human (never force a resolution,
+   P6). The fakes decode the payload with the REAL contract MODEL
+   (UpdateBaseBranchInput) and return UpdateBaseBranchResult — if the call site
+   drifts from the contract, it breaks here.
 
-2. **Episodio de clarificacao (source do WS-C, WSC-E4-T2).** O gate de
-   clarificacao emite um skill_episode (source=clarification) na tabela da
-   migracao 0019 quando a MESMA lacuna recorre — NENHUMA skill e criada aqui
-   (fronteira testada em packages/contracts), so o insumo governavel.
+2. **Clarification episode (WS-C source, WSC-E4-T2).** The clarification gate
+   emits a skill_episode (source=clarification) into the migration 0019 table
+   when the SAME gap recurs — NO skill is created here (boundary tested in
+   packages/contracts), only the governable input.
 
-3. **Metrica de qualidade de PR (pilot gate).** rounds de review, contagem de
-   changes_requested, tempo ate merge e refreshes de evidencia sao emitidos via
-   OTel na fronteira terminal do PR (merge/escalacao).
+3. **PR quality metric (pilot gate).** review rounds, changes_requested count,
+   time to merge and evidence refreshes are emitted via OTel at the PR's
+   terminal boundary (merge/escalation).
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ from conftest import (
 from fakes import FakeControlPlane, build_fake_activities
 
 
-async def _wait_until(predicate, attempts: int = 400, msg: str = "condicao nunca ficou true"):
+async def _wait_until(predicate, attempts: int = 400, msg: str = "condition never became true"):
     for _ in range(attempts):
         if predicate():
             return
@@ -72,14 +73,14 @@ def _collect_points(reader: InMemoryMetricReader, metric_name: str):
 
 
 # ---------------------------------------------------------------------------
-# 1) Merge-base no caminho changes_requested (WSE-E6-T16)
+# 1) Merge-base on the changes_requested path (WSE-E6-T16)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_changes_requested_runs_merge_base_before_coder(time_skipping_env):
     work_item_id = new_work_item_id("mb")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    state = FakeControlPlane()  # base_has_drift=True default -> estrategia merge_base
+    state = FakeControlPlane()  # base_has_drift=True by default -> merge_base strategy
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(time_skipping_env.client, task_queue=task_queue,
@@ -91,7 +92,7 @@ async def test_changes_requested_runs_merge_base_before_coder(time_skipping_env)
 
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
         await _wait_until(lambda: state.update_base_calls >= 1,
-                          msg="merge-base nunca rodou no changes_requested")
+                          msg="merge-base never ran on changes_requested")
         await wait_for_status(handle, {"review_ready"})
 
         await handle.signal("review_comment", {"verdict": "approved"})
@@ -99,23 +100,23 @@ async def test_changes_requested_runs_merge_base_before_coder(time_skipping_env)
         result = await handle.result()
 
     assert result.status == WorkItemStatus.done.value
-    # merge-base rodou exatamente uma vez (um lote de changes_requested)
+    # merge-base ran exactly once (one batch of changes_requested)
     assert state.update_base_calls == 1
-    # ANTES do Coder: o payload carrega first_human_review_done=True (nunca rebase)
+    # BEFORE the Coder: the payload carries first_human_review_done=True (never rebase)
     assert state.last_update_base_payload["first_human_review_done"] is True
     assert state.last_update_base_payload["branch"] == f"dse/{work_item_id}"
     assert state.last_update_base_payload["base_branch"] == "main"
 
     actions = read_audit_actions(work_item_id)
     assert "base_branch_updated" in actions
-    # ordem: merge-base ANTES do fix do Coder (evidencia P8, nao asserção)
+    # order: merge-base BEFORE the Coder's fix (P8 evidence, not assertion)
     assert actions.index("base_branch_updated") < actions.index("coder_fix_applied")
 
 
 @pytest.mark.asyncio
 async def test_merge_base_conflict_escalates_and_does_not_rerun_coder(time_skipping_env):
-    """Conflito nao-resolvivel no merge-base -> escala a humano; o Coder NAO e
-    re-executado (P6: nunca resolve a forca, nunca segue adivinhando)."""
+    """An unresolvable merge-base conflict -> escalate to a human; the Coder is
+    NOT re-run (P6: never force a resolution, never keep guessing)."""
     work_item_id = new_work_item_id("mbconf")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -134,7 +135,7 @@ async def test_merge_base_conflict_escalates_and_does_not_rerun_coder(time_skipp
     assert result.status == WorkItemStatus.escalated.value
     assert "base_branch_merge_conflict" in (result.detail or "")
     assert state.update_base_calls == 1
-    # o Coder do ciclo de fix NUNCA rodou (so o turno inicial da implementacao)
+    # the fix cycle's Coder NEVER ran (only the implementation's initial turn)
     assert state.coder_turn_calls == 1
     actions = read_audit_actions(work_item_id)
     assert "base_branch_updated" in actions
@@ -144,9 +145,9 @@ async def test_merge_base_conflict_escalates_and_does_not_rerun_coder(time_skipp
 
 @pytest.mark.asyncio
 async def test_merge_base_orphaned_threads_violation_escalates(time_skipping_env):
-    """Invariante de exit da Fase 4: merge-base NUNCA orfana threads. Se o dono
-    (WS-E) reportar orphaned_threads>0, o workflow escala (nunca segue com a
-    invariante violada)."""
+    """Phase 4 exit invariant: merge-base NEVER orphans threads. If the owner
+    (WS-E) reports orphaned_threads>0, the workflow escalates (it never proceeds
+    with the invariant violated)."""
     work_item_id = new_work_item_id("mborph")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -164,17 +165,18 @@ async def test_merge_base_orphaned_threads_violation_escalates(time_skipping_env
 
     assert result.status == WorkItemStatus.escalated.value
     assert "orphaned_threads" in (result.detail or "")
-    assert state.coder_turn_calls == 1  # fix cycle nunca rodou
+    assert state.coder_turn_calls == 1  # the fix cycle never ran
 
 
 # ---------------------------------------------------------------------------
-# 2) Episodio de clarificacao recorrente (source do WS-C, WSC-E4-T2)
+# 2) Recurring clarification episode (WS-C source, WSC-E4-T2)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_recurring_clarification_gap_emits_skill_episode(time_skipping_env):
-    """A mesma lacuna (base_branch/acceptance_criteria continuam faltando depois
-    de ja termos pedido clarificacao) gera um skill_episode source=clarification
-    com proveniencia — insumo que o WS-C consome. NENHUMA skill e criada aqui."""
+    """The same gap (base_branch/acceptance_criteria still missing after we
+    already asked for clarification) produces a skill_episode
+    source=clarification with provenance — the input WS-C consumes. NO skill is
+    created here."""
     work_item_id = new_work_item_id("clarep")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -187,23 +189,23 @@ async def test_recurring_clarification_gap_emits_skill_episode(time_skipping_env
             repo=None, base_branch=None, acceptance_criteria=None,
             clarification_round_cap=3,
             clarification_reminder_hours=1.0,
-            clarification_escalation_days=10.0,  # nao deixa o timer de escalacao disparar
+            clarification_escalation_days=10.0,  # keeps the escalation timer from firing
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
-        # responde sempre so o repo -> base_branch/acceptance_criteria RECORREM faltando
+        # always answers only the repo -> base_branch/acceptance_criteria RECUR as missing
         for _ in range(3):
             await wait_for_status(handle, {"needs_clarification"})
             await handle.signal("clarification_answer", {"repo": "acme/repo"})
         result = await handle.result()
 
-    assert result.status == WorkItemStatus.escalated.value  # cap de rounds
+    assert result.status == WorkItemStatus.escalated.value  # round cap
 
     episodes = read_skill_episodes(work_item_id)
-    assert episodes, "nenhum skill_episode gravado para a lacuna recorrente"
+    assert episodes, "no skill_episode recorded for the recurring gap"
     sources = {e[0] for e in episodes}
     assert sources == {"clarification"}
-    # pattern_key agrupa os campos recorrentes; proveniencia carrega o contexto
+    # pattern_key groups the recurring fields; provenance carries the context
     source, pattern_key, occurrence_n, provenance = episodes[0]
     assert pattern_key.startswith("clarification_missing:")
     assert "base_branch" in pattern_key and "acceptance_criteria" in pattern_key
@@ -217,9 +219,9 @@ async def test_recurring_clarification_gap_emits_skill_episode(time_skipping_env
 
 @pytest.mark.asyncio
 async def test_non_recurring_clarification_emits_no_episode(time_skipping_env):
-    """A PRIMEIRA lacuna (round inicial, antes de qualquer pedido) NUNCA vira
-    episodio — so a RECORRENCIA conta. Uma clarificacao respondida de primeira
-    nao gera insumo."""
+    """The FIRST gap (initial round, before any request) NEVER becomes an
+    episode — only the RECURRENCE counts. A clarification answered on the first
+    try produces no input."""
     work_item_id = new_work_item_id("clarno")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -235,7 +237,7 @@ async def test_non_recurring_clarification_emits_no_episode(time_skipping_env):
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"needs_clarification"})
-        # responde TUDO de uma vez -> completa sem recorrencia
+        # answers EVERYTHING at once -> completes without a recurrence
         await handle.signal("clarification_answer",
                             {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "X"})
         await wait_for_status(handle, {"review_ready"})
@@ -249,7 +251,7 @@ async def test_non_recurring_clarification_emits_no_episode(time_skipping_env):
 
 
 # ---------------------------------------------------------------------------
-# 3) Metrica de qualidade de PR (pilot gate "PR quality thresholds")
+# 3) PR quality metric (pilot gate "PR quality thresholds")
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
@@ -259,7 +261,7 @@ async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
     work_item_id = new_work_item_id("prq")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
-    state = FakeControlPlane(coder_files_changed=["frontend/App.tsx"])  # gera evidencia/refresh
+    state = FakeControlPlane(coder_files_changed=["frontend/App.tsx"])  # produces evidence/refresh
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     async with Worker(time_skipping_env.client, task_queue=task_queue,
@@ -268,9 +270,9 @@ async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
-        # um round de changes_requested -> conta na taxa + 1 refresh de evidencia
+        # one changes_requested round -> counts toward the rate + 1 evidence refresh
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "y"})
-        await _wait_until(lambda: state.finalize_calls >= 2, msg="fix cycle nunca completou")
+        await _wait_until(lambda: state.finalize_calls >= 2, msg="the fix cycle never completed")
         await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
@@ -280,11 +282,11 @@ async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
 
     rounds = _collect_points(reader, metrics.METRIC_PR_REVIEW_ROUNDS)
     mine = [p for p in rounds if dict(p.attributes).get(OTEL_ATTR_WORK_ITEM) == work_item_id]
-    assert mine, "nenhum data point de review_rounds para o PR"
+    assert mine, "no review_rounds data point for the PR"
     attrs = dict(mine[0].attributes)
     assert attrs[OTEL_ATTR_TENANT] == "test-tenant"
     assert attrs[metrics.ATTR_PR_OUTCOME] == "merged"
-    # review_round conta os ciclos de fix (changes_requested/ci-red); aqui 1
+    # review_round counts the fix cycles (changes_requested/ci-red); 1 here
     assert max(p.max for p in mine) >= 1
 
     cr = _collect_points(reader, metrics.METRIC_PR_CHANGES_REQUESTED)
@@ -293,17 +295,17 @@ async def test_pr_quality_metric_emitted_on_merge(time_skipping_env):
 
     ttm = _collect_points(reader, metrics.METRIC_PR_TIME_TO_MERGE)
     ttm_mine = [p for p in ttm if dict(p.attributes).get(OTEL_ATTR_WORK_ITEM) == work_item_id]
-    assert ttm_mine, "tempo-ate-merge nunca emitido no merge"
+    assert ttm_mine, "time-to-merge was never emitted on merge"
 
     ev = _collect_points(reader, metrics.METRIC_PR_EVIDENCE_REFRESHES)
     ev_mine = [p for p in ev if dict(p.attributes).get(OTEL_ATTR_WORK_ITEM) == work_item_id]
-    assert ev_mine  # evidence-consumption (proxy) emitido
+    assert ev_mine  # evidence-consumption (proxy) emitted
 
 
 @pytest.mark.asyncio
 async def test_pr_quality_metric_emitted_on_escalation(time_skipping_env):
-    """PRs que nao mergeiam (escalados apos o PR existir) tambem emitem a
-    metrica — o pilot gate precisa dos dados dos dois desfechos."""
+    """PRs that never merge (escalated after the PR exists) also emit the metric
+    — the pilot gate needs data from both outcomes."""
     reader = InMemoryMetricReader()
     metrics.configure_for_tests(reader)
 
@@ -321,7 +323,7 @@ async def test_pr_quality_metric_emitted_on_escalation(time_skipping_env):
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r1"})
-        await _wait_until(lambda: state.finalize_calls >= 2, msg="round 1 nunca completou")
+        await _wait_until(lambda: state.finalize_calls >= 2, msg="round 1 never completed")
         await wait_for_status(handle, {"review_ready"})
         await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "r2"})
         result = await handle.result()

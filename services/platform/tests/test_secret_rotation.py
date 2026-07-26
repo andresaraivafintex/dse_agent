@@ -1,10 +1,10 @@
-"""WSF-E2-T3b(a) — rotação agendada de secrets de serviço, contra o Vault
-REAL da fundação (localhost:8200, dev mode). Nunca mockado (P8).
+"""WSF-E2-T3b(a) — scheduled rotation of service secrets, against the
+foundation's REAL Vault (localhost:8200, dev mode). Never mocked (P8).
 
-O teste central é o de zero-downtime: um leitor concorrente em loop apertado
-durante N rotações nunca vê erro nem estado intermediário — cada GET devolve
-uma versão completa (antiga ou nova), que é exatamente a garantia que o
-intake precisa (webhook secret sendo lido pelo adapter durante a troca).
+The central test is the zero-downtime one: a concurrent reader in a tight loop
+across N rotations never sees an error nor an intermediate state — every GET
+returns a complete version (old or new), which is exactly the guarantee intake
+needs (the webhook secret being read by the adapter while it is swapped).
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def client():
         c = SecretsClient()
         c.put_secret("dse/test/rotation-smoke", {"ok": "1"})
     except VaultUnavailableError as exc:
-        pytest.skip(f"Vault da fundação indisponível: {exc}")
+        pytest.skip(f"foundation Vault unavailable: {exc}")
     return c
 
 
@@ -57,7 +57,7 @@ def test_rotate_creates_new_version_and_audit_row(client, path):
     assert result.old_version == 1
     assert result.new_version == 2
     assert result.rotated_keys == ["signing_secret"]
-    # o material realmente mudou e é o que um leitor vê agora
+    # the material really changed and is what a reader sees now
     live = client.get_secret(path)
     assert live["signing_secret"] != "old-material"
 
@@ -77,20 +77,20 @@ def test_audit_row_never_contains_secret_material(client, path):
     serialized = str(rows)
     assert "super-sensitive-old" not in serialized
     assert new_value not in serialized
-    # só os NOMES das chaves aparecem
+    # only the key NAMES show up
     assert rows[0]["details"]["rotated_keys"] == ["token"]
 
 
 def test_rotation_without_downtime_for_active_reader(client, path):
-    """Prova do aceite: rotacionar um secret consumido por um leitor ativo,
-    zero janela de erro. Leitor em loop apertado numa thread; 5 rotações no
-    fluxo principal; toda leitura devolve um estado completo e conhecido."""
+    """Acceptance proof: rotate a secret consumed by an active reader with zero
+    error window. Reader in a tight loop on a thread; 5 rotations on the main
+    flow; every read returns a complete, known state."""
     client.put_secret(path, {"webhook_secret": "v0"})
 
     stop = threading.Event()
     errors: list[Exception] = []
     seen: list[str] = []
-    # cliente separado (conexão própria) — leitor independente de verdade
+    # separate client (its own connection) — a genuinely independent reader
     reader = SecretsClient()
 
     def read_loop():
@@ -98,7 +98,7 @@ def test_rotation_without_downtime_for_active_reader(client, path):
             try:
                 value = reader.get_secret(path)
                 seen.append(value["webhook_secret"])
-            except Exception as exc:  # noqa: BLE001 — o ponto é capturar QUALQUER janela
+            except Exception as exc:  # noqa: BLE001 — the point is to catch ANY window
                 errors.append(exc)
 
     t = threading.Thread(target=read_loop, daemon=True)
@@ -114,35 +114,35 @@ def test_rotation_without_downtime_for_active_reader(client, path):
         stop.set()
         t.join(timeout=10)
 
-    assert not errors, f"leitor ativo viu erro durante rotação (janela de downtime!): {errors[:3]}"
-    assert len(seen) > 0, "leitor não chegou a ler nada — teste inválido"
+    assert not errors, f"an active reader saw an error during rotation (downtime window!): {errors[:3]}"
+    assert len(seen) > 0, "the reader never read anything — invalid test"
     unknown = set(seen) - valid_values
-    assert not unknown, f"leitor viu material que não é nenhuma versão conhecida: {unknown}"
-    # e as 5 rotações ficaram no ledger
+    assert not unknown, f"the reader saw material matching no known version: {unknown}"
+    # and all 5 rotations landed in the ledger
     assert len(_audit_rows("service_secret_rotated", path)) == 5
 
 
 def test_generator_returning_same_material_is_refused(client, path):
     client.put_secret(path, {"k": "same"})
-    with pytest.raises(RotationError, match="MESMO material"):
+    with pytest.raises(RotationError, match="SAME material"):
         rotate_secret(path, actor="system:secret-rotator", client=client, generator=lambda cur: dict(cur))
-    # a versão corrente permaneceu intacta (P6: falha limpa)
+    # the current version stayed intact (P6: clean failure)
     assert client.get_secret(path) == {"k": "same"}
 
 
 def test_generator_returning_empty_is_refused(client, path):
     client.put_secret(path, {"k": "x"})
-    with pytest.raises(RotationError, match="inválido"):
+    with pytest.raises(RotationError, match="invalid material"):
         rotate_secret(path, actor="system:secret-rotator", client=client, generator=lambda cur: {})
 
 
 def test_rotate_from_manifest_isolates_failures(client, path):
-    """Uma entrada quebrada não impede as demais (agendado roda sem babá)."""
+    """One broken entry must not stop the others (the scheduled run is unattended)."""
     client.put_secret(path, {"a": "1"})
     results = rotate_from_manifest(
         [
             {"path": path},
-            {"no_path_key": "quebrada"},
+            {"no_path_key": "broken"},
         ],
         client=client,
     )
@@ -152,8 +152,8 @@ def test_rotate_from_manifest_isolates_failures(client, path):
 
 
 def test_scheduler_run_rotation_once_uses_manifest_env(client, path, monkeypatch):
-    """O entrypoint agendado (compose platform-jobs / CronJob --once) roda o
-    manifest do env de verdade contra o Vault real."""
+    """The scheduled entrypoint (compose platform-jobs / CronJob --once) really
+    runs the manifest from env against the real Vault."""
     client.put_secret(path, {"session_secret": "before"})
     monkeypatch.setenv("DSE_ROTATION_MANIFEST", f'[{{"path": "{path}", "tenant_id": "platform"}}]')
 

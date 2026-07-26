@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-identity"
 version = "0.1.0"
-description = "Resolução platform_user_id -> principal único (WSF-E3-T1, fundações do identity map)"
+description = "platform_user_id -> single principal resolution (WSF-E3-T1, identity map foundations)"
 requires-python = ">=3.11"
 dependencies = ["psycopg2-binary>=2.9"]
 

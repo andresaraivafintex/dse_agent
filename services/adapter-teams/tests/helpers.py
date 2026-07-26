@@ -8,7 +8,7 @@ from typing import Any
 
 
 def teams_auth_header(secret_b64: str, body: bytes) -> str:
-    """Reproduz a assinatura do outgoing webhook do Teams:
+    """Reproduces the Teams outgoing webhook signature:
     `HMAC <base64(HMAC_SHA256(decoded_secret, body))>`."""
     key = base64.b64decode(secret_b64)
     digest = hmac.new(key, body, hashlib.sha256).digest()

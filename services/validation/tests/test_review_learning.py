@@ -1,12 +1,12 @@
-"""WSE-E6-T18 — episódios de skill-learning de review feedback aceito.
+"""WSE-E6-T18 — skill-learning episodes from accepted review feedback.
 
-Postgres real (skill_episode da migração 0019 + audit). Prova:
-  - feedback aceito repetido (mesmo padrão) => episódios com occurrence_n
-    crescente, tenant-scoped;
-  - proveniência completa (PR/reviewer/diff);
-  - FRONTEIRA: NENHUMA skill é criada/ativada (skill_registry inalterado);
-  - feedback NÃO aceito não vira episódio (P3);
-  - isolamento por tenant do occurrence_n.
+Real Postgres (skill_episode from migration 0019 + audit). Proves:
+  - repeated accepted feedback (same pattern) => episodes with increasing
+    occurrence_n, tenant-scoped;
+  - full provenance (PR/reviewer/diff);
+  - BOUNDARY: NO skill is created/activated (skill_registry untouched);
+  - feedback that was NOT accepted does not become an episode (P3);
+  - per-tenant isolation of occurrence_n.
 """
 from __future__ import annotations
 
@@ -41,11 +41,11 @@ def test_repeated_accepted_feedback_increments_occurrence(tenant_id, work_item_i
     assert first is not None
     assert first["occurrence_n"] == 1
 
-    # MESMO padrão, outro PR/work item — occurrence_n sobe (feedback repetido)
+    # SAME pattern, different PR/work item — occurrence_n goes up (repeated feedback)
     wi2 = f"wi_{uuid.uuid4().hex[:8]}"
     second = record_review_feedback_episode(
         tenant_id=tenant_id, work_item_id=wi2, pr_number=102,
-        reviewer="usr_bob", comment_body=body.upper(),  # normalização: mesmo padrão
+        reviewer="usr_bob", comment_body=body.upper(),  # normalization: same pattern
         path=path, accepted=True,
     )
     assert second["occurrence_n"] == 2
@@ -60,20 +60,20 @@ def test_repeated_accepted_feedback_increments_occurrence(tenant_id, work_item_i
 
 
 def test_boundary_no_skill_created_or_activated(tenant_id, work_item_id):
-    """A FRONTEIRA testada: gravar um episódio NÃO cria/ativa nenhuma skill."""
+    """The BOUNDARY under test: recording an episode does NOT create/activate any skill."""
     before = db.count_skill_registry(tenant_id)
 
     ep = record_review_feedback_episode(
         tenant_id=tenant_id, work_item_id=work_item_id, pr_number=200,
-        reviewer="usr_alice", comment_body="Adicione tratamento de None aqui.",
+        reviewer="usr_alice", comment_body="Add None handling here.",
         path="app/svc.py", accepted=True,
     )
     assert ep is not None
 
     after = db.count_skill_registry(tenant_id)
-    assert after == before, "gravar episódio NÃO pode criar/ativar skill (promoção é do WS-C)"
+    assert after == before, "recording an episode must NOT create/activate a skill (promotion belongs to WS-C)"
 
-    # o episódio existe (o insumo governável)
+    # the episode exists (the governable input)
     assert len(db.list_skill_episodes(tenant_id, source="review_feedback")) == 1
     # audit (P8)
     assert _audit_count(work_item_id, "review_feedback_episode_recorded") == 1
@@ -93,13 +93,13 @@ def test_not_accepted_feedback_records_nothing(tenant_id, work_item_id):
 def test_pattern_key_deterministic_and_path_scoped():
     a = review_pattern_key("Use  parametrized   query", "app/dao.py")
     b = review_pattern_key("use parametrized query", "app/dao.py")
-    assert a == b  # normalização (lower + colapsa espaços)
+    assert a == b  # normalization (lower + collapse whitespace)
     c = review_pattern_key("use parametrized query", "app/other.py")
-    assert c != a  # path escopa o padrão
+    assert c != a  # path scopes the pattern
 
 
 def test_tenant_scoped_occurrence(work_item_id):
-    body = "Extraia essa constante mágica."
+    body = "Extract this magic constant."
     t1 = f"acme-{uuid.uuid4().hex[:8]}"
     t2 = f"globex-{uuid.uuid4().hex[:8]}"
     e1 = record_review_feedback_episode(
@@ -110,7 +110,7 @@ def test_tenant_scoped_occurrence(work_item_id):
         tenant_id=t2, work_item_id=work_item_id, pr_number=1, reviewer="usr_a",
         comment_body=body, path="c.py", accepted=True,
     )
-    # mesmo pattern_key (mesmo texto/path) mas occurrence_n reinicia por tenant
+    # same pattern_key (same text/path) but occurrence_n restarts per tenant
     assert e1["pattern_key"] == e2["pattern_key"]
     assert e1["occurrence_n"] == 1
     assert e2["occurrence_n"] == 1

@@ -1,21 +1,21 @@
-"""Instrumentação OTel do model-gateway client (WSD-E3-T1/T2).
+"""OTel instrumentation for the model-gateway client (WSD-E3-T1/T2).
 
-Cada chamada de modelo feita via `gateway_call.chat_completion` gera um span
-`dse.model_gateway.chat_completion` com os atributos definidos em
-`dse_contracts.constants` (contrato estável entre WS-D e WS-F):
-`OTEL_ATTR_TENANT/WORK_ITEM/STAGE/MODEL/COST_USD/TOKENS_IN/TOKENS_OUT`,
-preenchidos a partir da resposta real do LiteLLM (ele já retorna
-custo/tokens — não recalculamos nada aqui).
+Every model call made through `gateway_call.chat_completion` produces a
+`dse.model_gateway.chat_completion` span with the attributes defined in
+`dse_contracts.constants` (stable contract between WS-D and WS-F):
+`OTEL_ATTR_TENANT/WORK_ITEM/STAGE/MODEL/COST_USD/TOKENS_IN/TOKENS_OUT`, filled
+from LiteLLM's real response (it already returns cost/tokens — we recompute
+nothing here).
 
-Dois destinos de exportação, sempre ativos ao mesmo tempo:
-  1. Um `InMemorySpanExporter` — sempre ligado. É o que permite testar
-     `WSD-E3-T2` (agregação de custo) e os próprios testes pytest sem
-     depender de nenhum collector rodando. Acesse via `get_recorded_spans()`.
-  2. Um exportador OTLP/HTTP real para o collector do WS-F, SE
-     `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` estiver setado. Nesta sessão não há
-     collector do WS-F no ar (services/platform/ ainda não publicou um) —
-     documentamos a integração esperada mas ela é condicional/opt-in e não
-     quebra nada se ausente.
+Two export destinations, always active at the same time:
+  1. An `InMemorySpanExporter` — always on. It is what makes `WSD-E3-T2` (cost
+     aggregation) and the pytest suite itself testable without depending on any
+     running collector. Read it via `get_recorded_spans()`.
+  2. A real OTLP/HTTP exporter to the WS-F collector, IF
+     `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` is set. In this session there is no WS-F
+     collector up (services/platform/ has not published one yet) — we document
+     the expected integration but it is conditional/opt-in and breaks nothing
+     when absent.
 """
 from __future__ import annotations
 
@@ -39,12 +39,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from . import settings
 
-# Atributo extra, fora do contrato publicado em dse_contracts.constants (que
-# não define um OTEL_ATTR_TASK_CLASS hoje) — mas necessário para a agregação
-# de custo por tenant/task-class/stage pedida em WSD-E3-T2. Segue a mesma
-# convenção de nome (`dse.<campo>`) e é aditivo: não substitui nenhum
-# atributo do contrato, só complementa. Documentado no README como um campo
-# que deveria subir para o contrato compartilhado quando WS-F tocar nele.
+# Extra attribute, outside the contract published in dse_contracts.constants
+# (which defines no OTEL_ATTR_TASK_CLASS today) — but required for the cost
+# aggregation by tenant/task-class/stage asked for in WSD-E3-T2. It follows the
+# same naming convention (`dse.<field>`) and is additive: it replaces no
+# contract attribute, it only complements them. Documented in the README as a
+# field that should be promoted to the shared contract when WS-F touches it.
 OTEL_ATTR_TASK_CLASS = "dse.task_class"
 
 _IN_MEMORY_EXPORTER = InMemorySpanExporter()
@@ -55,13 +55,13 @@ def _build_provider() -> TracerProvider:
     provider = TracerProvider(
         resource=Resource.create({"service.name": "dse-model-gateway-client"})
     )
-    # Sempre ativo — é o backend usado pelos testes e pelo cost_export local.
+    # Always on — it is the backend used by the tests and by the local cost_export.
     provider.add_span_processor(SimpleSpanProcessor(_IN_MEMORY_EXPORTER))
 
     endpoint = settings.otlp_exporter_endpoint()
     if endpoint:
-        # Caminho de produção esperado: OTel collector do WS-F. Import local
-        # para não forçar a dependência de rede em quem não configurou nada.
+        # Expected production path: WS-F's OTel collector. Local import so we
+        # do not force the network dependency on anyone who configured nothing.
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
@@ -80,10 +80,10 @@ def get_tracer_provider() -> TracerProvider:
 
 
 def get_recorded_spans() -> tuple[ReadableSpan, ...]:
-    """Todos os spans emitidos pelo processo atual — usado por testes e por
-    `cost_export.py`. Em produção, a fonte de verdade é o backend do
-    collector (Tempo/Jaeger/etc. do WS-F), não este buffer em memória."""
-    get_tracer_provider()  # garante que o provider (e o processor) existe
+    """All spans emitted by the current process — used by tests and by
+    `cost_export.py`. In production the source of truth is the collector
+    backend (WS-F's Tempo/Jaeger/etc.), not this in-memory buffer."""
+    get_tracer_provider()  # makes sure the provider (and the processor) exists
     return tuple(_IN_MEMORY_EXPORTER.get_finished_spans())
 
 
@@ -100,9 +100,9 @@ def model_call_span(
     model: str,
     task_class: str | None = None,
 ) -> Iterator[trace.Span]:
-    """Span de uma chamada de modelo. Atributos de custo/tokens são setados
-    pelo caller (`gateway_call.chat_completion`) depois que a resposta do
-    LiteLLM chega — só ele sabe o custo real daquela chamada específica."""
+    """Span for one model call. Cost/token attributes are set by the caller
+    (`gateway_call.chat_completion`) after LiteLLM's response arrives — only it
+    knows the real cost of that specific call."""
     tracer = trace.get_tracer("dse.model_gateway_client", tracer_provider=get_tracer_provider())
     with tracer.start_as_current_span("dse.model_gateway.chat_completion") as span:
         span.set_attribute(OTEL_ATTR_TENANT, tenant_id)

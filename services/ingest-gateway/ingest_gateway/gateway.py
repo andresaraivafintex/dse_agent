@@ -1,15 +1,15 @@
-"""WSA-E1-T3 — Gateway transacional (outbox).
+"""WSA-E1-T3 — Transactional gateway (outbox).
 
-`admit_work_item` grava um WorkItem novo + seu ingest_event na MESMA
-transação Postgres. Idempotência de nível de tarefa: `idempotency_key` e o
-próprio `work_item_id` são derivados deterministicamente de
-`ConversationEvent.event_id` (que já é um sha256 de
-platform+thread+message) — reentregas do mesmo webhook (mesmo event_id)
-convergem para o mesmo work_item_id via `ON CONFLICT ... DO NOTHING`, nunca
-duplicando linha.
+`admit_work_item` writes a new WorkItem + its ingest_event in the SAME
+Postgres transaction. Task-level idempotency: `idempotency_key` and the
+`work_item_id` itself are derived deterministically from
+`ConversationEvent.event_id` (which is already a sha256 of
+platform+thread+message) — redeliveries of the same webhook (same event_id)
+converge to the same work_item_id via `ON CONFLICT ... DO NOTHING`, never
+duplicating a row.
 
-Kill switch de canal é checado ANTES de qualquer INSERT: evento de canal
-desligado não cria WorkItem nem ingest_event, e gera
+The channel kill switch is checked BEFORE any INSERT: an event from a disabled
+channel creates neither WorkItem nor ingest_event, and emits
 `dse_audit.emit(action="admission_blocked_kill_switch")`.
 """
 from __future__ import annotations
@@ -25,10 +25,10 @@ from .db import get_connection
 
 
 class AdmissionBlocked(Exception):
-    """Levantada quando o kill switch de canal/tenant bloqueia a admissão.
-    Não é um erro de infraestrutura — é uma decisão determinística válida
-    (P1), o caller (adapter) deve tratá-la retornando 200 sem side effects
-    além do audit row já emitido por esta função."""
+    """Raised when the channel/tenant kill switch blocks admission. This is not
+    an infrastructure error — it is a valid deterministic decision (P1); the
+    caller (adapter) should handle it by returning 200 with no side effects
+    beyond the audit row this function already emitted."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -40,19 +40,19 @@ def _payload_json(
     sanitized_content: str | None,
     extra_payload: dict[str, Any] | None = None,
 ) -> str:
-    """`ingest_events.payload`: o `ConversationEvent` completo (com o
-    `content_snapshot` ORIGINAL intacto, congelado pela defesa TOCTOU —
-    WSA-E2-T2) mais, se fornecido, `sanitized_content` — a versão que passou
-    pela sanitização (WSA-E2-T3) e é a que deve seguir para qualquer estágio
-    que envolva um modelo. Nunca sobrescreve `content_snapshot`.
+    """`ingest_events.payload`: the full `ConversationEvent` (with the ORIGINAL
+    `content_snapshot` intact, frozen by the TOCTOU defense — WSA-E2-T2) plus,
+    if provided, `sanitized_content` — the version that went through
+    sanitization (WSA-E2-T3) and the one that must be used by any stage that
+    involves a model. Never overwrites `content_snapshot`.
 
-    `extra_payload` (Fase 2): chaves de roteamento determinístico que o
-    dispatcher lê para escolher o signal certo — ex.: `{"merged_by_human":
-    True, "merged_by": <principal>, "pr_number": N}` para o webhook de merge
-    (WSA-E4-T3), ou `{"approval_verdict": "rejected", "approval_route":
-    "re_plan"}` para uma transição/botão de aprovação de plano (WSA-E6-T3).
-    São marcadores postos pelo ADAPTER (código determinístico, P1), nunca por
-    um modelo. Nunca sobrescreve chaves do próprio ConversationEvent."""
+    `extra_payload` (Phase 2): deterministic routing keys the dispatcher reads
+    to pick the right signal — e.g. `{"merged_by_human": True, "merged_by":
+    <principal>, "pr_number": N}` for the merge webhook (WSA-E4-T3), or
+    `{"approval_verdict": "rejected", "approval_route": "re_plan"}` for a plan
+    approval transition/button (WSA-E6-T3). These are markers set by the
+    ADAPTER (deterministic code, P1), never by a model. Never overwrites keys
+    of the ConversationEvent itself."""
     data = event.model_dump(mode="json")
     if sanitized_content is not None:
         data["sanitized_content"] = sanitized_content
@@ -76,10 +76,10 @@ def admit_work_item(
     sanitized_content: str | None = None,
     conn=None,
 ) -> str:
-    """Retorna o `work_item_id` (novo ou já existente, se reentrega).
+    """Returns the `work_item_id` (new, or the existing one on a redelivery).
 
-    Levanta `AdmissionBlocked` se o kill switch do canal/tenant estiver
-    ativo — nesse caso NENHUM WorkItem/ingest_event é criado.
+    Raises `AdmissionBlocked` if the channel/tenant kill switch is active — in
+    that case NO WorkItem/ingest_event is created.
     """
     owns_conn = conn is None
     if owns_conn:
@@ -168,16 +168,16 @@ def record_signal_event(
     extra_payload: dict[str, Any] | None = None,
     conn=None,
 ) -> bool:
-    """Grava o ConversationEvent de um sinal (Path B — correlacionado a um
-    WorkItem já existente) no mesmo outbox `ingest_events`, SEM criar um
-    `work_items` novo. O dispatcher (WSA-E1-T3) drena esta tabela e decide
-    `start_workflow` (kind == task_request, cria o workflow) vs
-    `signal_workflow` (demais kinds, sinaliza o workflow já em andamento) —
-    ver `ingest_gateway.dispatcher`.
+    """Writes the ConversationEvent of a signal (Path B — correlated to an
+    already existing WorkItem) into the same `ingest_events` outbox, WITHOUT
+    creating a new `work_items` row. The dispatcher (WSA-E1-T3) drains this
+    table and decides between `start_workflow` (kind == task_request, creates
+    the workflow) and `signal_workflow` (other kinds, signals the workflow
+    already in flight) — see `ingest_gateway.dispatcher`.
 
-    Retorna True se este é o primeiro registro deste `event_id` (novo sinal
-    a ser dispatchado), False se já havia sido registrado antes (reentrega
-    de webhook — dedup por `event_id` UNIQUE).
+    Returns True if this is the first record of this `event_id` (a new signal
+    to dispatch), False if it had already been recorded before (webhook
+    redelivery — dedup by the UNIQUE `event_id`).
     """
     owns_conn = conn is None
     if owns_conn:

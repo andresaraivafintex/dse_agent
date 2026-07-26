@@ -1,7 +1,7 @@
-"""Regressoes P0 do primeiro sprint de remediacao.
+"""P0 regressions from the first remediation sprint.
 
-Exercita Temporal e Postgres reais; somente as fronteiras de outros servicos
-usam fakes, e cada fake decodifica o payload pelo modelo Pydantic canonico.
+Exercises real Temporal and Postgres; only other services' boundaries use fakes,
+and each fake decodes the payload through the canonical Pydantic model.
 """
 from __future__ import annotations
 
@@ -165,13 +165,14 @@ async def test_unverified_merge_signal_is_rejected_and_wait_continues(time_skipp
 
 @pytest.mark.asyncio
 async def test_forged_merge_signal_refuted_by_github_api(time_skipping_env):
-    """Plano 08 §F (F1): um signal que PASSA o envelope (pr_number certo) mas
-    cujo PR NÃO está merged na API do GitHub é rejeitado (webhook forjado) e o
-    workflow continua esperando; quando a API confirma o merge, conclui."""
+    """Plano 08 §F (F1): a signal that PASSES the envelope (correct pr_number)
+    but whose PR is NOT merged according to the GitHub API is rejected (forged
+    webhook) and the workflow keeps waiting; once the API confirms the merge, it
+    completes."""
     work_item_id = new_work_item_id("forgedmerge")
     insert_work_item(work_item_id)
     state = FakeControlPlane()
-    state.merge_verify_mode = "not_merged"  # API refuta (PR aberto, não merged)
+    state.merge_verify_mode = "not_merged"  # the API refutes it (PR open, not merged)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
 
     async with Worker(
@@ -188,7 +189,7 @@ async def test_forged_merge_signal_refuted_by_github_api(time_skipping_env):
         await handle.signal("review_comment", {"verdict": "approved"})
         await wait_for_status(handle, {WorkItemStatus.merge_pending.value})
 
-        # envelope VÁLIDO (pr_number certo), mas a API diz "não merged" → refuta
+        # VALID envelope (correct pr_number), but the API says "not merged" -> refuted
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         for _ in range(100):
             if "merge_signal_rejected" in read_audit_actions(work_item_id):
@@ -197,7 +198,7 @@ async def test_forged_merge_signal_refuted_by_github_api(time_skipping_env):
         assert "merge_signal_rejected" in read_audit_actions(work_item_id)
         assert await handle.query(WorkItemLifecycleWorkflow.get_status) == "merge_pending"
 
-        # agora a API confirma o merge → conclui
+        # now the API confirms the merge -> it completes
         state.merge_verify_mode = "verified"
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()

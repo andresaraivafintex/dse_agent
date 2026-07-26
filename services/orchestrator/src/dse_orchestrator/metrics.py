@@ -1,29 +1,30 @@
-"""Fase 3 — ativacao do alerta de aproximacao do limite de history do Temporal
-(infra/ALERTING-RULES.md §3, em conjunto com o WS-F).
+"""Phase 3 — feeds the alert for approaching Temporal's history limit
+(infra/ALERTING-RULES.md §3, together with WS-F).
 
-O servidor Temporal emite `temporal_workflow_event_history_size` nativamente,
-mas o compose da fundacao ainda nao expoe as metricas Prometheus do servidor
-(TODO explicito da regra §3). Enquanto isso, o proprio orquestrador emite uma
-metrica OTel com o tamanho APROXIMADO do run atual, medido do lado do worker:
+The Temporal server emits `temporal_workflow_event_history_size` natively, but
+the foundation's compose does not expose the server's Prometheus metrics yet
+(explicit TODO in rule §3). In the meantime, the orchestrator itself emits an
+OTel metric with the APPROXIMATE size of the current run, measured worker-side:
 
   - `dse.workflow.history_length`  — `workflow.info().get_current_history_length()`
-    (contagem real de eventos do run atual, exposta pelo SDK de forma
-    deterministica/replay-safe);
+    (the real event count of the current run, exposed by the SDK in a
+    deterministic/replay-safe way);
   - `dse.workflow.history_size_bytes` — `get_current_history_size()` (bytes);
-  - `dse.workflow.continue_as_new_count` — quantas vezes esta cadeia de
-    execucoes ja fez Continue-As-New (o run atual "zera" o history a cada CAN;
-    a contagem da o contexto de quantos resets ja houve).
+  - `dse.workflow.continue_as_new_count` — how many times this chain of
+    executions has done Continue-As-New (the current run "resets" the history on
+    every CAN; the count gives the context of how many resets happened).
 
-Atributos: `dse.work_item_id`, `dse.tenant_id`, `dse.stage` (fase do workflow)
-e `dse.checkpoint` (fronteira que emitiu). O WS-F aponta a regra de alerta
-(Warning 70% / Critical 90% de ~10k eventos) para `dse.workflow.history_length`.
+Attributes: `dse.work_item_id`, `dse.tenant_id`, `dse.stage` (workflow phase)
+and `dse.checkpoint` (the boundary that emitted). WS-F points the alert rule
+(Warning 70% / Critical 90% of ~10k events) at `dse.workflow.history_length`.
 
-A LEITURA acontece dentro do workflow (deterministica); a EMISSAO acontece na
-Activity local `emit_history_metric` (I/O fora do sandbox — disciplina P1).
+The READ happens inside the workflow (deterministic); the EMISSION happens in
+the local Activity `emit_history_metric` (I/O outside the sandbox — P1
+discipline).
 
-Exporter configuravel pelo MESMO env do tracing (`DSE_OTEL_EXPORTER`):
-console (default local) ou otlp + `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` apontando
-para o otel-collector do WS-F (`otel-collector:4317` no compose).
+Exporter configurable through the SAME env as tracing (`DSE_OTEL_EXPORTER`):
+console (local default) or otlp + `DSE_OTEL_EXPORTER_OTLP_ENDPOINT` pointing at
+WS-F's otel-collector (`otel-collector:4317` in compose).
 """
 from __future__ import annotations
 
@@ -42,15 +43,15 @@ METRIC_HISTORY_SIZE_BYTES = "dse.workflow.history_size_bytes"
 METRIC_CONTINUE_AS_NEW = "dse.workflow.continue_as_new_count"
 ATTR_CHECKPOINT = "dse.checkpoint"
 
-# Fase 4 — metricas de QUALIDADE DE PR (pilot gate "PR quality thresholds",
-# adendo 03 Parte 3). O piloto interno mede a saude do loop de review por PR;
-# estas quatro alimentam esse gate. NUMEROS reais so saem operando contra
-# repos reais (bloqueio administrativo do adendo 03) — aqui garantimos que a
-# instrumentacao existe e emite deterministicamente do lado do workflow.
-METRIC_PR_REVIEW_ROUNDS = "dse.pr.review_rounds"          # rounds de review por PR
-METRIC_PR_CHANGES_REQUESTED = "dse.pr.changes_requested_total"  # taxa (contagem) de changes_requested
-METRIC_PR_TIME_TO_MERGE = "dse.pr.time_to_merge_seconds"  # tempo ate merge (finalize -> merged_by_human)
-METRIC_PR_EVIDENCE_REFRESHES = "dse.pr.evidence_refreshes"  # evidence-consumption (proxy; WS-E loga o acesso real)
+# Phase 4 — PR QUALITY metrics (pilot gate "PR quality thresholds", addendum 03
+# Part 3). The internal pilot measures the health of the review loop per PR;
+# these four feed that gate. Real NUMBERS only come from operating against real
+# repos (administrative blocker in addendum 03) — here we guarantee the
+# instrumentation exists and emits deterministically from the workflow side.
+METRIC_PR_REVIEW_ROUNDS = "dse.pr.review_rounds"          # review rounds per PR
+METRIC_PR_CHANGES_REQUESTED = "dse.pr.changes_requested_total"  # changes_requested rate (count)
+METRIC_PR_TIME_TO_MERGE = "dse.pr.time_to_merge_seconds"  # time to merge (finalize -> merged_by_human)
+METRIC_PR_EVIDENCE_REFRESHES = "dse.pr.evidence_refreshes"  # evidence-consumption (proxy; WS-E logs the real access)
 ATTR_PR_OUTCOME = "dse.pr.outcome"  # "merged" | "escalated" | ...
 
 _lock = threading.Lock()
@@ -72,9 +73,9 @@ def _build_metric_reader():
     )
 
     class _QuietConsoleMetricExporter(ConsoleMetricExporter):
-        """Console exporter que tolera stdout ja fechado (ex.: flush de
-        shutdown depois que o pytest fechou o capture) — metrica e sempre
-        best-effort, nunca barulho fatal."""
+        """Console exporter that tolerates an already-closed stdout (e.g. a
+        shutdown flush after pytest closed the capture) — metrics are always
+        best-effort, never fatal noise."""
 
         def export(self, metrics_data, timeout_millis: float = 10_000, **kwargs):
             try:
@@ -87,8 +88,8 @@ def _build_metric_reader():
         endpoint = os.environ.get("DSE_OTEL_EXPORTER_OTLP_ENDPOINT")
         if not endpoint:
             logger.warning(
-                "DSE_OTEL_EXPORTER=otlp mas DSE_OTEL_EXPORTER_OTLP_ENDPOINT nao definido; "
-                "metricas caem para ConsoleMetricExporter (modo local)."
+                "DSE_OTEL_EXPORTER=otlp but DSE_OTEL_EXPORTER_OTLP_ENDPOINT is not set; "
+                "metrics fall back to ConsoleMetricExporter (local mode)."
             )
         else:
             try:
@@ -102,8 +103,8 @@ def _build_metric_reader():
                 )
             except ImportError:
                 logger.warning(
-                    "opentelemetry-exporter-otlp-proto-grpc nao instalado; metricas "
-                    "caem para ConsoleMetricExporter. Instale-o para producao."
+                    "opentelemetry-exporter-otlp-proto-grpc is not installed; metrics "
+                    "fall back to ConsoleMetricExporter. Install it for production."
                 )
     return PeriodicExportingMetricReader(
         _QuietConsoleMetricExporter(), export_interval_millis=60_000
@@ -131,7 +132,7 @@ def _make_instruments() -> None:
     global _pr_review_rounds, _pr_changes_requested, _pr_time_to_merge, _pr_evidence_refreshes
     _pr_review_rounds = _meter.create_histogram(
         METRIC_PR_REVIEW_ROUNDS, unit="{round}",
-        description="Rounds de review humano/CI-red por PR (pilot gate: PR quality thresholds)",
+        description="Human-review/CI-red rounds per PR (pilot gate: PR quality thresholds)",
     )
     _pr_changes_requested = _meter.create_histogram(
         METRIC_PR_CHANGES_REQUESTED, unit="{batch}",
@@ -139,11 +140,11 @@ def _make_instruments() -> None:
     )
     _pr_time_to_merge = _meter.create_histogram(
         METRIC_PR_TIME_TO_MERGE, unit="s",
-        description="Segundos de PR finalizado ate merged_by_human (pilot gate)",
+        description="Seconds from PR finalized to merged_by_human (pilot gate)",
     )
     _pr_evidence_refreshes = _meter.create_histogram(
         METRIC_PR_EVIDENCE_REFRESHES, unit="{refresh}",
-        description="Refreshes de evidencia do PR (proxy de evidence-consumption; "
+        description="PR evidence refreshes (evidence-consumption proxy; "
         "o acesso real e logado pelo WS-E). Pilot gate.",
     )
 
@@ -165,8 +166,8 @@ def _ensure_configured() -> None:
 
 
 def configure_for_tests(metric_reader) -> None:
-    """Injeta um MetricReader (ex.: InMemoryMetricReader) — uso exclusivo de
-    teste; substitui qualquer configuracao anterior deste modulo."""
+    """Injects a MetricReader (e.g. InMemoryMetricReader) — test-only use; it
+    replaces any previous configuration of this module."""
     global _meter
     from opentelemetry.sdk.metrics import MeterProvider
 
@@ -209,11 +210,11 @@ def record_pr_quality_metric(
     evidence_refreshes: int,
     time_to_merge_seconds: float | None = None,
 ) -> None:
-    """Fase 4 — emite as quatro metricas de QUALIDADE DE PR que alimentam o
-    pilot gate "PR quality thresholds" (adendo 03). Emitida numa fronteira
-    TERMINAL do PR (merge ou escalacao) com as tallies finais do run, mais
-    incrementalmente por round (contadores) para nao perder dados de PRs que
-    nunca mergeiam. Best-effort — falha aqui nunca afeta o fluxo."""
+    """Phase 4 — emits the four PR QUALITY metrics that feed the pilot gate "PR
+    quality thresholds" (addendum 03). Emitted at a TERMINAL PR boundary (merge
+    or escalation) with the run's final tallies, plus incrementally per round
+    (counters) so data on PRs that never merge is not lost. Best-effort — a
+    failure here never affects the flow."""
     _ensure_configured()
     attrs = {
         OTEL_ATTR_WORK_ITEM: work_item_id,

@@ -1,79 +1,79 @@
-# Fase 4 ("Loop hardening & learning") — Status da implementação
+# Phase 4 ("Loop hardening & learning") — Implementation status
 
-Data: 2026-07-21. Última fase de ENGENHARIA antes dos pilot gates. Escopo e ajustes conforme o
-[adendo 03](../../plano-desenvolvimento/03-ADENDO-FASE4-POS-FASE3.md), precedido de validação
-profunda do estado.
+Date: 2026-07-21. The last ENGINEERING phase before the pilot gates. Scope and adjustments per
+[addendum 03](../../plano-desenvolvimento/03-ADENDO-FASE4-POS-FASE3.md), preceded by a deep
+validation of the current state.
 
-## Resumo executivo
+## Executive summary
 
-- **597 testes passando, 0 falhando, 5 pulados** (Fase 3 fechou em 503; +94 na Fase 4) — suíte
-  inteira re-executada com os DSNs corretos por workstream, contra Postgres/Temporal/Docker/
-  Vault/LiteLLM/Garage **e o cluster k3d + Argo CD**.
-- **Zero bugs de integração de contrato pela segunda fase seguida** — o gate de entrada
-  (contratos + boundary tests + `extra="forbid"`) continua pagando: as 3 activities novas
-  (`update_base_branch`, `eval_skill_candidate`, `promote_skill`) e os 26 nomes cross-workstream
-  registraram sem colisão; worker sobe com **36 activities**.
-- **Toda a engenharia da Fase 4 está entregue e provada.** O que separa o produto do piloto
-  agora é **administrativo/de negócio**, não código — ver §"Pilot-readiness".
+- **597 tests passing, 0 failing, 5 skipped** (Phase 3 closed at 503; +94 in Phase 4) — the whole
+  suite re-run with the correct per-workstream DSNs, against Postgres/Temporal/Docker/
+  Vault/LiteLLM/Garage **and the k3d cluster + Argo CD**.
+- **Zero contract integration bugs for the second phase in a row** — the entry gate
+  (contracts + boundary tests + `extra="forbid"`) keeps paying off: the 3 new activities
+  (`update_base_branch`, `eval_skill_candidate`, `promote_skill`) and the 26 cross-workstream names
+  registered with no collision; the worker comes up with **36 activities**.
+- **All Phase 4 engineering is delivered and proven.** What separates the product from the pilot
+  now is **administrative/business**, not code — see §"Pilot-readiness".
 
-## O que foi construído (real, por workstream)
+## What was built (real, per workstream)
 
-| WS | Fase 4 entregue | Prova real |
+| WS | Phase 4 delivered | Real proof |
 |---|---|---|
-| E | **merge-base (construção nova)** — atualiza o branch da tarefa com drift da base por merge, nunca rebase depois do 1º review; conflito → escala; episódios de review-feedback | teste de exit: PR com drift + 2 threads ancoradas → merge-base → **orphaned_threads==0** (alcançabilidade real de shas); teste negativo prova que rebase orfanaria todas |
-| C | **esteira de promoção de skill** candidate→eval→approved→canary→active + rollback por ponteiro; captura de episódios (3 sources) | exit: pipeline completo + rollback restaura o ponteiro (skill some do Planner); **adversarial: promote(active, approver=None) e system:* recusados** antes de qualquer escrita |
-| A | **steering sobre identity map real** (RBAC do console + approvers do bundle, offboarding sobrepõe), assinatura estável da Fase 1; **adapter Teams** (provisão, não ativado) | offboarded nega apesar de allowlist; troca de impl não quebrou os testes de steering da Fase 1; Teams inbound retorna 501 até ativação |
-| F | **threat model + data-flow** (ameaça→controle implementado→teste, diagramas mermaid validados); **programa de red-team** (21 ataques executáveis); **topologia B**; **decisão Webex** (de-scope formal com "como reverter") | 21/21 red-team passando contra infra real (forged webhook, prompt-injection/SSRF via egress, cross-tenant, skill maliciosa via WS-C); `helm lint`/`template` limpos em A e B |
-| B | **wiring merge-base** no review loop (conflito/órfãs → escala), episódio de clarificação, 4 métricas OTel de qualidade de PR | conflito → `_EscalateNow`; orphaned_threads>0 também escala (defesa extra da invariante) |
+| E | **merge-base (new construction)** — updates the task branch with base drift by merging, never rebasing after the 1st review; conflict → escalate; review-feedback episodes | exit test: PR with drift + 2 anchored threads → merge-base → **orphaned_threads==0** (real sha reachability); a negative test proves that rebasing would orphan all of them |
+| C | **skill promotion pipeline** candidate→eval→approved→canary→active + pointer-based rollback; episode capture (3 sources) | exit: full pipeline + rollback restores the pointer (the skill disappears from the Planner); **adversarial: promote(active, approver=None) and system:\* refused** before any write |
+| A | **steering over the real identity map** (console RBAC + bundle approvers, offboarding overrides), stable Phase 1 signature; **Teams adapter** (provisioned, not activated) | an offboarded user is denied despite the allowlist; swapping the implementation did not break the Phase 1 steering tests; Teams inbound returns 501 until activation |
+| F | **threat model + data-flow** (threat→implemented control→test, validated mermaid diagrams); **red-team program** (21 executable attacks); **topology B**; **Webex decision** (formal de-scope with "how to revert") | 21/21 red-team passing against real infra (forged webhook, prompt-injection/SSRF via egress, cross-tenant, malicious skill via WS-C); `helm lint`/`template` clean on A and B |
+| B | **merge-base wiring** in the review loop (conflict/orphans → escalate), clarification episode, 4 OTel PR-quality metrics | conflict → `_EscalateNow`; orphaned_threads>0 also escalates (extra defense of the invariant) |
 
-## Exit criteria de engenharia da Fase 4 (Seção 16) — atendidos
+## Phase 4 engineering exit criteria (Section 16) — met
 
-| Critério | Status |
+| Criterion | Status |
 |---|---|
-| UC4 verde incluindo asserção de zero threads de review órfãs | **Atendido** — merge-base provado com orphaned_threads==0 + wiring que escala se >0 |
-| Primeira skill promovida candidate→eval→approval→canary com rollback demonstrado | **Atendido** — pipeline completo testado contra Postgres real; rollback por ponteiro |
-| Decisão Webex executada (restaurar ou de-scope com sign-off) | **Atendido** — de-scope formal documentado (ADR-25), com caminho de reversão mecânico |
-| Threat model + data-flow diagrams (pacote de security review) | **Atendido** — THREAT-MODEL.md com rastreabilidade ameaça→controle→teste |
-| Programa de red-team antes do primeiro repo de cliente | **Atendido** — dono, cadência, 21 ataques automatizados + itens manuais |
+| UC4 green including the zero-orphaned-review-threads assertion | **Met** — merge-base proven with orphaned_threads==0 + wiring that escalates if >0 |
+| First skill promoted candidate→eval→approval→canary with rollback demonstrated | **Met** — full pipeline tested against real Postgres; pointer-based rollback |
+| Webex decision executed (restore or de-scope with sign-off) | **Met** — formal de-scope documented (ADR-25), with a mechanical reversion path |
+| Threat model + data-flow diagrams (security review package) | **Met** — THREAT-MODEL.md with threat→control→test traceability |
+| Red-team program before the first customer repo | **Met** — owner, cadence, 21 automated attacks + manual items |
 
-## Pilot-readiness — a fronteira honesta (adendo 03 §3)
+## Pilot-readiness — the honest boundary (addendum 03 §3)
 
-A Fase 4 fecha **tudo o que é engenharia**. Os pilot gates restantes **não são resolvíveis com
-código** — são administrativos/de negócio e devem virar um checklist de readiness separado:
+Phase 4 closes **everything that is engineering**. The remaining pilot gates **cannot be solved
+with code** — they are administrative/business and should become a separate readiness checklist:
 
-| Pilot gate (Seção 16) | Natureza | Bloqueio |
+| Pilot gate (Section 16) | Nature | Blocker |
 |---|---|---|
-| PR quality thresholds no piloto interno | Engenharia **pronta**, dados **pendentes** | As 4 métricas OTel existem e emitem; os NÚMEROS reais exigem operar contra repos reais |
-| Economics measured (Seção 15, números reais) | idem | Atribuição de custo instrumentada (Fase 2/3); números reais dependem de modelo/uso reais |
-| Client security/data review passed | **Pronto para submeter** | THREAT-MODEL.md + data-flow diagrams prontos; a aprovação é do cliente |
-| Licensing BOM assinado | Administrativo | `infra/OSS-BOM.md` existe; assinatura é processo |
-| RACI operacional; termos contratuais executados | Negócio/jurídico | Fora de engenharia |
-| Queue board demonstravelmente system of record | **Atendido** (Fase 2) | — |
+| PR quality thresholds in the internal pilot | Engineering **ready**, data **pending** | The 4 OTel metrics exist and emit; the real NUMBERS require operating against real repos |
+| Economics measured (Section 15, real numbers) | same | Cost attribution instrumented (Phase 2/3); real numbers depend on a real model/usage |
+| Client security/data review passed | **Ready to submit** | THREAT-MODEL.md + data-flow diagrams ready; the approval is the customer's |
+| Signed licensing BOM | Administrative | `infra/OSS-BOM.md` exists; the signature is a process |
+| Operational RACI; contractual terms executed | Business/legal | Outside engineering |
+| Queue board demonstrably the system of record | **Met** (Phase 2) | — |
 
-**Caminho crítico para o piloto (não é código):** registrar **GitHub App / Slack / Jira / conta
-AWS-Bedrock reais**. É o maior lead time pendente desde a Fase 1 e agora gateia diretamente
-"PR quality thresholds" e "economics measured". **Recomendação: disparar já** — nenhuma linha de
-código o desbloqueia, e todo o resto da engenharia já está pronto para consumi-lo.
+**Critical path to the pilot (it is not code):** register **real GitHub App / Slack / Jira /
+AWS-Bedrock account**. That is the longest lead time pending since Phase 1 and it now directly
+gates "PR quality thresholds" and "economics measured". **Recommendation: kick it off now** — no
+line of code unblocks it, and every other piece of engineering is already ready to consume it.
 
-## Gaps de engenharia declarados (honestos)
+## Declared engineering gaps (honest)
 
-- **Credenciais/serviços reais** (GitHub App, Slack, Jira, AWS/Bedrock, modelo real): tudo com
-  fixture/fake claramente marcado; a lógica é real contra as APIs reais. Mesmo bloqueio desde a
-  Fase 1 — administrativo.
-- **merge-base**: o core roda contra git real nos testes; o wrapper de Activity resolve threads
-  ancoradas via GitHub client (Fake sem App). Une-se ao workspace do sandbox do WS-C na
-  integração final com repo real.
-- **canary = shadow** (sem seleção de subconjunto de tráfego): documentado; seleção canário real
-  é evolução pós-piloto.
-- **eval matcher** de skill é por `pattern_key` (determinístico, auditável, simples) — um matcher
-  semântico rico é evolução futura.
-- **Teams**: provisão completa e testada, **não ativada** (decisão de roadmap; Webex de-scoped).
+- **Real credentials/services** (GitHub App, Slack, Jira, AWS/Bedrock, a real model): everything
+  runs on a clearly marked fixture/fake; the logic is real against the real APIs. Same blocker as
+  since Phase 1 — administrative.
+- **merge-base**: the core runs against real git in the tests; the Activity wrapper resolves
+  anchored threads via the GitHub client (Fake, no App). It joins WS-C's sandbox workspace in the
+  final integration with a real repo.
+- **canary = shadow** (no traffic-subset selection): documented; real canary selection is a
+  post-pilot evolution.
+- The skill **eval matcher** is by `pattern_key` (deterministic, auditable, simple) — a rich
+  semantic matcher is future work.
+- **Teams**: fully provisioned and tested, **not activated** (roadmap decision; Webex de-scoped).
 
-## Como rodar
+## How to run
 
 ```
 cd fase1
 make up && make migrate
 ./infra/k8s-local/setup-k3d-argocd.sh && ./infra/k8s-local/setup-eso.sh
-# testes por workstream, venv ATIVADO; platform/audit com DSN dse_app (nunca superuser)
+# per-workstream tests, venv ACTIVATED; platform/audit with the dse_app DSN (never superuser)
 ```

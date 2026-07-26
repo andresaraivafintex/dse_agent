@@ -1,12 +1,12 @@
-"""WSF-E3-T3 (parte do offboarding) — resolução de "quem pode steerar uma
-tarefa", combinando a allowlist explícita do WS-A (`tenant_steering_allowlist`)
-com o estado de offboarding do console (`dse_console_identity.active`).
+"""WSF-E3-T3 (part of offboarding) — resolves "who may steer a task" by
+combining WS-A's explicit allowlist (`tenant_steering_allowlist`) with the
+console offboarding state (`dse_console_identity.active`).
 
-O WS-A (WSA-E6-T2a) já tem a allowlist como fonte da verdade de autorização de
-steering ("ausência de linha = não autorizado"). Este helper adiciona a camada
-de offboarding do ADR-22: um principal offboardado (`active = false`) NÃO pode
-steerar mesmo que ainda tenha linha na allowlist — o offboarding é a autoridade
-que sobrepõe. Puramente determinístico (P1); nega por default.
+WS-A (WSA-E6-T2a) already treats the allowlist as the source of truth for
+steering authorization ("no row = not authorized"). This helper adds the ADR-22
+offboarding layer: an offboarded principal (`active = false`) may NOT steer even
+if it still has a row in the allowlist — offboarding is the overriding
+authority. Purely deterministic (P1); denies by default.
 """
 from __future__ import annotations
 
@@ -27,11 +27,11 @@ def _get_connection():
 
 
 def is_steering_allowed(tenant_id: str, principal_id: str, conn=None) -> bool:
-    """True sse o principal está na allowlist de steering do tenant E não está
-    offboardado no console. Um principal que nunca logou no console (sem linha
-    em dse_console_identity) NÃO é bloqueado por isso — só é bloqueado se
-    EXPLICITAMENTE desativado/expirado (mesma regra de
-    access_bundles.resolve_plan_approvers). Nega por default."""
+    """True iff the principal is in the tenant's steering allowlist AND is not
+    offboarded in the console. A principal that never logged into the console
+    (no row in dse_console_identity) is NOT blocked for that reason — it is only
+    blocked when EXPLICITLY deactivated/expired (same rule as
+    access_bundles.resolve_plan_approvers). Denies by default."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -44,7 +44,7 @@ def is_steering_allowed(tenant_id: str, principal_id: str, conn=None) -> bool:
             in_allowlist = cur.fetchone() is not None
         if not in_allowlist:
             return False
-        # tem linha em console_identity e está desativado? bloqueia.
+        # has a row in console_identity and is deactivated? block.
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT 1 FROM dse_console_identity WHERE principal_id = %s",

@@ -1,12 +1,12 @@
-"""tenant_config (migrations/0007_wsf.sql) — budgets/fairness/kill-switch por
-tenant. Roda contra o Postgres real da fundação (nunca mockado)."""
+"""tenant_config (migrations/0007_wsf.sql) — per-tenant budgets/fairness/
+kill-switch. Runs against the foundation's real Postgres (never mocked)."""
 from __future__ import annotations
 
 import uuid
 from decimal import Decimal
 
 import pytest
-from dse_audit import reconstruct_work_item_history  # noqa: F401 (paridade de import, não usado diretamente aqui)
+from dse_audit import reconstruct_work_item_history  # noqa: F401 (import parity, not used directly here)
 from dse_audit.client import get_connection
 from dse_platform import get_tenant_config, set_kill_switch, upsert_tenant_config
 
@@ -29,7 +29,7 @@ def test_upsert_creates_with_defaults_then_updates(tenant_id):
 
     updated = upsert_tenant_config(tenant_id, monthly_budget_usd=Decimal("250.00"))
     assert updated.monthly_budget_usd == Decimal("250.00")
-    # campo não passado permanece o que já estava (idempotência parcial)
+    # a field that was not passed keeps its previous value (partial idempotency)
     assert updated.max_concurrent_work_items == 5
 
 
@@ -56,7 +56,7 @@ def test_set_kill_switch_enable_then_disable_and_audit_trail(tenant_id):
     disabled_cfg = set_kill_switch(tenant_id, enabled=False, reason=None, actor="system:operator")
     assert disabled_cfg.kill_switch_enabled is False
 
-    # P8: cada mudança de kill-switch deixou uma linha de audit imutável.
+    # P8: every kill-switch change left an immutable audit row.
     conn = get_connection()
     try:
         with conn.cursor() as cur:

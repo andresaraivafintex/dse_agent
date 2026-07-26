@@ -1,14 +1,14 @@
-"""Normalização de webhooks GitHub -> `ConversationEvent` (WSA-E4-T1).
+"""Normalization of GitHub webhooks -> `ConversationEvent` (WSA-E4-T1).
 
-`source_ref` normalizado como `{"repo": <owner/repo>, "number": <N>}` —
-o mesmo número serve para issue e PR (a API do GitHub compartilha o
-namespace), o que permite `correlate()` casar um `pull_request_review_comment`
-ou `issue_comment` numa PR com o WorkItem aberto originalmente pela issue
-(ou vice-versa) sem lógica extra.
+`source_ref` is normalized as `{"repo": <owner/repo>, "number": <N>}` — the
+same number covers both issue and PR (the GitHub API shares the namespace),
+which lets `correlate()` match a `pull_request_review_comment` or an
+`issue_comment` on a PR with the WorkItem originally opened by the issue (or
+vice versa) with no extra logic.
 
-Defesa TOCTOU (WSA-E2-T2): `content_snapshot` é lido diretamente do corpo do
-webhook (`payload["comment"]["body"]` / título+corpo da issue) — nunca
-re-buscado via `GET /repos/.../issues/{n}` depois.
+TOCTOU defense (WSA-E2-T2): `content_snapshot` is read straight from the
+webhook body (`payload["comment"]["body"]` / issue title+body) — never
+re-fetched via `GET /repos/.../issues/{n}` afterwards.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ def _actor(login: str, resolved_principal: str) -> Actor:
 
 
 def is_pull_request_comment(issue_payload: dict[str, Any]) -> bool:
-    """`issue_comment` events carregam `issue.pull_request` quando o
-    comentário é, na verdade, num PR (GitHub trata PR como issue)."""
+    """`issue_comment` events carry `issue.pull_request` when the comment is
+    actually on a PR (GitHub treats a PR as an issue)."""
     return "pull_request" in issue_payload
 
 
@@ -52,9 +52,9 @@ def build_event_from_issue_assigned_or_labeled(
 def build_event_from_issue_comment(
     payload: dict[str, Any], *, resolved_principal: str
 ) -> tuple[ConversationEvent, bool]:
-    """Retorna `(event, is_pr_comment)`. `is_pr_comment=True` -> o caller
-    (app.py) NUNCA deve chamar `admit_work_item` para este evento (WSA-E4:
-    'deve criar ZERO WorkItems novos'), só `correlate`+signal."""
+    """Returns `(event, is_pr_comment)`. `is_pr_comment=True` -> the caller
+    (app.py) must NEVER call `admit_work_item` for this event (WSA-E4:
+    'must create ZERO new WorkItems'), only `correlate`+signal."""
     repo = payload["repository"]["full_name"]
     number = payload["issue"]["number"]
     sender = payload["comment"]["user"]["login"]
@@ -62,9 +62,9 @@ def build_event_from_issue_comment(
     body = payload["comment"]["body"]
 
     is_pr_comment = is_pull_request_comment(payload["issue"])
-    # Default para issue comum: clarification_answer (resposta/comentário
-    # comum) — app.py promove para task_request se o corpo mencionar o bot.
-    # PR: sempre review_comment (nunca cria WorkItem novo, ver WSA-E4-T1).
+    # Default for a plain issue: clarification_answer (an ordinary reply/comment)
+    # — app.py promotes it to task_request if the body mentions the bot.
+    # PR: always review_comment (never creates a new WorkItem, see WSA-E4-T1).
     kind = EventKind.review_comment if is_pr_comment else EventKind.clarification_answer
 
     event = ConversationEvent.build(
@@ -83,14 +83,14 @@ def build_event_from_issue_comment(
 def build_event_from_pr_merged(
     payload: dict[str, Any], *, resolved_principal: str, merge_sha: str
 ) -> ConversationEvent:
-    """WSA-E4-T3 — webhook `pull_request` (action=closed, merged=true) ->
-    `ConversationEvent` de aprovação humana de merge. `merge_sha` (o
-    `merge_commit_sha` do PR) entra no `message_id` para o `event_id`
-    determinístico deduplicar reentregas do mesmo webhook de merge.
+    """WSA-E4-T3 — `pull_request` webhook (action=closed, merged=true) ->
+    `ConversationEvent` for human merge approval. `merge_sha` (the PR's
+    `merge_commit_sha`) goes into the `message_id` so that the deterministic
+    `event_id` dedups redeliveries of the same merge webhook.
 
-    Só é construído quando `pull_request.merged == true` (o handler em app.py
-    já filtrou o caso de PR fechado SEM merge — que NÃO dispara nada, rota
-    documentada)."""
+    Only built when `pull_request.merged == true` (the handler in app.py has
+    already filtered the PR-closed-WITHOUT-merge case — which triggers NOTHING,
+    a documented route)."""
     repo = payload["repository"]["full_name"]
     number = payload["pull_request"]["number"]
     return ConversationEvent.build(
@@ -106,13 +106,13 @@ def build_event_from_pr_merged(
 
 
 def build_event_from_pr_review(payload: dict[str, Any], *, resolved_principal: str) -> ConversationEvent:
-    """Webhook `pull_request_review` (action=submitted) — o ÚNICO evento do
-    GitHub que carrega o veredito formal do review (`review.state`:
-    approved / changes_requested / commented). Auditoria pós-S7: sem este
-    builder, `source_ref.review_state` nunca era populado e
-    `_review_signal_payload` (dispatcher) devolvia None para TODO review do
-    GitHub — o loop de changes_requested era inalcançável a partir da UI.
-    O `review_state` entra no source_ref e vira o verdict do signal."""
+    """`pull_request_review` webhook (action=submitted) — the ONLY GitHub event
+    that carries the formal review verdict (`review.state`: approved /
+    changes_requested / commented). Post-S7 audit: without this builder,
+    `source_ref.review_state` was never populated and `_review_signal_payload`
+    (dispatcher) returned None for EVERY GitHub review — the changes_requested
+    loop was unreachable from the UI. `review_state` goes into the source_ref
+    and becomes the signal's verdict."""
     repo = payload["repository"]["full_name"]
     number = payload["pull_request"]["number"]
     review = payload["review"]

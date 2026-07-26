@@ -1,8 +1,8 @@
-"""Boundary tests do contrato de turno isolado (plano 09, Fase 1).
+"""Boundary tests of the isolated-turn contract (plano 09, Phase 1).
 
-Mesma disciplina de `test_activity_boundaries`: payloads LITERAIS (o que de
-fato atravessa a fronteira worker → agent-runner), nunca objetos construídos
-com defaults — se um campo mudar de nome/shape, este arquivo quebra JUNTO.
+Same discipline as `test_activity_boundaries`: LITERAL payloads (what actually
+crosses the worker → agent-runner boundary), never objects built with defaults
+— if a field changes name/shape, this file breaks ALONG WITH it.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def test_request_literal_payload_roundtrip():
     }
     req = AgentTurnRequest.model_validate(payload)
     assert req.gateway.virtual_key == "vk-ephemeral-abc"
-    # roundtrip estável: o que o worker serializa é o que o runner decodifica
+    # stable roundtrip: what the worker serializes is what the runner decodes
     assert AgentTurnRequest.model_validate(req.model_dump()) == req
 
 
@@ -53,8 +53,8 @@ def test_request_minimal_payload_uses_safe_defaults():
         }
     )
     assert req.schema_version == AGENT_TURN_SCHEMA_VERSION
-    assert req.workspace_dir == "/workspace"  # nunca path do host
-    assert "Bash" not in req.allowed_tools  # toolset só de edição (P1)
+    assert req.workspace_dir == "/workspace"  # never a host path
+    assert "Bash" not in req.allowed_tools  # edit-only toolset (P1)
     assert req.fake_script is None
 
 
@@ -68,7 +68,7 @@ def test_request_rejects_unknown_field():
                 "substrate": "fake",
                 "instruction": "x",
                 "gateway": {"base_url": "u", "virtual_key": "vk"},
-                "host_workspace_path": "/Users/alguem/repo",  # NUNCA atravessa
+                "host_workspace_path": "/Users/alguem/repo",  # NEVER crosses
             }
         )
 
@@ -78,7 +78,7 @@ def test_result_literal_payload_and_error_vocabulary():
         {
             "schema_version": 1,
             "done": True,
-            "thoughts": ["editei o arquivo"],
+            "thoughts": ["edited the file"],
             "tool_calls": ["Edit"],
             "cost_usd": 0.0123,
             "tokens_in": 100,
@@ -88,12 +88,12 @@ def test_result_literal_payload_and_error_vocabulary():
     assert not ok.failed
 
     err = AgentTurnResult.model_validate(
-        {"done": False, "error": "openhands ainda não roda no runner", "error_kind": "unsupported_substrate"}
+        {"done": False, "error": "openhands does not run on the runner yet", "error_kind": "unsupported_substrate"}
     )
     assert err.failed
 
 
 def test_known_substrates_vocabulary_is_closed():
-    # O runner e o runtime_profile dependem deste vocabulário; mudança aqui
-    # exige mudar os dois lados no MESMO PR.
+    # The runner and the runtime_profile depend on this vocabulary; a change
+    # here requires changing both sides in the SAME PR.
     assert KNOWN_SUBSTRATES == ("fake", "claude-agent", "openhands")

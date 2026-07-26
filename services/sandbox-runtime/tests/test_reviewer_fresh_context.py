@@ -1,13 +1,14 @@
-"""WSC-E3-T5: sessão Reviewer de contexto fresco (constrói a sessão; WS-E
-orquestra o loop).
+"""WSC-E3-T5: fresh-context Reviewer session (builds the session; WS-E
+orchestrates the loop).
 
-Prova (P3 — nenhum produtor aprova o próprio trabalho, e o Reviewer nunca vê o
-histórico do Coder):
-  - a Activity `run_l2_review` é uma Activity Temporal com o nome do contrato e
-    retorna `L2Verdict`;
-  - POR CONSTRUÇÃO o contexto do Reviewer contém SÓ plan + diff — não existe
-    campo/parâmetro que carregue transcrição/thoughts/tool-calls do Coder;
-  - o veredito reflete aderência ao plano (objeções específicas quando não).
+Proves (P3 — no producer approves its own work, and the Reviewer never sees the
+Coder's history):
+  - the `run_l2_review` Activity is a Temporal Activity named after the contract
+    and returns `L2Verdict`;
+  - BY CONSTRUCTION the Reviewer's context holds ONLY plan + diff — there is no
+    field/parameter that could carry the Coder's transcript/thoughts/tool-calls;
+  - the verdict reflects adherence to the plan (specific objections when it does
+    not).
 """
 from __future__ import annotations
 
@@ -50,18 +51,18 @@ def test_activity_name_matches_contract():
 
 
 def test_reviewer_context_by_construction_has_only_plan_and_diff():
-    """A prova estrutural de P3: os campos do contexto do Reviewer e da entrada
-    da Activity são EXATAMENTE {plan, diff} (+ ids/classes) — nenhum canal para
-    histórico do Coder."""
+    """The structural proof of P3: the fields of the Reviewer context and of the
+    Activity input are EXACTLY {plan, diff} (+ ids/classes) — no channel for the
+    Coder's history."""
     ctx_fields = set(ReviewerContext.__dataclass_fields__.keys())
     assert ctx_fields == {"work_item_id", "plan", "diff"}
     for banned in ("coder_history", "transcript", "turns", "thoughts", "tool_calls", "coder_log", "session_history"):
         assert banned not in ctx_fields
 
-    # Remediação (spec §4): a evidência do L2 é amarrada ao SHA — o input ganhou
-    # base_sha/head_sha (metadados imutáveis, NÃO histórico do Coder). O guard de
-    # P3 é o allowlist de conteúdo {plan, diff} + a lista de campos BANIDOS abaixo;
-    # SHAs de commit não abrem canal para transcrição/thoughts/tool-calls.
+    # Remediation (spec §4): the L2 evidence is pinned to the SHA — the input
+    # gained base_sha/head_sha (immutable metadata, NOT the Coder's history). The
+    # P3 guard is the {plan, diff} content allowlist + the BANNED field list
+    # below; commit SHAs open no channel for transcript/thoughts/tool-calls.
     input_fields = set(RunL2ReviewInput.model_fields.keys())
     assert input_fields == {
         "work_item_id", "tenant_id", "plan", "diff", "task_class", "data_class",
@@ -71,7 +72,7 @@ def test_reviewer_context_by_construction_has_only_plan_and_diff():
                    "thoughts", "tool_calls", "session_history"):
         assert banned not in input_fields
 
-    # A sessão fresca só expõe read_plan/read_diff — nada de repo/history.
+    # The fresh session only exposes read_plan/read_diff — no repo/history.
     session = FreshReviewerSession(ReviewerContext(work_item_id="x", plan=_PLAN, diff=_CLEAN_DIFF))
     public = {m for m in dir(session) if not m.startswith("_")}
     assert "read_plan" in public and "read_diff" in public
@@ -99,11 +100,11 @@ def test_reviewer_objects_when_diff_leaves_blast_radius():
 
 
 def test_reviewer_accepts_custom_model_verdict_with_file_line_objections():
-    """O substrato de review (fresco) pode devolver objeções específicas de
-    arquivo/linha — o loop do WS-E consome isso."""
+    """The (fresh) review substrate may return file/line-specific objections —
+    the WS-E loop consumes those."""
 
     def model_verdict(ctx: ReviewerContext):
-        return (False, ["src/handler.py:2 — retorno hardcoded 'ok' viola convenção de erros do AGENTS.md"], 0.02)
+        return (False, ["src/handler.py:2 — hardcoded 'ok' return violates the AGENTS.md error convention"], 0.02)
 
     verdict = asyncio.run(
         _run_l2_review_impl(

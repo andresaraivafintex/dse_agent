@@ -10,10 +10,10 @@ from scripts import test_matrix, with_test_database
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parent.parent / "migrations"
 
-# Colisão histórica ANTERIOR ao gate (0020_wsc4.sql + 0020_wse4.sql): as duas
-# já foram aplicadas (schema_migrations registra por NOME; a ordenação
-# lexicográfica as executa de forma estável) — renumerar quebraria todo
-# ambiente existente. Congeladas aqui; NENHUMA colisão nova é aceita.
+# Historical collision PREDATING this gate (0020_wsc4.sql + 0020_wse4.sql): both
+# have already been applied (schema_migrations records by NAME; lexicographic
+# ordering runs them stably) — renumbering would break every existing
+# environment. Frozen here; NO new collision is accepted.
 _GRANDFATHERED_PREFIXES = {"0020"}
 
 
@@ -26,8 +26,8 @@ def test_migration_numeric_prefixes_are_unique() -> None:
     duplicated = {p for p, n in collections.Counter(prefixes).items() if n > 1}
     new_collisions = duplicated - _GRANDFATHERED_PREFIXES
     assert not new_collisions, (
-        f"prefixo de migração duplicado: {sorted(new_collisions)} — reserve o número "
-        "seguinte livre (CONVENTIONS.md, 'Migrações') em vez de colidir"
+        f"duplicated migration prefix: {sorted(new_collisions)} — reserve the next "
+        "free number (CONVENTIONS.md, 'Migrations') instead of colliding"
     )
 
 

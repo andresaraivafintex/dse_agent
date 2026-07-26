@@ -1,14 +1,14 @@
-"""WSD-E3-T4: agregação de custo a partir de fonte DURÁVEL (Postgres), não do
-buffer em memória por processo.
+"""WSD-E3-T4: cost aggregation from a DURABLE source (Postgres), not from the
+per-process in-memory buffer.
 
-Prova que:
-  - `cost_export.aggregate_cost(source="ledger")` (default) lê da tabela
-    `model_call_ledger`, independente do buffer de spans em memória — mesmo
-    depois de LIMPAR o recorder em memória (proxy de "restart do processo") o
-    custo continua lá;
-  - a série sobrevive a leituras por conexões novas (durabilidade);
-  - o export via OTLP para o collector do WS-F pode ser habilitado (endpoint
-    já suportado) sem quebrar a agregação durável.
+Proves that:
+  - `cost_export.aggregate_cost(source="ledger")` (the default) reads from the
+    `model_call_ledger` table, independent of the in-memory span buffer — even
+    after CLEARING the in-memory recorder (a proxy for "process restart") the
+    cost is still there;
+  - the series survives reads from fresh connections (durability);
+  - OTLP export to WS-F's collector can be enabled (the endpoint is already
+    supported) without breaking the durable aggregation.
 """
 from __future__ import annotations
 
@@ -27,13 +27,13 @@ def test_ledger_survives_in_memory_clear(unique_ids):
     try:
         chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "one two three"}])
 
-        # simula "restart do processo": zera todo o buffer de spans em memória
+        # simulates a "process restart": wipes the whole in-memory span buffer
         telemetry.clear_recorded_spans()
 
-        # a fonte em memória agora está vazia para este tenant...
+        # the in-memory source is now empty for this tenant...
         mem = aggregate_cost(tenant_id=t, source="memory")
         assert mem == []
-        # ...mas a fonte durável (ledger) ainda tem a chamada
+        # ...but the durable source (ledger) still has the call
         durable = aggregate_cost(tenant_id=t)  # default source="ledger"
         assert len(durable) == 1
         assert durable[0]["call_count"] == 1

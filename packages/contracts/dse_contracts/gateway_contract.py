@@ -1,7 +1,7 @@
-"""Contrato de consumo do model-gateway (WSD-E1-T4). Toda sessão de agente
-(Coder, e futuramente Planner/Tester/Reviewer) chama o gateway exclusivamente
-por esta interface — nunca um SDK de provider diretamente (o egress proxy do
-WS-C bloquearia mesmo que tentasse; isto documenta o contrato feliz).
+"""Consumption contract of the model-gateway (WSD-E1-T4). Every agent session
+(Coder, and later Planner/Tester/Reviewer) calls the gateway exclusively
+through this interface — never a provider SDK directly (the WS-C egress proxy
+would block it even if it tried; this documents the happy contract).
 """
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ from pydantic import BaseModel
 
 class Stage(str, Enum):
     coder = "coder"
-    planner = "planner"  # Fase 2
-    tester = "tester"  # Fase 2
-    reviewer = "reviewer"  # Fase 2
+    planner = "planner"  # Phase 2
+    tester = "tester"  # Phase 2
+    reviewer = "reviewer"  # Phase 2
 
 
 class GatewayCallHeaders(BaseModel):
-    """Headers obrigatórios em toda chamada ao gateway — permitem policy/budget
-    enforcement no call time (FR-12) sem o agente saber de nenhum dos dois."""
+    """Headers required on every gateway call — they enable policy/budget
+    enforcement at call time (FR-12) without the agent knowing about either."""
 
     tenant_id: str
     work_item_id: str
@@ -38,8 +38,8 @@ class GatewayCallHeaders(BaseModel):
 
 
 class GatewayErrorResponse(BaseModel):
-    """Formato de recusa de política/budget — o Temporal trata isto como
-    fronteira (P6 decline-never-truncate), nunca como truncamento de output."""
+    """Shape of a policy/budget refusal — Temporal treats this as a boundary
+    (P6 decline-never-truncate), never as output truncation."""
 
     error: str  # "policy_denied" | "budget_exhausted" | "model_unavailable"
     message: str

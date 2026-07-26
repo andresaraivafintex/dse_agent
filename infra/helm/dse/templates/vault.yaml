@@ -1,11 +1,10 @@
 {{/*
-Vault — só desenhado por este chart quando `externallyManaged: false` (dev/
-staging descartável). Em produção (topologia A, VPC do cliente), o Vault
-deve ser o do próprio cliente ou um cluster Vault HA dedicado fora deste
-chart — setar `vault.externallyManaged: true` e apontar
-`secrets.vaultAddr` para ele; este template inteiro não é renderizado nesse
-caso. `devMode: true` NUNCA deve ser usado fora de dev/smoke-test (dados só
-em memória, unseal automático, sem HA).
+Vault — only rendered by this chart when `externallyManaged: false` (disposable
+dev/staging). In production (topology A, the customer's VPC), Vault must be the
+customer's own or a dedicated HA Vault cluster outside this chart — set
+`vault.externallyManaged: true` and point `secrets.vaultAddr` at it; this whole
+template is then not rendered. `devMode: true` must NEVER be used outside
+dev/smoke-test (in-memory data only, automatic unseal, no HA).
 */}}
 {{- if and .Values.vault.devMode (not .Values.vault.externallyManaged) }}
 apiVersion: apps/v1
@@ -36,11 +35,12 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             capabilities:
-              # A imagem oficial do Vault inicia como root e faz su-exec p/ o
-              # user vault (precisa de SETUID/SETGID, nas caps default). Dropar
-              # ALL impede o boot. Mantemos as caps default + IPC_LOCK. Perfis
-              # pilot/prod usam Vault EXTERNO (externallyManaged) — este pod não
-              # sobe lá, então o relaxamento fica restrito a dev/POC.
+              # The official Vault image starts as root and su-execs to the vault
+              # user (it needs SETUID/SETGID, part of the default caps). Dropping
+              # ALL prevents boot. We keep the default caps + IPC_LOCK. The
+              # pilot/prod profiles use an EXTERNAL Vault (externallyManaged) —
+              # this pod does not come up there, so the relaxation stays confined
+              # to dev/POC.
               drop: []
               add: ["IPC_LOCK"]
           ports:

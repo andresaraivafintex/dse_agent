@@ -16,7 +16,7 @@ async def main() -> None:
     address = os.environ.get("TEMPORAL_ADDRESS", "localhost:7233")
     client = await Client.connect(address)
     dispatcher = Dispatcher(client)
-    print(f"[ingest-gateway] dispatcher rodando contra {address}, task_queue={TASK_QUEUE}")
+    print(f"[ingest-gateway] dispatcher running against {address}, task_queue={TASK_QUEUE}")
     await dispatcher.run_forever()
 
 

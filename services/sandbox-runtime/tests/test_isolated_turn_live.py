@@ -1,18 +1,18 @@
-"""Prova VIVA do turno isolado em dev (Fase 1, plano 09 — F1.6 parcial).
+"""LIVE proof of the isolated turn in dev (Fase 1, plano 09 — partial F1.6).
 
-Executa o agent-runner de verdade dentro do container endurecido do sandbox
-(`docker exec -i`, imagem `dse/agent-runner:local` — `make agent-runner-image`)
-e prova as duas propriedades que a suíte de conformidade só afirma:
+Runs the real agent-runner inside the hardened sandbox container (`docker exec
+-i`, image `dse/agent-runner:local` — `make agent-runner-image`) and proves the
+two properties the conformance suite merely asserts:
 
-  1. O turno executa DENTRO do sandbox e o worker enxerga a edição apenas
-     pelo bind mount do workspace — nenhum SDK no processo do worker.
-  2. Tentativas de escrever FORA do /workspace falham por isolamento de SO
-     (rootfs read-only, usuário não-root), não por disciplina de toolset —
-     e a negação volta como resultado estruturado (P6), nunca fallback.
+  1. The turn executes INSIDE the sandbox and the worker sees the edit only
+     through the workspace bind mount — no SDK in the worker process.
+  2. Attempts to write OUTSIDE /workspace fail because of OS isolation
+     (read-only rootfs, non-root user), not because of toolset discipline —
+     and the denial comes back as a structured result (P6), never a fallback.
 
-Estes testes SÃO PULADOS quando a imagem não existe localmente (CI de unidade
-não a constrói). A prova equivalente sob gVisor/K8s continua pendente de
-cluster — gate pilotReadiness.sandboxIsolationVerified permanece false.
+These tests ARE SKIPPED when the image does not exist locally (unit CI does not
+build it). The equivalent proof under gVisor/K8s still awaits a cluster — the
+pilotReadiness.sandboxIsolationVerified gate stays false.
 """
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ def _turn_request(work_item_id: str, fake_script: list[dict]) -> dict:
         substrate="fake",
         instruction="prova viva",
         fake_script=fake_script,
-    # gateway aponta para a rede interna; o turno fake não faz chamada de rede
+    # gateway points at the internal network; the fake turn makes no network call
         gateway={"base_url": "http://model-gateway:4000", "virtual_key": "vk-live"},
     ).model_dump()
 
@@ -96,14 +96,14 @@ def test_turn_executes_inside_sandbox_and_edit_arrives_via_bind_mount(live_sandb
     )
     turn = AgentTurnResult.model_validate(result.output_payload)
     assert turn.done and not turn.failed
-    # a edição só chega ao worker pelo bind mount — o marker existe no host
+    # the edit reaches the worker only via the bind mount — the marker exists on the host
     assert (workspace / "src" / "inside.py").read_text() == "WRITTEN_INSIDE = True\n"
 
 
 def test_escape_attempts_are_denied_by_os_isolation(live_sandbox, work_item_id, tmp_path):
     driver, sandbox, workspace = live_sandbox
 
-    # 1) path absoluto fora do workspace → rootfs read-only nega (EROFS/EACCES)
+    # 1) absolute path outside the workspace → the read-only rootfs denies it (EROFS/EACCES)
     result = driver.execute_stage(
         StageExecutionRequest(
             sandbox_id=sandbox.container_name,
@@ -119,7 +119,7 @@ def test_escape_attempts_are_denied_by_os_isolation(live_sandbox, work_item_id, 
     turn = AgentTurnResult.model_validate(result.output_payload)
     assert turn.failed and turn.error_kind == "substrate_error"
 
-    # 2) traversal ../ para fora do bind mount → o host NUNCA vê o arquivo
+    # 2) ../ traversal out of the bind mount → the host NEVER sees the file
     driver.execute_stage(
         StageExecutionRequest(
             sandbox_id=sandbox.container_name,

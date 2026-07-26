@@ -1,25 +1,25 @@
-"""WSE-E5-T12 — artifact store Garage (S3 self-hosted, dxflrs/garage pinado no
-docker-compose.wse.yml). Implementa a Activity `publish_artifact` do contrato
-(`ACTIVITY_PUBLISH_ARTIFACT`, input `PublishArtifactInput`, retorno `ArtifactRef`).
+"""WSE-E5-T12 — Garage artifact store (self-hosted S3, dxflrs/garage pinned in
+docker-compose.wse.yml). Implements the contract's `publish_artifact` Activity
+(`ACTIVITY_PUBLISH_ARTIFACT`, input `PublishArtifactInput`, returns `ArtifactRef`).
 
-Decisões (documentadas, P7 boring-first):
-  - 1 BUCKET POR TENANT (`dse-tenant-<slug>`) + chave prefixada por WorkItem
-    (NFR-03: isolamento de evidência por tenant é estrutural, não convenção).
-  - Presigned URL com TTL — links de evidência EXPIRAM POR POLÍTICA (exit da
-    Fase 3). Provado por teste real: URL expirada retorna negado (403).
-  - Upload MULTIPART real (create/upload_part/complete) acima do threshold de
-    5 MiB — obrigação do ADR-18 revisado, validada com um vídeo real >5MB.
-  - QUARENTENA (costura com WS-F, Fase 2): quando um work item é quarantinado
-    (`dse_work_item_quarantine` / `quarantine_work_item()`), os artefatos dele
-    são MOVIDOS para o prefixo `quarantine/` e o acesso via as URLs presigned
-    antigas é invalidado ANTES do TTL (a chave original deixa de existir).
-  - LOG DE ACESSO: toda resolução de link (`resolve_artifact_url`) grava uma
-    linha em `wse_artifact_access_log` associável ao PR + audit (P8) — insumo
-    da métrica "evidence consumption".
+Decisions (documented, P7 boring-first):
+  - 1 BUCKET PER TENANT (`dse-tenant-<slug>`) + key prefixed by WorkItem
+    (NFR-03: per-tenant evidence isolation is structural, not a convention).
+  - Presigned URL with a TTL — evidence links EXPIRE BY POLICY (Phase 3 exit
+    criterion). Proven by a real test: an expired URL returns denied (403).
+  - Real MULTIPART upload (create/upload_part/complete) above the 5 MiB threshold
+    — required by the revised ADR-18, validated with a real >5MB video.
+  - QUARANTINE (seam with WS-F, Phase 2): when a work item is quarantined
+    (`dse_work_item_quarantine` / `quarantine_work_item()`), its artifacts are
+    MOVED to the `quarantine/` prefix and access through the old presigned URLs is
+    invalidated BEFORE the TTL (the original key stops existing).
+  - ACCESS LOG: every link resolution (`resolve_artifact_url`) writes a row to
+    `wse_artifact_access_log` attributable to the PR + audit (P8) — input to the
+    "evidence consumption" metric.
 
-Bootstrap idempotente via admin API (:3903): layout single-node, chave S3 do
-serviço, bucket por tenant. Nenhum segredo S3 em env/arquivo — a secret key é
-buscada da admin API a cada processo (dev; produção = Vault/ESO, WS-F).
+Idempotent bootstrap via the admin API (:3903): single-node layout, the service's
+S3 key, per-tenant bucket. No S3 secret in env/file — the secret key is fetched
+from the admin API on every process (dev; production = Vault/ESO, WS-F).
 """
 from __future__ import annotations
 
@@ -59,13 +59,13 @@ def _admin(cfg: GarageConfig, method: str, path: str, json_body=None) -> httpx.R
 def _parse_capacity(cap: str) -> int:
     m = re.fullmatch(r"(\d+)\s*([KMGT]?)B?", cap.strip(), re.IGNORECASE)
     if not m:
-        raise ValueError(f"capacidade inválida: {cap!r}")
+        raise ValueError(f"invalid capacity: {cap!r}")
     mult = {"": 1, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12}[m.group(2).upper()]
     return int(m.group(1)) * mult
 
 
 def ensure_layout(cfg: GarageConfig | None = None) -> None:
-    """Idempotente: aplica o layout single-node dev se ainda não aplicado."""
+    """Idempotent: applies the single-node dev layout if not applied yet."""
     cfg = cfg or GarageConfig()
     status = _admin(cfg, "GET", "/v1/status")
     status.raise_for_status()
@@ -89,8 +89,8 @@ def ensure_layout(cfg: GarageConfig | None = None) -> None:
 
 
 def ensure_service_key(cfg: GarageConfig | None = None) -> tuple[str, str]:
-    """Garante a chave S3 do serviço; retorna (access_key_id, secret_access_key).
-    A secret é lida da admin API (nunca persistida em env/arquivo)."""
+    """Ensures the service's S3 key; returns (access_key_id, secret_access_key).
+    The secret is read from the admin API (never persisted to env/file)."""
     cfg = cfg or GarageConfig()
     resp = _admin(cfg, "GET", "/v1/key")
     resp.raise_for_status()
@@ -121,8 +121,8 @@ def bucket_for_tenant(tenant_id: str, cfg: GarageConfig | None = None) -> str:
 
 
 def ensure_tenant_bucket(tenant_id: str, cfg: GarageConfig | None = None) -> str:
-    """Idempotente: cria o bucket do tenant (NFR-03) e dá read/write/owner à
-    chave do serviço. Retorna o nome do bucket."""
+    """Idempotent: creates the tenant's bucket (NFR-03) and grants read/write/owner
+    to the service key. Returns the bucket name."""
     cfg = cfg or GarageConfig()
     bucket = bucket_for_tenant(tenant_id, cfg)
     resp = _admin(cfg, "GET", f"/v1/bucket?globalAlias={bucket}")
@@ -149,14 +149,14 @@ def ensure_tenant_bucket(tenant_id: str, cfg: GarageConfig | None = None) -> str
 
 
 def ensure_garage_ready(cfg: GarageConfig | None = None) -> None:
-    """Bootstrap completo idempotente (layout + chave do serviço)."""
+    """Full idempotent bootstrap (layout + service key)."""
     cfg = cfg or GarageConfig()
     ensure_layout(cfg)
     ensure_service_key(cfg)
 
 
 # ---------------------------------------------------------------------------
-# Cliente S3 (boto3) contra o Garage
+# S3 client (boto3) against Garage
 # ---------------------------------------------------------------------------
 def s3_client(cfg: GarageConfig | None = None):
     import boto3
@@ -175,8 +175,8 @@ def s3_client(cfg: GarageConfig | None = None):
 
 
 def _upload(client, bucket: str, key: str, local_path: str, content_type: str, threshold: int) -> tuple[int, bool]:
-    """Upload real; MULTIPART explícito (create/upload_part/complete) acima do
-    threshold — retorna (size_bytes, multipart_used)."""
+    """Real upload; explicit MULTIPART (create/upload_part/complete) above the
+    threshold — returns (size_bytes, multipart_used)."""
     size = os.path.getsize(local_path)
     if size <= threshold:
         with open(local_path, "rb") as fh:
@@ -214,7 +214,7 @@ def presign_get(client, bucket: str, key: str, ttl_seconds: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# publish_artifact — core da Activity do contrato
+# publish_artifact — core of the contract's Activity
 # ---------------------------------------------------------------------------
 def publish_artifact_core(
     inp: PublishArtifactInput,
@@ -274,7 +274,7 @@ def publish_artifact_core(
 
 
 # ---------------------------------------------------------------------------
-# Resolução de link com LOG DE ACESSO (métrica evidence consumption)
+# Link resolution with ACCESS LOG (evidence-consumption metric)
 # ---------------------------------------------------------------------------
 def resolve_artifact_url(
     *,
@@ -286,10 +286,10 @@ def resolve_artifact_url(
     ttl_seconds: int | None = None,
     cfg: GarageConfig | None = None,
 ) -> str:
-    """Gera uma presigned URL fresca para um artefato JÁ publicado e registra o
-    acesso (tabela própria + audit, associável ao PR). Recusa artefato
-    quarantinado ou expirado por política (P6 — falha limpa, nunca um link
-    'meio válido')."""
+    """Generates a fresh presigned URL for an ALREADY published artifact and
+    records the access (dedicated table + audit, attributable to the PR). Refuses
+    a quarantined or policy-expired artifact (P6 — clean failure, never a
+    'half-valid' link)."""
     cfg = cfg or GarageConfig()
     row = db.get_artifact(work_item_id, store_key)
     if row is None:
@@ -327,7 +327,7 @@ def resolve_artifact_url(
 
 
 # ---------------------------------------------------------------------------
-# QUARENTENA — costura com WS-F (dse_work_item_quarantine, Fase 2)
+# QUARANTINE — seam with WS-F (dse_work_item_quarantine, Phase 2)
 # ---------------------------------------------------------------------------
 def quarantine_artifacts_for_work_item(
     work_item_id: str,
@@ -335,11 +335,11 @@ def quarantine_artifacts_for_work_item(
     actor: str = "system:validation",
     cfg: GarageConfig | None = None,
 ) -> list[str]:
-    """Move TODOS os artefatos do work item para o prefixo `quarantine/` e
-    invalida o acesso antes do TTL (a chave original deixa de existir no
-    bucket => qualquer presigned URL antiga passa a retornar negado). Chamada
-    quando o work item é quarantinado (WS-F: `quarantine_work_item()` /
-    tabela `dse_work_item_quarantine`). Idempotente. Retorna as chaves movidas."""
+    """Moves ALL of the work item's artifacts to the `quarantine/` prefix and
+    invalidates access before the TTL (the original key stops existing in the
+    bucket => any old presigned URL starts returning denied). Called when the work
+    item is quarantined (WS-F: `quarantine_work_item()` /
+    `dse_work_item_quarantine` table). Idempotent. Returns the moved keys."""
     cfg = cfg or GarageConfig()
     rows = db.list_artifacts(work_item_id)
     if not rows:
@@ -371,10 +371,11 @@ def quarantine_artifacts_for_work_item(
 
 
 def sweep_quarantined_work_items(*, actor: str = "system:validation", cfg: GarageConfig | None = None) -> dict[str, list[str]]:
-    """Varredura determinística: para cada work item ATIVO em quarentena
-    (`dse_work_item_quarantine`, tabela do WS-F) que ainda tem artefato fora do
-    prefixo de quarentena, move e invalida. Pode rodar em cron/Activity — o
-    aceite do WS-F é que artefato de work item quarantinado fica inacessível."""
+    """Deterministic sweep: for every ACTIVE quarantined work item
+    (`dse_work_item_quarantine`, WS-F's table) that still has an artifact outside
+    the quarantine prefix, move and invalidate it. Can run on a cron/Activity —
+    WS-F's acceptance criterion is that a quarantined work item's artifact becomes
+    inaccessible."""
     cfg = cfg or GarageConfig()
     result: dict[str, list[str]] = {}
     for wi in db.list_quarantined_work_items_with_artifacts():

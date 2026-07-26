@@ -1,8 +1,8 @@
-"""WSE-E5-T11 — testes REAIS do vídeo @demo: Playwright de verdade (versão
-pinada em services/validation/playwright/, browser Chromium instalado), página
-fixture estática local (tests/fixtures/demos/wi_demo_fixture/ — o fixture
-"oficial" do WS-C está em construção paralela; convenção demos/<work_item_id>/),
-publicação REAL no Garage. Nenhum mock de Playwright/Garage/Postgres."""
+"""WSE-E5-T11 — REAL tests for the @demo video: actual Playwright (version pinned
+in services/validation/playwright/, Chromium browser installed), local static
+fixture page (tests/fixtures/demos/wi_demo_fixture/ — WS-C's "official" fixture is
+being built in parallel; convention demos/<work_item_id>/), REAL publication to
+Garage. No Playwright/Garage/Postgres mocks."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,13 +24,13 @@ _PLAYWRIGHT_DIR = Path(__file__).resolve().parent.parent / "playwright"
 
 
 def _demo_video_capable() -> bool:
-    """Grava vídeo/trace REAL exige ffmpeg + os browsers do Playwright
-    instalados (services/validation/playwright/node_modules). No runner CI
-    minimalista faltam — o teste roda de verdade no dev/VPS onde existem."""
+    """Recording a REAL video/trace requires ffmpeg + the Playwright browsers
+    installed (services/validation/playwright/node_modules). They are missing on
+    the minimal CI runner — the test really runs on dev/VPS where they exist."""
     return shutil.which("ffmpeg") is not None and (_PLAYWRIGHT_DIR / "node_modules").exists()
 
 
-@pytest.mark.skipif(not _demo_video_capable(), reason="requer ffmpeg + browsers do Playwright")
+@pytest.mark.skipif(not _demo_video_capable(), reason="requires ffmpeg + Playwright browsers")
 def test_demo_evidence_records_real_video_and_trace(work_item_id, tenant_id, tmp_path):
     res = run_demo_evidence_core(
         RunDemoEvidenceInput(
@@ -45,7 +45,7 @@ def test_demo_evidence_records_real_video_and_trace(work_item_id, tenant_id, tmp
     assert res.trace_artifact_key and res.trace_artifact_key.startswith(f"{work_item_id}/playwright_trace/")
     assert res.duration_s > 0
 
-    # o vídeo publicado no Garage é um webm REAL: baixa e valida header+tamanho
+    # the video published to Garage is a REAL webm: download it and check header+size
     url = garage.resolve_artifact_url(
         work_item_id=work_item_id, store_key=res.video_artifact_key, accessor="user:tester"
     )
@@ -54,9 +54,9 @@ def test_demo_evidence_records_real_video_and_trace(work_item_id, tenant_id, tmp
     video_path = tmp_path / "video.webm"
     video_path.write_bytes(resp.content)
     assert video_path.stat().st_size > 0
-    assert is_real_video(video_path), "header EBML/mp4 esperado — vídeo de verdade"
+    assert is_real_video(video_path), "EBML/mp4 header expected — a real video"
 
-    # trace publicado também (zip não-vazio)
+    # trace published as well (non-empty zip)
     trace_row = db.get_artifact(work_item_id, res.trace_artifact_key)
     assert trace_row is not None and trace_row["size_bytes"] > 0
 
@@ -74,8 +74,8 @@ def test_demo_evidence_records_real_video_and_trace(work_item_id, tenant_id, tmp
 
 
 def test_demo_dir_missing_declines_cleanly(work_item_id, tenant_id):
-    """P6 decline-never-truncate: sem diretório de demo => passed=False com
-    detail explícito (nunca evidência 'fingida')."""
+    """P6 decline-never-truncate: no demo directory => passed=False with an
+    explicit detail (never 'faked' evidence)."""
     res = run_demo_evidence_core(
         RunDemoEvidenceInput(
             work_item_id=work_item_id, tenant_id=tenant_id,
@@ -83,17 +83,17 @@ def test_demo_dir_missing_declines_cleanly(work_item_id, tenant_id):
         )
     )
     assert res.passed is False
-    assert "inexistente" in res.detail
+    assert "does not exist" in res.detail
     assert res.video_artifact_key is None
 
 
 def test_demo_dir_without_demo_tagged_tests_declines(work_item_id, tenant_id, tmp_path):
-    """Diretório existe mas nenhum teste tem a tag @demo => falha explícita."""
+    """Directory exists but no test carries the @demo tag => explicit failure."""
     demo_dir = tmp_path / "demos" / work_item_id
     demo_dir.mkdir(parents=True)
     (demo_dir / "other.spec.ts").write_text(
         "import { test, expect } from '@playwright/test';\n"
-        "test('sem tag demo', async ({ page }) => { expect(1).toBe(1); });\n"
+        "test('without demo tag', async ({ page }) => { expect(1).toBe(1); });\n"
     )
     res = run_demo_evidence_core(
         RunDemoEvidenceInput(
@@ -102,4 +102,4 @@ def test_demo_dir_without_demo_tagged_tests_declines(work_item_id, tenant_id, tm
         )
     )
     assert res.passed is False
-    assert "nenhum teste @demo" in res.detail
+    assert "no @demo test found" in res.detail

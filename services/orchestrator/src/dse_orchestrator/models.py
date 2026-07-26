@@ -1,10 +1,10 @@
-"""Tipos que atravessam a fronteira do workflow (`@workflow.run` input/output e
-`continue_as_new`). Dataclasses simples (nao pydantic) de proposito: o
-workflow roda dentro do sandbox deterministico do Temporal Python SDK e
-dataclasses com tipos primitivos sao o caminho mais bem suportado pelo data
-converter default sem plugins extras. Tipos pydantic ricos (WorkItem,
-PlanArtifact, os tipos de `dse_contracts.activities`) sao usados livremente
-nos *parametros/retorno de Activity*, que rodam fora do sandbox.
+"""Types that cross the workflow boundary (`@workflow.run` input/output and
+`continue_as_new`). Plain dataclasses (not pydantic) on purpose: the workflow
+runs inside the Temporal Python SDK's deterministic sandbox, and dataclasses
+of primitive types are the best-supported path for the default data converter
+without extra plugins. Rich pydantic types (WorkItem, PlanArtifact, the types
+in `dse_contracts.activities`) are used freely in *Activity params/returns*,
+which run outside the sandbox.
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 
 # ---------------------------------------------------------------------------
-# Fases grosseiras do workflow — cada uma fecha com `continue_as_new` para
-# manter o historico de eventos pequeno (WSB-E2-T1).
+# Coarse workflow phases — each one closes with `continue_as_new` to keep the
+# event history small (WSB-E2-T1).
 # ---------------------------------------------------------------------------
 PHASE_INTAKE = "intake"
 PHASE_IMPLEMENTATION = "implementation"
@@ -23,8 +23,8 @@ PHASE_TERMINAL = "terminal"
 
 @dataclass
 class WorkItemLifecycleInput:
-    """Estado que atravessa `continue_as_new` entre fases. `status` usa os
-    valores (strings) de `dse_contracts.work_item.WorkItemStatus`."""
+    """State carried across `continue_as_new` between phases. `status` uses the
+    (string) values of `dse_contracts.work_item.WorkItemStatus`."""
 
     work_item_id: str
     tenant_id: str
@@ -33,14 +33,14 @@ class WorkItemLifecycleInput:
     base_branch: str | None = None
     data_class: str = "internal"
     acceptance_criteria: str | None = None
-    # S1 (Fase 5): titulo+corpo da issue (ja sanitizado) — o QUE construir.
-    # Carregado de ingest_events.payload por load_work_item; passado como
-    # instruction do Planner/Coder. Sem isto os agentes nao sabiam a tarefa.
+    # S1 (Phase 5): issue title+body (already sanitized) — WHAT to build.
+    # Loaded from ingest_events.payload by load_work_item; passed as the
+    # Planner/Coder instruction. Without it the agents did not know the task.
     task_content: str = ""
-    # Numero da issue de origem (de work_items.source_ref, via load_work_item).
-    # O finalize usa como issue_ref -> "Closes #N" no corpo do PR (back-link +
-    # auto-close no merge). Sem isto o PR saia com "(sem issue de origem
-    # vinculada)" mesmo vindo de uma issue.
+    # Source issue number (from work_items.source_ref, via load_work_item).
+    # finalize uses it as issue_ref -> "Closes #N" in the PR body (back-link +
+    # auto-close on merge). Without it the PR went out with "(sem issue de
+    # origem vinculada)" even when it came from an issue.
     issue_number: int | None = None
 
     phase: str = PHASE_INTAKE
@@ -51,20 +51,20 @@ class WorkItemLifecycleInput:
     review_round: int = 0
 
     sandbox_id: str | None = None
-    # S7 (Fase 5): SandboxHandle serializado (sandbox_id, work_item_id,
-    # tenant_id, branch, container_id) retido do provision. L1 e finalize exigem
-    # o handle COMPLETO (nao so o sandbox_id) para resolver o executor — o call
-    # site antigo so guardava sandbox_id, causando `Failed decoding arguments`
-    # (RunL1PipelineInput.sandbox faltando). Sobrevive a continue_as_new.
+    # S7 (Phase 5): serialized SandboxHandle (sandbox_id, work_item_id,
+    # tenant_id, branch, container_id) retained from provision. L1 and finalize
+    # need the COMPLETE handle (not just sandbox_id) to resolve the executor —
+    # the old call site only kept sandbox_id, causing `Failed decoding arguments`
+    # (missing RunL1PipelineInput.sandbox). Survives continue_as_new.
     sandbox_handle: dict = field(default_factory=dict)
-    # Ultimo CheckpointRef (dict) bem-sucedido — fonte do rebuild. Vive no INPUT
-    # (nao em atributo de instancia) para sobreviver a continue_as_new: um
-    # rebuild na fase de review reconstroi do checkpoint da implementacao.
+    # Last successful CheckpointRef (dict) — the rebuild source. Lives in the
+    # INPUT (not in an instance attribute) so it survives continue_as_new: a
+    # rebuild in the review phase restores from the implementation checkpoint.
     last_checkpoint_ref: dict = field(default_factory=dict)
     branch: str | None = None
-    # SHAs imutaveis delimitam todos os gates. Defaults preservam histories
-    # antigos; execucoes novas capturam base_sha antes do primeiro turno e
-    # head_sha em cada checkpoint anterior ao L1.
+    # Immutable SHAs delimit every gate. Defaults preserve old histories; new
+    # executions capture base_sha before the first turn and head_sha at every
+    # checkpoint prior to L1.
     base_sha: str | None = None
     head_sha: str | None = None
     pr_number: int | None = None
@@ -72,54 +72,54 @@ class WorkItemLifecycleInput:
     ci_status: str | None = None
     state_version: int = 0
 
-    # payload textual acumulado de respostas de clarificacao (para o Coder
-    # eventualmente consumir via Activity — Fase 1 nao interpreta com LLM
-    # dentro do workflow, so repassa; P1: nenhuma decisao de fluxo por LLM).
+    # accumulated textual payload of clarification answers (for the Coder to
+    # eventually consume via Activity — Phase 1 does not interpret it with an
+    # LLM inside the workflow, it only forwards it; P1: no flow decision by LLM).
     clarification_notes: list[str] = field(default_factory=list)
 
     terminal_detail: str | None = None
 
     # ------------------------------------------------------------------
-    # Fase 2 — split de sessoes + gate de aprovacao de plano (WSB-E2-T3
-    # estendida / WSB-E3-T2/T3). Sobrevivem a `continue_as_new` como o resto
-    # do estado deterministico do workflow.
+    # Phase 2 — session split + plan approval gate (extended WSB-E2-T3 /
+    # WSB-E3-T2/T3). These survive `continue_as_new` like the rest of the
+    # workflow's deterministic state.
     # ------------------------------------------------------------------
-    # PlanArtifact serializado (produzido pelo Planner read-only ANTES do
-    # gate). Passado para o Reviewer L2 junto do diff final — e SO isto +
-    # diff, nunca o historico do Coder (P3).
+    # Serialized PlanArtifact (produced by the read-only Planner BEFORE the
+    # gate). Passed to Reviewer L2 together with the final diff — ONLY this +
+    # the diff, never the Coder's history (P3).
     plan_json: dict = field(default_factory=dict)
     plan_hash: str | None = None
-    # classe de risco EFETIVA (planner + classificacao deterministica de
-    # defesa-em-profundidade — ver policy.classify_risk). Dirige o gate.
+    # EFFECTIVE risk class (planner + deterministic defense-in-depth
+    # classification — see policy.classify_risk). Drives the gate.
     risk_class: str = "low"
-    # aprovadores resolvidos pela cascata CODEOWNERS -> access bundle (WS-F),
-    # preenchido quando o gate estaciona em awaiting_plan_approval.
+    # approvers resolved by the CODEOWNERS -> access bundle (WS-F) cascade,
+    # filled in when the gate parks at awaiting_plan_approval.
     approvers: list[str] = field(default_factory=list)
-    plan_rounds: int = 0  # quantas vezes o Planner rodou (re_plan incrementa)
+    plan_rounds: int = 0  # how many times the Planner ran (re_plan increments)
 
-    # Reviewer L2 (contexto fresco) — objecoes voltam ao Coder, capadas.
+    # Reviewer L2 (fresh context) — objections go back to the Coder, capped.
     l2_objections: list[str] = field(default_factory=list)
     l2_retry_count: int = 0
 
     # ------------------------------------------------------------------
-    # Fase 2 — budgets (WSB-E4-T1). `budget_max_usd` vem do JSONB
-    # `work_items.budget` (chave "max_usd") lido na admissao; `spent_usd`
-    # acumula o custo reportado pelo gateway (WS-D) em cada Activity de
-    # modelo. Checado na admissao e em CADA fronteira de fase — nunca corta
-    # no meio de uma Activity (P6).
+    # Phase 2 — budgets (WSB-E4-T1). `budget_max_usd` comes from the JSONB
+    # `work_items.budget` (key "max_usd") read at admission; `spent_usd`
+    # accumulates the cost reported by the gateway (WS-D) on every model
+    # Activity. Checked at admission and at EVERY phase boundary — it never
+    # cuts mid-Activity (P6).
     # ------------------------------------------------------------------
     budget_max_usd: float | None = None
     spent_usd: float = 0.0
 
     # ------------------------------------------------------------------
-    # Caps/timers configuraveis (WSB-E3-T1 / E2-T3 / E5-T1). Fazem parte do
-    # INPUT do workflow (nao de env-var lida dentro do sandbox) para que:
-    #  (a) sejam deterministicas e sobrevivam a `continue_as_new`/replay;
-    #  (b) os testes possam injetar timers curtos sem monkeypatch de env
-    #      dentro do sandbox de workflow (que nao e seguro/suportado).
-    # `dse_orchestrator.config.OrchestratorConfig.from_env()` e o helper que
-    # quem inicia o workflow (worker/dispatcher do WS-A) usa para preencher
-    # estes campos a partir do ambiente de producao.
+    # Configurable caps/timers (WSB-E3-T1 / E2-T3 / E5-T1). They are part of the
+    # workflow INPUT (not env vars read inside the sandbox) so that:
+    #  (a) they are deterministic and survive `continue_as_new`/replay;
+    #  (b) tests can inject short timers without monkeypatching env inside the
+    #      workflow sandbox (which is neither safe nor supported).
+    # `dse_orchestrator.config.OrchestratorConfig.from_env()` is the helper that
+    # whoever starts the workflow (worker/WS-A dispatcher) uses to fill these
+    # fields from the production environment.
     # ------------------------------------------------------------------
     clarification_round_cap: int = 3
     clarification_reminder_hours: float = 24.0
@@ -128,83 +128,85 @@ class WorkItemLifecycleInput:
     checkpoint_retry_cap: int = 2
     rebuild_retry_cap: int = 1
     activity_start_to_close_seconds: float = 3600.0
-    # Remediação (spec §6): o substrato emite heartbeat periódico durante
-    # turnos longos (sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat).
-    # 2026-07-23 (disparos reais wi_d05c/wi_257d/wi_150d): com 60s, turnos de
-    # coder/tester com chamadas de modelo entravam em LOOP INFINITO de retry —
-    # o server cancelava por heartbeat timeout ATIVIDADE JÁ TRABALHANDO (e o
-    # retry re-pagava o modelo). 600s dá folga real; start_to_close (1h) segue
-    # como teto duro do turno. NOTA: este default É o valor operativo no caminho
-    # do dispatcher (start_workflow com string → _coerce_input usa o default do
-    # modelo; apply_to_input/env só vale para quem passa o input completo).
+    # Remediation (spec §6): the substrate emits a periodic heartbeat during
+    # long turns (sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat).
+    # 2026-07-23 (real runs wi_d05c/wi_257d/wi_150d): at 60s, coder/tester turns
+    # with model calls fell into an INFINITE retry LOOP — the server cancelled
+    # on heartbeat timeout an ACTIVITY THAT WAS STILL WORKING (and the retry
+    # paid for the model again). 600s gives real slack; start_to_close (1h)
+    # remains the hard ceiling of the turn. NOTE: this default IS the operative
+    # value on the dispatcher path (start_workflow with a string → _coerce_input
+    # uses the model default; apply_to_input/env only applies to callers that
+    # pass the full input).
     activity_heartbeat_seconds: float = 600.0
     activity_schedule_to_close_seconds: float = 7200.0
-    # Retries de Activities de negocio devem terminar. O schedule-to-close
-    # continua sendo o teto temporal, e este cap limita tentativas/custo.
+    # Retries of business Activities must terminate. schedule-to-close remains
+    # the time ceiling, and this cap bounds attempts/cost.
     activity_retry_cap: int = 3
 
-    # CI pending e uma espera duravel, nao permissao para review. O cap
-    # default equivale a 24h com polling por minuto; ambos vivem no input para
-    # replay deterministico e podem ser reduzidos nos testes.
+    # CI pending is a durable wait, not permission to review. The default cap
+    # equals 24h at one poll per minute; both live in the input for
+    # deterministic replay and can be shortened in tests.
     ci_poll_interval_seconds: float = 60.0
     ci_pending_poll_cap: int = 1440
     ci_pending_polls: int = 0
 
-    # Fase 2 (WSB-E3-T2/E3-T3/E4) — caps/politica novos. `require_approval_risk_classes`
-    # e a POLITICA de quais classes de risco exigem aprovacao humana; vive no
-    # INPUT (fora do modelo — P1), preenchida por config.from_env pelo caller.
+    # Phase 2 (WSB-E3-T2/E3-T3/E4) — new caps/policy. `require_approval_risk_classes`
+    # is the POLICY of which risk classes require human approval; it lives in the
+    # INPUT (outside the model — P1), filled by config.from_env by the caller.
     require_approval_risk_classes: tuple[str, ...] = ("high",)
-    plan_round_cap: int = 3  # re_plan capado (rejection path — WSB-E3-T3)
-    l2_retry_cap: int = 2  # objecoes do L2 -> Coder, capadas
+    plan_round_cap: int = 3  # capped re_plan (rejection path — WSB-E3-T3)
+    l2_retry_cap: int = 2  # L2 objections -> Coder, capped
 
     # ------------------------------------------------------------------
-    # Fase 3 — WSB-E4-T2: iteration caps + debounce de refresh de evidencia
-    # (ADR-26) e o estado do pipeline de evidencia (preview/demo/visual diff)
-    # que sobrevive a `continue_as_new` como o resto do estado deterministico.
+    # Phase 3 — WSB-E4-T2: iteration caps + evidence refresh debounce (ADR-26)
+    # and the evidence pipeline state (preview/demo/visual diff) that survives
+    # `continue_as_new` like the rest of the deterministic state.
     # ------------------------------------------------------------------
-    # Cap de rounds de review (loop humano changes_requested/CI-red). Todo
-    # `while` do workflow tem cap: clarificacao (clarification_round_cap),
-    # fix L1 (coder_retry_cap), objecoes L2 (l2_retry_cap), re_plan
-    # (plan_round_cap) e agora rounds de review. Esgotado -> escalated.
+    # Cap on review rounds (human changes_requested/CI-red loop). Every `while`
+    # in the workflow has a cap: clarification (clarification_round_cap), L1 fix
+    # (coder_retry_cap), L2 objections (l2_retry_cap), re_plan (plan_round_cap)
+    # and now review rounds. Exhausted -> escalated.
     review_round_cap: int = 20
-    # Janela de debounce (segundos) para agrupar comentarios de review antes
-    # de UM ciclo de fix + UM refresh de evidencia (ADR-26: 6 comentarios numa
-    # janela = no maximo 1 refresh). 0 = sem janela (compat/testes legados);
-    # producao recebe o valor de config.from_env via apply_to_input.
+    # Debounce window (seconds) to batch review comments before ONE fix cycle +
+    # ONE evidence refresh (ADR-26: 6 comments in one window = at most 1
+    # refresh). 0 = no window (compat/legacy tests); production gets the value
+    # from config.from_env via apply_to_input.
     evidence_debounce_seconds: float = 0.0
-    # Cap de refreshes de evidencia ALEM do inicial. Excedido -> declina limpo
-    # (auditado, P6) sem bloquear o PR — a evidencia apenas fica "stale".
+    # Cap on evidence refreshes BEYOND the initial one. Exceeded -> clean
+    # decline (audited, P6) without blocking the PR — the evidence just goes
+    # "stale".
     evidence_refresh_cap: int = 5
     evidence_refreshes: int = 0
 
-    # Estado do pipeline de evidencia (projetado tambem em work_item_evidence,
-    # migracao 0014, via Activity local record_evidence_state).
+    # Evidence pipeline state (also projected into work_item_evidence,
+    # migration 0014, via the local Activity record_evidence_state).
     preview_status: str | None = None   # PreviewRef.status
     preview_url: str | None = None
     evidence_passed: bool | None = None
     evidence_video_key: str | None = None
     evidence_trace_key: str | None = None
     visual_baseline_key: str | None = None
-    # ultimo files_changed conhecido (Coder inicial ou ultimo fix cycle) — um
-    # refresh a pedido humano nao tem commit novo, entao reusa este conjunto
-    # para a decisao deterministica de paths-filter do trigger_preview (FR-20).
+    # last known files_changed (initial Coder or last fix cycle) — a
+    # human-requested refresh has no new commit, so it reuses this set for
+    # trigger_preview's deterministic paths-filter decision (FR-20).
     last_files_changed: list[str] = field(default_factory=list)
 
-    # Ativacao do alerta de history (infra/ALERTING-RULES.md §3, com WS-F):
-    # contagem de Continue-As-New desta cadeia de execucoes, emitida junto com
-    # o history length/size em cada fronteira via emit_history_metric.
+    # Feeds the history alert (infra/ALERTING-RULES.md §3, with WS-F):
+    # Continue-As-New count for this chain of executions, emitted together with
+    # the history length/size at each boundary via emit_history_metric.
     continue_as_new_count: int = 0
 
     # ------------------------------------------------------------------
-    # Fase 4 — metricas de qualidade de PR (pilot gate "PR quality
-    # thresholds", adendo 03). Contadores deterministicos que sobrevivem a
-    # `continue_as_new` como o resto do estado; emitidos via OTel na fronteira
-    # terminal do PR (merge/escalacao) pela Activity local emit_pr_quality_metric.
+    # Phase 4 — PR quality metrics (pilot gate "PR quality thresholds",
+    # addendum 03). Deterministic counters that survive `continue_as_new` like
+    # the rest of the state; emitted via OTel at the PR's terminal boundary
+    # (merge/escalation) by the local Activity emit_pr_quality_metric.
     # ------------------------------------------------------------------
     changes_requested_count: int = 0
-    # epoch (segundos) de quando o PR foi finalizado (workflow.now() — leitura
-    # deterministica/replay-safe). Usado para o tempo-ate-merge; None ate o PR
-    # existir.
+    # epoch (seconds) of when the PR was finalized (workflow.now() —
+    # deterministic/replay-safe read). Used for time-to-merge; None until the PR
+    # exists.
     pr_finalized_at_epoch: float | None = None
 
 
@@ -218,7 +220,7 @@ class WorkItemLifecycleResult:
 
 @dataclass
 class OperatorEvent:
-    """Ultimos eventos de operador, exposto via query para observabilidade."""
+    """Latest operator events, exposed via query for observability."""
 
     action: str
     actor: str

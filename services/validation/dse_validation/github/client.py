@@ -1,21 +1,18 @@
-"""Cliente mínimo da API REST do GitHub usado pelo PR finalizer (WSE-E3),
-pelo backend de comentário mutável (WSE-E3-T7) e pelo consumo de status de CI
-(WSE-E4-T9a).
+"""Minimal GitHub REST API client used by the PR finalizer (WSE-E3), the mutable
+comment backend (WSE-E3-T7) and the CI status consumption (WSE-E4-T9a).
 
-Duas implementações do mesmo `Protocol` `GitHubClient`:
+Two implementations of the same `GitHubClient` `Protocol`:
 
-  - `RealGitHubClient` — chamadas HTTP reais à API do GitHub, autenticado como
-    GitHub App (via `app_auth.py`). É o que roda em produção.
-  - `FakeGitHubClient` — fixture in-memory, usada em todos os testes deste
-    workstream porque nenhuma GitHub App real está registrada nesta sessão
-    (falta `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_INSTALLATION_ID`
-    reais — ver README). Implementa a MESMA interface, então a lógica de
-    idempotência do PR finalizer é testada de verdade; só o transporte HTTP é
-    substituído.
+  - `RealGitHubClient` — real HTTP calls to the GitHub API, authenticated as a
+    GitHub App (via `app_auth.py`). This is what runs in production.
+  - `FakeGitHubClient` — in-memory fixture, used in all of this workstream's tests
+    because no real GitHub App is registered in this session (real
+    `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_INSTALLATION_ID` are
+    missing — see README). It implements the SAME interface, so the PR finalizer's
+    idempotency logic really is tested; only the HTTP transport is swapped out.
 
-`build_github_client()` escolhe automaticamente: real se as 3 env vars de
-GitHub App estiverem presentes, fake caso contrário (nunca falha silenciosamente
-— loga qual modo escolheu).
+`build_github_client()` picks automatically: real if the 3 GitHub App env vars are
+present, fake otherwise (never fails silently — it logs which mode it chose).
 """
 from __future__ import annotations
 
@@ -49,24 +46,24 @@ class GitHubClient(Protocol):
     def list_check_runs(self, repo: str, ref: str) -> list[dict]: ...
 
     def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
-        """Fase 3 (WSE-E4-T9b) — targeted re-run de UM check-run (fix commit).
-        `POST /repos/{repo}/check-runs/{id}/rerequest`. Retorna False quando o
-        CI do repo NÃO suporta re-run por job (403/422 da API) — o caller
-        registra e segue (nunca bloqueia por isso)."""
+        """Phase 3 (WSE-E4-T9b) — targeted re-run of ONE check-run (fix commit).
+        `POST /repos/{repo}/check-runs/{id}/rerequest`. Returns False when the
+        repo's CI does NOT support per-job re-run (403/422 from the API) — the
+        caller records it and moves on (never blocks because of it)."""
         ...
 
     def list_review_threads(self, repo: str, pr_number: int) -> list[dict]:
-        """Fase 4 (WSE-E6-T16) — threads de review do PR, cada uma ANCORADA em
-        um commit. `GET /repos/{repo}/pulls/{n}/comments` (review comments).
-        Retorna `[{id, commit_id, original_commit_id, path}]`. O
-        `original_commit_id` é o sha em que a thread foi ancorada — é ele que
-        rebase+force-push orfanaria (merge-base preserva). Usado pelo wrapper de
-        Activity para saber quais shas NÃO podem sumir da história do branch."""
+        """Phase 4 (WSE-E6-T16) — the PR's review threads, each ANCHORED to a
+        commit. `GET /repos/{repo}/pulls/{n}/comments` (review comments). Returns
+        `[{id, commit_id, original_commit_id, path}]`. `original_commit_id` is the
+        sha the thread was anchored to — that is the one rebase+force-push would
+        orphan (merge-base preserves it). Used by the Activity wrapper to know
+        which shas must NOT disappear from the branch's history."""
         ...
 
     def authenticated_remote_url(self, repo: str) -> str:
-        """URL https://x-access-token:<token>@github.com/<repo>.git para git push
-        autenticado como a GitHub App, sem expor o token em nenhum argv de log."""
+        """https://x-access-token:<token>@github.com/<repo>.git URL for a git push
+        authenticated as the GitHub App, without exposing the token in any logged argv."""
         ...
 
 
@@ -80,7 +77,7 @@ class RealGitHubClient:
         self._token_expires_at: float = 0.0
 
     def _installation_token(self) -> str:
-        # margem de 60s antes da expiração declarada (1h) para evitar corrida.
+        # 60s margin before the declared expiration (1h) to avoid a race.
         if self._token is None or time.time() >= self._token_expires_at - 60:
             self._token = fetch_installation_token(
                 self._cfg.app_id, self._cfg.private_key_pem, self._cfg.installation_id, self._cfg.api_base_url
@@ -111,9 +108,10 @@ class RealGitHubClient:
         return {"number": pr["number"], "html_url": pr["html_url"], "state": pr["state"]}
 
     def get_pull_request(self, repo: str, pr_number: int) -> dict | None:
-        """Plano 08 §F (F1) — estado REAL do PR na fonte (GitHub), para verificar
-        um signal de merge contra a verdade e não só contra o envelope. Retorna
-        merged/merged_by/merge_commit_sha/head_sha; None se o PR não existe."""
+        """plano 08 §F (F1) — the PR's REAL state at the source (GitHub), so a
+        merge signal is verified against the truth and not just against the
+        envelope. Returns merged/merged_by/merge_commit_sha/head_sha; None if the
+        PR does not exist."""
         resp = httpx.get(
             f"{self._cfg.api_base_url}/repos/{repo}/pulls/{pr_number}",
             headers=self._headers(),
@@ -135,9 +133,9 @@ class RealGitHubClient:
         }
 
     def get_tree_paths(self, repo: str, ref: str, *, limit: int = 300) -> list[str]:
-        """Árvore de arquivos do repo em `ref` (achado do disparo real: o Planner
-        propõe expected_files ANTES do clone — sem a árvore ele adivinha caminhos
-        e o plan_compliance reprova o diff real). Só paths de blob, truncado."""
+        """The repo's file tree at `ref` (found during the real run: the Planner
+        proposes expected_files BEFORE the clone — without the tree it guesses
+        paths and plan_compliance rejects the real diff). Blob paths only, truncated."""
         resp = httpx.get(
             f"{self._cfg.api_base_url}/repos/{repo}/git/trees/{ref}",
             headers=self._headers(),
@@ -160,8 +158,8 @@ class RealGitHubClient:
         return {"number": pr["number"], "html_url": pr["html_url"], "state": pr["state"]}
 
     def update_pull_request(self, repo: str, pr_number: int, *, body: str) -> None:
-        """Edita o CORPO do PR (D1: o link do preview vai na descrição, não como
-        comentário). `PATCH /repos/{repo}/pulls/{n}`."""
+        """Edits the PR's BODY (D1: the preview link goes in the description, not
+        as a comment). `PATCH /repos/{repo}/pulls/{n}`."""
         resp = httpx.patch(
             f"{self._cfg.api_base_url}/repos/{repo}/pulls/{pr_number}",
             headers=self._headers(),
@@ -190,8 +188,8 @@ class RealGitHubClient:
         resp.raise_for_status()
 
     def list_issue_comments(self, repo: str, issue_number: int) -> list[dict]:
-        """Comentários de uma issue/PR (PR é issue no GitHub) — usado para
-        idempotência do link de preview (edita em vez de duplicar)."""
+        """Comments on an issue/PR (a PR is an issue on GitHub) — used for the
+        preview link's idempotency (edit instead of duplicating)."""
         resp = httpx.get(
             f"{self._cfg.api_base_url}/repos/{repo}/issues/{issue_number}/comments",
             headers=self._headers(),
@@ -217,7 +215,7 @@ class RealGitHubClient:
             timeout=15.0,
         )
         if resp.status_code in (403, 404, 422):
-            # CI do repo não suporta re-run por job (ou o run não é re-rodável).
+            # the repo's CI does not support per-job re-run (or the run is not re-runnable).
             return False
         resp.raise_for_status()
         return True
@@ -246,15 +244,15 @@ class RealGitHubClient:
 
 
 # ---------------------------------------------------------------------------
-# Fake / modo local — sem GitHub App real. Documentado como fixture no README.
+# Fake / local mode — no real GitHub App. Documented as a fixture in the README.
 # ---------------------------------------------------------------------------
 @dataclass
 class FakeGitHubClient:
-    """Estado em memória que imita o GitHub o suficiente para testar a lógica
-    de idempotência do PR finalizer, o backend de comentário e o consumo de
-    status de CI SEM rede/credenciais reais. Cada instância representa o
-    "estado do GitHub" de forma persistente entre chamadas (ao contrário do
-    nosso Postgres, que pode ser "esquecido" simulando um crash)."""
+    """In-memory state that mimics GitHub just enough to test the PR finalizer's
+    idempotency logic, the comment backend and the CI status consumption WITHOUT
+    network/real credentials. Each instance represents "GitHub's state"
+    persistently across calls (unlike our Postgres, which can be "forgotten" to
+    simulate a crash)."""
 
     _prs: dict[tuple[str, str], dict] = field(default_factory=dict)  # (repo, branch) -> pr dict
     _pr_by_number: dict[tuple[str, int], dict] = field(default_factory=dict)
@@ -288,7 +286,7 @@ class FakeGitHubClient:
     def update_pull_request(self, repo: str, pr_number: int, *, body: str) -> None:
         pr = self._pr_by_number.get((repo, pr_number))
         if pr is None:
-            raise KeyError(f"PR {pr_number} não existe no FakeGitHubClient")
+            raise KeyError(f"PR {pr_number} does not exist in FakeGitHubClient")
         pr["body"] = body
 
     def get_pull_request(self, repo: str, pr_number: int) -> dict | None:
@@ -304,17 +302,17 @@ class FakeGitHubClient:
 
     def edit_issue_comment(self, repo: str, comment_id: str, body: str) -> None:
         if comment_id not in self._comments:
-            raise KeyError(f"comment {comment_id} não existe no FakeGitHubClient")
+            raise KeyError(f"comment {comment_id} does not exist in FakeGitHubClient")
         self._comments[comment_id] = body
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]:
         return list(self._check_runs.get((repo, ref), []))
 
     def set_check_runs(self, repo: str, ref: str, runs: list[dict]) -> None:
-        """Só para teste — popula os check-runs "reportados pelo CI"."""
+        """Test-only — populates the check-runs "reported by CI"."""
         self._check_runs[(repo, ref)] = runs
 
-    # Fase 3 (WSE-E4-T9b) — targeted re-runs
+    # Phase 3 (WSE-E4-T9b) — targeted re-runs
     rerequest_supported: bool = True
     rerequested: list[tuple[str, int]] = field(default_factory=list)
 
@@ -322,7 +320,7 @@ class FakeGitHubClient:
         if not self.rerequest_supported:
             return False
         self.rerequested.append((repo, check_run_id))
-        # imita o GitHub: o check-run re-rodado volta a "queued"
+        # mimics GitHub: a re-run check-run goes back to "queued"
         for runs in self._check_runs.values():
             for run in runs:
                 if run.get("id") == check_run_id:
@@ -330,11 +328,11 @@ class FakeGitHubClient:
                     run["conclusion"] = None
         return True
 
-    # Fase 4 (WSE-E6-T16) — threads de review ancoradas em commits.
+    # Phase 4 (WSE-E6-T16) — review threads anchored to commits.
     _review_threads: dict[tuple[str, int], list[dict]] = field(default_factory=dict)
 
     def set_review_threads(self, repo: str, pr_number: int, threads: list[dict]) -> None:
-        """Só para teste — popula as threads de review "ancoradas em commits"."""
+        """Test-only — populates the review threads "anchored to commits"."""
         self._review_threads[(repo, pr_number)] = threads
 
     def list_review_threads(self, repo: str, pr_number: int) -> list[dict]:
@@ -347,10 +345,10 @@ class FakeGitHubClient:
 def build_github_client(cfg: GitHubConfig | None = None) -> GitHubClient:
     cfg = cfg or GitHubConfig()
     if cfg.is_configured:
-        logger.info("dse_validation: usando RealGitHubClient (GitHub App configurada)")
+        logger.info("dse_validation: using RealGitHubClient (GitHub App configured)")
         return RealGitHubClient(cfg)
     logger.warning(
         "dse_validation: GITHUB_APP_ID/GITHUB_APP_PRIVATE_KEY/GITHUB_APP_INSTALLATION_ID "
-        "não configurados — usando FakeGitHubClient (modo local/teste, NÃO produção)"
+        "not configured — using FakeGitHubClient (local/test mode, NOT production)"
     )
     return FakeGitHubClient()

@@ -1,8 +1,7 @@
-"""WSB-E3-T1 — gate de clarificacao: reminder, escalacao por falta de
-resposta, cap de rounds, e checklist deterministico (sem LLM). Usa o
-ambiente de time-skipping do Temporal para acelerar os timers de
-reminder/escalacao (configurados em HORAS/segundos curtos aqui, nao dias) e
-provar o comportamento sem esperar tempo real de verdade.
+"""WSB-E3-T1 — clarification gate: reminder, escalation on no response, round
+cap, and deterministic checklist (no LLM). Uses Temporal's time-skipping
+environment to fast-forward the reminder/escalation timers (configured here in
+short HOURS/seconds, not days) and prove the behavior without waiting real time.
 """
 from __future__ import annotations
 
@@ -58,8 +57,9 @@ async def test_clarification_completes_after_answer(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_clarification_reminder_then_answer(time_skipping_env):
-    """Timer de reminder dispara (sem resposta ainda), so DEPOIS a resposta
-    chega e o workflow segue — prova que o reminder nao e terminal."""
+    """The reminder timer fires (still no answer), and only AFTERWARDS the
+    answer arrives and the workflow proceeds — proof that the reminder is not
+    terminal."""
     work_item_id = new_work_item_id("clar-remind")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -72,17 +72,16 @@ async def test_clarification_reminder_then_answer(time_skipping_env):
         wf_input = WorkItemLifecycleInput(
             work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
             acceptance_criteria=None,
-            clarification_reminder_hours=1.0,  # curto o suficiente p/ time-skipping avancar rapido
-            clarification_escalation_days=1.0,  # reminder == escalation --> so 1 janela
+            clarification_reminder_hours=1.0,  # short enough for time-skipping to advance fast
+            clarification_escalation_days=1.0,  # reminder == escalation --> only 1 window
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
         await wait_for_status(handle, {"needs_clarification"})
 
-        # Nao respondemos ainda — avancamos o relogio do servidor de teste
-        # explicitamente (time-skipping) alem do timer de reminder (1h) sem
-        # esperar tempo real de verdade.
+        # We do not answer yet — we advance the test server's clock explicitly
+        # (time-skipping) past the reminder timer (1h) without waiting real time.
         from datetime import timedelta
 
         await time_skipping_env.sleep(timedelta(hours=1, minutes=5))
@@ -91,7 +90,7 @@ async def test_clarification_reminder_then_answer(time_skipping_env):
 
         await handle.signal(
             "clarification_answer",
-            {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "ok agora"},
+            {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "ok now"},
         )
         await wait_for_status(handle, {"review_ready"})
 
@@ -114,7 +113,7 @@ async def test_clarification_escalates_without_any_response(time_skipping_env):
             work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
             acceptance_criteria=None,
             clarification_reminder_hours=1.0,
-            clarification_escalation_days=1.0 / 24.0,  # = 1h, igual ao reminder -> escala logo apos o reminder
+            clarification_escalation_days=1.0 / 24.0,  # = 1h, same as the reminder -> escalates right after it
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
@@ -131,9 +130,9 @@ async def test_clarification_escalates_without_any_response(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_clarification_round_cap_escalates(time_skipping_env):
-    """Responde sempre com o MESMO campo faltando (ex.: nunca manda
-    acceptance_criteria) — o checklist nunca fecha, entao o cap de rounds
-    estoura e escala (nunca segue adivinhando)."""
+    """Always answers with the SAME field missing (e.g. never sends
+    acceptance_criteria) — the checklist never closes, so the round cap is
+    exhausted and it escalates (it never keeps guessing)."""
     work_item_id = new_work_item_id("clar-cap")
     insert_work_item(work_item_id)
     task_queue = f"tq-{uuid.uuid4().hex[:8]}"
@@ -148,14 +147,14 @@ async def test_clarification_round_cap_escalates(time_skipping_env):
             repo=None, base_branch=None, acceptance_criteria=None,
             clarification_round_cap=2,
             clarification_reminder_hours=1.0,
-            clarification_escalation_days=10.0,  # nao deixa o timer de escalacao disparar primeiro
+            clarification_escalation_days=10.0,  # keeps the escalation timer from firing first
         )
         handle = await time_skipping_env.client.start_workflow(
             WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue,
         )
         for _ in range(3):
             await wait_for_status(handle, {"needs_clarification"})
-            # responde so o repo — base_branch/acceptance_criteria continuam faltando
+            # answers only the repo — base_branch/acceptance_criteria stay missing
             await handle.signal("clarification_answer", {"repo": "acme/repo"})
 
         result = await handle.result()
@@ -175,4 +174,4 @@ async def _wait_for_audit_action(work_item_id: str, action: str, attempts: int =
         if action in actions:
             return actions
         await asyncio.sleep(0.05)
-    raise AssertionError(f"acao de audit '{action}' nunca apareceu; vistas={actions}")
+    raise AssertionError(f"audit action '{action}' never appeared; seen={actions}")

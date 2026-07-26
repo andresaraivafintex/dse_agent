@@ -1,28 +1,27 @@
-"""WSA-E2-T3 — Sanitização de conteúdo inbound (defesa #3 do pipeline de
-intake). Pipeline plugável: cada função de estágio recebe/retorna `str`.
+"""WSA-E2-T3 — Inbound content sanitization (defense #3 of the intake
+pipeline). Pluggable pipeline: each stage function takes/returns a `str`.
 
-IMPORTANTE (documentado explicitamente, conforme pedido): isto é MITIGAÇÃO,
-não CONTENÇÃO. Remover Unicode invisível e redigir padrões óbvios de
-token/secret reduz a superfície de prompt injection / exfiltração óbvia
-*antes* do texto poder chegar a qualquer chamada de modelo, mas um atacante
-determinado pode ofuscar além do que regex simples pega. A contenção real
-(a garantia que efetivamente impede exfiltração mesmo se o modelo for
-enganado) é o egress proxy default-deny do WS-C
-(`services/egress-proxy/`) — este módulo é defesa em profundidade, não a
-linha de defesa que se pode confiar sozinha.
+IMPORTANT (documented explicitly, as requested): this is MITIGATION, not
+CONTAINMENT. Stripping invisible Unicode and redacting obvious token/secret
+patterns reduces the surface for prompt injection / obvious exfiltration
+*before* the text can reach any model call, but a determined attacker can
+obfuscate beyond what simple regexes catch. The real containment (the
+guarantee that actually prevents exfiltration even if the model is fooled) is
+the WS-C default-deny egress proxy (`services/egress-proxy/`) — this module is
+defense in depth, not a line of defense that can be trusted on its own.
 
-`content_snapshot` original (congelado pela defesa TOCTOU, WSA-E2-T2)
-permanece intacto para auditoria — a versão SANITIZADA é a que segue no
-pipeline para clarificação/Coder. Nunca sobrescreva o snapshot original.
+The original `content_snapshot` (frozen by the TOCTOU defense, WSA-E2-T2)
+stays intact for auditing — the SANITIZED version is the one that flows down
+the pipeline to clarification/Coder. Never overwrite the original snapshot.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
 
-# Categorias Unicode "invisíveis"/controle a remover: Cf (format — inclui
-# zero-width space/joiner, bidi override RTL/LTR), Cc (control, exceto
-# whitespace comum \t \n \r que preservamos para não quebrar formatação).
+# "Invisible"/control Unicode categories to strip: Cf (format — includes
+# zero-width space/joiner, RTL/LTR bidi override), Cc (control, except the
+# common whitespace \t \n \r that we preserve so formatting is not broken).
 _PRESERVED_CONTROL = {"\t", "\n", "\r"}
 
 
@@ -39,7 +38,7 @@ def strip_invisible_unicode(text: str) -> str:
     return "".join(out)
 
 
-# Padrões óbvios de token/secret (WSA-E2-T3). Cada tupla é (nome, regex).
+# Obvious token/secret patterns (WSA-E2-T3). Each tuple is (name, regex).
 _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),
     ("slack_token", re.compile(r"xox[bpears]-[A-Za-z0-9-]{10,}")),
@@ -58,7 +57,7 @@ def redact_secrets(text: str) -> str:
 
 
 def sanitize_content(text: str) -> str:
-    """Pipeline completo aplicado ao `content_snapshot` antes de seguir para
-    qualquer estágio que envolva um modelo. Ordem importa: unicode primeiro
-    (para não deixar caracteres invisíveis quebrarem os regex de secret)."""
+    """Full pipeline applied to `content_snapshot` before it goes to any stage
+    that involves a model. Order matters: unicode first (so invisible
+    characters cannot break the secret regexes)."""
     return redact_secrets(strip_invisible_unicode(text))

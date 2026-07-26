@@ -1,21 +1,22 @@
-"""WSF-E6-T2 — kill switches nos 4 escopos + quarentena de work item.
+"""WSF-E6-T2 — kill switches across the 4 scopes + work item quarantine.
 
-Escopos (do mais amplo ao mais estreito):
-  1. GLOBAL  — `dse_kill_switch_global` (este WS). Bloqueia toda admissão em
-               todos os tenants.
+Scopes (broadest to narrowest):
+  1. GLOBAL  — `dse_kill_switch_global` (this WS). Blocks all admission across
+               every tenant.
   2. TENANT  — `tenant_config.kill_switch_enabled` (dse_platform.tenant_config).
-  3. CHANNEL — `channel_kill_switches` (tabela do WS-A; escrevemos linhas nela
-               no mesmo banco — data-plane, não editamos o arquivo/migração do
-               WS-A). Bloqueia admissão de um (tenant, canal) específico.
-  4. TASK    — quarentena durável de um work item (`dse_work_item_quarantine`) +
-               (no operator.py) o signal Temporal `pause`/`cancel`. O flag
-               durável sobrevive a restart do worker e alimenta a projeção do
-               queue board.
+  3. CHANNEL — `channel_kill_switches` (a WS-A table; we write rows into it in
+               the same database — data plane, we do not edit WS-A's
+               file/migration). Blocks admission for one specific
+               (tenant, channel).
+  4. TASK    — durable quarantine of a work item (`dse_work_item_quarantine`) +
+               (in operator.py) the Temporal `pause`/`cancel` signal. The durable
+               flag survives a worker restart and feeds the queue board
+               projection.
 
-`is_admission_blocked(tenant, channel)` é o composto que o ingest-gateway (WS-A)
-e o model-gateway (WS-D) devem consultar: checa global -> tenant -> canal, nessa
-ordem, e devolve o primeiro bloqueio encontrado (ou None). Toda mudança de
-qualquer switch grava audit (P8).
+`is_admission_blocked(tenant, channel)` is the composite that the ingest-gateway
+(WS-A) and the model-gateway (WS-D) must consult: it checks global -> tenant ->
+channel, in that order, and returns the first block found (or None). Every change
+to any switch writes an audit row (P8).
 """
 from __future__ import annotations
 
@@ -98,21 +99,21 @@ def get_global_kill_switch(conn=None) -> tuple[bool, str | None]:
 
 
 # ---------------------------------------------------------------------------
-# 2. TENANT (delega ao módulo tenant_config, que já audita)
+# 2. TENANT (delegates to the tenant_config module, which already audits)
 # ---------------------------------------------------------------------------
 def set_tenant_kill_switch(tenant_id: str, *, enabled: bool, reason: str | None, actor: str, conn=None):
     return _set_tenant_kill_switch(tenant_id, enabled=enabled, reason=reason, actor=actor, conn=conn)
 
 
 # ---------------------------------------------------------------------------
-# 3. CHANNEL (tabela channel_kill_switches do WS-A — data-plane)
+# 3. CHANNEL (WS-A's channel_kill_switches table — data plane)
 # ---------------------------------------------------------------------------
 def set_channel_kill_switch(
     tenant_id: str, channel: str, *, active: bool, reason: str | None, actor: str, conn=None
 ) -> None:
-    """Liga/desliga o kill switch de um (tenant, canal). `active = true` =
-    canal DESLIGADO (bloqueia admissão) — mesma semântica da coluna `active`
-    da tabela do WS-A."""
+    """Turns the kill switch of a (tenant, channel) on/off. `active = true` =
+    channel OFF (blocks admission) — same semantics as the `active` column of
+    WS-A's table."""
     if active and not reason:
         raise ValueError("channel kill switch exige `reason` ao ATIVAR (P8)")
     owns = conn is None
@@ -147,12 +148,12 @@ def set_channel_kill_switch(
 
 
 # ---------------------------------------------------------------------------
-# Composto de admissão (global -> tenant -> canal)
+# Admission composite (global -> tenant -> channel)
 # ---------------------------------------------------------------------------
 def is_admission_blocked(tenant_id: str, channel: str | None = None, conn=None) -> AdmissionBlock | None:
-    """Retorna o primeiro bloqueio (mais amplo primeiro) ou None se admissível.
-    Deve ser chamado pelo ingest-gateway (WS-A) e pelo model-gateway (WS-D)
-    ANTES de admitir/rodar trabalho. Puramente determinístico (P1)."""
+    """Returns the first block (broadest first) or None if admissible. Must be
+    called by the ingest-gateway (WS-A) and the model-gateway (WS-D) BEFORE
+    admitting/running work. Purely deterministic (P1)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -181,13 +182,14 @@ def is_admission_blocked(tenant_id: str, channel: str | None = None, conn=None) 
 
 
 # ---------------------------------------------------------------------------
-# 4. TASK — quarentena durável de work item (par do signal em operator.py)
+# 4. TASK — durable work item quarantine (counterpart of the signal in operator.py)
 # ---------------------------------------------------------------------------
 def quarantine_work_item(
     work_item_id: str, tenant_id: str, *, reason: str, actor: str, conn=None
 ) -> None:
-    """Marca um work item como em quarentena (durável). Idempotente: re-quarantinar
-    um já-quarantinado só atualiza a razão. `reason`/`actor` obrigatórios (P8)."""
+    """Marks a work item as quarantined (durably). Idempotent: re-quarantining an
+    already-quarantined item only updates the reason. `reason`/`actor` are
+    mandatory (P8)."""
     if not reason:
         raise ValueError("quarantine exige `reason` (P8)")
     owns = conn is None

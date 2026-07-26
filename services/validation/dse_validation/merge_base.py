@@ -1,42 +1,42 @@
-"""WSE-E6-T16 — merge-base, NUNCA rebase durante um review humano ativo.
+"""WSE-E6-T16 — merge-base, NEVER rebase during an active human review.
 
-CONSTRUÇÃO NOVA (achado #2 do adendo 03): a Fase 1 descreveu o tratamento de
-base-drift no plano mas nunca o implementou; o review loop só re-rodava o Coder
-no mesmo branch. Este módulo constrói o comportamento do zero.
+NEW CONSTRUCTION (finding #2 of addendum 03): Phase 1 described base-drift
+handling in the plan but never implemented it; the review loop only re-ran the
+Coder on the same branch. This module builds the behavior from scratch.
 
-Problema (failure mode 11, comportamento VERIFICADO do GitHub): quando a base
-branch (main) avança durante um review humano ativo, é tentador "atualizar" o
-branch da tarefa com `git rebase origin/main` + `git push --force`. Mas rebase
-REESCREVE os commits do branch (novos shas), e as threads de review do GitHub
-estão ANCORADAS em commits específicos — reescrevê-los ÓRFÃ as threads (viram
-"outdated", perdem a âncora). A conversa de review é destruída.
+Problem (failure mode 11, VERIFIED GitHub behavior): when the base branch (main)
+advances during an active human review, it is tempting to "update" the task
+branch with `git rebase origin/main` + `git push --force`. But rebase REWRITES
+the branch's commits (new shas), and GitHub's review threads are ANCHORED to
+specific commits — rewriting them ORPHANS the threads (they become "outdated",
+losing their anchor). The review conversation is destroyed.
 
-A estratégia correta (P1: determinística, código — nunca modelo):
-  - Se a base NÃO avançou → `noop_no_drift` (nada a fazer).
-  - Se avançou e AINDA NÃO houve o primeiro review humano (`first_human_review_done
-    is False`) E não há nenhuma thread de review ancorada → `rebase_prefirst_review`
-    é seguro (não há o que orfanar): rebase + force-with-lease.
-  - Caso contrário (já houve review, OU já existem threads ancoradas) →
-    `merge_base`: `git merge origin/main` NO branch da tarefa. Merge PRESERVA os
-    commits originais (o merge commit tem o tip antigo como pai) → os shas
-    ancorados continuam alcançáveis → ZERO threads órfãs. Push fast-forward, SEM
-    force.
-  - Conflito de merge não-resolvível → `git merge --abort`, `conflict=True`. O
-    workflow (WS-B) escala a um humano; o agente NUNCA resolve à força (P1/P6).
+The correct strategy (P1: deterministic, code — never a model):
+  - If the base did NOT advance → `noop_no_drift` (nothing to do).
+  - If it advanced and the first human review has NOT happened yet
+    (`first_human_review_done is False`) AND there is no anchored review thread →
+    `rebase_prefirst_review` is safe (there is nothing to orphan): rebase +
+    force-with-lease.
+  - Otherwise (a review already happened, OR anchored threads already exist) →
+    `merge_base`: `git merge origin/main` ON the task branch. Merge PRESERVES the
+    original commits (the merge commit has the old tip as a parent) → the anchored
+    shas stay reachable → ZERO orphaned threads. Fast-forward push, NO force.
+  - Unresolvable merge conflict → `git merge --abort`, `conflict=True`. The
+    workflow (WS-B) escalates to a human; the agent NEVER force-resolves (P1/P6).
 
-NOTA: isto NÃO quebra a invariante anti-merge-AUTOMÁTICO (FR-16). merge-base
-atualiza o BRANCH DA TAREFA com o drift da base; o merge do PR na base continua
-100% humano. São coisas diferentes: aqui o merge é origin/main → branch da
-tarefa (trazer o drift PARA a tarefa), não branch da tarefa → main.
+NOTE: this does NOT break the anti-AUTOMATIC-merge invariant (FR-16). merge-base
+updates the TASK BRANCH with the base's drift; merging the PR into the base stays
+100% human. They are different things: here the merge is origin/main → task
+branch (bringing the drift INTO the task), not task branch → main.
 
-`orphaned_threads` é a asserção de exit da Fase 4: DEVE ser 0 no caminho
-merge-base. Medido comparando os shas ancorados ANTES/DEPOIS: uma thread está
-órfã se o commit em que ela foi ancorada deixou de ser alcançável a partir do
-tip do branch (merge-base --is-ancestor). merge preserva a alcançabilidade;
-rebase a quebra (o teste negativo documenta isso).
+`orphaned_threads` is the Phase 4 exit assertion: it MUST be 0 on the merge-base
+path. Measured by comparing the anchored shas BEFORE/AFTER: a thread is orphaned
+if the commit it was anchored to stopped being reachable from the branch tip
+(merge-base --is-ancestor). merge preserves reachability; rebase breaks it (the
+negative test documents this).
 
-Contra git REAL (bare repo local + clones, como o git_checkpoint do WS-C) —
-nenhum mock para as garantias de durabilidade/segurança (P8).
+Against REAL git (local bare repo + clones, like WS-C's git_checkpoint) — no mock
+for the durability/safety guarantees (P8).
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class GitError(RuntimeError):
         self.argv = argv
         self.returncode = returncode
         self.stderr = stderr
-        super().__init__(f"git {' '.join(argv)} falhou (exit={returncode}): {stderr.strip()}")
+        super().__init__(f"git {' '.join(argv)} failed (exit={returncode}): {stderr.strip()}")
 
 
 def _git(
@@ -85,17 +85,17 @@ def _current_sha(workspace_dir: str, ref: str = "HEAD") -> str:
 
 
 def _ensure_on_branch(workspace_dir: str, branch: str) -> None:
-    # checkout do branch da tarefa (idempotente — já pode estar nele).
+    # checkout the task branch (idempotent — we may already be on it).
     proc = _git(workspace_dir, "rev-parse", "--verify", "--quiet", branch, check=False)
     if proc.returncode == 0:
         _git(workspace_dir, "checkout", "-q", branch)
 
 
 def is_commit_reachable(workspace_dir: str, sha: str, branch: str) -> bool:
-    """True se `sha` é alcançável a partir do tip de `branch` (é um ancestral
-    ou o próprio tip). É exatamente o que decide se uma thread de review
-    ancorada em `sha` continua "viva" (não-órfã): o GitHub mantém a âncora
-    enquanto o commit faz parte da história do PR."""
+    """True if `sha` is reachable from `branch`'s tip (it is an ancestor or the
+    tip itself). This is exactly what decides whether a review thread anchored to
+    `sha` stays "alive" (non-orphaned): GitHub keeps the anchor as long as the
+    commit is part of the PR's history."""
     proc = _git(workspace_dir, "merge-base", "--is-ancestor", sha, branch, check=False)
     return proc.returncode == 0
 
@@ -103,39 +103,40 @@ def is_commit_reachable(workspace_dir: str, sha: str, branch: str) -> bool:
 def count_orphaned_threads(
     workspace_dir: str, branch: str, anchored_shas: Sequence[str]
 ) -> list[str]:
-    """Retorna os shas ancorados que ficaram ÓRFÃOS (não mais alcançáveis a
-    partir do tip do branch). merge-base preserva todos → lista vazia; rebase
-    reescreve os commits → todos os shas originais viram órfãos."""
+    """Returns the anchored shas that became ORPHANED (no longer reachable from
+    the branch tip). merge-base preserves all of them → empty list; rebase
+    rewrites the commits → every original sha becomes orphaned."""
     orphaned: list[str] = []
     for sha in anchored_shas:
         if not sha:
             continue
-        # commit ainda existe no repo? (rebase não deleta o objeto imediatamente,
-        # mas ele deixa de ser alcançável — que é o que orfaneia a thread.)
+        # does the commit still exist in the repo? (rebase does not delete the
+        # object immediately, but it stops being reachable — which is what
+        # orphans the thread.)
         if not is_commit_reachable(workspace_dir, sha, branch):
             orphaned.append(sha)
     return orphaned
 
 
 def _fetch_base(workspace_dir: str, base_branch: str) -> str:
-    """Busca o tip atual da base no origin e retorna o sha (via FETCH_HEAD)."""
+    """Fetches the base's current tip from origin and returns the sha (via FETCH_HEAD)."""
     _git(workspace_dir, "fetch", "--quiet", "origin", base_branch)
     return _current_sha(workspace_dir, "FETCH_HEAD")
 
 
 def _has_drift(workspace_dir: str, branch: str) -> bool:
-    """A base avançou além do que o branch já contém? Conta os commits em
-    FETCH_HEAD que NÃO são alcançáveis a partir do branch."""
+    """Has the base advanced beyond what the branch already contains? Counts the
+    commits in FETCH_HEAD that are NOT reachable from the branch."""
     out = _git(workspace_dir, "rev-list", "--count", f"{branch}..FETCH_HEAD").stdout.strip()
     return int(out or "0") > 0
 
 
 class MergeBaseConfig:
-    """Localização do repo git para o wrapper de Activity (seam de integração
-    com o WS-C — os testes chamam o core diretamente com paths explícitos, como
-    o LocalFakeSandbox faz para o L1). Em produção o `workspace_dir` é o
-    workspace da tarefa do sandbox do WS-C e o remote `origin` é o repo real do
-    GitHub (URL autenticada da GitHub App)."""
+    """Git repo location for the Activity wrapper (integration seam with WS-C —
+    the tests call the core directly with explicit paths, the way LocalFakeSandbox
+    does for L1). In production `workspace_dir` is the task workspace of WS-C's
+    sandbox and the `origin` remote is the real GitHub repo (GitHub App
+    authenticated URL)."""
 
     def __init__(self) -> None:
         self.git_root = os.environ.get(
@@ -144,11 +145,11 @@ class MergeBaseConfig:
         )
 
     def locations(self, work_item_id: str) -> tuple[str, str]:
-        # Costura com o WS-C (observada ao vivo no review loop): o workspace
-        # REAL da tarefa vive em $DSE_SANDBOX_STATE_DIR/<wi>/workspace (onde o
-        # clone/Coder/checkpoint operam). Se ele existe, é ele que o merge-base
-        # deve atualizar — o default legado (merge_base_repos/, fixtures dos
-        # testes) fica como fallback quando o sandbox real não está neste host.
+        # Seam with WS-C (observed live in the review loop): the REAL task
+        # workspace lives at $DSE_SANDBOX_STATE_DIR/<wi>/workspace (where the
+        # clone/Coder/checkpoint operate). If it exists, that is what merge-base
+        # must update — the legacy default (merge_base_repos/, test fixtures)
+        # stays as a fallback when the real sandbox is not on this host.
         state_dir = os.environ.get("DSE_SANDBOX_STATE_DIR", "/tmp/dse-sandboxes")
         sandbox_ws = os.path.join(state_dir, work_item_id, "workspace")
         if os.path.isdir(sandbox_ws):
@@ -172,29 +173,29 @@ def update_base_branch_core(
     push: bool = True,
     record: bool = True,
 ) -> UpdateBaseBranchResult:
-    """Atualiza `branch` com o drift de `base_branch` SEM reescrever história
-    quando há (ou já houve) review humano. `workspace_dir` é um clone/checkout
-    do repo com o `origin` remote configurado. Ver docstring do módulo."""
+    """Updates `branch` with `base_branch`'s drift WITHOUT rewriting history when
+    there is (or has been) a human review. `workspace_dir` is a clone/checkout of
+    the repo with the `origin` remote configured. See the module docstring."""
     anchored = [s for s in anchored_review_shas if s]
     _ensure_on_branch(workspace_dir, branch)
     old_tip = _current_sha(workspace_dir, "HEAD")
     base_tip = _fetch_base(workspace_dir, base_branch)
 
-    # 1) Sem drift → noop. Nada a mesclar, nada a orfanar.
+    # 1) No drift → noop. Nothing to merge, nothing to orphan.
     if not _has_drift(workspace_dir, branch):
         return _finish(
             work_item_id=work_item_id, tenant_id=tenant_id, repo=repo, branch=branch,
             base_branch=base_branch, strategy="noop_no_drift", conflict=False,
             orphaned=[], anchored=anchored, first_human_review_done=first_human_review_done,
             old_tip=old_tip, new_tip=old_tip,
-            detail=f"base {base_branch}@{base_tip[:8]} já contido no branch — nada a fazer",
+            detail=f"base {base_branch}@{base_tip[:8]} already contained in the branch — nothing to do",
             actor=actor, record=record,
         )
 
-    # 2) Escolha de estratégia — DETERMINÍSTICA (P1). Rebase é permitido SÓ
-    #    antes do 1º review humano E quando não há NENHUMA thread ancorada
-    #    (belt-and-suspenders: mesmo com first_human_review_done=False, se já
-    #    existem threads ancoradas, jamais rebase — orfanaria).
+    # 2) Strategy choice — DETERMINISTIC (P1). Rebase is allowed ONLY before the
+    #    1st human review AND when there is NO anchored thread (belt-and-
+    #    suspenders: even with first_human_review_done=False, if anchored threads
+    #    already exist, never rebase — it would orphan them).
     allow_rebase = (not first_human_review_done) and (len(anchored) == 0)
 
     if allow_rebase:
@@ -206,14 +207,14 @@ def update_base_branch_core(
                 base_branch=base_branch, strategy="rebase_prefirst_review", conflict=True,
                 orphaned=[], anchored=anchored, first_human_review_done=first_human_review_done,
                 old_tip=old_tip, new_tip=old_tip,
-                detail="conflito no rebase pré-review — abortado; escalar a humano",
+                detail="conflict during the pre-review rebase — aborted; escalate to a human",
                 actor=actor, record=record,
             )
         strategy = "rebase_prefirst_review"
         force = True
     else:
-        # git merge origin/main NO branch da tarefa. Preserva a história →
-        # preserva as âncoras das threads → zero órfãs.
+        # git merge origin/main ON the task branch. Preserves history →
+        # preserves the threads' anchors → zero orphans.
         proc = _git(workspace_dir, "merge", "--no-edit", "FETCH_HEAD", check=False)
         if proc.returncode != 0:
             _git(workspace_dir, "merge", "--abort", check=False)
@@ -222,8 +223,8 @@ def update_base_branch_core(
                 base_branch=base_branch, strategy="merge_base", conflict=True,
                 orphaned=[], anchored=anchored, first_human_review_done=first_human_review_done,
                 old_tip=old_tip, new_tip=old_tip,
-                detail="conflito de merge não-resolvível — abortado; workflow escala a humano "
-                       "(o agente NUNCA resolve à força)",
+                detail="unresolvable merge conflict — aborted; the workflow escalates to a human "
+                       "(the agent NEVER force-resolves)",
                 actor=actor, record=record,
             )
         strategy = "merge_base"
@@ -244,8 +245,8 @@ def update_base_branch_core(
         base_branch=base_branch, strategy=strategy, conflict=False,
         orphaned=orphaned, anchored=anchored, first_human_review_done=first_human_review_done,
         old_tip=old_tip, new_tip=new_tip,
-        detail=f"atualizado por {strategy}: {old_tip[:8]} -> {new_tip[:8]} "
-               f"(base {base_tip[:8]}); órfãs={len(orphaned)}",
+        detail=f"updated by {strategy}: {old_tip[:8]} -> {new_tip[:8]} "
+               f"(base {base_tip[:8]}); orphaned={len(orphaned)}",
         actor=actor, record=record,
     )
 

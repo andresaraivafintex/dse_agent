@@ -1,28 +1,28 @@
-# Topologia B — tudo no VPC do cliente (WSF-E5-T3, Fase 4)
+# Topology B — everything inside the client's VPC (WSF-E5-T3, Phase 4)
 
-O chart `infra/helm/dse` suporta duas topologias de deployment. Este documento descreve a
-**topologia B** (a mais estrita) e, sobretudo, o **custo operacional** que ela implica.
+The `infra/helm/dse` chart supports two deployment topologies. This document describes
+**topology B** (the stricter one) and, above all, the **operational cost** it implies.
 
-## A vs B em uma frase
+## A vs B in one sentence
 
-- **Topologia A** (default, `values.yaml`): uma instalação = um tenant = um namespace dentro do
-  VPC/K8s do cliente. Em produção, PERMITE apontar componentes de infra para serviços
-  **gerenciados/compartilhados** — Postgres gerenciado (RDS/CloudSQL), Temporal Cloud, Vault HA
-  externo, Bedrock via PrivateLink. É o ponto de amortização de custo.
-- **Topologia B** (`values-topology-b.yaml`): o TIER MAIS ESTRITO. **TUDO** roda dentro do VPC do
-  cliente, sem nenhuma dependência externa gerenciada nem compartilhada — Postgres, Temporal
-  (+ console), Vault, **e o próprio modelo** (self-hosted / air-gapped, Tier 2). Nada de dado
-  (nem de controle, nem de inferência) sai do VPC.
+- **Topology A** (default, `values.yaml`): one installation = one tenant = one namespace inside the
+  client's VPC/K8s. In production it ALLOWS pointing infra components at
+  **managed/shared** services — managed Postgres (RDS/CloudSQL), Temporal Cloud, external Vault HA,
+  Bedrock via PrivateLink. This is where cost amortizes.
+- **Topology B** (`values-topology-b.yaml`): the STRICTEST TIER. **EVERYTHING** runs inside the
+  client's VPC, with no external managed or shared dependency — Postgres, Temporal
+  (+ console), Vault, **and the model itself** (self-hosted / air-gapped, Tier 2). No data
+  (neither control nor inference) leaves the VPC.
 
-Mapeia no data-flow diagram Tier 2 do `infra/THREAT-MODEL.md §3.2`.
+Maps onto the Tier 2 data-flow diagram in `infra/THREAT-MODEL.md §3.2`.
 
-## Como renderizar/validar
+## How to render/validate
 
 ```bash
-# Topologia A (base)
+# Topology A (base)
 helm template dse-acme infra/helm/dse
 
-# Topologia B (base + overlay estrito)
+# Topology B (base + strict overlay)
 helm template dse-acme infra/helm/dse \
     -f infra/helm/dse/values.yaml \
     -f infra/helm/dse/values-topology-b.yaml
@@ -31,74 +31,74 @@ helm lint infra/helm/dse
 helm lint infra/helm/dse -f infra/helm/dse/values-topology-b.yaml
 ```
 
-(Não é necessário `helm install` real — a validação é `lint` + `template` renderizando YAML
-válido, conforme o aceite da tarefa.)
+(No real `helm install` is required — validation is `lint` + `template` rendering valid
+YAML, per the task's acceptance criteria.)
 
-## O que muda estruturalmente em B
+## What changes structurally in B
 
-| Componente | Topologia A (produção recomendada) | Topologia B (estrita) |
+| Component | Topology A (recommended production) | Topology B (strict) |
 |---|---|---|
-| Postgres | pode ser RDS/CloudSQL gerenciado | StatefulSet in-cluster obrigatório; PITR é responsabilidade do cliente no VPC |
-| Temporal | pode ser Temporal Cloud | self-hosted in-cluster (+ UI in-VPC) |
-| Vault | pode ser Vault HA externo/HSM do cliente | in-cluster, `devMode: false`, unseal pelo cliente |
-| Modelo | Bedrock via PrivateLink (dado no VPC via endpoint privado) | **model-server self-hosted in-cluster (GPU)** — `modelServer.enabled: true` |
-| Egress allowlist | api.github.com, slack.com, *.amazonaws.com | **só hosts internos** (git/registry espelhados); nenhum host público |
-| Console (queue board / Temporal UI) | in-VPC | in-VPC (idem A) |
-| ESO / NetworkPolicy | opcional / on | ESO on + NetworkPolicy default-deny obrigatório |
+| Postgres | may be managed RDS/CloudSQL | in-cluster StatefulSet mandatory; PITR is the client's responsibility inside the VPC |
+| Temporal | may be Temporal Cloud | self-hosted in-cluster (+ UI in-VPC) |
+| Vault | may be the client's external Vault HA/HSM | in-cluster, `devMode: false`, unsealed by the client |
+| Model | Bedrock via PrivateLink (data stays in the VPC via a private endpoint) | **self-hosted in-cluster model server (GPU)** — `modelServer.enabled: true` |
+| Egress allowlist | api.github.com, slack.com, *.amazonaws.com | **internal hosts only** (mirrored git/registry); no public host |
+| Console (queue board / Temporal UI) | in-VPC | in-VPC (same as A) |
+| ESO / NetworkPolicy | optional / on | ESO on + default-deny NetworkPolicy mandatory |
 
-## Custo operacional — NFR-08 × N (o ponto principal)
+## Operational cost — NFR-08 × N (the main point)
 
-**NFR-08** é o custo operacional de manter uma stack DSE em pé (compute + storage + o esforço
-humano de operar Postgres/Temporal/Vault/observabilidade/patching). Em topologia A, boa parte
-desse custo **amortiza** porque componentes pesados podem ser gerenciados (o provedor opera o
-Postgres/Temporal) e/ou compartilhados entre tenants do mesmo operador.
+**NFR-08** is the operational cost of keeping a DSE stack standing (compute + storage + the human
+effort of operating Postgres/Temporal/Vault/observability/patching). In topology A, much of
+that cost **amortizes** because heavy components can be managed (the provider operates
+Postgres/Temporal) and/or shared across tenants of the same operator.
 
-Em **topologia B, nada amortiza**: cada cliente recebe uma **stack standalone completa** dentro do
-próprio VPC. Portanto, para **N clientes** em topologia B, o custo operacional é aproximadamente:
-
-```
-custo_total_B  ≈  N × (NFR-08 stack completa self-hosted)
-```
-
-contra a topologia A, onde:
+In **topology B, nothing amortizes**: each client gets a **complete standalone stack** inside their
+own VPC. So for **N clients** on topology B, the operational cost is approximately:
 
 ```
-custo_total_A  ≈  N × (NFR-08 componentes leves)  +  custo_fixo(serviços gerenciados/compartilhados)
+total_cost_B  ≈  N × (NFR-08 full self-hosted stack)
 ```
 
-### De onde vem a multiplicação, concretamente
+versus topology A, where:
 
-Cada instalação B carrega, por cliente, **sem diluição**:
+```
+total_cost_A  ≈  N × (NFR-08 lightweight components)  +  fixed_cost(managed/shared services)
+```
 
-1. **Postgres self-managed** — não há um time de RDS operando por você. Backup/PITR, upgrades de
-   versão maior, tuning e monitoramento de disco são **× N**.
-2. **Temporal self-hosted** — cluster de orquestração + sua própria persistência e UI, operado e
-   atualizado (Worker Versioning, ver `infra/RUNBOOK-UPGRADE.md`) **× N**.
-3. **Vault HA in-cluster** — unseal, rotação, DR do cofre, **× N** (não um Vault central).
-4. **GPU para o model-server air-gapped** — o item mais caro. Uma GPU (ou pool) dedicada por
-   cliente, ociosa fora dos picos, **× N**. Não há amortização de inferência entre clientes
-   (que é justamente a economia de um endpoint gerenciado como Bedrock).
-5. **Observabilidade + patching + on-call** — o custo humano de operar N stacks isoladas cresce
-   quase linearmente; não há "um pane de vidro" central por definição do air-gap.
+### Where the multiplication comes from, concretely
 
-### Implicação de negócio (registrada honestamente)
+Each B installation carries, per client, **undiluted**:
 
-- Topologia B só se paga para o tier de clientes cuja exigência regulatória/contratual **proíbe**
-  qualquer saída de dado do VPC (o motivo de existir). Para os demais, topologia A com PrivateLink
-  (Tier 1) entrega a mesma residência de dado de inferência a uma fração do custo.
-- O pricing do piloto deve refletir a multiplicação: um cliente em topologia B não pode ser
-  precificado como um tenant marginal de uma stack compartilhada — ele **é** a stack.
-- A GPU dedicada é o driver dominante de custo e o item de maior lead time de provisionamento no
-  VPC do cliente; começar cedo (é caminho crítico junto com as credenciais reais — adendo 03
-  §Parte 3).
+1. **Self-managed Postgres** — there is no RDS team operating it for you. Backup/PITR, major
+   version upgrades, tuning and disk monitoring are **× N**.
+2. **Self-hosted Temporal** — an orchestration cluster plus its own persistence and UI, operated and
+   upgraded (Worker Versioning, see `infra/RUNBOOK-UPGRADE.md`) **× N**.
+3. **In-cluster Vault HA** — unseal, rotation, vault DR, **× N** (not one central Vault).
+4. **GPU for the air-gapped model server** — the most expensive item. A dedicated GPU (or pool) per
+   client, idle outside peaks, **× N**. There is no inference amortization across clients
+   (which is exactly the economics of a managed endpoint like Bedrock).
+5. **Observability + patching + on-call** — the human cost of operating N isolated stacks grows
+   almost linearly; there is no "single pane of glass" by definition of the air gap.
 
-## Estado (P8 — honesto)
+### Business implication (recorded honestly)
 
-- O empacotamento (overlay + template do model-server) está completo e validado por
-  `helm lint` + `helm template` (ambas as topologias renderizam YAML válido).
-- O `model-server` air-gapped concreto (imagem/serving) é **P2** (WSD-E5-T2/T3): o mecanismo de
-  provider custom já está provado (echo provider, `services/model-gateway/tests/test_echo_provider.py`);
-  a imagem de serving real não bloqueia o piloto.
-- `helm install` real em um cluster com GPU device plugin não foi executado (fora do escopo do
-  aceite e sem hardware de GPU nesta sessão). Em cluster sem GPU, deixar `modelServer.gpu: 0`
-  para o `helm template`/`lint` validar sem exigir `nvidia.com/gpu`.
+- Topology B only pays off for the tier of clients whose regulatory/contractual requirement
+  **forbids** any data from leaving the VPC (its reason to exist). For everyone else, topology A with
+  PrivateLink (Tier 1) delivers the same inference-data residency at a fraction of the cost.
+- Pilot pricing must reflect the multiplication: a topology B client cannot be
+  priced as a marginal tenant on a shared stack — they **are** the stack.
+- The dedicated GPU is the dominant cost driver and the item with the longest provisioning lead time in
+  the client's VPC; start early (it is on the critical path along with the real credentials — addendum 03
+  §Part 3).
+
+## State (P8 — honest)
+
+- The packaging (overlay + model-server template) is complete and validated by
+  `helm lint` + `helm template` (both topologies render valid YAML).
+- The concrete air-gapped `model-server` (image/serving) is **P2** (WSD-E5-T2/T3): the custom
+  provider mechanism is already proven (echo provider, `services/model-gateway/tests/test_echo_provider.py`);
+  the real serving image does not block the pilot.
+- A real `helm install` on a cluster with a GPU device plugin was not executed (out of scope for the
+  acceptance criteria and with no GPU hardware in this session). On a cluster without a GPU, leave
+  `modelServer.gpu: 0` so that `helm template`/`lint` validate without requiring `nvidia.com/gpu`.

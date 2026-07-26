@@ -1,33 +1,34 @@
-"""Enforcement no call time (WSD-E2 + WSD-E4-T2) — o ponto único onde política,
-budget, kill switch e reassign se aplicam a CADA chamada de modelo.
+"""Call-time enforcement (WSD-E2 + WSD-E4-T2) — the single point where policy,
+budget, kill switch and reassign apply to EVERY model call.
 
-`enforce_call(headers, requested_model)` é chamado por
-`gateway_call.chat_completion` ANTES de qualquer HTTP para o LiteLLM. Ordem:
+`enforce_call(headers, requested_model)` is called by
+`gateway_call.chat_completion` BEFORE any HTTP to LiteLLM. Order:
 
-  1. reassign de modelo em voo (WSD-E4-T2) — troca o modelo efetivo;
-  2. kill switch (WSD-E4-T2) — global/tenant/work_item -> recusa;
-  3. política (WSD-E2-T1) — modelo efetivo tem que estar no allowlist do escopo;
-  4. budget (WSD-E2-T2) — spent-so-far do work_item e do tenant vs caps.
+  1. in-flight model reassign (WSD-E4-T2) — swaps the effective model;
+  2. kill switch (WSD-E4-T2) — global/tenant/work_item -> refuse;
+  3. policy (WSD-E2-T1) — the effective model must be in the scope's allowlist;
+  4. budget (WSD-E2-T2) — work_item and tenant spent-so-far vs caps.
 
-Toda recusa:
-  - é uma FRONTEIRA limpa (P6 decline-never-truncate): levanta
-    `GatewayCallError(status, body)` com `body` no formato
-    `dse_contracts.gateway_contract.GatewayErrorResponse`
-    (`error in {policy_denied, budget_exhausted}`), que o workflow do WS-B
-    converte em Failed;
-  - gera uma linha de audit (P8) via `dse_audit.emit`;
-  - NÃO é decidida por um LLM (P1) — é código determinístico lendo config/estado.
+Every refusal:
+  - is a clean BOUNDARY (P6 decline-never-truncate): raises
+    `GatewayCallError(status, body)` with `body` in
+    `dse_contracts.gateway_contract.GatewayErrorResponse` format
+    (`error in {policy_denied, budget_exhausted}`), which the WS-B workflow
+    turns into Failed;
+  - produces an audit row (P8) via `dse_audit.emit`;
+  - is NOT decided by an LLM (P1) — it is deterministic code reading
+    config/state.
 
-Enforcement é PERMISSIVO por default: sem política configurada, sem cap, sem
-kill switch e sem reassign, `enforce_call` devolve o modelo requisitado
-inalterado — o comportamento da Fase 1 é preservado para tenants sem config.
+Enforcement is PERMISSIVE by default: with no policy configured, no cap, no
+kill switch and no reassign, `enforce_call` returns the requested model
+unchanged — Phase 1 behavior is preserved for tenants with no config.
 
-Nota de arquitetura (honesta): este enforcement roda no caminho do CLIENTE do
-gateway. O backstop server-side já existe e NÃO é burlável pelo sandbox: as
-virtual keys são escopadas por modelo no LiteLLM (403 nativo) e podem levar
-`max_budget`/`duration`. Para um deployment 100% non-bypassable, o mesmo
-`enforce_call` deve ser espelhado como um pre-call hook do LiteLLM proxy
-(callback custom) — ver README §"O que falta para produção".
+Architecture note (honest): this enforcement runs on the gateway's CLIENT path.
+The server-side backstop already exists and is NOT bypassable by the sandbox:
+virtual keys are scoped per model in LiteLLM (native 403) and can carry
+`max_budget`/`duration`. For a 100% non-bypassable deployment, this same
+`enforce_call` must be mirrored as a LiteLLM proxy pre-call hook (custom
+callback) — see README §"What is still missing for production".
 """
 from __future__ import annotations
 
@@ -58,10 +59,10 @@ def _deny(
     action: str,
     extra: dict,
 ) -> "GatewayCallError":
-    """Constrói o corpo de recusa (validável como GatewayErrorResponse), emite
-    audit e retorna a exceção pronta para o caller levantar."""
+    """Builds the refusal body (validatable as GatewayErrorResponse), emits
+    audit and returns the exception ready for the caller to raise."""
     body = GatewayErrorResponse(error=error, message=message, retryable=False).model_dump()
-    body.update(extra)  # detalhe adicional (kind/scope/cap) — extras ignorados na validação
+    body.update(extra)  # extra detail (kind/scope/cap) — extras ignored on validation
     audit_emit(
         actor=_AUDIT_ACTOR,
         action=action,
@@ -83,7 +84,7 @@ def enforce_call(headers: GatewayCallHeaders, requested_model: str) -> Enforceme
     tenant_id = headers.tenant_id
     work_item_id = headers.work_item_id
 
-    # 1. reassign em voo (operador) — modelo efetivo pode mudar.
+    # 1. in-flight reassign (operator) — the effective model may change.
     reassigned_to = controls.resolve_reassignment(work_item_id)
     effective_model = reassigned_to or requested_model
     reassigned_from = requested_model if reassigned_to else None
@@ -106,7 +107,7 @@ def enforce_call(headers: GatewayCallHeaders, requested_model: str) -> Enforceme
             },
         )
 
-    # 3. política — modelo efetivo tem que estar no allowlist do escopo.
+    # 3. policy — the effective model must be in the scope's allowlist.
     decision = policy.resolve_policy(
         tenant_id,
         headers.stage.value,

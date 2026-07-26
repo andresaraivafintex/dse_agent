@@ -1,13 +1,14 @@
-# WS-D — model-gateway (LiteLLM). Ver CONVENTIONS.md — conectado à rede
-# externa `dse_net` já criada pela fundação. Não editar docker-compose.yml.
+# WS-D — model-gateway (LiteLLM). See CONVENTIONS.md — connected to the
+# external network `dse_net` already created by the foundation. Do not edit
+# docker-compose.yml.
 #
-# Version pinning (WSD-E1-T1): a imagem do LiteLLM é fixada por DIGEST, não
-# por tag flutuante (`main-latest` muda de conteúdo silenciosamente). O
-# digest abaixo corresponde à imagem litellm==1.93.0 puxada em 2026-07-09.
-# Procedimento de upgrade: ver services/model-gateway/README.md
-# §"Version pinning e upgrade simulado" — troque o digest, rode
-# `services/model-gateway/scripts/smoke_test.py` contra o modelo eco, compare
-# byte-a-byte com a baseline antes de promover.
+# Version pinning (WSD-E1-T1): the LiteLLM image is pinned by DIGEST, not by a
+# floating tag (`main-latest` changes content silently). The digest below
+# corresponds to the litellm==1.93.0 image pulled on 2026-07-09.
+# Upgrade procedure: see services/model-gateway/README.md
+# §"Version pinning e upgrade simulado" — swap the digest, run
+# `services/model-gateway/scripts/smoke_test.py` against the echo model, and
+# compare byte for byte with the baseline before promoting.
 
 services:
   model-gateway-echo:
@@ -19,12 +20,12 @@ services:
       ECHO_PORT: "9000"
     networks: [dse_net]
 
-  # Fase 3 (WSD-E4-T1): SEGUNDA instância do modelo eco — mesmo tier
-  # ("local-dev"), mesma imagem, endpoint distinto. É o alvo do fallback
-  # intra-tier nativo do LiteLLM (ver router_settings em litellm_config.yaml).
-  # Os testes de failover derrubam `dse_model_gateway_echo` DE VERDADE
-  # (docker stop) e provam que esta instância assume, com atribuição de
-  # custo/audit corretas — e que ambas fora => recusa limpa (P6).
+  # Phase 3 (WSD-E4-T1): SECOND instance of the echo model — same tier
+  # ("local-dev"), same image, different endpoint. It is the target of
+  # LiteLLM's native intra-tier fallback (see router_settings in
+  # litellm_config.yaml). The failover tests take `dse_model_gateway_echo` down
+  # FOR REAL (docker stop) and prove this instance takes over, with correct
+  # cost/audit attribution — and that both down => clean refusal (P6).
   model-gateway-echo-b:
     build:
       context: ./services/model-gateway/echo_provider
@@ -32,19 +33,20 @@ services:
     container_name: dse_model_gateway_echo_b
     environment:
       ECHO_PORT: "9000"
-      # Nome de upstream distinto: permite distinguir nos logs/respostas qual
-      # instância serviu (o LiteLLM reescreve `model` para o alias, mas o
-      # header x-litellm-model-api-base preserva o endpoint real).
+      # Distinct upstream name: makes it possible to tell from the
+      # logs/responses which instance served (LiteLLM rewrites `model` to the
+      # alias, but the x-litellm-model-api-base header keeps the real endpoint).
       ECHO_MODEL_NAME: "echo-model-b"
     networks: [dse_net]
 
   model-gateway:
-    # F2 (auditoria): imagem DERIVADA da stock pinada (Dockerfile.proxy) — a
-    # stock não tem driver Postgres e o hook de budget ficaria inerte. O digest
-    # pinado vive no FROM do Dockerfile.proxy (upgrade segue explícito).
+    # F2 (audit): image DERIVED from the pinned stock one (Dockerfile.proxy) —
+    # the stock image has no Postgres driver and the budget hook would be
+    # inert. The pinned digest lives in Dockerfile.proxy's FROM (upgrades stay
+    # explicit).
     build:
-      # contexto = raiz do monorepo (mesmo do release) para o Dockerfile.proxy
-      # embutir config/hook por caminho services/model-gateway/...
+      # context = monorepo root (same as the release) so Dockerfile.proxy can
+      # embed config/hook by the services/model-gateway/... path
       context: .
       dockerfile: services/model-gateway/Dockerfile.proxy
     image: dse-model-gateway-proxy:local
@@ -54,33 +56,33 @@ services:
       - model-gateway-echo-b
     environment:
       LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
-      # Banco DEDICADO do LiteLLM (schema interno do proxy p/ /key/generate,
-      # spend tracking etc.) — uma database própria `dse_litellm` na MESMA
-      # instância Postgres da fundação, NUNCA o schema/database `dse`
-      # compartilhado do control-plane. Criada uma vez via:
+      # DEDICATED LiteLLM database (the proxy's internal schema for
+      # /key/generate, spend tracking, etc.) — its own `dse_litellm` database
+      # on the SAME Postgres instance as the foundation, NEVER the shared
+      # control-plane `dse` schema/database. Created once via:
       #   docker exec dse_postgres psql -U dse -d dse -c "CREATE DATABASE dse_litellm OWNER dse;"
       DATABASE_URL: ${DSE_LITELLM_DATABASE_URL:-postgresql://dse:dse_dev_only@dse_postgres:5432/dse_litellm}
       DSE_ECHO_PROVIDER_URL: "http://model-gateway-echo:9000"
       DSE_ECHO_PROVIDER_B_URL: "http://model-gateway-echo-b:9000"
       DSE_ECHO_PROVIDER_API_KEY: ${DSE_ECHO_PROVIDER_API_KEY:-sk-eco-local-dev-not-a-real-key}
-      # PoC: key da Anthropic injetada do Vault no boot (ver Makefile/README);
-      # nunca hardcoded aqui. Se vazia, o modelo anthropic/claude simplesmente
-      # não responde — o resto do gateway (echo/failover) segue funcionando.
+      # PoC: Anthropic key injected from Vault at boot (see Makefile/README);
+      # never hardcoded here. If empty, the anthropic/claude model simply does
+      # not answer — the rest of the gateway (echo/failover) keeps working.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Placeholders de produção (Bedrock/PrivateLink) — sem valor real
-      # disponível nesta sessão de dev; ver litellm_config.yaml e README.
+      # Production placeholders (Bedrock/PrivateLink) — no real value available
+      # in this dev session; see litellm_config.yaml and README.
       DSE_AWS_REGION: ${DSE_AWS_REGION:-us-east-1}
       DSE_BEDROCK_PRIVATELINK_ENDPOINT: ${DSE_BEDROCK_PRIVATELINK_ENDPOINT:-https://vpce-PLACEHOLDER.bedrock-runtime.us-east-1.vpce.amazonaws.com}
       DSE_BEDROCK_IAM_ROLE_ARN: ${DSE_BEDROCK_IAM_ROLE_ARN:-arn:aws:iam::000000000000:role/dse-model-gateway-PLACEHOLDER}
-      # Plano 08 §F (F2): o pre-call hook lê o Postgres do CONTROL-PLANE (schema
-      # `dse`: kill-switch/budgets/ledger) — distinto do DATABASE_URL interno do
-      # proxy (`dse_litellm`). Só-leitura na prática (o hook só faz SELECT + um
-      # INSERT append-only em audit_log).
+      # Plan 08 §F (F2): the pre-call hook reads the CONTROL-PLANE Postgres
+      # (schema `dse`: kill-switch/budgets/ledger) — distinct from the proxy's
+      # internal DATABASE_URL (`dse_litellm`). Read-only in practice (the hook
+      # only does SELECTs + one append-only INSERT into audit_log).
       DSE_DATABASE_URL: ${DSE_DATABASE_URL:-postgresql://dse_app:dse_app_dev_only@dse_postgres:5432/dse}
     volumes:
       - ./services/model-gateway/litellm_config.yaml:/app/config.yaml:ro
-      # F2: monta o hook no CWD do proxy (/app está no PYTHONPATH → import
-      # dse_budget_hook resolve).
+      # F2: mounts the hook in the proxy's CWD (/app is on PYTHONPATH → the
+      # dse_budget_hook import resolves).
       - ./services/model-gateway/dse_budget_hook.py:/app/dse_budget_hook.py:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     ports:

@@ -108,10 +108,10 @@ jobs:
       - name: Install locked environment
         run: python -m pip install -r requirements-ci.lock
 
-      # O runner limpo não tem git configurado como uma máquina de dev: sem
-      # init.defaultBranch (o git cai em "master") os testes que clonam um bare
-      # criado sem -b fazem checkout de um HEAD inexistente e o merge/drift fica
-      # incoerente; sem user.identity, qualquer commit de teste falha.
+      # A clean runner does not have git configured like a dev machine: without
+      # init.defaultBranch (git falls back to "master") the tests that clone a
+      # bare repo created without -b check out a non-existent HEAD and the
+      # merge/drift becomes incoherent; without user.identity, any test commit fails.
       - name: Configure git for deterministic tests
         run: |
           git config --global init.defaultBranch main
@@ -123,8 +123,8 @@ jobs:
           if ! docker network inspect dse_sandbox_net >/dev/null 2>&1; then
             docker network create --internal dse_sandbox_net
           fi
-          # Fragments ws* declaram dse_net como external (o merge do compose
-          # herda essa marcação) — no runner limpo ela não existe ainda.
+          # ws* fragments declare dse_net as external (the compose merge
+          # inherits that flag) — on a clean runner it does not exist yet.
           if ! docker network inspect dse_net >/dev/null 2>&1; then
             docker network create dse_net
           fi
@@ -187,9 +187,9 @@ jobs:
           VAULT_ADDR: http://localhost:8200
           VAULT_TOKEN: dse_dev_root
           VAULT_DEV_ROOT_TOKEN: dse_dev_root
-          # api_bases dos deployments de fallback (echo B) — deixa a detecção de
-          # degradação por COOLDOWN funcionar no runner (health-check tira o
-          # primário do pool antes da chamada; ver failover.detect_degradation).
+          # api_bases of the fallback deployments (echo B) — lets COOLDOWN
+          # degradation detection work on the runner (the health check pulls the
+          # primary out of the pool before the call; see failover.detect_degradation).
           DSE_FALLBACK_API_BASES: "http://model-gateway-echo-b:9000"
         run: >-
           python scripts/with_test_database.py --
@@ -225,9 +225,9 @@ jobs:
         with:
           version: v4.0.4
 
-      # Suíte canônica do chart (tests/test_profiles.sh): dev renderiza; pilot
-      # SEM digests DEVE falhar (fail-closed) e COM o fixture de digests passa
-      # todas as asserções de postura. Os passos crus antigos invertiam essa
-      # semântica (renderavam pilot sem o fixture e falhavam sempre).
+      # Canonical chart suite (tests/test_profiles.sh): dev renders; pilot
+      # WITHOUT digests MUST fail (fail-closed) and WITH the digest fixture it
+      # passes every posture assertion. The old raw steps inverted that
+      # semantics (they rendered pilot without the fixture and always failed).
       - name: Chart profile suite (lint + render + fail-closed posture)
         run: bash infra/helm/dse/tests/test_profiles.sh

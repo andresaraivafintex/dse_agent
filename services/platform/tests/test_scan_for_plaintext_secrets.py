@@ -1,7 +1,7 @@
-"""WSF-E2-T3a — testes do scanner de secrets em texto plano.
+"""WSF-E2-T3a — tests for the plaintext secrets scanner.
 
-Usa um repositório git temporário isolado (tmp_path) para não depender do
-estado real do monorepo (que muda conforme os outros workstreams commitam).
+Uses an isolated temporary git repo (tmp_path) so the tests do not depend on the
+real monorepo state (which changes as the other workstreams commit).
 """
 from __future__ import annotations
 
@@ -103,9 +103,10 @@ def test_ignores_untracked_venv_directory(tmp_path):
 
 
 def test_real_repo_scan_runs_and_returns_deterministic_exit_code():
-    """Smoke test contra o monorepo real: o scanner deve rodar sem erro de
-    execução (exit 0 ou 1 são ambos aceitáveis — depende do estado atual dos
-    outros workstreams; o que este teste garante é que o script não quebra)."""
+    """Smoke test against the real monorepo: the scanner must run without an
+    execution error (exit 0 or 1 are both acceptable — it depends on the current
+    state of the other workstreams; what this test guarantees is that the script
+    does not break)."""
     result = _run_scanner(REPO_ROOT)
     assert result.returncode in (0, 1)
     assert "[scan_for_plaintext_secrets]" in result.stdout

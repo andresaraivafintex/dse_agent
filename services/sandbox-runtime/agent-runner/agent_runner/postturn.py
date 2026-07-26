@@ -1,24 +1,24 @@
-"""Op `--op post_turn` — pós-turno do Coder DENTRO do sandbox (runtime K8s).
+"""Op `--op post_turn` — the Coder's post-turn INSIDE the sandbox (K8s runtime).
 
-Mesma sequência determinística que o worker executa no runtime Docker
-(`_run_coder_turn_impl`), com a mesma fonte de verdade (`workspace_hygiene` e
-`scoped_git`, vendorados na imagem): prune de descartáveis → restore de
-lockfile churn → revert de edições de teste → commit/push escopado (refspec
-fixo, hook pre-receive no remoto). Devolve as listas para o worker auditar
-(P8 fica no worker; aqui não há Postgres nem credencial de audit).
+Same deterministic sequence the worker runs on the Docker runtime
+(`_run_coder_turn_impl`), off the same source of truth (`workspace_hygiene` and
+`scoped_git`, vendored into the image): prune disposables → restore lockfile
+churn → revert test edits → scoped commit/push (fixed refspec, pre-receive hook
+on the remote). Returns the lists for the worker to audit (P8 stays in the
+worker; there is no Postgres nor audit credential here).
 """
 from __future__ import annotations
 
 from dse_contracts import PostTurnRequest, PostTurnResult
 
-try:  # dev/test: pacotes do worker no venv
+try:  # dev/test: worker packages in the venv
     from sandbox_runtime.scoped_git import ScopedGitSession
     from sandbox_runtime.workspace_hygiene import (
         prune_disposable_artifacts,
         restore_lockfile_churn,
         revert_test_edits,
     )
-except ImportError:  # imagem: cópias vendoradas no build (Dockerfile)
+except ImportError:  # image: copies vendored at build time (Dockerfile)
     from ._scoped_git import ScopedGitSession  # type: ignore[no-redef]
     from ._workspace_hygiene import (  # type: ignore[no-redef]
         prune_disposable_artifacts,
@@ -61,7 +61,7 @@ def run_post_turn(req: PostTurnRequest) -> PostTurnResult:
             restored_lockfiles=restored,
             reverted_tests=reverted,
         )
-    except Exception as exc:  # noqa: BLE001 — P6 (inclui GitScopeViolation)
+    except Exception as exc:  # noqa: BLE001 — P6 (includes GitScopeViolation)
         return PostTurnResult(
             error=f"{type(exc).__name__}: {str(exc)[:400]}",
             error_kind="gitops_error",

@@ -1,12 +1,12 @@
-"""WSD-E4-T2: kill switch de gateway por escopo + reassign de modelo em voo.
+"""WSD-E4-T2: scoped gateway kill switch + in-flight model reassign.
 
-Testes REAIS. Provam:
-  - kill switch por work_item/tenant/global recusa a chamada e audita;
-  - o gateway HONRA os controles do WS-F (tenant_config.kill_switch_enabled e
-    dse_kill_switch_global) além da própria tabela;
-  - liga/desliga: desativar o switch volta a permitir (efeito <= TTL do cache);
-  - reassign troca o modelo efetivo da próxima chamada + audita;
-  - reassign NÃO burla a política.
+REAL tests. They prove:
+  - a work_item/tenant/global kill switch refuses the call and audits it;
+  - the gateway HONORS WS-F's controls (tenant_config.kill_switch_enabled and
+    dse_kill_switch_global) on top of its own table;
+  - on/off: disabling the switch allows calls again (effect <= the cache TTL);
+  - reassign swaps the effective model of the next call + audits it;
+  - reassign does NOT bypass policy.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def test_work_item_kill_switch_denies_and_audits(unique_ids):
         assert ei.value.body["scope_type"] == "work_item"
         assert "gateway.call_denied_kill_switch" in _audit_actions(wi)
 
-        # desligar o switch -> volta a permitir
+        # turning the switch off -> calls are allowed again
         set_kill_switch("work_item", wi, enabled=False, actor="system:operator", tenant_id=t)
         r = chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "ok"}])
         assert r.content.startswith("ECHO[")
@@ -90,7 +90,7 @@ def test_gateway_honors_wsf_tenant_kill_switch(unique_ids):
             chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "x"}])
         assert ei.value.body["source"] == "tenant_config"
     finally:
-        # limpa o switch do WS-F para não afetar outros testes do mesmo tenant
+        # clears the WS-F switch so it does not affect other tests of the same tenant
         conn = db.get_connection()
         try:
             with conn.cursor() as cur:
@@ -104,19 +104,19 @@ def test_gateway_honors_wsf_tenant_kill_switch(unique_ids):
 
 def test_reassign_changes_effective_model_and_audits(unique_ids):
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    # key escopada a AMBOS os aliases para que o LiteLLM não bloqueie por model-scope
+    # key scoped to BOTH aliases so LiteLLM does not block on model-scope
     key = mint_virtual_key(t, wi, Stage.coder, models=[ECHO, "bedrock/anthropic.claude-3-haiku"])
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
-        # operador reassigna o work_item do haiku (indisponível/AWS) para o echo
+        # operator reassigns the work_item from haiku (unavailable/AWS) to echo
         reassign_model(wi, ECHO, reason="fallback para modelo local", actor="system:operator", tenant_id=t)
         assert controls.resolve_reassignment(wi) == ECHO
-        # o caller pede haiku, mas o reassign força echo -> resposta do echo
+        # the caller asks for haiku, but the reassign forces echo -> echo's response
         r = chat_completion(
             headers=headers, virtual_key=key, model="bedrock/anthropic.claude-3-haiku",
             messages=[{"role": "user", "content": "abc"}],
         )
-        assert r.content == "ECHO[cba]"  # veio do echo, não do haiku
+        assert r.content == "ECHO[cba]"  # came from echo, not from haiku
         assert "gateway.model_reassigned" in _audit_actions(wi)
         clear_reassignment(wi, actor="system:operator", tenant_id=t)
         assert controls.resolve_reassignment(wi) is None
@@ -127,7 +127,7 @@ def test_reassign_changes_effective_model_and_audits(unique_ids):
 def test_reassign_does_not_bypass_policy(unique_ids):
     import json
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    # política do tenant só permite o echo
+    # the tenant's policy only permits echo
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -145,7 +145,7 @@ def test_reassign_does_not_bypass_policy(unique_ids):
     key = mint_virtual_key(t, wi, Stage.coder, models=[ECHO, "bedrock/anthropic.claude-3-haiku"])
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
-        # reassigna para um modelo NÃO permitido pela política -> deve ser negado pela política
+        # reassigns to a model NOT permitted by policy -> must be denied by policy
         reassign_model(wi, "bedrock/anthropic.claude-3-haiku", actor="system:operator", tenant_id=t)
         with pytest.raises(GatewayCallError) as ei:
             chat_completion(headers=headers, virtual_key=key, model=ECHO, messages=[{"role": "user", "content": "x"}])

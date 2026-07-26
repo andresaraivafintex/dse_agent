@@ -1,7 +1,7 @@
--- Fintex DSE — Plano 08 §D (D5) — projeção da evidência (preview) no read
--- model do console. O console-projector tail-eia `work_item_evidence` e reflete
--- o status/URL do preview na work_items_view, para o painel mostrar o link do
--- preview ao lado do PR. Aditiva e idempotente.
+-- Fintex DSE — Plan 08 §D (D5) — projection of the evidence (preview) into the
+-- console read model. The console-projector tails `work_item_evidence` and
+-- reflects the preview status/URL on work_items_view, so the panel can show the
+-- preview link next to the PR. Additive and idempotent.
 
 ALTER TABLE console_rm.work_items_view ADD COLUMN IF NOT EXISTS preview_status TEXT;
 ALTER TABLE console_rm.work_items_view ADD COLUMN IF NOT EXISTS preview_url TEXT;

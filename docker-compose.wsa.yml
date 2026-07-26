@@ -1,10 +1,10 @@
-# WS-A — Ingestão e adaptadores (ver CONVENTIONS.md). Fragment reservado do
-# WS-A: só os serviços deste workstream, conectados à rede externa `dse_net`
-# (declarada em docker-compose.yml, fundação). `make up` faz o merge de
-# todos os fragments `docker-compose.ws*.yml` presentes.
+# WS-A — Ingestion and adapters (see CONVENTIONS.md). Fragment reserved for
+# WS-A: only this workstream's services, connected to the external network
+# `dse_net` (declared in docker-compose.yml, the foundation). `make up` merges
+# every `docker-compose.ws*.yml` fragment present.
 #
-# Build a partir da RAIZ do monorepo (contexto = `.`) porque cada Dockerfile
-# precisa copiar `packages/*` além do próprio serviço.
+# Build from the ROOT of the monorepo (context = `.`) because each Dockerfile
+# needs to copy `packages/*` in addition to the service itself.
 
 services:
   adapter-slack:
@@ -69,7 +69,7 @@ services:
     depends_on:
       - temporal
 
-  # --- Fase 2 (WSA-E5): adapter Jira + workers de transição/poll ---
+  # --- Phase 2 (WSA-E5): Jira adapter + transition/poll workers ---
   adapter-jira:
     build:
       context: .
@@ -93,7 +93,7 @@ services:
     networks: [dse_net]
     restart: unless-stopped
 
-  # Worker de transições serializadas por ticket (WSA-E5-T3).
+  # Worker for per-ticket serialized transitions (WSA-E5-T3).
   adapter-jira-transitions:
     build:
       context: .
@@ -110,10 +110,10 @@ services:
     networks: [dse_net]
     restart: unless-stopped
 
-  # --- Fase 4 (WSA, PROVISÃO): adapter Teams — NÃO ativado (ver
-  # services/adapter-teams/README.md). Sobe o serviço (health/outbound
-  # funcionam); o inbound retorna 501 teams_not_activated até a fundação
-  # expor Platform.teams + activation.sql. Porta 8808. ---
+  # --- Phase 4 (WSA, PROVISION): Teams adapter — NOT activated (see
+  # services/adapter-teams/README.md). It starts the service (health/outbound
+  # work); inbound returns 501 teams_not_activated until the foundation
+  # exposes Platform.teams + activation.sql. Port 8808. ---
   adapter-teams:
     build:
       context: .
@@ -133,7 +133,7 @@ services:
     networks: [dse_net]
     restart: unless-stopped
 
-  # Poller de fallback do webhook Jira (best-effort) — WSA-E5-T2.
+  # Fallback poller for the Jira webhook (best-effort) — WSA-E5-T2.
   adapter-jira-poller:
     build:
       context: .

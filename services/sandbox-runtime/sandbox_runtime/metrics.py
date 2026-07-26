@@ -1,15 +1,15 @@
-"""Métricas OTel de runtime de sandbox por resource class (WSC-E1-T2).
+"""OTel metrics for sandbox runtime per resource class (WSC-E1-T2).
 
-Usa os nomes de atributo definidos em `dse_contracts.constants.OTEL_ATTR_*`
-para que WSF-E7 (dashboards/alerting) consiga correlacionar com o que
-WSD-E3 (model-gateway) emite, sem precisar coordenar em tempo real.
+Uses the attribute names defined in `dse_contracts.constants.OTEL_ATTR_*` so
+that WSF-E7 (dashboards/alerting) can correlate with what WSD-E3
+(model-gateway) emits, without needing real-time coordination.
 
-Em produção, o exporter é configurado via variáveis de ambiente padrão do
-OTel SDK (`OTEL_EXPORTER_OTLP_ENDPOINT` etc., ver
-opentelemetry.exporter.otlp) — este módulo não força nenhum exporter
-específico; se nenhum estiver configurado, usa um
-`InMemoryMetricReader`-friendly `MeterProvider` (sem exportar de verdade)
-para não quebrar processos que não têm um collector no ar.
+In production the exporter is configured through the OTel SDK's standard
+environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT` etc., see
+opentelemetry.exporter.otlp) — this module does not force any specific
+exporter; if none is configured it uses an `InMemoryMetricReader`-friendly
+`MeterProvider` (not actually exporting) so it does not break processes that
+have no collector running.
 """
 from __future__ import annotations
 
@@ -36,9 +36,9 @@ def _get_provider() -> MeterProvider:
     global _provider
     if _provider is not None:
         return _provider
-    # Boring-first (P7): sem collector configurado, exporta pro console (dev);
-    # `readers=[]` seria silencioso demais para provar que a métrica existe —
-    # preferimos um reader real e barato (console) por padrão em dev.
+    # Boring-first (P7): with no collector configured, export to the console (dev);
+    # `readers=[]` would be too silent to prove the metric exists at all — we
+    # prefer a real, cheap reader (console) as the dev default.
     if os.environ.get("DSE_OTEL_DISABLE_CONSOLE_EXPORT") == "1":
         _provider = MeterProvider()
     else:
@@ -55,10 +55,10 @@ def get_meter():
 
 
 def set_provider_for_test(provider: MeterProvider) -> None:
-    """Usado exclusivamente pela suíte de testes para injetar um
-    `MeterProvider` com um `InMemoryMetricReader` e conseguir fazer asserts
-    sobre os data points emitidos (ver tests/test_resource_caps_and_metrics.py).
-    Nunca chamado em código de produção."""
+    """Used exclusively by the test suite to inject a `MeterProvider` with an
+    `InMemoryMetricReader` so tests can assert on the emitted data points (see
+    tests/test_resource_caps_and_metrics.py). Never called from production
+    code."""
     global _provider, _runtime_histogram
     _provider = provider
     metrics.set_meter_provider(provider)
@@ -87,9 +87,9 @@ def record_sandbox_runtime_minutes(
     resource_class: str,
     minutes: float,
 ) -> None:
-    """Emite um data point OTel de minutos de runtime consumidos por um
-    sandbox, atribuído a uma resource class (ex.: "small"/"medium"/"large",
-    derivada do budget do WorkItem). Chamado por `teardown_sandbox`."""
+    """Emit an OTel data point with the runtime minutes consumed by a sandbox,
+    attributed to a resource class (e.g. "small"/"medium"/"large", derived from
+    the WorkItem budget). Called by `teardown_sandbox`."""
     _histogram().record(
         minutes,
         attributes={

@@ -1,8 +1,8 @@
 {{- if .Values.migrations.enabled }}
-# Fase 5 (plano 09): migrações como Job de hook — o deploy é autossuficiente
-# (helm upgrade aplica o schema ANTES dos workloads novos subirem). Reusa a
-# imagem do orchestrator (carrega scripts/migrate.py + psycopg2) e o mesmo
-# secret de Postgres; idempotente por desenho (schema_migrations).
+# Phase 5 (plan 09): migrations as a hook Job — the deploy is self-sufficient
+# (helm upgrade applies the schema BEFORE the new workloads come up). Reuses the
+# orchestrator image (which carries scripts/migrate.py + psycopg2) and the same
+# Postgres secret; idempotent by design (schema_migrations).
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -1,18 +1,18 @@
-"""WS-C: sandbox efêmero por tarefa.
+"""WS-C: per-task ephemeral sandbox.
 
-Este pacote nunca deve levantar exceção só de ser importado (o worker do
-WS-B importa `sandbox_runtime.activities` defensivamente com
-try/except ImportError — ver services/orchestrator/worker.py). Todos os
-imports de dependências pesadas (docker SDK, temporalio, opentelemetry) são
-feitos normalmente no topo dos módulos porque são dependências declaradas do
-próprio pacote (pyproject.toml) — se não estiverem instaladas no venv de quem
-importa, isso é responsabilidade do integrador (cada workstream tem seu
-próprio venv), não algo que este pacote deve esconder silenciosamente.
+This package must never raise just from being imported (the WS-B worker
+imports `sandbox_runtime.activities` defensively with try/except
+ImportError — see services/orchestrator/worker.py). Heavy dependencies
+(docker SDK, temporalio, opentelemetry) are imported normally at module top
+level because they are declared dependencies of this package itself
+(pyproject.toml) — if they are not installed in the importer's venv, that is
+the integrator's responsibility (each workstream has its own venv), not
+something this package should silently paper over.
 
-O que este pacote garante ativamente para não quebrar o import de terceiros:
-  - Nenhum código de nível de módulo abre conexão de rede, conecta no Docker
-    daemon, ou conecta no Postgres no momento do import. Toda I/O acontece
-    dentro de funções/métodos, chamada explicitamente.
+What this package actively guarantees so it never breaks a third-party import:
+  - No module-level code opens a network connection, connects to the Docker
+    daemon, or connects to Postgres at import time. All I/O happens inside
+    functions/methods, invoked explicitly.
 """
 
 from .driver import (

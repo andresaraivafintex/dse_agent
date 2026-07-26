@@ -1,76 +1,76 @@
-# Exposição dos previews (D3) — local → túnel Cloudflare → VPS
+# Preview exposure (D3) — local → Cloudflare tunnel → VPS
 
-O mecanismo é UM só: o Ingress do preview é gerado com o hostname derivado de
-`DSE_PREVIEW_EXTERNAL_HOST` (template com `{namespace}`), e o Traefik do k3d
-publica a porta 80 em **localhost:8081**. Mudar de "só eu" para "túnel" para
-"VPS" é mudar **para onde o DNS aponta** + o template — zero mudança de código.
+There is only ONE mechanism: the preview's Ingress is generated with the hostname derived from
+`DSE_PREVIEW_EXTERNAL_HOST` (a template with `{namespace}`), and k3d's Traefik
+publishes port 80 on **localhost:8081**. Going from "just me" to "tunnel" to
+"VPS" means changing **where DNS points** + the template — zero code changes.
 
-## Modo 1 — local, só para você (ATIVO por default)
+## Mode 1 — local, just for you (ACTIVE by default)
 
 ```
 DSE_PREVIEW_EXTERNAL_HOST=http://{namespace}.preview.localhost:8081
 ```
 
-- Browsers modernos resolvem `*.localhost` → 127.0.0.1 automaticamente.
-- Abra o link que o DSE posta no PR (ex.:
-  `http://preview-wi-abc123.preview.localhost:8081`) na SUA máquina.
-- Pré-requisitos (uma vez): `infra/k8s-local/setup-k3d-argocd.sh` (cluster +
-  Traefik + registry) e `infra/k8s-local/gen-kubeconfig-internal.sh`
-  (kubeconfig do worker). Re-rode ambos se recriar o cluster.
+- Modern browsers resolve `*.localhost` → 127.0.0.1 automatically.
+- Open the link the DSE posts on the PR (e.g.
+  `http://preview-wi-abc123.preview.localhost:8081`) on YOUR machine.
+- Prerequisites (one time): `infra/k8s-local/setup-k3d-argocd.sh` (cluster +
+  Traefik + registry) and `infra/k8s-local/gen-kubeconfig-internal.sh`
+  (the worker's kubeconfig). Re-run both if you recreate the cluster.
 
-## Modo 2 — túnel Cloudflare (acesso externo sem abrir porta)
+## Mode 2 — Cloudflare tunnel (external access without opening a port)
 
-Requer um domínio na sua conta Cloudflare (o plano free basta). Uma vez:
+Requires a domain on your Cloudflare account (the free plan is enough). One time:
 
 ```bash
 cloudflared tunnel login
 cloudflared tunnel create dse-preview
-# DNS wildcard do túnel (uma vez):
-cloudflared tunnel route dns dse-preview '*.preview.SEUDOMINIO.com'
+# Wildcard DNS for the tunnel (one time):
+cloudflared tunnel route dns dse-preview '*.preview.YOURDOMAIN.com'
 ```
 
 `~/.cloudflared/config.yml`:
 
 ```yaml
 tunnel: dse-preview
-credentials-file: /Users/<voce>/.cloudflared/<TUNNEL_ID>.json
+credentials-file: /Users/<you>/.cloudflared/<TUNNEL_ID>.json
 ingress:
-  # todo *.preview.SEUDOMINIO.com cai no Traefik local; o Ingress do k8s
-  # roteia pelo Host header (o mesmo hostname do template) — nada mais muda.
-  - hostname: "*.preview.SEUDOMINIO.com"
+  # every *.preview.YOURDOMAIN.com lands on the local Traefik; the k8s Ingress
+  # routes by Host header (the same hostname as the template) — nothing else changes.
+  - hostname: "*.preview.YOURDOMAIN.com"
     service: http://localhost:8081
   - service: http_status:404
 ```
 
-Rode `cloudflared tunnel run dse-preview` e troque só o template:
+Run `cloudflared tunnel run dse-preview` and change only the template:
 
 ```
-DSE_PREVIEW_EXTERNAL_HOST=https://{namespace}.preview.SEUDOMINIO.com
+DSE_PREVIEW_EXTERNAL_HOST=https://{namespace}.preview.YOURDOMAIN.com
 ```
 
-(`https` — o Cloudflare termina o TLS na borda.) Recrie o worker
-(`docker compose ... up -d orchestrator`) para o env valer.
+(`https` — Cloudflare terminates TLS at the edge.) Recreate the worker
+(`docker compose ... up -d orchestrator`) for the env var to take effect.
 
-> Nota: um *quick tunnel* (`cloudflared tunnel --url`, sem conta) NÃO serve —
-> ele dá um hostname aleatório único, e o roteamento dos previews é por
-> subdomínio wildcard.
+> Note: a *quick tunnel* (`cloudflared tunnel --url`, no account) does NOT work —
+> it hands out a single random hostname, and preview routing is by
+> wildcard subdomain.
 
-## Modo 3 — VPS com subdomínio (o destino combinado)
+## Mode 3 — VPS with a subdomain (the agreed destination)
 
-Mesmíssimo template do modo 2 (`https://{namespace}.preview.SEUDOMINIO.com`).
-O que muda é onde o cluster/Traefik vive:
+Exactly the same template as mode 2 (`https://{namespace}.preview.YOURDOMAIN.com`).
+What changes is where the cluster/Traefik lives:
 
-1. Na VPS: k3s (ou o k3d + compose, idêntico ao local), Traefik exposto em
-   80/443, cert wildcard (cert-manager + Let's Encrypt DNS-01).
-2. DNS: `*.preview.SEUDOMINIO.com` → A/AAAA da VPS (ou mantenha o cloudflared
-   na VPS como ingress — dispensa abrir porta e o TLS segue na borda).
-3. `DSE_PREVIEW_EXTERNAL_HOST` fica igual ao modo 2 — nenhum código muda.
+1. On the VPS: k3s (or k3d + compose, identical to local), Traefik exposed on
+   80/443, wildcard cert (cert-manager + Let's Encrypt DNS-01).
+2. DNS: `*.preview.YOURDOMAIN.com` → the VPS's A/AAAA (or keep cloudflared
+   on the VPS as the ingress — no port to open and TLS still terminates at the edge).
+3. `DSE_PREVIEW_EXTERNAL_HOST` stays the same as mode 2 — no code changes.
 
-## Peças relacionadas
+## Related pieces
 
-- Imagem do PR (D4): `DSE_PREVIEW_BUILD_IMAGE=true` builda a imagem do head do
-  PR quando o workspace tem `Dockerfile` (senão placeholder nginx, motivo
-  auditado). Porta do app: `DSE_PREVIEW_APP_PORT` (default 80). Registry local:
+- PR image (D4): `DSE_PREVIEW_BUILD_IMAGE=true` builds the image from the PR's
+  head when the workspace has a `Dockerfile` (otherwise an nginx placeholder, with the reason
+  audited). App port: `DSE_PREVIEW_APP_PORT` (default 80). Local registry:
   push `localhost:5510`, pull `k3d-dse-registry:5510`.
-- TTL: os previews expiram (`DSE_PREVIEW_TTL_SECONDS`, default 1h) e o reaper
-  os remove via GitOps.
+- TTL: previews expire (`DSE_PREVIEW_TTL_SECONDS`, default 1h) and the reaper
+  removes them via GitOps.

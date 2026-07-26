@@ -1,24 +1,25 @@
-"""Enforcement de budget no call time (WSD-E2-T2).
+"""Call-time budget enforcement (WSD-E2-T2).
 
-Dois caps checados a CADA chamada, antes de deixar a chamada passar:
-  - budget de runtime do WorkItem (`work_item_budgets`, ou `per_task_usd` do
-    access bundle do WS-F);
-  - budget AGREGADO do tenant no mês (`tenant_config.monthly_budget_usd` do
-    WS-F, ou `monthly_usd` do access bundle).
+Two caps checked on EVERY call, before letting the call through:
+  - the WorkItem's runtime budget (`work_item_budgets`, or `per_task_usd` from
+    WS-F's access bundle);
+  - the tenant's AGGREGATE budget for the month (`tenant_config.monthly_budget_usd`
+    from WS-F, or `monthly_usd` from the access bundle).
 
-"spent-so-far" vem do ledger DURÁVEL (`ledger.py` / `model_call_ledger`) — não
-de um contador em memória — então sobrevive a restart e agrega entre processos.
+"spent-so-far" comes from the DURABLE ledger (`ledger.py` / `model_call_ledger`)
+— not from an in-memory counter — so it survives a restart and aggregates
+across processes.
 
-P6 (decline-never-truncate): exaustão -> recusa LIMPA na fronteira de chamada
-(uma exceção tipada que o `gateway_call` converte em `GatewayCallError` com
-corpo `GatewayErrorResponse{error="budget_exhausted"}`; o workflow do WS-B
-converte isso em Failed). Nunca cortamos no meio de uma geração.
+P6 (decline-never-truncate): exhaustion -> CLEAN refusal at the call boundary
+(a typed exception that `gateway_call` converts into a `GatewayCallError` with
+a `GatewayErrorResponse{error="budget_exhausted"}` body; the WS-B workflow
+turns that into Failed). We never cut off mid-generation.
 
-Semântica do cap: checa spent-so-far ANTES da chamada. Se já atingiu/passou o
-cap, recusa a PRÓXIMA chamada (o custo real só é conhecido depois da resposta;
-recusar na fronteira da próxima chamada é o comportamento correto de "decline
-at boundary"). Sem cap resolvido (nenhuma das fontes define um limite) -> sem
-enforcement (comportamento da Fase 1 preservado para tenants sem config).
+Cap semantics: check spent-so-far BEFORE the call. If it already reached/passed
+the cap, refuse the NEXT call (the real cost is only known after the response;
+refusing at the next call's boundary is the correct "decline at boundary"
+behavior). With no cap resolved (none of the sources defines a limit) -> no
+enforcement (Phase 1 behavior preserved for tenants with no config).
 """
 from __future__ import annotations
 
@@ -53,8 +54,8 @@ class BudgetStatus:
 
 
 def _access_bundle_budgets(tenant_id: str) -> dict:
-    """`budgets` JSONB do bundle DEFAULT do tenant (WS-F). Defensivo: tabela
-    ausente/erro -> {} (sem cap vindo do bundle)."""
+    """`budgets` JSONB from the tenant's DEFAULT bundle (WS-F). Defensive:
+    missing table / error -> {} (no cap coming from the bundle)."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -110,9 +111,9 @@ def _tenant_monthly_cap(tenant_id: str) -> tuple[float | None, str | None]:
 
 
 def resolve_caps(tenant_id: str, work_item_id: str) -> BudgetCaps:
-    """Resolve os caps. Autoridade: access bundle do WS-F primeiro (é o
-    controle administrável de budget da Fase 2), com fallback para as tabelas
-    mais simples (`work_item_budgets`, `tenant_config`)."""
+    """Resolves the caps. Authority: WS-F's access bundle first (it is Phase 2's
+    administrable budget control), falling back to the simpler tables
+    (`work_item_budgets`, `tenant_config`)."""
     bundle = _access_bundle_budgets(tenant_id)
 
     wi_cap: float | None = None
@@ -147,8 +148,8 @@ def get_status(tenant_id: str, work_item_id: str) -> BudgetStatus:
 
 
 def set_work_item_budget(work_item_id: str, tenant_id: str, max_budget_usd: float) -> None:
-    """Helper de operador/orquestrador (WS-B) para setar o cap de runtime de um
-    WorkItem. Idempotente (upsert)."""
+    """Operator/orchestrator (WS-B) helper to set a WorkItem's runtime cap.
+    Idempotent (upsert)."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:

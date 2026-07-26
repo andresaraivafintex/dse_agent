@@ -1,22 +1,23 @@
-"""Materialização de skills no workspace do sandbox (integração console ⇄ engine).
+"""Materialization of skills into the sandbox workspace (console ⇄ engine
+integration).
 
-O console (dse_console_pane) é o banco central de skills; o tick por repo
-(`skill_registry.repo_scope`, migração 0029) decide o que roda onde. Este
-módulo escreve as skills servidas como arquivos Claude-Agent-Skill no
-workspace — `.claude/skills/<skill_key>/SKILL.md` — ANTES do turno do agente:
+The console (dse_console_pane) is the central skill store; the per-repo
+checkbox (`skill_registry.repo_scope`, migration 0029) decides what runs where.
+This module writes the served skills as Claude-Agent-Skill files in the
+workspace — `.claude/skills/<skill_key>/SKILL.md` — BEFORE the agent turn:
 
-  - o `ClaudeAgentSubstrate` as carrega nativamente (`setting_sources=
-    ["project"]` — só o projeto/workspace, nunca settings do usuário do host);
-  - qualquer outro substrato as alcança por leitura de arquivo, guiado pela
-    nota de instrução (`workspace_skills_note`).
+  - `ClaudeAgentSubstrate` loads them natively (`setting_sources=["project"]`
+    — project/workspace only, never the host user's settings);
+  - any other substrate reaches them by reading files, guided by the
+    instruction note (`workspace_skills_note`).
 
-Regras deliberadas:
-  - skill já COMMITADA no repo alvo (`.claude/skills/<key>/` existente) VENCE a
-    versão do registry — convenção versionada com o código é soberana; nada é
-    sobrescrito.
-  - tudo que materializamos entra em `.git/info/exclude` (exclude LOCAL, nunca
-    commitado) — o commit determinístico do Coder (`ScopedGitSession`) jamais
-    arrasta guidance para o PR.
+Deliberate rules:
+  - a skill already COMMITTED in the target repo (existing
+    `.claude/skills/<key>/`) BEATS the registry version — a convention
+    versioned alongside the code is sovereign; nothing gets overwritten.
+  - everything we materialize goes into `.git/info/exclude` (a LOCAL exclude,
+    never committed) — the Coder's deterministic commit (`ScopedGitSession`)
+    never drags guidance into the PR.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ _SKILLS_SUBDIR = Path(".claude") / "skills"
 
 
 def _safe_key(skill_key: str) -> str:
-    """Nome de diretório derivado do skill_key — nunca um path traversal."""
+    """Directory name derived from the skill_key — never a path traversal."""
     key = re.sub(r"[^a-zA-Z0-9._-]", "-", skill_key).strip(".-") or "skill"
     return key[:64]
 
@@ -40,8 +41,9 @@ def _frontmatter(skill: Skill) -> str:
 
 
 def _git_exclude(workspace_dir: Path, rel_paths: list[str]) -> None:
-    """Registra os paths materializados no exclude LOCAL do clone (não é a
-    .gitignore do repo — nunca vira diff). Sem repo git (testes/fixtures), no-op."""
+    """Register the materialized paths in the clone's LOCAL exclude (this is not
+    the repo's .gitignore — it never becomes a diff). With no git repo
+    (tests/fixtures), no-op."""
     info_dir = workspace_dir / ".git" / "info"
     if not (workspace_dir / ".git").is_dir():
         return
@@ -54,14 +56,14 @@ def _git_exclude(workspace_dir: Path, rel_paths: list[str]) -> None:
 
 
 def materialize_skills(workspace_dir: str, skills: list[Skill]) -> list[str]:
-    """Escreve cada skill servida em `.claude/skills/<key>/SKILL.md` do
-    workspace. Idempotente; devolve as keys efetivamente materializadas
-    (skills já presentes no repo alvo são puladas — repo vence registry).
+    """Write each served skill to the workspace's `.claude/skills/<key>/SKILL.md`.
+    Idempotent; returns the keys actually materialized (skills already present
+    in the target repo are skipped — repo beats registry).
 
-    GUARD (achado do disparo real 2026-07-23, wi_17eefa): só materializa em
-    workspace JÁ PROVISIONADO (git). Criar o diretório antes do clone fazia o
-    `provision_sandbox` pular o clone (`if not exists`) e o checkpoint morria
-    em "not a git directory". Sem `.git` => no-op."""
+    GUARD (found in the real 2026-07-23 run, wi_17eefa): only materialize into
+    an ALREADY PROVISIONED (git) workspace. Creating the directory before the
+    clone made `provision_sandbox` skip the clone (`if not exists`) and the
+    checkpoint died with "not a git directory". No `.git` => no-op."""
     ws = Path(workspace_dir)
     if not (ws / ".git").exists():
         return []
@@ -73,8 +75,8 @@ def materialize_skills(workspace_dir: str, skills: list[Skill]) -> list[str]:
         target = target_dir / "SKILL.md"
         rel = f"{_SKILLS_SUBDIR.as_posix()}/{key}/"
         if target.is_file() and rel not in _materialized_marker(ws):
-            # SKILL.md pré-existente que NÃO foi materializado por nós =
-            # commitado no repo alvo — soberano, não sobrescreve.
+            # A pre-existing SKILL.md that we did NOT materialize = committed in
+            # the target repo — sovereign, do not overwrite.
             continue
         target_dir.mkdir(parents=True, exist_ok=True)
         target.write_text(_frontmatter(skill) + skill.body, encoding="utf-8")
@@ -86,8 +88,8 @@ def materialize_skills(workspace_dir: str, skills: list[Skill]) -> list[str]:
     return written
 
 
-# Marker de proveniência: distingue "skill que NÓS escrevemos em run anterior"
-# (pode re-escrever/atualizar) de "skill commitada no repo" (intocável).
+# Provenance marker: distinguishes "a skill WE wrote in a previous run"
+# (safe to rewrite/update) from "a skill committed in the repo" (untouchable).
 _MARKER = ".claude/.dse-materialized"
 
 
@@ -107,9 +109,9 @@ def _write_materialized_marker(ws: Path, rels: list[str]) -> None:
 
 
 def workspace_skills_note(workspace_dir: str) -> str:
-    """Seção de instrução apontando as skills presentes no workspace (as
-    materializadas do registry E as commitadas no repo). Vazio se não houver
-    nenhuma — o prompt não ganha ruído."""
+    """Instruction section pointing at the skills present in the workspace (both
+    the ones materialized from the registry AND the ones committed in the repo).
+    Empty when there are none — the prompt gains no noise."""
     ws = Path(workspace_dir) / _SKILLS_SUBDIR
     if not ws.is_dir():
         return ""

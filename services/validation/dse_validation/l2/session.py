@@ -1,19 +1,21 @@
-"""WSE-E2-T4 — interface da sessão Reviewer L2 (contexto fresco).
+"""WSE-E2-T4 — L2 Reviewer session interface (fresh context).
 
 **P3 (no producer approves its own work / reviewer sees no producer history):**
-o input da sessão L2 é ESTRUTURALMENTE só `plan` (PlanArtifact) + `diff` (o diff
-final, texto). Não existe campo para o histórico/transcript do Coder — não há como
-vazá-lo por esta fronteira. A sessão L2 do WS-C recebe exatamente este objeto.
+the L2 session input is STRUCTURALLY just `plan` (PlanArtifact) + `diff` (the
+final diff, as text). There is no field for the Coder's history/transcript — it
+cannot be leaked across this boundary. WS-C's L2 session receives exactly this
+object.
 
-A implementação real da sessão é do WS-C (WSC-E3-T5), exposta como a Activity
-`ACTIVITY_RUN_L2_REVIEW`. Como os workstreams constroem em paralelo, aqui há:
+The real session implementation belongs to WS-C (WSC-E3-T5), exposed as the
+`ACTIVITY_RUN_L2_REVIEW` Activity. Since the workstreams build in parallel, this
+module provides:
 
   - `L2ReviewSession` (Protocol) — `review(inp) -> L2Verdict`.
-  - `FakeL2ReviewSession` — fake determinístico (nenhum LLM), scriptável, usado
-    nos testes deste workstream para exercitar a orquestração de verdade sem a
-    sessão do WS-C. Explicitamente marcado como fixture (não é produção).
-  - `build_l2_session()` — resolve a sessão real do WS-C se ela já estiver
-    publicada e importável; caso contrário devolve o fake com um WARNING claro.
+  - `FakeL2ReviewSession` — deterministic fake (no LLM), scriptable, used in this
+    workstream's tests to exercise the real orchestration without WS-C's session.
+    Explicitly marked as a fixture (not production).
+  - `build_l2_session()` — resolves WS-C's real session if it is already published
+    and importable; otherwise returns the fake with a clear WARNING.
 """
 from __future__ import annotations
 
@@ -29,13 +31,13 @@ logger = logging.getLogger("dse_validation.l2")
 
 
 class L2ReviewInput(BaseModel):
-    """Tudo — e SÓ — o que a sessão L2 pode ver (P3). Sem histórico do Coder."""
+    """Everything — and ONLY — what the L2 session may see (P3). No Coder history."""
 
     work_item_id: str
     tenant_id: str
     plan: PlanArtifact
     diff: str
-    iteration: int = 0  # nº do turno L2 dentro do loop de fix-retries (informativo)
+    iteration: int = 0  # L2 turn number within the fix-retry loop (informational)
 
 
 class L2ReviewSession(Protocol):
@@ -43,16 +45,16 @@ class L2ReviewSession(Protocol):
 
 
 class FakeL2ReviewSession:
-    """Fake determinístico para os testes de orquestração do WS-E.
+    """Deterministic fake for WS-E's orchestration tests.
 
-    Modos:
-      - `scripted`: uma fila de `L2Verdict` (ou de `(passed, objections)`),
-        consumida em ordem a cada `review()` — permite simular
-        "reprova, reprova, aprova" para o loop de fix-retries.
-      - default: aprova sempre com custo fixo.
+    Modes:
+      - `scripted`: a queue of `L2Verdict` (or of `(passed, objections)`),
+        consumed in order on each `review()` — lets us simulate
+        "reject, reject, approve" for the fix-retry loop.
+      - default: always approves with a fixed cost.
 
-    NÃO é produção: nenhuma inteligência real, só devolve o roteiro. A sessão
-    real (WS-C) faz a chamada de modelo de contexto fresco de verdade.
+    NOT production: no real intelligence, it just plays back the script. The real
+    session (WS-C) makes the actual fresh-context model call.
     """
 
     def __init__(
@@ -66,8 +68,8 @@ class FakeL2ReviewSession:
         self.calls: list[L2ReviewInput] = []
 
     def review(self, inp: L2ReviewInput) -> L2Verdict:
-        # Registra o input recebido para os testes provarem que P3 foi honrado
-        # (o objeto não tem campo de histórico do Coder — é estrutural).
+        # Records the received input so the tests can prove P3 was honored
+        # (the object has no Coder-history field — it is structural).
         self.calls.append(inp)
         if self._queue:
             item = self._queue.popleft()
@@ -83,32 +85,34 @@ class FakeL2ReviewSession:
         return L2Verdict(work_item_id=inp.work_item_id, passed=True, objections=[], cost_usd=self._cost)
 
 
-_L2_PROMPT = """Você é o Reviewer L2 do Fintex DSE — um revisor de CONTEXTO FRESCO (P3):
-você vê APENAS o plano e o diff final. Avalie se a mudança implementa o plano
-com segurança e qualidade mínimas para abrir um PR (a revisão final é humana).
+_L2_PROMPT = """You are the Fintex DSE Reviewer L2 — a FRESH-CONTEXT reviewer (P3):
+you see ONLY the plan and the final diff. Judge whether the change implements the
+plan with the minimum safety and quality needed to open a PR (the final review is
+human).
 
-Responda APENAS com JSON válido:
-{{"passed": true|false, "objections": ["objeção específica (arquivo/linha) 1", ...]}}
+Answer ONLY with valid JSON:
+{{"passed": true|false, "objections": ["specific objection (file/line) 1", ...]}}
 
-- passed=true quando o diff cumpre o plano sem problema GRAVE (bug evidente,
-  risco de segurança, mudança fora do escopo). Estilo/nit não reprova.
-- objections: vazia quando passed; específicas e acionáveis quando não.
+- passed=true when the diff fulfils the plan with no SERIOUS problem (obvious bug,
+  security risk, out-of-scope change). Style/nits do not fail it.
+- objections: empty when passed; specific and actionable when not.
 
-## Plano
+## Plan
 {plan}
 
-## Diff final
+## Final diff
 {diff}
 """
 
 
 class ModelL2ReviewSession:
-    """Sessão L2 REAL (achado do disparo real 2026-07-22: o import do builder
-    apontava para um módulo inexistente — `dse_sandbox_runtime` — e TODO
-    deployment caía no fake que aprova sempre). Mesmo padrão do Planner/Tester:
-    1 chamada stage=l2 via gateway (enforcement + ledger no caminho), P3 por
-    construção (o prompt só carrega plan+diff). Falha de chamada/parse →
-    exceção (a activity retenta; billing/auth viram non-retryable na origem)."""
+    """REAL L2 session (found during the real run on 2026-07-22: the builder's
+    import pointed at a nonexistent module — `dse_sandbox_runtime` — and EVERY
+    deployment fell back to the fake that always approves). Same pattern as
+    Planner/Tester: 1 stage=l2 call via the gateway (enforcement + ledger on the
+    path), P3 by construction (the prompt only carries plan+diff). Call/parse
+    failure → exception (the activity retries; billing/auth become non-retryable
+    at the source)."""
 
     def review(self, inp: L2ReviewInput) -> L2Verdict:
         import json as _json
@@ -122,12 +126,12 @@ class ModelL2ReviewSession:
             tenant_id=inp.tenant_id, work_item_id=inp.work_item_id,
             stage=Stage.reviewer, task_class="default", data_class="internal",
         )
-        # mint_virtual_key -> str (a key crua); pego pelo shadow-run — o .key
-        # de IssuedVirtualKey só existe no retorno rico interno.
+        # mint_virtual_key -> str (the raw key); caught by the shadow-run —
+        # IssuedVirtualKey's .key only exists on the internal rich return.
         vk_key = mint_virtual_key(inp.tenant_id, inp.work_item_id, Stage.reviewer)
         model = _os.environ.get("DSE_L2_MODEL") or _os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
         prompt = _L2_PROMPT.format(
-            plan=inp.plan.model_dump_json()[:4000], diff=(inp.diff or "(diff vazio)")[:20000]
+            plan=inp.plan.model_dump_json()[:4000], diff=(inp.diff or "(empty diff)")[:20000]
         )
         result = chat_completion(
             headers=headers, virtual_key=vk_key, model=model,
@@ -138,8 +142,8 @@ class ModelL2ReviewSession:
         if text.startswith("```"):
             text = text.strip("`\n")
             text = text[4:] if text.startswith("json") else text
-        # raw_decode: o modelo às vezes continua escrevendo APÓS o JSON
-        # (pego pelo shadow-run — "Extra data") — usa o 1º objeto e ignora o resto.
+        # raw_decode: the model sometimes keeps writing AFTER the JSON
+        # (caught by the shadow-run — "Extra data") — take the 1st object and ignore the rest.
         verdict, _ = _json.JSONDecoder().raw_decode(text.strip())
         return L2Verdict(
             work_item_id=inp.work_item_id,
@@ -150,14 +154,14 @@ class ModelL2ReviewSession:
 
 
 def build_l2_session() -> L2ReviewSession:
-    """Sessão L2 por CONFIG (P1): substrato real configurado → ModelL2ReviewSession
-    (modelo via gateway); senão o fake explícito (modo local/teste, com WARNING —
-    P8: nunca em silêncio)."""
+    """L2 session by CONFIG (P1): real substrate configured → ModelL2ReviewSession
+    (model via gateway); otherwise the explicit fake (local/test mode, with a
+    WARNING — P8: never silently)."""
     if os.environ.get("DSE_CODER_SUBSTRATE", "fake").strip().lower() != "fake":
-        logger.info("dse_validation.l2: sessão Reviewer L2 REAL (modelo via gateway)")
+        logger.info("dse_validation.l2: REAL Reviewer L2 session (model via gateway)")
         return ModelL2ReviewSession()
     logger.warning(
-        "dse_validation.l2: DSE_CODER_SUBSTRATE=fake — usando FakeL2ReviewSession "
-        "(modo local/teste, NÃO produção)"
+        "dse_validation.l2: DSE_CODER_SUBSTRATE=fake — using FakeL2ReviewSession "
+        "(local/test mode, NOT production)"
     )
     return FakeL2ReviewSession()

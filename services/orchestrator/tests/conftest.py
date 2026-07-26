@@ -14,10 +14,11 @@ DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
 )
 
-# S3 (Fase 5): a Activity real `post_tracking_comment` tenta POSTar no
-# adapter-github. Nos testes não há adapter no ar e o hostname de rede Docker
-# não resolve no host — apontamos para uma porta local morta (connection
-# refused = falha instantânea) para o best-effort não somar timeouts.
+# S3 (Phase 5): the real `post_tracking_comment` Activity tries to POST to
+# adapter-github. In tests there is no adapter running and the Docker network
+# hostname does not resolve on the host — we point it at a dead local port
+# (connection refused = instant failure) so the best-effort path does not pile
+# up timeouts.
 os.environ.setdefault("DSE_ADAPTER_GITHUB_URL", "http://127.0.0.1:1")
 os.environ.setdefault("DSE_ADAPTER_SLACK_URL", "http://127.0.0.1:1")
 os.environ.setdefault("DSE_ADAPTER_JIRA_URL", "http://127.0.0.1:1")
@@ -78,7 +79,7 @@ def read_audit_actions(work_item_id: str) -> list[str]:
 
 
 def read_gate_row(work_item_id: str):
-    """WSB-E3-T2/T3 — le a projecao duravel do gate (migracao 0009)."""
+    """WSB-E3-T2/T3 — reads the durable projection of the gate (migration 0009)."""
     conn = psycopg2.connect(DSN)
     try:
         with conn.cursor() as cur:
@@ -94,7 +95,7 @@ def read_gate_row(work_item_id: str):
 
 
 def read_evidence_row(work_item_id: str):
-    """Fase 3 — le a projecao duravel do pipeline de evidencia (migracao 0014)."""
+    """Phase 3 — reads the durable projection of the evidence pipeline (migration 0014)."""
     conn = psycopg2.connect(DSN)
     try:
         with conn.cursor() as cur:
@@ -111,8 +112,8 @@ def read_evidence_row(work_item_id: str):
 
 
 def read_skill_episodes(work_item_id: str):
-    """Fase 4 — le os episodios de skill-learning gravados por um work item
-    (source=clarification, tabela skill_episode da migracao 0019/WS-C)."""
+    """Phase 4 — reads the skill-learning episodes written by a work item
+    (source=clarification, skill_episode table from migration 0019/WS-C)."""
     conn = psycopg2.connect(DSN)
     try:
         with conn.cursor() as cur:
@@ -128,9 +129,9 @@ def read_skill_episodes(work_item_id: str):
 
 def set_tenant_config(tenant_id: str, *, max_concurrent_work_items: int = 5,
                       max_concurrent_activities: int | None = None) -> None:
-    """Semeia/atualiza tenant_config (WS-F, migracao 0007) para o teste de
-    fairness (WSB-E1-T3). `fairness->>'max_concurrent_activities'` tem
-    precedencia sobre max_concurrent_work_items."""
+    """Seeds/updates tenant_config (WS-F, migration 0007) for the fairness test
+    (WSB-E1-T3). `fairness->>'max_concurrent_activities'` takes precedence over
+    max_concurrent_work_items."""
     import json
 
     fairness = {}
@@ -156,10 +157,10 @@ def set_tenant_config(tenant_id: str, *, max_concurrent_work_items: int = 5,
 
 @pytest_asyncio.fixture
 async def time_skipping_env():
-    """Ambiente Temporal real (servidor de teste com time-skipping) — nao e
-    um mock: e um servidor Temporal de verdade que acelera timers/wait_condition
-    quando o workflow esta bloqueado sem trabalho pendente (necessario para
-    testar reminders de 24h/escalacao de 3 dias em segundos)."""
+    """Real Temporal environment (test server with time-skipping) — not a mock:
+    it is an actual Temporal server that fast-forwards timers/wait_condition
+    when the workflow is blocked with no pending work (needed to test 24h
+    reminders / 3-day escalations in seconds)."""
     env = await WorkflowEnvironment.start_time_skipping(data_converter=pydantic_data_converter)
     try:
         yield env
@@ -169,36 +170,36 @@ async def time_skipping_env():
 
 @pytest.fixture(autouse=True)
 def _require_postgres():
-    """Falha cedo e com uma mensagem clara se a infra da fundacao nao
-    estiver no ar, em vez de um erro de conexao criptico no meio do teste."""
+    """Fails early with a clear message if the foundation infra is not up,
+    instead of a cryptic connection error in the middle of a test."""
     try:
         conn = psycopg2.connect(DSN, connect_timeout=3)
         conn.close()
-    except Exception as exc:  # pragma: no cover - so em ambiente sem infra
-        pytest.skip(f"Postgres da fundacao indisponivel em {DSN}: {exc}")
+    except Exception as exc:  # pragma: no cover - only in an environment without infra
+        pytest.skip(f"foundation Postgres unavailable at {DSN}: {exc}")
 
 
 async def wait_for_status(handle, expected, attempts: int = 120, sleep_s: float = 0.25) -> str:
-    """Polling resiliente de status de workflow (Fase 4, plano 09).
+    """Resilient polling of a workflow status (Phase 4, plano 09).
 
-    Duas armadilhas de runner que este helper trata, ambas vistas na primeira
-    execução real do CI (2 vCPU):
+    Two runner pitfalls this helper handles, both seen on the first real CI run
+    (2 vCPU):
 
-    1. TIME-SKIPPING sufocado por polling agressivo. Sob
-       `WorkflowEnvironment.start_time_skipping`, o relógio só AVANÇA quando
-       não há chamada de API pendente — e `handle.query()` PAUSA o skip
-       enquanto executa. Um poll de 50ms num runner saturado (query lenta)
-       não deixa janela idle para o relógio pular, então os timers do workflow
-       (lembrete de 24h, escalação de 3 dias) nunca disparam e o teste TRAVA.
-       O intervalo maior (250ms) garante a janela de time-skip entre queries.
+    1. TIME-SKIPPING starved by aggressive polling. Under
+       `WorkflowEnvironment.start_time_skipping`, the clock only ADVANCES when
+       there is no pending API call — and `handle.query()` PAUSES the skip while
+       it runs. A 50ms poll on a saturated runner (slow query) leaves no idle
+       window for the clock to jump, so the workflow timers (24h reminder, 3-day
+       escalation) never fire and the test HANGS. The larger interval (250ms)
+       guarantees the time-skip window between queries.
 
-    2. Deadline TRANSIENTE da query (continue_as_new ou worker saturado:
-       "query deadline exceeded" / "Timeout expired") — re-polla em vez de
-       propagar. Captura o RPCError da API E o RPCError cru do bridge Rust
-       (pelo nome do tipo), que nem sempre é subclasse do primeiro.
+    2. TRANSIENT query deadline (continue_as_new or a saturated worker: "query
+       deadline exceeded" / "Timeout expired") — re-poll instead of propagating.
+       Catches the API's RPCError AND the raw RPCError from the Rust bridge (by
+       type name), which is not always a subclass of the former.
 
-    Teto ~30s (120×250ms) de tempo de workflow — mais que suficiente com o
-    time-skip funcionando; o pytest-timeout de 180s é o backstop absoluto.
+    Ceiling ~30s (120x250ms) of workflow time — more than enough with the
+    time-skip working; the 180s pytest-timeout is the absolute backstop.
     """
     import asyncio
 
@@ -208,7 +209,7 @@ async def wait_for_status(handle, expected, attempts: int = 120, sleep_s: float 
     for _ in range(attempts):
         try:
             status = await handle.query(WorkItemLifecycleWorkflow.get_status)
-        except Exception as exc:  # noqa: BLE001 — só timeout/deadline de query é transiente
+        except Exception as exc:  # noqa: BLE001 - only a query timeout/deadline is transient
             name = type(exc).__name__
             msg = str(exc).lower()
             if "rpcerror" in name.lower() or "deadline" in msg or "timeout" in msg:
@@ -218,4 +219,4 @@ async def wait_for_status(handle, expected, attempts: int = 120, sleep_s: float 
         if status in expected:
             return status
         await asyncio.sleep(sleep_s)
-    raise AssertionError(f"status nunca chegou em {expected}, ultimo={status!r}")
+    raise AssertionError(f"status never reached {expected}, last={status!r}")

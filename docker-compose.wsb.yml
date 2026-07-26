@@ -9,93 +9,94 @@ services:
       DSE_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_IDENTITY_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
-      # Plano 08 §F (F5) — Worker Deployment Versioning (moderno, PINNED).
-      # build_id PINADO por deploy (não mais "dev") + nome do deployment. Pine
-      # DSE_WORKER_BUILD_ID ao SHA/tag da imagem em produção (ex.: git-abc123).
-      # DSE_WORKER_USE_VERSIONING default OFF: ligar exige o server com
-      # deployment versioning habilitado + o cutover via CLI
-      # (`temporal worker-deployment set-current-version`). Ver RUNBOOK.md
-      # §Worker-Versioning. Com ON, workflows em voo drenam na versão antiga
-      # (PINNED) e só os novos vão para a versão corrente.
+      # Plan 08 §F (F5) — Worker Deployment Versioning (modern, PINNED).
+      # build_id PINNED per deploy (no longer "dev") + deployment name. Pin
+      # DSE_WORKER_BUILD_ID to the image SHA/tag in production (e.g. git-abc123).
+      # DSE_WORKER_USE_VERSIONING defaults to OFF: turning it on requires the
+      # server with deployment versioning enabled + the cutover via CLI
+      # (`temporal worker-deployment set-current-version`). See RUNBOOK.md
+      # §Worker-Versioning. With ON, in-flight workflows drain on the old
+      # version (PINNED) and only new ones go to the current version.
       DSE_WORKER_BUILD_ID: ${DSE_WORKER_BUILD_ID:-v1}
       DSE_WORKER_DEPLOYMENT_NAME: ${DSE_WORKER_DEPLOYMENT_NAME:-dse-orchestrator}
       DSE_WORKER_USE_VERSIONING: ${DSE_WORKER_USE_VERSIONING:-false}
       DSE_ORCHESTRATOR_HEALTH_PORT: "8900"
-      # Heartbeat de activity: 60s derrubava coder/tester em loop infinito de
-      # retry quando a máquina satura (CLI do Coder + npm + >1 work item — o
-      # event loop do worker single-process passa >60s sem bater heartbeat e o
-      # server cancela ATIVIDADE JÁ CONCLUÍDA; achado do disparo Slack
-      # 2026-07-22, wi_d05c/wi_257d, 11+7 attempts). 600s dá folga; o
-      # start_to_close de 1h continua sendo o teto real.
+      # Activity heartbeat: 60s was killing coder/tester in an infinite retry
+      # loop when the machine saturates (Coder CLI + npm + >1 work item — the
+      # single-process worker's event loop goes >60s without heartbeating and
+      # the server cancels an ALREADY FINISHED ACTIVITY; found in the Slack
+      # run of 2026-07-22, wi_d05c/wi_257d, 11+7 attempts). 600s gives room;
+      # the 1h start_to_close is still the real ceiling.
       DSE_ACTIVITY_HEARTBEAT_SECONDS: ${DSE_ACTIVITY_HEARTBEAT_SECONDS:-600}
-      # Fase 3 (ativacao do alerta de history, ALERTING-RULES.md §3 com WS-F):
-      # aponte DSE_OTEL_EXPORTER=otlp para enviar traces + a metrica
-      # dse.workflow.history_length ao otel-collector do WS-F (porta 4317).
+      # Phase 3 (enabling the history alert, ALERTING-RULES.md §3 with WS-F):
+      # set DSE_OTEL_EXPORTER=otlp to send traces + the
+      # dse.workflow.history_length metric to WS-F's otel-collector (port 4317).
       DSE_OTEL_EXPORTER: ${DSE_OTEL_EXPORTER:-console}
       DSE_OTEL_EXPORTER_OTLP_ENDPOINT: ${DSE_OTEL_EXPORTER_OTLP_ENDPOINT:-otel-collector:4317}
-      # Fase 3 (WSB-E4-T2/ADR-26) — caps e debounce configuraveis sem redeploy:
+      # Phase 3 (WSB-E4-T2/ADR-26) — caps and debounce configurable without redeploy:
       DSE_REVIEW_ROUND_CAP: ${DSE_REVIEW_ROUND_CAP:-20}
       DSE_EVIDENCE_DEBOUNCE_SECONDS: ${DSE_EVIDENCE_DEBOUNCE_SECONDS:-300}
       DSE_EVIDENCE_REFRESH_CAP: ${DSE_EVIDENCE_REFRESH_CAP:-5}
-      # Fase 2 (WSB-E1-T3) — fairness worker-side (caps de concorrencia por
-      # tenant lidos de tenant_config). "native" so quando o server for 1.31+.
+      # Phase 2 (WSB-E1-T3) — worker-side fairness (per-tenant concurrency caps
+      # read from tenant_config). "native" only when the server is 1.31+.
       DSE_FAIRNESS_MODE: ${DSE_FAIRNESS_MODE:-worker-side}
-      # Fase 2 (WSB-E3-T2) — POLITICA do gate de aprovacao (P1: fora do modelo).
+      # Phase 2 (WSB-E3-T2) — approval gate POLICY (P1: outside the model).
       DSE_REQUIRE_APPROVAL_RISK_CLASSES: ${DSE_REQUIRE_APPROVAL_RISK_CLASSES:-high}
-      # Mapa status DSE -> coluna Jira (move o card no board). O default cobre
-      # In Progress / In Review / Done; blocked/escalated/failed apontam para
-      # uma coluna "Blocked" que NEM todo board tem. Override abaixo mapeia
-      # esses 3 para "" (no-op: o card fica onde está e o comentario de falha
-      # explica) — boards com coluna Blocked podem sobrescrever com o nome real.
+      # DSE status -> Jira column map (moves the card on the board). The default
+      # covers In Progress / In Review / Done; blocked/escalated/failed point to
+      # a "Blocked" column that NOT every board has. The override below maps
+      # those 3 to "" (no-op: the card stays where it is and the failure comment
+      # explains) — boards with a Blocked column can override with the real name.
       DSE_JIRA_STATUS_MAP: ${DSE_JIRA_STATUS_MAP:-{"blocked":"","escalated":"","failed":""}}
-      # Consumidos pelas Activities cross-workstream registradas neste worker
-      # unico (WS-C sandbox_runtime + WS-E dse_validation, ver worker.py):
+      # Consumed by the cross-workstream Activities registered in this single
+      # worker (WS-C sandbox_runtime + WS-E dse_validation, see worker.py):
       DSE_MODEL_GATEWAY_URL: http://model-gateway:4000
-      # model_gateway_client (planner real via gateway) usa ESTE nome de env:
+      # model_gateway_client (real planner via gateway) uses THIS env name:
       DSE_MODEL_GATEWAY_BASE_URL: http://model-gateway:4000
       DSE_SANDBOX_STATE_DIR: /tmp/dse-sandboxes
-      # PoC (2026-07-21): Coder aponta para o alias real da Anthropic no gateway
-      # e minta a virtual key via /key/generate com a master key (control plane).
-      # Modo econômico (2026-07-22): Haiku 4.5 default (~3× mais barato). Para
-      # voltar ao Sonnet: DSE_CODER_MODEL=anthropic/claude ./dse.sh start.
-      # Planner/Tester herdam (DSE_PLANNER_MODEL/DSE_TESTER_MODEL sobrepõem).
+      # PoC (2026-07-21): the Coder points to the real Anthropic alias on the
+      # gateway and mints the virtual key via /key/generate with the master key
+      # (control plane). Economy mode (2026-07-22): Haiku 4.5 by default (~3x
+      # cheaper). To go back to Sonnet: DSE_CODER_MODEL=anthropic/claude ./dse.sh start.
+      # Planner/Tester inherit it (DSE_PLANNER_MODEL/DSE_TESTER_MODEL override).
       DSE_CODER_MODEL: ${DSE_CODER_MODEL:-anthropic/claude-haiku}
       DSE_CODER_SUBSTRATE: ${DSE_CODER_SUBSTRATE:-fake}
-      # S7 (Fase 5) — L1 configurado para o repo de PoC (fintex-wallet, JS):
-      # os checks Python (lint/typecheck/build) são pulados (comando vazio);
-      # o teste real é um syntax-check do entrypoint (node --check, sem
-      # node_modules). secret-scan + diff-budget/forbidden-paths (agnósticos
-      # de linguagem) seguem ativos. NOTA: derivar os comandos de L1 do próprio
-      # repo (package.json/Makefile) é trabalho futuro — hoje é config por env.
+      # S7 (Phase 5) — L1 configured for the PoC repo (fintex-wallet, JS):
+      # the Python checks (lint/typecheck/build) are skipped (empty command);
+      # the real test is a syntax check of the entrypoint (node --check, without
+      # node_modules). secret-scan + diff-budget/forbidden-paths (language
+      # agnostic) stay active. NOTE: deriving the L1 commands from the repo
+      # itself (package.json/Makefile) is future work — today it is env config.
       DSE_L1_LINT_CMD: ${DSE_L1_LINT_CMD:-}
       DSE_L1_TYPECHECK_CMD: ${DSE_L1_TYPECHECK_CMD:-}
       DSE_L1_BUILD_CMD: ${DSE_L1_BUILD_CMD:-}
       DSE_L1_TEST_CMD: ${DSE_L1_TEST_CMD:-node --check server.js}
       DSE_LITELLM_MASTER_KEY: ${DSE_LITELLM_MASTER_KEY:-sk-dse-local-dev-master-key}
       DSE_MODEL_GATEWAY_ALLOW_FIXTURE: ${DSE_MODEL_GATEWAY_ALLOW_FIXTURE:-1}
-      # S7-c: imagem do sandbox com git+node (L1 `node --check` + finalize push
-      # rodam via docker exec DENTRO do sandbox). dse-sandbox-base (WSC-E3-T4b).
+      # S7-c: sandbox image with git+node (L1 `node --check` + finalize push run
+      # via docker exec INSIDE the sandbox). dse-sandbox-base (WSC-E3-T4b).
       DSE_SANDBOX_IMAGE: ${DSE_SANDBOX_IMAGE:-dse-sandbox-base:wsc3}
-      # S7 (Fase 5) — modo IN-PROCESS do PoC: o substrato do Coder (claude-agent-
-      # sdk) roda NESTE processo de control-plane, então o código real vive no
-      # workspace LOCAL (DSE_SANDBOX_STATE_DIR/<wi>/workspace) e NÃO no /workspace
-      # do container efêmero (que fica vazio no docker-out-of-docker). Com isto,
-      # L1 e finalize (git push) operam nesse workspace local via subprocesso.
-      # Produção (agente DENTRO do container) NÃO seta esta flag → usa DockerExec.
+      # S7 (Phase 5) — the PoC's IN-PROCESS mode: the Coder substrate (claude-
+      # agent-sdk) runs in THIS control-plane process, so the real code lives in
+      # the LOCAL workspace (DSE_SANDBOX_STATE_DIR/<wi>/workspace) and NOT in the
+      # ephemeral container's /workspace (empty under docker-out-of-docker). With
+      # that, L1 and finalize (git push) operate on that local workspace via a
+      # subprocess. Production (agent INSIDE the container) does NOT set this
+      # flag → it uses DockerExec.
       DSE_SANDBOX_INPROCESS: ${DSE_SANDBOX_INPROCESS:-1}
-      # Credenciais do GitHub App injetadas do Vault no boot (ver make up-poc);
-      # o finalize_pr (WS-E) roda aqui no orchestrator e precisa delas p/ abrir PR.
+      # GitHub App credentials injected from Vault at boot (see make up-poc);
+      # finalize_pr (WS-E) runs here in the orchestrator and needs them to open PRs.
       GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
-      # Plano 08 §D (D1/D3/D4) — o trigger_preview roda NESTE worker.
-      # KUBECONFIG interno (rede dse_net; gere com infra/k8s-local/
-      # gen-kubeconfig-internal.sh após criar o cluster). O link do PR usa o
-      # EXTERNAL_HOST: local = *.preview.localhost:8081 (Traefik do k3d
-      # publicado no host). Para expor via túnel Cloudflare/VPS depois: só
-      # trocar o template (ver infra/preview-exposure.md) — o Ingress segue o
-      # mesmo hostname.
+      # Plan 08 §D (D1/D3/D4) — trigger_preview runs in THIS worker.
+      # Internal KUBECONFIG (dse_net network; generate it with infra/k8s-local/
+      # gen-kubeconfig-internal.sh after creating the cluster). The PR link uses
+      # EXTERNAL_HOST: local = *.preview.localhost:8081 (k3d's Traefik published
+      # on the host). To expose it via a Cloudflare/VPS tunnel later: just swap
+      # the template (see infra/preview-exposure.md) — the Ingress keeps the
+      # same hostname.
       KUBECONFIG: /app/infra/kubeconfig-internal.yaml
       DSE_PREVIEW_KUBE_CONTEXT: ${DSE_PREVIEW_KUBE_CONTEXT:-k3d-dse-preview}
       DSE_PREVIEW_EXTERNAL_HOST: ${DSE_PREVIEW_EXTERNAL_HOST:-http://{namespace}.preview.localhost:8081}
@@ -106,23 +107,23 @@ services:
     ports:
       - "8900:8900"
     volumes:
-      # Docker-outside-of-Docker: o worker (control plane confiavel) precisa
-      # do socket do host para provisionar/destruir os containers de sandbox
-      # via sandbox_runtime.docker_driver. Isto e' distinto e nao contradiz a
-      # regra do proprio sandbox nao ter socket (P2/ADR-11) — o sandbox em si
-      # nunca recebe este mount, so o processo que o cria.
+      # Docker-outside-of-Docker: the worker (trusted control plane) needs the
+      # host socket to provision/destroy the sandbox containers via
+      # sandbox_runtime.docker_driver. This is distinct from, and does not
+      # contradict, the rule that the sandbox itself has no socket (P2/ADR-11) —
+      # the sandbox never receives this mount, only the process that creates it.
       - /var/run/docker.sock:/var/run/docker.sock
-      # Robustez (observado ao vivo): os workspaces/checkpoints das tarefas
-      # (DSE_SANDBOX_STATE_DIR) viviam no /tmp DO CONTAINER — cada recreate do
-      # worker destruia o estado de TODA tarefa em voo. Montado do host:
-      # (a) sobrevive a restart/deploy do worker; (b) coere com o
-      # docker-outside-of-docker — o daemon monta este MESMO path do host no
-      # /workspace do sandbox, entao o container do sandbox passa a ver os
-      # arquivos reais (antes via um diretorio vazio).
+      # Robustness (observed live): the tasks' workspaces/checkpoints
+      # (DSE_SANDBOX_STATE_DIR) lived in the CONTAINER's /tmp — every worker
+      # recreate destroyed the state of EVERY in-flight task. Mounted from the
+      # host: (a) it survives a worker restart/deploy; (b) it is coherent with
+      # docker-outside-of-docker — the daemon mounts this SAME host path into
+      # the sandbox's /workspace, so the sandbox container now sees the real
+      # files (it used to see an empty directory).
       - /tmp/dse-sandboxes:/tmp/dse-sandboxes
-      # Plano 08 §D — preview: kubeconfig interno (ro) + o repo GitOps de
-      # manifests (rw — o worker escreve; o dse-wse-gitserver serve o MESMO
-      # path do host em ro para o Argo CD puxar).
+      # Plan 08 §D — preview: internal kubeconfig (ro) + the GitOps repo of
+      # manifests (rw — the worker writes; dse-wse-gitserver serves the SAME
+      # host path read-only for Argo CD to pull).
       - ./infra/k8s-local/kubeconfig-internal.yaml:/app/infra/kubeconfig-internal.yaml:ro
       - ./services/validation/preview_repo:/app/services/validation/preview_repo
     depends_on:

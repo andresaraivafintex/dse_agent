@@ -1,14 +1,14 @@
-"""Dev/mock OpenID Connect provider — FIXTURE CLARAMENTE MARCADO (não usar em
-produção). Existe porque nenhum IdP real (Keycloak/Okta/Entra/Ping) está
-provisionado nesta sessão de dev (ver README, seção "gaps"). Mina o mesmo tipo
-de artefato que um IdP OIDC real emite — um `id_token` RS256 assinado + um
-documento JWKS — para que `dse_platform.sso.OIDCVerifier` possa ser exercitado
-contra o contrato OIDC REAL (assinatura RSA, claims `iss/aud/sub/exp`), não
-contra um mock de si mesmo.
+"""Dev/mock OpenID Connect provider — CLEARLY MARKED FIXTURE (do not use in
+production). It exists because no real IdP (Keycloak/Okta/Entra/Ping) is
+provisioned in this dev session (see README, "gaps" section). It mints the same
+kind of artifact a real OIDC IdP emits — a signed RS256 `id_token` plus a JWKS
+document — so that `dse_platform.sso.OIDCVerifier` can be exercised against the
+REAL OIDC contract (RSA signature, `iss/aud/sub/exp` claims) rather than against
+a mock of itself.
 
-Em produção: apague este módulo do caminho e aponte `OIDCVerifier` para o
-`.well-known/openid-configuration` / `jwks_uri` do IdP do cliente. A verificação
-do lado do console (sso.py) não muda — só a origem das chaves.
+In production: drop this module from the path and point `OIDCVerifier` at the
+customer IdP's `.well-known/openid-configuration` / `jwks_uri`. Verification on
+the console side (sso.py) does not change — only where the keys come from.
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 
 class DevIdP:
-    """IdP OIDC de desenvolvimento. Gera um keypair RSA em memória e emite
-    id_tokens assinados. `jwks()` devolve o material público no formato JWKS
-    (o mesmo que um `jwks_uri` real serviria)."""
+    """Development OIDC IdP. Generates an in-memory RSA keypair and mints signed
+    id_tokens. `jwks()` returns the public material in JWKS format (the same a
+    real `jwks_uri` would serve)."""
 
     def __init__(self, issuer: str = "https://dev-idp.local", kid: str = "dev-key-1"):
         self.issuer = issuer

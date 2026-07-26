@@ -1,45 +1,45 @@
-# OSS Bill of Materials — Fintex DSE (Fase 1)
+# OSS Bill of Materials — Fintex DSE (Phase 1)
 
-Dono: WS-F. Lista os componentes open-source de infraestrutura usados no
-steady-state (imagens de container + bibliotecas Python de maior porte),
-suas licenças, e a implicação para um cliente fintech regulado (self-hosted,
-sem obrigação de compartilhamento de código proprietário do cliente).
+Owner: WS-F. Lists the open-source infrastructure components used in
+steady state (container images + the larger Python libraries),
+their licenses, and the implication for a regulated fintech client (self-hosted,
+with no obligation to share the client's proprietary code).
 
-Este documento cobre **infraestrutura e runtime**, não todas as
-transitivas de `pip` (essas são auditadas via `pip-licenses`/SBOM de
-supply-chain — fora do escopo da Fase 1, ver nota no final).
+This document covers **infrastructure and runtime**, not every
+`pip` transitive dependency (those are audited via `pip-licenses`/a supply-chain
+SBOM — out of scope for Phase 1, see the note at the end).
 
-## Componentes de infraestrutura (imagens de container)
+## Infrastructure components (container images)
 
-| Componente | Imagem | Licença | Uso no DSE | Obrigações |
+| Component | Image | License | Use in the DSE | Obligations |
 |---|---|---|---|---|
-| PostgreSQL | `postgres:16-alpine` | PostgreSQL License (permissiva, estilo MIT/BSD) | Control plane (work_items, audit_log, tenant_config, identity map) | Nenhuma — atribuição opcional, sem copyleft |
-| Temporal | `temporalio/auto-setup`, `temporalio/ui` | MIT | Orquestração durável do ciclo de vida do WorkItem | Nenhuma — permissiva |
-| Redis | `redis:7-alpine` | RSALv2 / SSPLv1 (dual license, Redis 7.x) — **atenção**: a partir do Redis 7.4/8, a Redis Inc. mudou a licença de BSD para RSAL/SSPL | Cache/fila leve (uso interno, não como serviço multi-tenant hospedado) | Uso self-hosted interno (não oferecido como serviço a terceiros) tipicamente cai fora do gatilho do SSPL, mas **recomendação WS-F**: avaliar migração para `valkey` (fork BSD-3-Clause mantido pela Linux Foundation) antes do primeiro cliente de produção, ou confirmar com jurídico que o uso interno não aciona SSPL/RSAL |
-| HashiCorp Vault | `hashicorp/vault:1.17` | BUSL 1.1 (Business Source License) desde Vault 1.11+ — **não é OSS puro** | Secrets backend (dev mode nesta Fase 1) | BUSL permite uso em produção não-competitivo (não oferecer Vault como serviço concorrente da HashiCorp) — uso interno do DSE está coberto; documentar para o cliente que licenciamento comercial da HashiCorp pode ser necessário dependendo do volume/suporte desejado. Alternativa 100% OSS (MPL 2.0): OpenBao (fork da Linux Foundation pós-BUSL) — avaliar antes do piloto se BUSL for bloqueio contratual |
-| OpenTelemetry Collector | `otel/opentelemetry-collector-contrib` | Apache 2.0 | Coleta de spans/métricas (WSF-E7-T1) | Nenhuma — permissiva |
+| PostgreSQL | `postgres:16-alpine` | PostgreSQL License (permissive, MIT/BSD-style) | Control plane (work_items, audit_log, tenant_config, identity map) | None — attribution optional, no copyleft |
+| Temporal | `temporalio/auto-setup`, `temporalio/ui` | MIT | Durable orchestration of the WorkItem lifecycle | None — permissive |
+| Redis | `redis:7-alpine` | RSALv2 / SSPLv1 (dual license, Redis 7.x) — **caution**: as of Redis 7.4/8, Redis Inc. changed the license from BSD to RSAL/SSPL | Cache/lightweight queue (internal use, not as a hosted multi-tenant service) | Internal self-hosted use (not offered as a service to third parties) typically falls outside the SSPL trigger, but **WS-F recommendation**: evaluate migrating to `valkey` (a BSD-3-Clause fork maintained by the Linux Foundation) before the first production client, or confirm with legal that internal use does not trigger SSPL/RSAL |
+| HashiCorp Vault | `hashicorp/vault:1.17` | BUSL 1.1 (Business Source License) since Vault 1.11+ — **not pure OSS** | Secrets backend (dev mode in this Phase 1) | BUSL allows non-competitive production use (not offering Vault as a service competing with HashiCorp) — the DSE's internal use is covered; document for the client that a HashiCorp commercial license may be required depending on the desired volume/support. A 100% OSS alternative (MPL 2.0): OpenBao (a Linux Foundation post-BUSL fork) — evaluate before the pilot if BUSL is a contractual blocker |
+| OpenTelemetry Collector | `otel/opentelemetry-collector-contrib` | Apache 2.0 | Span/metric collection (WSF-E7-T1) | None — permissive |
 
-## Bibliotecas Python principais (runtime, não dev-only)
+## Main Python libraries (runtime, not dev-only)
 
-| Biblioteca | Licença | Uso |
+| Library | License | Use |
 |---|---|---|
-| LiteLLM | MIT | Model gateway (WS-D) — proxy unificado para providers de LLM |
-| FastAPI | MIT | Todo serviço HTTP (adapters, ingest-gateway, validation, platform) |
-| Pydantic v2 | MIT | Validação de dados (contratos `dse_contracts`) |
+| LiteLLM | MIT | Model gateway (WS-D) — unified proxy for LLM providers |
+| FastAPI | MIT | Every HTTP service (adapters, ingest-gateway, validation, platform) |
+| Pydantic v2 | MIT | Data validation (`dse_contracts` contracts) |
 | Temporal Python SDK | MIT | Workers/workflows (`services/orchestrator`) |
-| psycopg2-binary | LGPL 3.0 (com exceção — permite linking dinâmico sem copyleft de aplicação) | Driver Postgres |
-| hvac | Apache 2.0 | Cliente Python para Vault (`services/platform/dse_secrets`) |
-| requests | Apache 2.0 | HTTP client (fallback do `dse_secrets` sem hvac) |
+| psycopg2-binary | LGPL 3.0 (with an exception — permits dynamic linking without application copyleft) | Postgres driver |
+| hvac | Apache 2.0 | Python client for Vault (`services/platform/dse_secrets`) |
+| requests | Apache 2.0 | HTTP client (`dse_secrets` fallback without hvac) |
 
-## Ação recomendada antes do primeiro cliente de produção
+## Recommended action before the first production client
 
-1. **Vault (BUSL)**: decisão jurídica explícita — aceitar BUSL para uso
-   interno self-hosted, ou migrar para OpenBao (MPL 2.0). Bloqueia
-   `WSF-E5-T3` (topologia B) se o cliente exigir OSS puro por contrato.
-2. **Redis (RSAL/SSPL)**: mesma decisão — migrar para Valkey é uma troca de
-   imagem de baixo esforço (protocolo compatível) se necessário.
-3. **SBOM completo de transitivas**: rodar `pip-licenses` (ou `cyclonedx-py`)
-   em cada `pyproject.toml` do monorepo e anexar a este documento — não feito
-   nesta sessão porque cada workstream ainda está fixando suas próprias
-   dependências em paralelo (faria sentido só na fase de consolidação, com
-   o dependency tree final congelado).
+1. **Vault (BUSL)**: an explicit legal decision — accept BUSL for internal
+   self-hosted use, or migrate to OpenBao (MPL 2.0). Blocks
+   `WSF-E5-T3` (topology B) if the client contractually requires pure OSS.
+2. **Redis (RSAL/SSPL)**: same decision — migrating to Valkey is a low-effort
+   image swap (protocol compatible) if needed.
+3. **Full SBOM of transitive dependencies**: run `pip-licenses` (or `cyclonedx-py`)
+   over every `pyproject.toml` in the monorepo and attach it to this document — not done
+   in this session because each workstream is still pinning its own
+   dependencies in parallel (it only makes sense at the consolidation phase, with
+   the final dependency tree frozen).

@@ -1,11 +1,11 @@
-"""WSE-E5-T12 — testes REAIS do artifact store Garage (S3 self-hosted em
-localhost:3900, docker-compose.wse.yml). NADA aqui mocka o Garage, o Postgres
-ou o boto3 — o ponto do teste é a garantia de política (expiração, quarentena,
-log de acesso) contra o store de verdade (P8).
+"""WSE-E5-T12 — REAL tests for the Garage artifact store (self-hosted S3 on
+localhost:3900, docker-compose.wse.yml). NOTHING here mocks Garage, Postgres or
+boto3 — the point of the test is the policy guarantee (expiration, quarantine,
+access log) against the real store (P8).
 
-Requer: `docker compose -f docker-compose.wse.yml up -d garage` + migração
-0017_wse3.sql aplicada + ffmpeg no host (multipart com vídeo real >5MB,
-obrigação do ADR-18 revisado).
+Requires: `docker compose -f docker-compose.wse.yml up -d garage` + migration
+0017_wse3.sql applied + ffmpeg on the host (multipart with a real >5MB video,
+required by the revised ADR-18).
 """
 from __future__ import annotations
 
@@ -59,12 +59,12 @@ def test_publish_and_presigned_get_roundtrip(garage_ready, small_file, work_item
         )
     )
     assert ref.store_key == f"{work_item_id}/test_report/{small_file.name}"
-    assert ref.store_key.startswith(work_item_id)  # prefixo por WorkItem
-    # bucket POR TENANT (NFR-03)
+    assert ref.store_key.startswith(work_item_id)  # per-WorkItem prefix
+    # PER-TENANT bucket (NFR-03)
     row = db.get_artifact(work_item_id, ref.store_key)
     assert row is not None and row["bucket"] == garage.bucket_for_tenant(tenant_id)
     assert row["multipart"] is False
-    # download real via presigned URL
+    # real download via presigned URL
     resp = httpx.get(ref.presigned_url)
     assert resp.status_code == 200
     assert resp.text.startswith("linha de evidencia")
@@ -73,22 +73,22 @@ def test_publish_and_presigned_get_roundtrip(garage_ready, small_file, work_item
 
 
 def test_presigned_url_expires_and_is_denied(garage_ready, small_file, work_item_id, tenant_id):
-    """Exit da Fase 3: links de evidência EXPIRAM por política — URL expirada
-    retorna NEGADO (4xx assinatura expirada), provado contra o Garage real."""
+    """Phase 3 exit criterion: evidence links EXPIRE by policy — an expired URL
+    returns DENIED (4xx, expired signature), proven against the real Garage."""
     ref = garage.publish_artifact_core(
         PublishArtifactInput(
             work_item_id=work_item_id, tenant_id=tenant_id, kind="test_report",
             local_path=str(small_file), content_type="text/plain", ttl_seconds=1,
         )
     )
-    assert httpx.get(ref.presigned_url).status_code == 200  # válida agora
+    assert httpx.get(ref.presigned_url).status_code == 200  # valid right now
     time.sleep(3)
     resp = httpx.get(ref.presigned_url)
-    # Garage nega assinatura expirada com 400 (AuthorizationHeaderMalformed/
-    # expired); AWS S3 usaria 403 — ambos são NEGADO, nunca o conteúdo.
+    # Garage denies an expired signature with 400 (AuthorizationHeaderMalformed/
+    # expired); AWS S3 would use 403 — both mean DENIED, never the content.
     assert resp.status_code in (400, 401, 403), f"URL expirada deveria ser negada, veio {resp.status_code}"
     assert b"linha de evidencia" not in resp.content
-    # e a resolução por política também recusa (P6 — falha limpa)
+    # and policy-based resolution refuses it too (P6 — clean failure)
     with pytest.raises(PermissionError, match="expired"):
         garage.resolve_artifact_url(
             work_item_id=work_item_id, store_key=ref.store_key, accessor="user:tester"
@@ -97,11 +97,12 @@ def test_presigned_url_expires_and_is_denied(garage_ready, small_file, work_item
 
 @pytest.fixture(scope="module")
 def real_video_over_5mb(tmp_path_factory) -> Path:
-    """Vídeo mp4 REAL (>5MB) gerado com ffmpeg — obrigação do ADR-18 revisado
-    (validar multipart com artefato de vídeo real, não um blob sintético)."""
+    """REAL mp4 video (>5MB) generated with ffmpeg — required by the revised
+    ADR-18 (validate multipart with a real video artifact, not a synthetic blob)."""
     out = tmp_path_factory.mktemp("video") / "demo_big.mp4"
-    # testsrc puro comprime demais (fica <1MB); ruído temporal torna o vídeo
-    # realisticamente incompressível, e minrate força o encoder a manter bitrate.
+    # plain testsrc compresses too well (ends up <1MB); temporal noise makes the
+    # video realistically incompressible, and minrate forces the encoder to hold
+    # the bitrate.
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error",
          "-f", "lavfi", "-i", "testsrc=duration=10:size=1280x720:rate=30",
@@ -111,11 +112,11 @@ def real_video_over_5mb(tmp_path_factory) -> Path:
          str(out)],
         check=True, timeout=180,
     )
-    assert out.stat().st_size > 5 * 1024 * 1024, "fixture precisa ter >5MB"
+    assert out.stat().st_size > 5 * 1024 * 1024, "the fixture must be >5MB"
     return out
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requer ffmpeg (vídeo real >5MB)")
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="requires ffmpeg (real video >5MB)")
 def test_multipart_upload_with_real_video(garage_ready, real_video_over_5mb, work_item_id, tenant_id):
     ref = garage.publish_artifact_core(
         PublishArtifactInput(
@@ -124,19 +125,19 @@ def test_multipart_upload_with_real_video(garage_ready, real_video_over_5mb, wor
         )
     )
     row = db.get_artifact(work_item_id, ref.store_key)
-    assert row["multipart"] is True, "upload >5MB deve usar multipart real"
+    assert row["multipart"] is True, "a >5MB upload must use real multipart"
     assert row["size_bytes"] == real_video_over_5mb.stat().st_size
-    # o objeto remontado no Garage é BYTE-IDÊNTICO ao vídeo original
+    # the object reassembled in Garage is BYTE-IDENTICAL to the original video
     resp = httpx.get(ref.presigned_url)
     assert resp.status_code == 200
     assert len(resp.content) == real_video_over_5mb.stat().st_size
-    assert resp.content[4:8] == b"ftyp"  # header mp4 real
+    assert resp.content[4:8] == b"ftyp"  # real mp4 header
     assert resp.content == real_video_over_5mb.read_bytes()
 
 
 def test_access_log_associates_resolution_to_pr(garage_ready, small_file, work_item_id, tenant_id):
-    """Cada resolução/abertura de link registra acesso associável ao PR —
-    insumo da métrica evidence consumption."""
+    """Every link resolution/open records an access attributable to the PR —
+    input to the evidence-consumption metric."""
     ref = garage.publish_artifact_core(
         PublishArtifactInput(
             work_item_id=work_item_id, tenant_id=tenant_id, kind="test_report",
@@ -161,9 +162,9 @@ def test_access_log_associates_resolution_to_pr(garage_ready, small_file, work_i
 
 
 def test_quarantine_invalidates_access_before_ttl(garage_ready, small_file, work_item_id, tenant_id):
-    """Aceite do WS-F (costura EXISTENTE da Fase 2): work item quarantinado via
-    `dse_platform.kill_switches.quarantine_work_item` => artefato movido para o
-    prefixo de quarentena E acesso invalidado ANTES do TTL (que aqui é 1h)."""
+    """WS-F acceptance (EXISTING Phase 2 seam): a work item quarantined via
+    `dse_platform.kill_switches.quarantine_work_item` => artifact moved to the
+    quarantine prefix AND access invalidated BEFORE the TTL (which is 1h here)."""
     from dse_platform.kill_switches import is_quarantined, quarantine_work_item
 
     ref = garage.publish_artifact_core(
@@ -175,31 +176,31 @@ def test_quarantine_invalidates_access_before_ttl(garage_ready, small_file, work
     old_url = ref.presigned_url
     assert httpx.get(old_url).status_code == 200
 
-    # quarentena REAL do WS-F (tabela dse_work_item_quarantine + audit dele)
-    quarantine_work_item(work_item_id, tenant_id, reason="suspeita de exfiltração", actor="user:operador")
+    # REAL WS-F quarantine (dse_work_item_quarantine table + its own audit)
+    quarantine_work_item(work_item_id, tenant_id, reason="suspected exfiltration", actor="user:operador")
     assert is_quarantined(work_item_id)
 
     moved = garage.sweep_quarantined_work_items()
     assert moved.get(work_item_id) == [ref.store_key]
 
-    # 1) a URL presigned ANTIGA (TTL de 1h ainda vigente) agora é negada —
-    #    a chave original não existe mais no bucket.
+    # 1) the OLD presigned URL (1h TTL still valid) is now denied —
+    #    the original key no longer exists in the bucket.
     resp = httpx.get(old_url)
     assert resp.status_code in (403, 404), f"acesso deveria estar invalidado, veio {resp.status_code}"
-    # 2) resolução por política recusa explicitamente (P6)
+    # 2) policy-based resolution refuses explicitly (P6)
     with pytest.raises(PermissionError, match="quarantine"):
         garage.resolve_artifact_url(
             work_item_id=work_item_id, store_key=ref.store_key, accessor="user:andre"
         )
-    # 3) o objeto foi MOVIDO (não deletado — evidência preservada p/ auditoria)
+    # 3) the object was MOVED (not deleted — evidence preserved for auditing)
     row = db.get_artifact(work_item_id, ref.store_key)
     assert row["quarantined_at"] is not None
     assert row["quarantine_key"] == f"quarantine/{ref.store_key}"
     client = garage.s3_client(garage_ready)
     head = client.head_object(Bucket=row["bucket"], Key=row["quarantine_key"])
     assert head["ContentLength"] == small_file.stat().st_size
-    # 4) audit (P8) — nosso + o do WS-F
+    # 4) audit (P8) — ours + WS-F's
     assert len(_audit_rows(work_item_id, "artifact_quarantined")) == 1
     assert len(_audit_rows(work_item_id, "work_item_quarantined")) == 1
-    # 5) idempotente: segunda varredura não move de novo
+    # 5) idempotent: a second sweep does not move it again
     assert garage.sweep_quarantined_work_items().get(work_item_id) is None

@@ -1,26 +1,26 @@
-# WS-C — sandbox-runtime (não expõe porta; chamado in-process pelo worker
-# Temporal do WS-B) + egress-proxy (porta reservada 8806).
+# WS-C — sandbox-runtime (exposes no port; called in-process by WS-B's
+# Temporal worker) + egress-proxy (reserved port 8806).
 #
-# Modo dev (P7 boring-first): a imagem do egress-proxy é `python:3.11-slim`
-# de cima com o código-fonte bind-mountado (`egress_proxy` depende só de
-# stdlib + imports opcionais) — evita precisar de um passo de build para
-# subir o serviço em dev. Produção deve trocar por uma imagem própria com
-# `pip install -e services/egress-proxy` congelado (ver README).
+# Dev mode (P7 boring-first): the egress-proxy image is a stock
+# `python:3.11-slim` with the source code bind-mounted (`egress_proxy` depends
+# only on stdlib + optional imports) — this avoids needing a build step to
+# bring the service up in dev. Production should swap it for a dedicated image
+# with a frozen `pip install -e services/egress-proxy` (see README).
 #
-# A rede `dse_sandbox_net` é interna (sem gateway de internet) — todo
-# container de sandbox efêmero (criado programaticamente pelo
-# `docker_driver.py`, não por este compose) se conecta SÓ a ela. O
-# egress-proxy é o único participante conectado tanto a `dse_sandbox_net`
-# quanto a `dse_net` (que tem rota de internet padrão do Docker), fazendo a
-# ponte controlada.
+# The `dse_sandbox_net` network is internal (no internet gateway) — every
+# ephemeral sandbox container (created programmatically by
+# `docker_driver.py`, not by this compose file) connects ONLY to it. The
+# egress-proxy is the only participant connected both to `dse_sandbox_net`
+# and to `dse_net` (which has Docker's default internet route), acting as the
+# controlled bridge.
 networks:
-  # dse_sandbox_net é criada programaticamente por
-  # sandbox_runtime/docker_driver.py (SANDBOX_NETWORK_NAME) na primeira vez
-  # que um sandbox é provisionado — não pelo compose. Referenciada aqui como
-  # external para o egress-proxy poder se conectar a ela sem colidir com essa
-  # criação dinâmica. Rode `docker network create --internal dse_sandbox_net`
-  # manualmente (ou provisione um sandbox de teste) antes do primeiro `make up`
-  # se ela ainda não existir.
+  # dse_sandbox_net is created programmatically by
+  # sandbox_runtime/docker_driver.py (SANDBOX_NETWORK_NAME) the first time a
+  # sandbox is provisioned — not by compose. It is referenced here as external
+  # so the egress-proxy can attach to it without clashing with that dynamic
+  # creation. Run `docker network create --internal dse_sandbox_net` manually
+  # (or provision a test sandbox) before the first `make up` if it does not
+  # exist yet.
   dse_sandbox_net:
     external: true
 

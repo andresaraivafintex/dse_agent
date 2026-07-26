@@ -1,89 +1,89 @@
-# Fase 2 ("Judgment & queue") — Status da implementação
+# Phase 2 ("Judgment & queue") — Implementation status
 
-Data: 2026-07-20. Escopo: implementação real da Fase 2 sobre a Fase 1 já integrada, com os
-7 itens do [adendo 01](../../plano-desenvolvimento/01-ADENDO-FASE2-POS-FASE1.md) incorporados.
+Date: 2026-07-20. Scope: real implementation of Phase 2 on top of the already-integrated Phase 1,
+with the 7 items from [addendum 01](../../plano-desenvolvimento/01-ADENDO-FASE2-POS-FASE1.md) folded in.
 
-## Resumo executivo
+## Executive summary
 
-- **399 testes passando, 2 pulados (com razão), 0 falhando** nos 11 pacotes/serviços, contra
-  Postgres/Temporal/Docker/Vault/LiteLLM reais. (Fase 1 fechou em 223; +176 novos na Fase 2.)
-- **Temporal atualizado 1.24 → 1.29** (drill WSB-E1-T5), com estado preservado (bancos próprios
-  do Temporal) — validado recriando o container. Priority & Fairness nativo (1.31+) ainda não
-  publicado no registro, então o fairness é **worker-side** (caps por tenant) atrás de interface
-  trocável, como o adendo previu.
-- **Smoke test end-to-end real** do caminho da Fase 2 executado: intake → clarificação → budget
-  → **sessão Planner** → **gate de aprovação de plano** (auto-aprovado por risco baixo, com
-  projeção em `plan_approval_gate`) → sandbox provisionado. O worker registra **20 Activities**
-  (8 WS-C + 6 WS-E + 6 locais do WS-B).
-- **5 bugs de integração reais encontrados e corrigidos** na consolidação — de novo, nenhum
-  workstream os pegaria sozinho (fakes lenientes escondiam o boundary real). Ver §"Achados".
+- **399 tests passing, 2 skipped (with a reason), 0 failing** across the 11 packages/services,
+  against real Postgres/Temporal/Docker/Vault/LiteLLM. (Phase 1 closed at 223; +176 new in Phase 2.)
+- **Temporal upgraded 1.24 → 1.29** (drill WSB-E1-T5), with state preserved (Temporal's own
+  databases) — validated by recreating the container. Native Priority & Fairness (1.31+) is not yet
+  published in the registry, so fairness is **worker-side** (per-tenant caps) behind a swappable
+  interface, exactly as the addendum anticipated.
+- **Real end-to-end smoke test** of the Phase 2 path executed: intake → clarification → budget
+  → **Planner session** → **plan approval gate** (auto-approved by low risk, with the projection in
+  `plan_approval_gate`) → sandbox provisioned. The worker registers **20 Activities**
+  (8 WS-C + 6 WS-E + 6 WS-B local ones).
+- **5 real integration bugs found and fixed** during consolidation — again, no single
+  workstream would have caught them alone (lenient fakes hid the real boundary). See §"Findings".
 
-## O que foi construído (real, por workstream)
+## What was built (real, per workstream)
 
-| WS | Fase 2 entregue | Testes |
+| WS | Phase 2 delivered | Tests |
 |---|---|---|
-| A | Adapter Jira completo (webhook + poller obrigatório + transições serializadas + transição-como-aprovação UC5), mapeamento plataforma→tenant, webhook `pull_request` merged → `merged_by_human`, roteamento de signal por status do WorkItem | 107 |
-| B | Gate de aprovação de plano por risk class (com classificação de risco determinística que não rebaixa por Planner otimista), rejection path (re-plan/re-clarify/cancel), budgets na admissão e em fronteiras, fairness worker-side, sequência Planner→gate→Coder→Tester→L1→L2→PR, chaos de modelo/proxy fail-closed | 37 |
-| C | Sessões Planner read-only / Tester (test-paths) / Reviewer fresh-context (P3 por construção), skill registry bootstrap (tenant-scoped), retrieval/index (BM25 + TF-IDF self-hosted, isolamento por tenant, conteúdo não confiável) | 55 |
-| D | Policy per-stage/per-tenant no call time (hot-reload), enforcement de budget (decline-never-truncate), kill switch de gateway 4 escopos + reassign de modelo, custo durável ligado ao OTel collector, eval suite Tier-2 | 39 |
-| E | Loop L2 fresh-context (cheapest-first, P5), fix-retries bounded L2→Coder, modo estrito de PR (humano abre, via `PrRef.compare_url`) | 71 |
-| F | Access bundles por tenant/canal (cascata de aprovador vazia bloqueia), design ADR-22 + SSO OIDC real + offboarding em cascata, suíte de isolamento multi-tenant (tentativas ativas cross-tenant), admin queue board (API + controles→signals + UI mínima na 8890) | 90 |
+| A | Complete Jira adapter (webhook + mandatory poller + serialized transitions + transition-as-approval UC5), platform→tenant mapping, `pull_request` merged webhook → `merged_by_human`, signal routing by WorkItem status | 107 |
+| B | Plan approval gate by risk class (with deterministic risk classification that does not downgrade for an optimistic Planner), rejection path (re-plan/re-clarify/cancel), budgets at admission and at boundaries, worker-side fairness, Planner→gate→Coder→Tester→L1→L2→PR sequence, fail-closed model/proxy chaos | 37 |
+| C | Read-only Planner / Tester (test-paths) / fresh-context Reviewer sessions (P3 by construction), skill registry bootstrap (tenant-scoped), retrieval/index (self-hosted BM25 + TF-IDF, per-tenant isolation, untrusted content) | 55 |
+| D | Per-stage/per-tenant policy at call time (hot-reload), budget enforcement (decline-never-truncate), 4-scope gateway kill switch + model reassign, durable cost wired to the OTel collector, Tier-2 eval suite | 39 |
+| E | Fresh-context L2 loop (cheapest-first, P5), bounded L2→Coder fix-retries, strict PR mode (a human opens it, via `PrRef.compare_url`) | 71 |
+| F | Access bundles per tenant/channel (an empty approver cascade blocks), ADR-22 design + real OIDC SSO + cascading offboarding, multi-tenant isolation suite (active cross-tenant attempts), admin queue board (API + controls→signals + minimal UI on 8890) | 90 |
 
-## Achados da integração (o valor de ligar os 6 workstreams)
+## Integration findings (the value of wiring the 6 workstreams together)
 
-1. **`awaiting_plan_approval` ausente do enum de fundação** — o WS-B gravava o estado na coluna
-   TEXT e a `constants.py` já o referenciava como gatilho de roteamento do WS-A, mas o enum
-   `WorkItemStatus` e o `to_public_status` não o tinham. Adicionado à fundação com projeção
-   pública `blocked` (§10.3).
-2. **Boundary Planner quebrado** — o WS-B enviava `instructions`(lista)+`base_branch`; o
-   `RunPlannerTurnInput` do WS-C exigia `instruction`(str). Fakes lenientes dos dois lados
-   escondiam; o wire real crashava com "missing instruction". Modelo do Planner tornado
-   tolerante (deriva `instruction` de `instructions`).
-3. **Boundary Tester quebrado, nos dois sentidos** — input faltava `instruction`; e o retorno
-   `TesterTurnResult` do WS-C não tinha `diff_summary`/`files_changed` que o WS-B decodifica em
-   `CoderTurnResult`. Tornado superset compatível.
-4. **Boundary L2 quebrado** — WS-B enviava `diff_summary`; o input estrito do WS-C exigia `diff`.
-   Aqui a correção foi no **chamador** (WS-B envia `diff`), preservando o input do L2
-   deliberadamente estrito — porque a prova de P3 "por construção" (o input do Reviewer tem
-   exatamente `{plan, diff}`, nenhum canal para histórico do Coder) é a joia da coroa e não pode
-   ser alargada. Os testes de P3 dos dois lados foram ajustados ao payload correto.
-5. **Colisão potencial de nome de Activity** — WS-C e WS-E ambos tinham conceito de "L2 review".
-   Verificado que o WS-E prefixou os seus (`wse_*`) e não há colisão: 14 Activities
-   cross-workstream com nomes únicos, worker sobe com 20 registradas.
+1. **`awaiting_plan_approval` missing from the foundation enum** — WS-B wrote the state into the
+   TEXT column and `constants.py` already referenced it as a WS-A routing trigger, but the
+   `WorkItemStatus` enum and `to_public_status` did not have it. Added to the foundation with
+   public projection `blocked` (§10.3).
+2. **Broken Planner boundary** — WS-B sent `instructions`(list)+`base_branch`; WS-C's
+   `RunPlannerTurnInput` required `instruction`(str). Lenient fakes on both sides
+   hid it; the real wire crashed with "missing instruction". The Planner model was made
+   tolerant (it derives `instruction` from `instructions`).
+3. **Broken Tester boundary, in both directions** — the input was missing `instruction`; and WS-C's
+   `TesterTurnResult` return value lacked the `diff_summary`/`files_changed` that WS-B decodes into
+   `CoderTurnResult`. Made a compatible superset.
+4. **Broken L2 boundary** — WS-B sent `diff_summary`; WS-C's strict input required `diff`.
+   Here the fix went into the **caller** (WS-B sends `diff`), deliberately keeping the L2 input
+   strict — because the "by construction" P3 proof (the Reviewer's input is exactly
+   `{plan, diff}`, no channel for Coder history) is the crown jewel and cannot be
+   widened. The P3 tests on both sides were adjusted to the correct payload.
+5. **Potential Activity name collision** — WS-C and WS-E both had an "L2 review" concept.
+   Verified that WS-E prefixed theirs (`wse_*`) and there is no collision: 14 cross-workstream
+   Activities with unique names, worker comes up with 20 registered.
 
-> Nota de dívida técnica registrada: os input/output models das Activities (Planner/Tester/L2)
-> vivem em cada workstream, não em `dse_contracts` — foi o que permitiu o drift dos achados 2–4.
-> A correção definitiva é promovê-los à fundação (uma fonte da verdade), agendado para a próxima
-> janela de contrato do arquiteto.
+> Recorded technical debt: the Activities' input/output models (Planner/Tester/L2)
+> live in each workstream, not in `dse_contracts` — that is what allowed the drift in findings 2–4.
+> The definitive fix is promoting them to the foundation (a single source of truth), scheduled for
+> the architect's next contract window.
 
-## Exit criteria da Fase 2 (Seção 16) — honestamente
+## Phase 2 exit criteria (Section 16) — honestly
 
-| Critério | Status |
+| Criterion | Status |
 |---|---|
-| UC2 verde (Jira) | **Parcial** — adapter completo e testado com FakeJiraClient; falta service account/site Jira reais no Vault (operacional) |
-| UC5 verde incl. block-on-unresolvable-approver | **Atendido em lógica** — gate + cascata vazia→Blocked provados por 7 testes de integração do WS-B contra Temporal real; costura do signal `plan_approval` (dispatcher→handler) verificada estaticamente e o gate auto roda ao vivo no smoke test |
-| Queue board mostra todos os estados + controles com efeito real | **Atendido** — API + UI mínima (8890) + controles→signals Temporal; kill switch 4 escopos e reassign de modelo com efeito |
-| Design ADR-22 fechado antes do exit | **Atendido** — `infra/ADR-22-identity.md` + SSO OIDC real + offboarding em cascata |
-| Skill registry bootstrapped + retrieval operacional | **Atendido** — registry tenant-scoped com seed humano; retrieval BM25/TF-IDF com isolamento provado pela suíte cross-tenant do WS-F |
+| UC2 green (Jira) | **Partial** — adapter complete and tested with FakeJiraClient; still needs a real Jira service account/site in Vault (operational) |
+| UC5 green incl. block-on-unresolvable-approver | **Met in logic** — gate + empty cascade→Blocked proven by 7 WS-B integration tests against real Temporal; the `plan_approval` signal seam (dispatcher→handler) verified statically and the auto gate runs live in the smoke test |
+| Queue board shows all states + controls with real effect | **Met** — API + minimal UI (8890) + controls→Temporal signals; 4-scope kill switch and model reassign with real effect |
+| ADR-22 design closed before exit | **Met** — `infra/ADR-22-identity.md` + real OIDC SSO + cascading offboarding |
+| Skill registry bootstrapped + retrieval operational | **Met** — tenant-scoped registry with a human seed; BM25/TF-IDF retrieval with isolation proven by WS-F's cross-tenant suite |
 
-## O que falta (não escondido)
+## What is missing (not hidden)
 
-- **Caminho de alto risco end-to-end ao vivo**: o gate auto (risco baixo) roda no smoke test; o
-  caminho `high → awaiting_plan_approval → signal plan_approval → prossegue` é provado por testes
-  de integração (Temporal real, WS-B) mas não foi forçado end-to-end pela pilha conteinerizada,
-  porque o Planner fake emite `expected_files: []` (risco baixo) e não há modelo real para
-  emitir um plano de alto risco. Precisa de um modelo real ou injeção de script no Planner.
-- Credenciais/instâncias reais (Slack/GitHub/Jira Apps, AWS/Bedrock) seguem pendentes — mesma
-  situação da Fase 1, é bloqueio administrativo, não de engenharia.
-- Promoção dos models de Activity a `dse_contracts` (dívida do achado 2–4).
-- `dse_ingest_dispatcher` e demais containers: as imagens foram reconstruídas na integração; um
-  redeploy limpo em produção deve rebuildar tudo (já é o fluxo do `make up`).
+- **High-risk path end-to-end, live**: the auto gate (low risk) runs in the smoke test; the
+  `high → awaiting_plan_approval → plan_approval signal → proceeds` path is proven by integration
+  tests (real Temporal, WS-B) but was not forced end-to-end through the containerized stack,
+  because the fake Planner emits `expected_files: []` (low risk) and there is no real model to
+  emit a high-risk plan. It needs a real model or script injection into the Planner.
+- Real credentials/instances (Slack/GitHub/Jira Apps, AWS/Bedrock) remain pending — same
+  situation as Phase 1; it is an administrative blocker, not an engineering one.
+- Promotion of the Activity models to `dse_contracts` (debt from findings 2–4).
+- `dse_ingest_dispatcher` and the other containers: the images were rebuilt during integration; a
+  clean production redeploy should rebuild everything (that is already what `make up` does).
 
-## Como rodar
+## How to run
 
 ```
 cd fase1
 make up && make migrate
-# testes: cada workstream no seu venv ATIVADO (o L1 do WS-E precisa de ruff/mypy no PATH):
+# tests: each workstream in its own ACTIVATED venv (WS-E's L1 needs ruff/mypy on PATH):
 #   source .venv-wse/bin/activate && (cd services/validation && pytest -q)
 ```

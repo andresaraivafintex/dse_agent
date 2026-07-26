@@ -1,12 +1,12 @@
-"""WSA-E6-T3 — roteamento de signal por STATUS do WorkItem + merge override
+"""WSA-E6-T3 — signal routing by WorkItem STATUS + merge override
 (WSA-E4-T3).
 
-Duas camadas:
-  1. `_route_signal(status, kind, payload)` — lógica pura de decisão
-     (determinística, P1): testada exaustivamente por branch.
-  2. Integração real (Postgres + Temporal): o `Dispatcher` drena um
-     ingest_event de aprovação e emite a audit row com o signal correto,
-     consumindo o evento (nunca mock — CONVENTIONS.md).
+Two layers:
+  1. `_route_signal(status, kind, payload)` — pure decision logic
+     (deterministic, P1): tested exhaustively branch by branch.
+  2. Real integration (Postgres + Temporal): the `Dispatcher` drains an
+     approval ingest_event and emits the audit row with the correct signal,
+     consuming the event (never mocked — CONVENTIONS.md).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ TEMPORAL_ADDRESS = "localhost:7233"
 
 
 # --------------------------------------------------------------------------
-# 1. Lógica pura de roteamento
+# 1. Pure routing logic
 # --------------------------------------------------------------------------
 def _payload(content="ok", **extra):
     p = {"content_snapshot": content, "actor": {"resolved_principal": "usr_alice"}}
@@ -59,7 +59,7 @@ def test_approval_rejected_carries_route_when_rejected():
 def test_approval_rejected_defaults_route_when_missing():
     route = _route_signal("awaiting_plan_approval", "approval", _payload(approval_verdict="rejected"))
     assert route.payload["verdict"] == "rejected"
-    assert route.payload["route"] == "re_plan"  # obrigatório quando rejected (WSB-E3-T3)
+    assert route.payload["route"] == "re_plan"  # required when rejected (WSB-E3-T3)
 
 
 def test_approval_with_pr_ready_routes_to_review_comment():
@@ -97,22 +97,23 @@ def test_review_comment_with_verdict_preserved():
 
 
 def test_review_comment_without_verdict_is_not_a_decision():
-    route = _route_signal("pr_ready", "review_comment", _payload("só um comentário"))
+    route = _route_signal("pr_ready", "review_comment", _payload("just a comment"))
     assert route.signal_name is None
     assert route.reason == "review_comment_no_verdict"
 
 
 # --------------------------------------------------------------------------
-# 2. Integração real (Postgres + Temporal)
+# 2. Real integration (Postgres + Temporal)
 #
-# Nota de isolamento: o ambiente compartilhado desta fase tem o container
-# `dse_ingest_dispatcher` (código Fase 1, roteamento por `kind` antigo) rodando
-# `run_forever` contra o MESMO outbox. Um teste que insira em `ingest_events` e
-# chame `drain_once` competiria com esse container (SKIP LOCKED) — e, pior, o
-# container roteia com o mapa antigo. Por isso a INTEGRAÇÃO de roteamento aqui
-# exercita `_dispatch_row` DIRETAMENTE (o código novo, WSA-E6-T3), entregando
-# um signal REAL a um workflow Temporal REAL — durabilidade/entrega de signal
-# de verdade (P8), sem passar pelo outbox disputado.
+# Isolation note: this phase's shared environment has the
+# `dse_ingest_dispatcher` container (Phase 1 code, old `kind`-based routing)
+# running `run_forever` against the SAME outbox. A test that inserted into
+# `ingest_events` and called `drain_once` would compete with that container
+# (SKIP LOCKED) — and, worse, the container routes with the old map. That is
+# why the routing INTEGRATION here exercises `_dispatch_row` DIRECTLY (the new
+# code, WSA-E6-T3), delivering a REAL signal to a REAL Temporal workflow —
+# genuine signal durability/delivery (P8), without going through the contended
+# outbox.
 # --------------------------------------------------------------------------
 def _create_work_item_and_workflow(client, tenant_id: str, status: str, *, start: bool = True) -> str:
     work_item_id = f"wi_route_{uuid.uuid4().hex[:12]}"

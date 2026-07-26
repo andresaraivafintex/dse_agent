@@ -1,12 +1,13 @@
-"""Ativação da ALERTING-RULES.md §3 — alerta de aproximação do limite de
-history do Temporal, provado contra o otel-collector REAL da fundação
-(dse_otel_collector, pipeline `metrics/history_alert` em
+"""Activation of ALERTING-RULES.md §3 — alert for approaching the Temporal
+history limit, proven against the foundation's REAL otel-collector
+(dse_otel_collector, `metrics/history_alert` pipeline in
 infra/otel-collector-config.yaml).
 
-Mecânica do teste: envia datapoints OTLP/HTTP reais (o mesmo caminho que o
-emit_history_metric do WS-B usa) acima e abaixo dos thresholds e verifica no
-stdout do collector que SÓ os acima do threshold saíram no exporter
-`debug/history_alert` (o canal do alerta no MVP), com a severidade correta.
+Test mechanics: send real OTLP/HTTP datapoints (the same path WS-B's
+emit_history_metric uses) above and below the thresholds, then check on the
+collector's stdout that ONLY the ones above the threshold came out on the
+`debug/history_alert` exporter (the alert channel in the MVP), with the correct
+severity.
 """
 from __future__ import annotations
 
@@ -20,8 +21,8 @@ import requests
 OTLP_METRICS_URL = "http://localhost:4318/v1/metrics"
 COLLECTOR_CONTAINER = "dse_otel_collector"
 
-# Mesmos números do infra/otel-collector-config.yaml (70%/90% dos limites
-# default do Temporal: 51.200 eventos / 50MB).
+# Same numbers as infra/otel-collector-config.yaml (70%/90% of Temporal's
+# default limits: 51,200 events / 50MB).
 WARNING_EVENTS = 35_840
 CRITICAL_EVENTS = 46_080
 
@@ -65,10 +66,10 @@ def _send_history_metric(metric_name: str, value: int, work_item_id: str) -> Non
 
 
 def _alert_channel_lines(since: str) -> list[str]:
-    """Linhas do stdout do collector que pertencem a blocos do exporter
-    debug/history_alert (o canal do alerta). O debug exporter loga um header
-    com o nome do exporter e depois o dump do datapoint — um parser de
-    estado simples separa os canais."""
+    """Lines of the collector's stdout that belong to blocks of the
+    debug/history_alert exporter (the alert channel). The debug exporter logs a
+    header with the exporter name and then the datapoint dump — a simple state
+    parser separates the channels."""
     logs = subprocess.run(
         ["docker", "logs", COLLECTOR_CONTAINER, "--since", since],
         capture_output=True, text=True, timeout=30,
@@ -93,7 +94,7 @@ def collector():
         )
         requests.get("http://localhost:4318", timeout=5)
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"otel-collector da fundação indisponível: {exc}")
+        pytest.skip(f"foundation otel-collector unavailable: {exc}")
     return True
 
 
@@ -102,7 +103,7 @@ def collector():
     [
         ("dse.workflow.history_length", WARNING_EVENTS + 200, "warning"),
         ("dse.workflow.history_length", CRITICAL_EVENTS + 200, "critical"),
-        ("temporal_workflow_event_history_size", 47_500_000, "critical"),  # bytes: > 90% de 50MB
+        ("temporal_workflow_event_history_size", 47_500_000, "critical"),  # bytes: > 90% of 50MB
     ],
 )
 def test_above_threshold_fires_alert(collector, metric_name, value, expected_severity):
@@ -119,7 +120,7 @@ def test_above_threshold_fires_alert(collector, metric_name, value, expected_sev
         time.sleep(1)
     assert found, f"datapoint {value} de {metric_name} NÃO apareceu no canal de alerta ({since})"
 
-    # a severidade marcada pelo transform está no mesmo bloco do datapoint
+    # the severity stamped by the transform is in the same block as the datapoint
     window = _alert_channel_lines("60s")
     idx = next(i for i, ln in enumerate(window) if wid in ln)
     block = "\n".join(window[max(0, idx - 20): idx + 20])
@@ -130,18 +131,18 @@ def test_above_threshold_fires_alert(collector, metric_name, value, expected_sev
 def test_below_threshold_does_not_fire(collector):
     wid = f"wi-quiet-{uuid.uuid4().hex[:10]}"
     _send_history_metric("dse.workflow.history_length", 5_000, wid)
-    time.sleep(6)  # janela generosa para o pipeline (sem batch) processar
+    time.sleep(6)  # generous window for the (unbatched) pipeline to process
 
     assert not [ln for ln in _alert_channel_lines("30s") if wid in ln], (
-        "datapoint ABAIXO do threshold vazou para o canal de alerta"
+        "a datapoint BELOW the threshold leaked into the alert channel"
     )
 
 
 def test_unrelated_metric_never_reaches_alert_channel(collector):
     wid = f"wi-other-{uuid.uuid4().hex[:10]}"
-    _send_history_metric("dse.cost_usd_total", 999_999, wid)  # nem é métrica de history
+    _send_history_metric("dse.cost_usd_total", 999_999, wid)  # not even a history metric
     time.sleep(6)
 
     assert not [ln for ln in _alert_channel_lines("30s") if wid in ln], (
-        "métrica não-history vazou para o canal de alerta"
+        "a non-history metric leaked into the alert channel"
     )

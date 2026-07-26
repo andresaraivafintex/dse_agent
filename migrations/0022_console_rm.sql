@@ -1,19 +1,19 @@
--- Fintex DSE — Plano 06 F0 — read model do console (schema console_rm).
--- Projecao DERIVADA do system of record (nunca dual-write): o worker
--- services/console-projector tailea work_items/ingest_events/audit_log/
--- model_call_ledger por cursores e materializa aqui o SHAPE que o
--- dse_console_pane consome. Drop schema + replay reconstroi tudo (P8).
--- Migracao aditiva e idempotente.
+-- Fintex DSE — Plan 06 F0 — console read model (console_rm schema).
+-- DERIVED projection of the system of record (never dual-write): the worker
+-- services/console-projector tails work_items/ingest_events/audit_log/
+-- model_call_ledger by cursors and materializes here the SHAPE that
+-- dse_console_pane consumes. Drop schema + replay rebuilds everything (P8).
+-- Additive and idempotent migration.
 
 CREATE SCHEMA IF NOT EXISTS console_rm;
 
--- Shape `WorkItem` do console (status ja no vocabulario do console — o mapa
--- 17->11 vive no projector, testado por contrato).
+-- The console's `WorkItem` shape (status already in the console vocabulary — the
+-- 17->11 map lives in the projector, covered by a contract test).
 CREATE TABLE IF NOT EXISTS console_rm.work_items_view (
     work_item_id  TEXT PRIMARY KEY,
     tenant_id     TEXT NOT NULL,
     source        TEXT NOT NULL,             -- github|jira|slack|teams|admin
-    source_id     TEXT,                      -- ex.: andre2654/fintex-wallet#8
+    source_id     TEXT,                      -- e.g.: andre2654/fintex-wallet#8
     repo          TEXT,
     base_branch   TEXT,
     title         TEXT NOT NULL DEFAULT '',
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS console_rm.work_items_view (
     requester     TEXT,
     priority      TEXT NOT NULL DEFAULT 'normal',
     data_class    TEXT,
-    status        TEXT NOT NULL,             -- vocabulario do console
+    status        TEXT NOT NULL,             -- console vocabulary
     current_phase TEXT,
     last_event    TEXT,
     pr_number     INTEGER,
@@ -38,8 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_crm_wi_tenant   ON console_rm.work_items_view (te
 CREATE INDEX IF NOT EXISTS idx_crm_wi_status   ON console_rm.work_items_view (status);
 CREATE INDEX IF NOT EXISTS idx_crm_wi_updated  ON console_rm.work_items_view (updated_at DESC);
 
--- `TimelineEvent` do console, derivado 1:1 de audit_log (acoes mapeadas para
--- EventType; nao mapeadas viram `note` — nunca silenciar).
+-- The console's `TimelineEvent`, derived 1:1 from audit_log (actions mapped to
+-- EventType; unmapped ones become `note` — never silence anything).
 CREATE TABLE IF NOT EXISTS console_rm.timeline_events (
     audit_id     BIGINT NOT NULL,
     work_item_id TEXT   NOT NULL,
@@ -53,12 +53,12 @@ CREATE TABLE IF NOT EXISTS console_rm.timeline_events (
 );
 CREATE INDEX IF NOT EXISTS idx_crm_tl_wi ON console_rm.timeline_events (work_item_id, created_at);
 
--- `RunRow` do console (analytics de custo/tokens). DUAS fontes (Plano 06,
--- achado F0): model_call_ledger (chamadas via client Python) E audit_log
--- details->>'cost_usd' dos *_turn_completed — o substrato in-process fala com
--- o gateway direto e nao passa pelo client que grava o ledger. run_key
--- desambigua: 'ledger:<id>' | 'audit:<id>'. Fix definitivo (gateway grava
--- server-side) e item F1.
+-- The console's `RunRow` (cost/token analytics). TWO sources (Plan 06,
+-- finding F0): model_call_ledger (calls through the Python client) AND audit_log
+-- details->>'cost_usd' of the *_turn_completed events — the in-process substrate
+-- talks to the gateway directly and does not go through the client that writes
+-- the ledger. run_key disambiguates: 'ledger:<id>' | 'audit:<id>'. The definitive
+-- fix (gateway writes server-side) is item F1.
 CREATE TABLE IF NOT EXISTS console_rm.runs_view (
     run_key      TEXT PRIMARY KEY,
     work_item_id TEXT NOT NULL,
@@ -75,8 +75,8 @@ CREATE TABLE IF NOT EXISTS console_rm.runs_view (
 CREATE INDEX IF NOT EXISTS idx_crm_runs_tenant_started ON console_rm.runs_view (tenant_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_crm_runs_wi ON console_rm.runs_view (work_item_id);
 
--- Baselines de ROI (G1 do plano 06): decisao de negocio por tenant; sem linha,
--- os cards de savings do console mostram "—" (comportamento honesto da UI).
+-- ROI baselines (G1 of plan 06): a business decision per tenant; with no row,
+-- the console savings cards show "—" (honest UI behavior).
 CREATE TABLE IF NOT EXISTS console_rm.baselines (
     tenant_id          TEXT PRIMARY KEY,
     hourly_rate_usd    NUMERIC(10, 2),
@@ -85,13 +85,13 @@ CREATE TABLE IF NOT EXISTS console_rm.baselines (
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- High-water marks das fontes (exactly-once efetivo: saida + cursor na MESMA
--- transacao; replay de lote e idempotente por upsert).
+-- High-water marks of the sources (effective exactly-once: output + cursor in the
+-- SAME transaction; replaying a batch is idempotent via upsert).
 CREATE TABLE IF NOT EXISTS console_rm.projection_cursor (
     source     TEXT PRIMARY KEY,             -- audit_log | model_call_ledger | work_items | ingest_events
     last_id    BIGINT NOT NULL DEFAULT 0,
-    last_seen  TIMESTAMPTZ,                  -- keyset (updated_at, id) p/ fontes mutaveis
-    last_key   TEXT,                         -- desempate do keyset (PK TEXT de work_items)
+    last_seen  TIMESTAMPTZ,                  -- keyset (updated_at, id) for mutable sources
+    last_key   TEXT,                         -- keyset tie-breaker (TEXT PK of work_items)
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

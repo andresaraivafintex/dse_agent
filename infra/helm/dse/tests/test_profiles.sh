@@ -18,13 +18,13 @@ expect_fail() {
   shift 2
   local output
   if output=$("$@" 2>&1); then
-    bad "${label} (renderização deveria falhar)"
+    bad "${label} (render should have failed)"
     return
   fi
   if grep -Fq -- "${expected}" <<<"${output}"; then
     pass "${label}"
   else
-    bad "${label} (mensagem inesperada: ${output})"
+    bad "${label} (unexpected message: ${output})"
   fi
 }
 
@@ -39,7 +39,7 @@ helm template dse-dev "${CHART_DIR}" -f "${CHART_DIR}/values-dev.yaml" \
 pass "development profile lints and renders"
 
 expect_fail "pilot sample refuses placeholders/unverified release" \
-  "exige digest sha256 imutável" \
+  "requires an immutable sha256 digest" \
   helm template dse-pilot "${CHART_DIR}" -f "${PILOT_VALUES}"
 
 helm lint "${CHART_DIR}" -f "${PILOT_VALUES}" -f "${PILOT_FIXTURE}" >/dev/null
@@ -48,55 +48,55 @@ pass "test-only verified pilot fixture lints and renders"
 python3 "${CHART_DIR}/tests/check_render.py" "${OUT_DIR}/pilot.yaml"
 pass "strict render satisfies structural workload/network invariants"
 
-expect_fail "rejects in-process execution" "runtime.inProcess deve ser false" \
+expect_fail "rejects in-process execution" "runtime.inProcess must be false" \
   strict_template --set runtime.inProcess=true
-expect_fail "rejects local fallback execution" "runtime.localFallbackAllowed deve ser false" \
+expect_fail "rejects local fallback execution" "runtime.localFallbackAllowed must be false" \
   strict_template --set runtime.localFallbackAllowed=true
-expect_fail "rejects fixture agent substrate" "runtime.agentSubstrate não pode ser fixture" \
+expect_fail "rejects fixture agent substrate" "runtime.agentSubstrate must not be fixture" \
   strict_template --set-string runtime.agentSubstrate=fixture
-expect_fail "rejects missing sandbox RuntimeClass" "sandbox RuntimeClass real é obrigatório" \
+expect_fail "rejects missing sandbox RuntimeClass" "a real sandbox RuntimeClass is required" \
   strict_template --set-string runtime.sandboxRuntimeClassName=
-expect_fail "rejects model fixture fallback" "modelGateway.allowFixture deve ser false" \
+expect_fail "rejects model fixture fallback" "modelGateway.allowFixture must be false" \
   strict_template --set modelGateway.allowFixture=true
-expect_fail "rejects Worker Versioning disabled" "Worker Versioning deve estar habilitado" \
+expect_fail "rejects Worker Versioning disabled" "Worker Versioning must be enabled" \
   strict_template --set orchestrator.workerVersioning.enabled=false
-expect_fail "rejects development build id" "buildId deve ser imutável" \
+expect_fail "rejects development build id" "buildId must be immutable" \
   strict_template --set-string orchestrator.workerVersioning.buildId=dev
-expect_fail "rejects Vault managed by this dev chart" "vault.externallyManaged deve ser true" \
+expect_fail "rejects Vault managed by this dev chart" "vault.externallyManaged must be true" \
   strict_template --set vault.externallyManaged=false
-expect_fail "rejects Vault dev mode" "vault.devMode é proibido" \
+expect_fail "rejects Vault dev mode" "vault.devMode is forbidden" \
   strict_template --set vault.devMode=true
-expect_fail "rejects ESO disabled" "secrets.externalSecrets.enabled deve ser true" \
+expect_fail "rejects ESO disabled" "secrets.externalSecrets.enabled must be true" \
   strict_template --set secrets.externalSecrets.enabled=false
-expect_fail "rejects cluster-wide secret store" "use SecretStore namespaced" \
+expect_fail "rejects cluster-wide secret store" "use a namespaced SecretStore" \
   strict_template --set-string secrets.externalSecrets.secretStoreKind=ClusterSecretStore
-expect_fail "rejects plaintext database password" "postgres.auth.password deve ficar vazio" \
+expect_fail "rejects plaintext database password" "postgres.auth.password must be left empty" \
   strict_template --set-string postgres.auth.password=dse_dev_only
-expect_fail "rejects missing egress proxy" "egressProxy.enabled é obrigatório" \
+expect_fail "rejects missing egress proxy" "egressProxy.enabled is required" \
   strict_template --set egressProxy.enabled=false
-expect_fail "rejects single-replica egress proxy" "egressProxy.replicas deve ser >= 2" \
+expect_fail "rejects single-replica egress proxy" "egressProxy.replicas must be >= 2" \
   strict_template --set egressProxy.replicas=1
-expect_fail "rejects missing credential broker" "credential broker é obrigatório" \
+expect_fail "rejects missing credential broker" "the credential broker is required" \
   strict_template --set egressProxy.credentialBroker.enabled=false
-expect_fail "rejects fixture credential broker" "credential broker não pode permitir fixture" \
+expect_fail "rejects fixture credential broker" "the credential broker must not allow fixtures" \
   strict_template --set egressProxy.credentialBroker.allowFixture=true
-expect_fail "rejects missing model gateway" "modelGateway.enabled é obrigatório" \
+expect_fail "rejects missing model gateway" "modelGateway.enabled is required" \
   strict_template --set modelGateway.enabled=false
-expect_fail "rejects missing audit ledger" "auditLedger.enabled é obrigatório" \
+expect_fail "rejects missing audit ledger" "auditLedger.enabled is required" \
   strict_template --set auditLedger.enabled=false
-expect_fail "rejects missing network containment" "networkPolicy.enabled é obrigatório" \
+expect_fail "rejects missing network containment" "networkPolicy.enabled is required" \
   strict_template --set networkPolicy.enabled=false
-expect_fail "rejects mounted Kubernetes token" "automountServiceAccountToken deve ser false" \
+expect_fail "rejects mounted Kubernetes token" "automountServiceAccountToken must be false" \
   strict_template --set serviceAccount.automountServiceAccountToken=true
-expect_fail "rejects mutable image reference" "exige digest sha256 imutável" \
+expect_fail "rejects mutable image reference" "requires an immutable sha256 digest" \
   strict_template --set-string orchestrator.image.digest=
-expect_fail "rejects unverified sandbox isolation" "teste de isolamento do sandbox" \
+expect_fail "rejects unverified sandbox isolation" "sandbox isolation test" \
   strict_template --set pilotReadiness.sandboxIsolationVerified=false
-expect_fail "rejects unverified strict egress policy" "não provou política estrita" \
+expect_fail "rejects unverified strict egress policy" "has not proven the strict policy" \
   strict_template --set pilotReadiness.egressStrictPolicyVerified=false
-expect_fail "rejects unregistered Temporal build id" "não foi registrado/verificado" \
+expect_fail "rejects unregistered Temporal build id" "has not been registered/verified" \
   strict_template --set pilotReadiness.workerVersioningRegistrationVerified=false
-expect_fail "rejects wildcard egress host" "wildcard de egress não é permitido" \
+expect_fail "rejects wildcard egress host" "egress wildcards are not allowed" \
   strict_template --set-string 'egressProxy.allowlist[0].host=*.example.net'
 
 if grep -Eq '^kind: Secret$' "${OUT_DIR}/pilot.yaml"; then

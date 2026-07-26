@@ -1,8 +1,8 @@
-"""WSE-E2-T5 — loop de fix-retries bounded L2->Coder.
+"""WSE-E2-T5 — bounded L2->Coder fix-retry loop.
 
-`decide_next_action` é lógica pura (testada sem I/O). O contador durável
-(`register_retry`/`escalate_to_operator`) é testado contra Postgres REAL
-(a durabilidade do contador é o próprio ponto — nunca mockado)."""
+`decide_next_action` is pure logic (tested without I/O). The durable counter
+(`register_retry`/`escalate_to_operator`) is tested against REAL Postgres
+(the counter's durability is the whole point — never mocked)."""
 from __future__ import annotations
 
 import pytest
@@ -25,7 +25,7 @@ def _state(work_item_id, tenant_id, iterations=0, spent=0.0) -> fix_loop.FixLoop
     )
 
 
-# --- decisão pura -----------------------------------------------------------
+# --- pure decision ----------------------------------------------------------
 def test_passed_verdict_proceeds(work_item_id, tenant_id):
     v = L2Verdict(work_item_id=work_item_id, passed=True)
     d = fix_loop.decide_next_action(verdict=v, state=_state(work_item_id, tenant_id), cfg=_cfg())
@@ -43,7 +43,7 @@ def test_failed_verdict_retries_while_under_cap(work_item_id, tenant_id):
 
 
 def test_escalates_when_retries_exhausted(work_item_id, tenant_id):
-    v = L2Verdict(work_item_id=work_item_id, passed=False, objections=["ainda ruim"])
+    v = L2Verdict(work_item_id=work_item_id, passed=False, objections=["still bad"])
     d = fix_loop.decide_next_action(
         verdict=v, state=_state(work_item_id, tenant_id, iterations=3), cfg=_cfg(max_retries=3)
     )
@@ -52,7 +52,7 @@ def test_escalates_when_retries_exhausted(work_item_id, tenant_id):
 
 
 def test_escalates_when_budget_exhausted_even_with_retries_left(work_item_id, tenant_id):
-    """P6: budget esgotado escala mesmo se ainda há iterações no contador."""
+    """P6: an exhausted budget escalates even if the counter still has iterations left."""
     v = L2Verdict(work_item_id=work_item_id, passed=False, objections=["y"])
     d = fix_loop.decide_next_action(
         verdict=v,
@@ -64,7 +64,7 @@ def test_escalates_when_budget_exhausted_even_with_retries_left(work_item_id, te
     assert d.budget_remaining_usd == 0.0
 
 
-# --- contador durável (Postgres real) --------------------------------------
+# --- durable counter (real Postgres) ---------------------------------------
 def test_register_retry_debits_budget_and_persists(work_item_id, tenant_id):
     state = _state(work_item_id, tenant_id)
     s1 = fix_loop.register_retry(state, coder_cost_usd=0.10, l2_cost_usd=0.02, cfg=_cfg())
@@ -102,8 +102,8 @@ def test_escalate_marks_exhausted_durably(work_item_id, tenant_id):
 
 
 def test_full_bounded_loop_reject_reject_reject_escalate(work_item_id, tenant_id):
-    """Simula o loop end-to-end: 3 reprovações consecutivas -> escala.
-    Cada iteração debita budget; a 4ª tentativa nunca acontece (P6)."""
+    """Simulates the loop end-to-end: 3 consecutive rejections -> escalate.
+    Each iteration debits budget; the 4th attempt never happens (P6)."""
     cfg = _cfg(max_retries=3)
     state = fix_loop.load_state(work_item_id, tenant_id)
     fail = L2Verdict(work_item_id=work_item_id, passed=False, objections=["persiste"])
@@ -113,7 +113,7 @@ def test_full_bounded_loop_reject_reject_reject_escalate(work_item_id, tenant_id
         assert decision.action == "retry_coder"
         state = fix_loop.register_retry(state, coder_cost_usd=0.1, l2_cost_usd=0.02, cfg=cfg)
 
-    # após 3 retornos, a próxima decisão escala
+    # after 3 round-trips, the next decision escalates
     final = fix_loop.decide_next_action(verdict=fail, state=state, cfg=cfg)
     assert final.action == "escalate_operator"
     fix_loop.escalate_to_operator(state, reason=final.reason)

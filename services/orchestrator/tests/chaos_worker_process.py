@@ -1,18 +1,18 @@
-"""Processo de worker usado SOMENTE pelo chaos test (`test_chaos.py`).
+"""Worker process used ONLY by the chaos test (`test_chaos.py`).
 
-Roda como um SUBPROCESSO de verdade (nao uma coroutine no mesmo processo do
-teste) para que possamos mata-lo com SIGKILL de fora e simular a queda real
-de um worker Temporal no meio de uma Activity longa (WSB-E5-T3).
+Runs as a real SUBPROCESS (not a coroutine in the test's own process) so we can
+SIGKILL it from the outside and simulate a real Temporal worker crash in the
+middle of a long Activity (WSB-E5-T3).
 
-Uso:
+Usage:
     python chaos_worker_process.py <temporal_address> <task_queue> <mode> <sentinel_dir>
 
 `mode`:
-  - "hang":   `run_coder_turn` escreve um arquivo sentinela `started` assim
-              que comeca, depois dorme por uma "eternidade" (nunca manda
-              heartbeat) — o teste mata este processo enquanto ele dorme.
-  - "normal": `run_coder_turn` completa rapido normalmente — usado para o
-              segundo worker (o que "assume" apos a queda do primeiro).
+  - "hang":   `run_coder_turn` writes a `started` sentinel file as soon as it
+              begins, then sleeps for an "eternity" (never heartbeats) — the
+              test kills this process while it sleeps.
+  - "normal": `run_coder_turn` completes quickly as usual — used for the second
+              worker (the one that "takes over" after the first one crashes).
 """
 from __future__ import annotations
 
@@ -49,11 +49,11 @@ async def main() -> None:
     activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
 
     if mode == "hang":
-        # Substitui a fake `run_coder_turn` por uma versao que avisa via
-        # sentinela e depois trava (sem heartbeat) ate ser morta.
+        # Replaces the `run_coder_turn` fake with a version that signals via a
+        # sentinel and then hangs (no heartbeat) until it is killed.
         async def hanging_run_coder_turn(payload: dict) -> CoderTurnResult:
             (sentinel_path / "started").write_text("1")
-            await asyncio.sleep(3600)  # nunca completa nesta execucao
+            await asyncio.sleep(3600)  # never completes in this run
             return CoderTurnResult(sandbox_id=payload["sandbox_id"], diff_summary="unreachable")
 
         activities = [a for a in activities if _activity_name(a) != ACTIVITY_RUN_CODER_TURN]
@@ -69,7 +69,7 @@ async def main() -> None:
     )
     (sentinel_path / f"worker-up-{mode}").write_text(str(os.getpid()))
     async with worker:
-        await asyncio.Event().wait()  # roda ate ser morto/terminado externamente
+        await asyncio.Event().wait()  # runs until killed/terminated externally
 
 
 if __name__ == "__main__":

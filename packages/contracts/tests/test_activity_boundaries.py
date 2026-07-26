@@ -1,16 +1,17 @@
-"""Testes de regressão de BOUNDARY (adendo 02 §2.3, gate de entrada da Fase 3).
+"""BOUNDARY regression tests (adendo 02 §2.3, Phase 3 entry gate).
 
-Nas Fases 1-2, 14 bugs de integração nasceram do mesmo padrão: o payload que o
-workflow (WS-B) envia derivou dos campos que a Activity (WS-C/WS-E) declara,
-e os fakes lenientes dos testes de cada lado (aceitam qualquer dict) nunca
-exercitaram o decode real. Estes testes validam os models do contrato contra
-os PAYLOADS EXATOS que `services/orchestrator/src/dse_orchestrator/workflows.py`
-constrói — se o WS-B mudar o payload OU o model mudar um campo, quebra AQUI,
-na fundação, antes de quebrar no wire.
+In Phases 1-2, 14 integration bugs came from the same pattern: the payload the
+workflow (WS-B) sends drifted away from the fields the Activity (WS-C/WS-E)
+declares, and the lenient fakes in each side's tests (they accept any dict)
+never exercised the real decode. These tests validate the contract models
+against the EXACT PAYLOADS that
+`services/orchestrator/src/dse_orchestrator/workflows.py` builds — if WS-B
+changes the payload OR the model changes a field, it breaks HERE, in the
+foundation, before breaking on the wire.
 
-Regra de manutenção: ao mudar um call site no workflow, atualize o payload
-correspondente aqui NO MESMO PR (e vice-versa). Payloads copiados literalmente
-dos call sites — não "equivalentes".
+Maintenance rule: when changing a call site in the workflow, update the
+corresponding payload here IN THE SAME PR (and vice versa). Payloads are copied
+literally from the call sites — not "equivalent" ones.
 """
 import pytest
 from pydantic import ValidationError
@@ -37,7 +38,7 @@ from dse_contracts import (
 )
 
 
-# Payloads copiados dos call sites reais do workflow (workflows.py).
+# Payloads copied from the real call sites of the workflow (workflows.py).
 WSB_PLANNER_PAYLOAD = {
     "work_item_id": "wi_x",
     "tenant_id": "tenant_dev",
@@ -66,7 +67,7 @@ WSB_L2_PAYLOAD = {
 
 def test_planner_input_accepts_exact_wsb_payload():
     inp = RunPlannerTurnInput(**WSB_PLANNER_PAYLOAD)
-    # reconciliação: instructions (lista) -> instruction; base_branch -> branch
+    # reconciliation: instructions (list) -> instruction; base_branch -> branch
     assert inp.instruction == "crit A crit B"
     assert inp.branch == "main"
 
@@ -78,15 +79,15 @@ def test_tester_input_accepts_exact_wsb_payload():
 
 
 def test_tester_result_decodes_as_coder_turn_result():
-    # O workflow declara CoderTurnResult como tipo de retorno do Tester — o
-    # superset TesterTurnResult tem que decodificar limpo nesse tipo.
+    # The workflow declares CoderTurnResult as the Tester's return type — the
+    # TesterTurnResult superset has to decode cleanly into that type.
     tr = _TesterTurnResult(
         sandbox_id="s", test_files=["tests/test_x.py"], tests_ran=True,
         tests_passed=True, returncode=0, cost_usd=0.02,
     )
     cr = CoderTurnResult(**tr.model_dump())
     assert cr.files_changed == ["tests/test_x.py"]
-    assert cr.diff_summary  # nunca vazio
+    assert cr.diff_summary  # never empty
 
 
 def test_l2_input_accepts_exact_wsb_payload():
@@ -96,9 +97,9 @@ def test_l2_input_accepts_exact_wsb_payload():
 
 
 def test_l2_input_forbids_coder_history_structurally():
-    """P3 endurecido: extra='forbid' faz o decode FALHAR se qualquer campo
-    além dos declarados for enviado — histórico do Coder não tem por onde
-    entrar, nem por acidente de payload."""
+    """Hardened P3: extra='forbid' makes the decode FAIL if any field beyond
+    the declared ones is sent — the Coder history has no way in, not even by
+    payload accident."""
     for forbidden_field in ("instructions", "clarification_notes", "coder_history",
                             "transcript", "sandbox_id", "diff_summary", "files_changed"):
         with pytest.raises(ValidationError):
@@ -111,29 +112,29 @@ def test_l2_verdict_roundtrip():
 
 
 def test_preview_skip_decision_is_deterministic_by_paths():
-    """FR-20: a decisão UI-touching é paths-filter puro. O model carrega os
-    globs; a decisão em si vive no WS-E, mas o contrato garante que os campos
-    necessários (files_changed + globs) atravessam a fronteira."""
+    """FR-20: the UI-touching decision is pure paths-filter. The model carries
+    the globs; the decision itself lives in WS-E, but the contract guarantees
+    the required fields (files_changed + globs) cross the boundary."""
     inp = TriggerPreviewInput(
         work_item_id="wi_x", tenant_id="t", repo="acme/repo", pr_number=7,
         files_changed=["api/handler.py", "README.md"],
     )
-    assert inp.ui_path_globs  # default não-vazio
-    # payload de PR backend-only é representável sem nenhum campo extra
+    assert inp.ui_path_globs  # non-empty default
+    # a backend-only PR payload is representable without any extra field
     assert all(not f.endswith((".tsx", ".css")) for f in inp.files_changed)
 
 
 def test_demo_evidence_input_defaults():
     inp = RunDemoEvidenceInput(work_item_id="wi_x", tenant_id="t")
     assert inp.timeout_s == 120
-    assert inp.demo_dir == ""  # derivado no dono: demos/<work_item_id>/
+    assert inp.demo_dir == ""  # derived at the owner: demos/<work_item_id>/
 
 
 # ---------------------------------------------------------------------------
-# Fase 3 — payloads EXATOS dos call sites do pipeline de evidencia do workflow
-# (services/orchestrator/src/dse_orchestrator/workflows.py::
-# _run_evidence_pipeline). Regra do arquivo: call site e teste de boundary
-# mudam JUNTOS, no mesmo conjunto de mudancas (WS-B).
+# Phase 3 — EXACT payloads of the call sites of the workflow's evidence
+# pipeline (services/orchestrator/src/dse_orchestrator/workflows.py::
+# _run_evidence_pipeline). Rule of this file: call site and boundary test
+# change TOGETHER, in the same change set (WS-B).
 # ---------------------------------------------------------------------------
 WSB_TRIGGER_PREVIEW_PAYLOAD = {
     "work_item_id": "wi_x",
@@ -146,21 +147,21 @@ WSB_TRIGGER_PREVIEW_PAYLOAD = {
 WSB_DEMO_EVIDENCE_PAYLOAD = {
     "work_item_id": "wi_x",
     "tenant_id": "tenant_dev",
-    "base_url": "http://preview-wi_x.local",  # PreviewRef.url do trigger_preview
+    "base_url": "http://preview-wi_x.local",  # PreviewRef.url from trigger_preview
 }
 
 WSB_VISUAL_DIFF_PAYLOAD = {
     "work_item_id": "wi_x",
     "tenant_id": "tenant_dev",
-    "base_screenshot_key": None,  # None no 1o run -> baseline (visual_baseline_key depois)
-    "candidate_screenshot_path": "demos/wi_x/screenshot.png",  # convencao ADR-27
+    "base_screenshot_key": None,  # None on the 1st run -> baseline (visual_baseline_key afterwards)
+    "candidate_screenshot_path": "demos/wi_x/screenshot.png",  # ADR-27 convention
 }
 
 
 def test_trigger_preview_accepts_exact_wsb_payload():
     inp = TriggerPreviewInput(**WSB_TRIGGER_PREVIEW_PAYLOAD)
-    # WS-B NAO envia ui_path_globs — a politica de paths e default do contrato
-    # (dono WS-E pode sobrepor); files_changed vem do CoderTurnResult.
+    # WS-B does NOT send ui_path_globs — the paths policy is a contract default
+    # (owner WS-E may override it); files_changed comes from CoderTurnResult.
     assert inp.ui_path_globs
     assert inp.files_changed == ["frontend/App.tsx", "api/handler.py"]
 
@@ -168,7 +169,7 @@ def test_trigger_preview_accepts_exact_wsb_payload():
 def test_demo_evidence_accepts_exact_wsb_payload():
     inp = RunDemoEvidenceInput(**WSB_DEMO_EVIDENCE_PAYLOAD)
     assert inp.base_url == "http://preview-wi_x.local"
-    # WS-B nao envia demo_dir/timeout_s/sandbox — defaults do dono (WS-E)
+    # WS-B does not send demo_dir/timeout_s/sandbox — owner defaults (WS-E)
     assert inp.demo_dir == "" and inp.timeout_s == 120 and inp.sandbox is None
 
 
@@ -176,11 +177,11 @@ def test_visual_diff_accepts_exact_wsb_payload():
     inp = RunVisualDiffInput(**WSB_VISUAL_DIFF_PAYLOAD)
     assert inp.base_screenshot_key is None
     assert inp.candidate_screenshot_path == "demos/wi_x/screenshot.png"
-    assert inp.threshold_pct == 0.1  # default do contrato — WS-B nao sobrepoe
+    assert inp.threshold_pct == 0.1  # contract default — WS-B does not override
 
 
 # ---------------------------------------------------------------------------
-# Fase 4 — payloads EXATOS dos call sites de merge-base e promoção de skill.
+# Phase 4 — EXACT payloads of the merge-base and skill-promotion call sites.
 # ---------------------------------------------------------------------------
 from dse_contracts import (  # noqa: E402
     EvalSkillCandidateInput,
@@ -200,14 +201,14 @@ WSB_UPDATE_BASE_PAYLOAD = {
 
 def test_update_base_branch_accepts_exact_wsb_payload():
     inp = UpdateBaseBranchInput(**WSB_UPDATE_BASE_PAYLOAD)
-    # default seguro: depois do 1o review, NUNCA rebase (só merge-base)
+    # safe default: after the 1st review, NEVER rebase (only merge-base)
     assert inp.first_human_review_done is True
 
 
 def test_update_base_branch_default_is_review_done_never_rebase():
-    """Invariante de segurança: se o chamador OMITIR first_human_review_done,
-    o default é True — ou seja, o caminho conservador (nunca rebase). Um
-    esquecimento no call site NÃO pode abrir a porta para force-push."""
+    """Safety invariant: if the caller OMITS first_human_review_done, the
+    default is True — that is, the conservative path (never rebase). An
+    oversight at the call site must NOT open the door to force-push."""
     inp = UpdateBaseBranchInput(
         work_item_id="w", tenant_id="t", repo="r", branch="b", base_branch="main"
     )
@@ -215,12 +216,13 @@ def test_update_base_branch_default_is_review_done_never_rebase():
 
 
 def test_promote_skill_requires_approver_for_approved_active():
-    """P1/P3 no contrato: o model aceita a intenção, mas a Activity (WS-C) DEVE
-    recusar to_status approved/active sem approver. Aqui garantimos que o campo
-    approver existe e é opcional no wire (a obrigatoriedade é enforcement da
-    Activity, testado no WS-C) — o contrato não pode ESCONDER o approver."""
+    """P1/P3 in the contract: the model accepts the intent, but the Activity
+    (WS-C) MUST refuse to_status approved/active without an approver. Here we
+    guarantee the approver field exists and is optional on the wire (making it
+    mandatory is Activity enforcement, tested in WS-C) — the contract must not
+    HIDE the approver."""
     inp = PromoteSkillInput(tenant_id="t", skill_key="s", version=1, to_status="canary")
-    assert inp.approver is None  # canary pode não ter approver; approved/active não (WS-C valida)
+    assert inp.approver is None  # canary may have no approver; approved/active may not (WS-C validates)
     inp2 = PromoteSkillInput(tenant_id="t", skill_key="s", version=1,
                              to_status="active", approver="usr_alice")
     assert inp2.approver == "usr_alice"
@@ -245,8 +247,8 @@ def test_gate_status_is_additive_and_only_pass_is_true():
 
 
 def test_historical_activity_payloads_decode_with_server_side_gaps():
-    # Shapes observados em histories antigos: campos novos nao podem impedir
-    # o decode; o owner resolve sandbox/plano/repo/ref pelo work_item_id.
+    # Shapes observed in old histories: new fields must not prevent the decode;
+    # the owner resolves sandbox/plan/repo/ref from the work_item_id.
     old_l1 = RunL1PipelineInput(work_item_id="wi_x", sandbox_id="sbx-old")
     assert old_l1.base_sha == "" and old_l1.head_sha == ""
     assert old_l1.sandbox is None and old_l1.plan is None

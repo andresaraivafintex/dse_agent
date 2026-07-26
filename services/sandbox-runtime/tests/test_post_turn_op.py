@@ -1,13 +1,13 @@
-"""Op post_turn do runner + Activity do Coder em modo K8s (Fase 1, F1.7).
+"""The runner's post_turn op + the Coder Activity in K8s mode (Fase 1, F1.7).
 
-Duas camadas de prova, sem cluster:
-  1. A op em si (git real em tmp dirs): prune de descartável, restore de
-     lockfile churn, revert de edição de teste e commit/push escopado — a
-     MESMA sequência do worker, agora executável dentro do Pod.
-  2. `_run_coder_turn_impl` inteiro no modo pod-git: um StubDriver com
-     `workspace_is_host_visible=False` roteia execute_op/execute_stage para
-     as funções REAIS do runner contra um diretório que simula o volume do
-     Pod — o worker nunca toca esse filesystem com git próprio.
+Two layers of proof, without a cluster:
+  1. The op itself (real git in tmp dirs): pruning disposables, restoring
+     lockfile churn, reverting test edits and the scoped commit/push — the SAME
+     sequence as the worker, now executable inside the Pod.
+  2. The whole `_run_coder_turn_impl` in pod-git mode: a StubDriver with
+     `workspace_is_host_visible=False` routes execute_op/execute_stage to the
+     REAL runner functions against a directory that simulates the Pod volume —
+     the worker never touches that filesystem with its own git.
 """
 from __future__ import annotations
 
@@ -53,10 +53,10 @@ def test_post_turn_full_hygiene_and_scoped_push(tmp_path):
     req, boot = _bootstrap(tmp_path, wi)
     ws = tmp_path / "workspace"
 
-    # simula o turno do agente: fonte legítima + lixo + churn + edição de teste
+    # simulates the agent turn: legitimate source + junk + churn + test edit
     (ws / "src").mkdir()
     (ws / "src" / "app.py").write_text("X = 1\n")
-    (ws / "BUG_FIX_REPORT.md").write_text("relatório espontâneo\n")
+    (ws / "BUG_FIX_REPORT.md").write_text("spontaneous report\n")
     (ws / "package-lock.json").write_text('{"lockfileVersion": 3}\n')
     (ws / "tests").mkdir()
     (ws / "tests" / "test_smuggled.py").write_text("def test_x(): pass\n")
@@ -80,7 +80,7 @@ def test_post_turn_full_hygiene_and_scoped_push(tmp_path):
     assert not (ws / "BUG_FIX_REPORT.md").exists()
     assert not (ws / "tests" / "test_smuggled.py").exists()
 
-    # push chegou ao checkpoint (refspec fixo)
+    # the push reached the checkpoint (fixed refspec)
     ck = checkpoint_workspace(
         CheckpointOpRequest(work_item_id=wi, branch=req.branch, phase="verify", workspace_dir=str(ws))
     )
@@ -88,9 +88,9 @@ def test_post_turn_full_hygiene_and_scoped_push(tmp_path):
 
 
 class PodGitStubDriver:
-    """Simula o runtime K8s: o 'volume do Pod' é um tmp dir que o worker NÃO
-    opera com git próprio — toda op passa por execute_op/execute_stage e roda
-    as funções REAIS do runner contra ele."""
+    """Simulates the K8s runtime: the 'Pod volume' is a tmp dir the worker does
+    NOT drive with its own git — every op goes through execute_op/execute_stage
+    and runs the REAL runner functions against it."""
 
     def __init__(self, pod_workspace: str, pod_checkpoint: str):
         self.pod_workspace = pod_workspace
@@ -119,7 +119,7 @@ class PodGitStubDriver:
 
     def execute_stage(self, request):
         self.ops.append(f"stage:{request.stage.value}")
-        # turno fake "dentro do pod": escreve no volume simulado
+        # fake turn "inside the pod": writes to the simulated volume
         target = os.path.join(self.pod_workspace, "src", "from_pod.py")
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, "w") as fh:
@@ -158,7 +158,7 @@ def test_coder_activity_full_pipeline_in_pod_git_mode(tmp_path, work_item_id, st
 
     assert result.files_changed == ["src/from_pod.py"]
     assert result.cost_usd == pytest.approx(0.02)
-    # sequência do modo pod-git: sha inicial via checkpoint, turno, pós-turno
+    # pod-git mode sequence: initial sha via checkpoint, turn, post-turn
     assert driver.ops[0] == "checkpoint"
     assert "stage:coder" in driver.ops
     assert driver.ops[-1] == "post_turn"

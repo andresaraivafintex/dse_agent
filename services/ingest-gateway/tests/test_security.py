@@ -1,5 +1,5 @@
-"""WSA-E2-T1 — corpus de forgery: sem assinatura, assinatura errada,
-timestamp expirado, replay. 100% deve ser rejeitado."""
+"""WSA-E2-T1 — forgery corpus: no signature, wrong signature, expired
+timestamp, replay. 100% of it must be rejected."""
 from __future__ import annotations
 
 import base64
@@ -15,7 +15,7 @@ from ingest_gateway.security import (
 
 SLACK_SECRET = "slack_signing_secret_test"
 GITHUB_SECRET = "github_webhook_secret_test"
-# Teams entrega o secret já em Base64 (é como o outgoing webhook o devolve).
+# Teams hands over the secret already in Base64 (that is how the outgoing webhook returns it).
 TEAMS_SECRET_B64 = base64.b64encode(b"teams_outgoing_webhook_secret_test").decode()
 
 
@@ -65,7 +65,7 @@ def test_slack_wrong_signature_rejected():
 
 def test_slack_expired_timestamp_rejected():
     body = b'{"type":"event_callback"}'
-    ts = str(int(time.time()) - 60 * 60)  # 1h atrás, fora da janela de 5min
+    ts = str(int(time.time()) - 60 * 60)  # 1h ago, outside the 5min window
     sig = _slack_sig(SLACK_SECRET, ts, body)
     result = verify_slack_signature(
         signing_secret=SLACK_SECRET, timestamp_header=ts, body=body, signature_header=sig
@@ -75,11 +75,11 @@ def test_slack_expired_timestamp_rejected():
 
 
 def test_slack_replay_of_valid_old_signature_rejected():
-    """Um atacante capturou um par (timestamp, signature) válido no passado e
-    tenta reenviar — mesmo com assinatura matematicamente correta para aquele
-    timestamp, a janela de replay rejeita."""
+    """An attacker captured a valid (timestamp, signature) pair in the past and
+    tries to resend it — even with a signature that is mathematically correct
+    for that timestamp, the replay window rejects it."""
     body = b'{"type":"event_callback"}'
-    old_ts = str(int(time.time()) - 600)  # 10 minutos atrás
+    old_ts = str(int(time.time()) - 600)  # 10 minutes ago
     sig = _slack_sig(SLACK_SECRET, old_ts, body)
     result = verify_slack_signature(
         signing_secret=SLACK_SECRET, timestamp_header=old_ts, body=body, signature_header=sig
@@ -123,8 +123,8 @@ def test_github_wrong_signature_rejected():
 
 
 def test_github_tampered_body_rejected():
-    """Corpo alterado depois de assinado — assinatura não bate mais (garante
-    que a verificação é sobre o corpo BRUTO, não uma versão reparseada)."""
+    """Body altered after signing — the signature no longer matches (ensures
+    the verification is over the RAW body, not a reparsed version)."""
     original_body = b'{"action":"opened"}'
     sig = _github_sig(GITHUB_SECRET, original_body)
     tampered_body = b'{"action":"closed"}'
@@ -146,7 +146,7 @@ def test_github_malformed_header_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Teams (provisão, Fase 4) — outgoing webhook HMAC (secret + assinatura Base64)
+# Teams (provision, Phase 4) — outgoing webhook HMAC (Base64 secret + signature)
 # ---------------------------------------------------------------------------
 def _teams_auth(secret_b64: str, body: bytes) -> str:
     key = base64.b64decode(secret_b64)

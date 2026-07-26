@@ -1,6 +1,6 @@
-"""Acesso Postgres para as tabelas de `migrations/0006_wse.sql`. Usa a role
-`dse_app` (mesma convenção de `dse_audit`/`dse_identity`) — sem framework de
-ORM (P7 boring-first)."""
+"""Postgres access for the tables in `migrations/0006_wse.sql`. Uses the
+`dse_app` role (same convention as `dse_audit`/`dse_identity`) — no ORM framework
+(P7 boring-first)."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ def get_connection():
 
 
 # ---------------------------------------------------------------------------
-# validation_runs (WSE-E1) — 1 linha de evidência por execução do L1.
+# validation_runs (WSE-E1) — 1 evidence row per L1 run.
 # ---------------------------------------------------------------------------
 def record_validation_run(work_item_id: str, tenant_id: str, passed: bool, findings: list[dict[str, Any]]) -> int:
     conn = get_connection()
@@ -42,7 +42,7 @@ def record_validation_run(work_item_id: str, tenant_id: str, passed: bool, findi
 
 
 # ---------------------------------------------------------------------------
-# wse_pr_tracking (WSE-E3-T6) — garante idempotência de "1 PR por WorkItem".
+# wse_pr_tracking (WSE-E3-T6) — enforces the "1 PR per WorkItem" idempotency.
 # ---------------------------------------------------------------------------
 def get_tracked_pr(work_item_id: str) -> dict[str, Any] | None:
     conn = get_connection()
@@ -71,9 +71,9 @@ def save_tracked_pr(
     pr_url: str,
     compare_url: str | None = None,
 ) -> None:
-    # Fase 2 (WSE-E3-T8): pr_number pode ser NULL no modo estrito (só compare
-    # link postado, PR ainda não aberto por humano). `pr_url` guarda a melhor
-    # URL conhecida (compare link enquanto pr_number IS NULL, depois a do PR).
+    # Phase 2 (WSE-E3-T8): pr_number can be NULL in strict mode (only the compare
+    # link posted, PR not yet opened by a human). `pr_url` holds the best known URL
+    # (the compare link while pr_number IS NULL, then the PR's).
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -94,10 +94,10 @@ def save_tracked_pr(
 
 
 def adopt_tracked_pr(work_item_id: str, pr_number: int, pr_url: str) -> None:
-    """WSE-E3-T8 — modo estrito: um humano abriu o PR a partir do compare link;
-    preenche pr_number/pr_url na linha existente SEM criar outra. Idempotente:
-    só grava se ainda não havia um pr_number (o primeiro humano que abre vence;
-    reexecuções não sobrescrevem)."""
+    """WSE-E3-T8 — strict mode: a human opened the PR from the compare link; fills
+    pr_number/pr_url on the existing row WITHOUT creating another. Idempotent: it
+    only writes if there was no pr_number yet (the first human to open wins;
+    re-runs do not overwrite)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -115,8 +115,8 @@ def adopt_tracked_pr(work_item_id: str, pr_number: int, pr_url: str) -> None:
 
 
 def _delete_tracked_pr_for_test(work_item_id: str) -> None:
-    """Só para testes — simula "crash antes de persistir" apagando a linha
-    sem apagar o estado do lado GitHub (fake). Não é chamado em produção."""
+    """Test-only — simulates a "crash before persisting" by deleting the row
+    without deleting the GitHub-side state (fake). Never called in production."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -200,7 +200,7 @@ def get_ci_status(work_item_id: str) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
-# wse_l2_reviews (WSE-E2-T4) — evidência de cada execução da sessão Reviewer L2.
+# wse_l2_reviews (WSE-E2-T4) — evidence for each run of the L2 Reviewer session.
 # ---------------------------------------------------------------------------
 def record_l2_review(
     work_item_id: str,
@@ -248,7 +248,7 @@ def get_l2_reviews(work_item_id: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# wse_fix_loops (WSE-E2-T5) — contador durável do loop bounded L2->Coder.
+# wse_fix_loops (WSE-E2-T5) — durable counter for the bounded L2->Coder loop.
 # ---------------------------------------------------------------------------
 def get_fix_loop(work_item_id: str) -> dict[str, Any] | None:
     conn = get_connection()
@@ -445,8 +445,8 @@ def list_artifact_accesses(work_item_id: str) -> list[dict[str, Any]]:
 
 
 def list_quarantined_work_items_with_artifacts() -> list[str]:
-    """Work items ATIVOS em quarentena (tabela do WS-F, data-plane — não editamos
-    a migração dele) que ainda têm artefato não-quarantinado no store."""
+    """ACTIVE quarantined work items (WS-F's table, data-plane — we do not edit
+    their migration) that still have a non-quarantined artifact in the store."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -540,9 +540,9 @@ def count_active_previews(tenant_id: str) -> int:
 
 
 def list_oldest_active_previews(tenant_id: str, limit: int = 1) -> list[dict[str, Any]]:
-    """Previews ativos do tenant do MAIS ANTIGO para o mais novo — a fila da
-    eviction LRU do cap (decisão operador 2026-07-23): cap cheio => o mais
-    antigo cede o slot para o PR novo."""
+    """The tenant's active previews from OLDEST to newest — the queue for the cap's
+    LRU eviction (operator decision 2026-07-23): cap full => the oldest yields its
+    slot to the new PR."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -677,9 +677,9 @@ def record_ci_repair_episode(
     fix_commit_sha: str,
     provenance: dict,
 ) -> dict[str, Any]:
-    """Grava o episódio de CI-repair (tenant-scoped) com `occurrence_n` =
-    nº de ocorrências do MESMO padrão (tenant, assinatura) até aqui, inclusive.
-    NENHUMA skill é criada/ativada — só o episódio (promoção é Fase 4)."""
+    """Records the CI-repair episode (tenant-scoped) with `occurrence_n` = the
+    number of occurrences of the SAME pattern (tenant, signature) so far, inclusive.
+    NO skill is created/activated — only the episode (promotion is Phase 4)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -777,11 +777,11 @@ def upsert_evidence_publication(
 
 
 # ===========================================================================
-# Fase 4 (0020_wse4.sql)
+# Phase 4 (0020_wse4.sql)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# wse_base_updates (WSE-E6-T16) — evidência de cada merge-base/rebase.
+# wse_base_updates (WSE-E6-T16) — evidence for each merge-base/rebase.
 # ---------------------------------------------------------------------------
 def record_base_update(
     *,
@@ -841,9 +841,9 @@ def list_base_updates(work_item_id: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# skill_episode (source='review_feedback') — WSE-E6-T18. Tabela do WS-C
-# (migração 0019); WS-E só INSERT/SELECT (grant da 0019). NENHUMA skill criada
-# aqui — é só o episódio (a fronteira é testada).
+# skill_episode (source='review_feedback') — WSE-E6-T18. WS-C's table
+# (migration 0019); WS-E only does INSERT/SELECT (granted by 0019). NO skill is
+# created here — it is only the episode (the boundary is tested).
 # ---------------------------------------------------------------------------
 def record_review_feedback_episode(
     *,
@@ -852,9 +852,9 @@ def record_review_feedback_episode(
     pattern_key: str,
     provenance: dict,
 ) -> dict[str, Any]:
-    """Grava o episódio (source='review_feedback') com `occurrence_n` =
-    nº de ocorrências do MESMO (tenant, source, pattern_key) até aqui, inclusive.
-    Mesma disciplina de `record_ci_repair_episode` (Fase 3)."""
+    """Records the episode (source='review_feedback') with `occurrence_n` = the
+    number of occurrences of the SAME (tenant, source, pattern_key) so far,
+    inclusive. Same discipline as `record_ci_repair_episode` (Phase 3)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -908,8 +908,8 @@ def list_skill_episodes(
 
 
 def count_skill_registry(tenant_id: str) -> int:
-    """Contagem de skills no registry para o tenant — usado pelos testes de
-    FRONTEIRA (WSE-E6-T18): gravar um episódio NÃO pode criar/ativar skill."""
+    """Count of skills in the registry for the tenant — used by the BOUNDARY tests
+    (WSE-E6-T18): recording an episode must NOT create/activate a skill."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:

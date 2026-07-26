@@ -1,8 +1,8 @@
-"""WSE-E4-T9a — consumo mínimo de status checks do PR: lê os check-runs do
-GitHub para o commit de topo do branch e agrega num sinal grosseiro
-(`pending|green|red`) para o workflow do WS-B decidir o que fazer (P1: quem
-decide é o workflow, esta função só entrega o resultado). Sem previews, sem
-re-run seletivo (Fase 3) — só leitura + agregação determinística.
+"""WSE-E4-T9a — minimal consumption of PR status checks: reads GitHub's
+check-runs for the branch's tip commit and aggregates them into a coarse signal
+(`pending|green|red`) for the WS-B workflow to decide what to do (P1: the
+workflow decides, this function only delivers the result). No previews, no
+selective re-run (Phase 3) — just reading + deterministic aggregation.
 """
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ _TERMINAL_FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_re
 
 
 def aggregate_check_runs(check_runs: list[dict]) -> str:
-    """green somente se TODOS os check-runs terminaram com conclusão não-falha;
-    red se QUALQUER um terminou em falha; pending se nenhum check-run existe
-    ainda ou algum ainda está rodando (decline-never-truncate: nunca
-    "adivinhamos" green antes de tudo ter concluído)."""
+    """green only if ALL check-runs finished with a non-failure conclusion;
+    red if ANY of them finished in failure; pending if no check-run exists yet
+    or some are still running (decline-never-truncate: we never "guess" green
+    before everything has completed)."""
     if not check_runs:
         return "pending"
     saw_failure = False

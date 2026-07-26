@@ -1,23 +1,24 @@
-"""Executor real do turno de agente DENTRO do sandbox (plano 09, Fase 1).
+"""Real agent-turn executor INSIDE the sandbox (plano 09, Fase 1).
 
-Este módulo roda no container/pod endurecido — nunca no worker. Ele recebe um
-`AgentTurnRequest` (contrato tipado do dse_contracts), executa o substrato
-pedido contra o `/workspace` local e devolve um `AgentTurnResult`. Regras:
+This module runs in the hardened container/pod — never in the worker. It takes
+an `AgentTurnRequest` (typed dse_contracts contract), runs the requested
+substrate against the local `/workspace` and returns an `AgentTurnResult`.
+Rules:
 
-  - P1: o substrato SÓ edita arquivos. Nenhuma tool de git/PR/bash entra no
-    toolset; commit/push continuam determinísticos no worker (ScopedGitSession
-    sobre o bind/emptyDir do workspace).
-  - Gateway-only: o CLI/SDK fala exclusivamente com o model-gateway via a
-    virtual key efêmera do request. Nenhuma credencial de longo prazo existe
-    neste processo; mesmo que existisse rota, o egress-proxy/NetworkPolicy
-    bloqueia provider direto.
-  - P6: toda falha vira `AgentTurnResult` estruturado (error_kind de
-    vocabulário fechado), nunca stdout truncado nem exceção crua no exec.
+  - P1: the substrate ONLY edits files. No git/PR/bash tool goes into the
+    toolset; commit/push stay deterministic in the worker (ScopedGitSession
+    over the workspace bind/emptyDir).
+  - Gateway-only: the CLI/SDK talks exclusively to the model-gateway through
+    the request's ephemeral virtual key. No long-lived credential exists in
+    this process; and even if a route existed, the egress-proxy/NetworkPolicy
+    blocks reaching a provider directly.
+  - P6: every failure becomes a structured `AgentTurnResult` (error_kind from a
+    closed vocabulary), never truncated stdout nor a raw exception in the exec.
 
-Substratos v1: "fake" (conformidade/testes) e "claude-agent" (o substrato dos
-disparos reais). "openhands" devolve unsupported_substrate até o
-RemoteWorkspace/agent-server ser empacotado nesta imagem — erro limpo, jamais
-fallback silencioso.
+v1 substrates: "fake" (conformance/tests) and "claude-agent" (the substrate for
+real runs). "openhands" returns unsupported_substrate until the
+RemoteWorkspace/agent-server is packaged into this image — a clean error, never
+a silent fallback.
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ import os
 
 from dse_contracts import AgentTurnRequest, AgentTurnResult
 
-# Caps de diagnóstico: o resultado atravessa exec/JSON — nunca deixar um turno
-# tagarela estourar o canal (o audit guarda amostra, não transcript).
+# Diagnostic caps: the result crosses exec/JSON — never let a chatty turn blow
+# up the channel (the audit stores a sample, not a transcript).
 _MAX_LOG_ITEMS = 50
 _MAX_ITEM_CHARS = 2000
 
@@ -37,9 +38,9 @@ def _capped(items: list[str]) -> list[str]:
 
 
 def _run_fake(req: AgentTurnRequest) -> AgentTurnResult:
-    """Replay do roteiro (mesma semântica do FakeSubstrate, colapsada num
-    exec: o runner é stateless entre execs, então consome o roteiro inteiro
-    e reporta o `done` do último passo)."""
+    """Replays the script (same semantics as FakeSubstrate, collapsed into a
+    single exec: the runner is stateless between execs, so it consumes the whole
+    script and reports the `done` of the last step)."""
     thoughts: list[str] = []
     done = True
     for step in req.fake_script or []:
@@ -55,8 +56,8 @@ def _run_fake(req: AgentTurnRequest) -> AgentTurnResult:
 
 
 def build_claude_gateway_env(req: AgentTurnRequest) -> dict[str, str]:
-    """Núcleo puro e testável do wiring gateway-only (espelha o
-    ClaudeAgentSubstrate do worker — se um mudar, mude os dois)."""
+    """Pure, testable core of the gateway-only wiring (mirrors the worker's
+    ClaudeAgentSubstrate — if one changes, change both)."""
     custom_headers = "\n".join(f"{k}: {v}" for k, v in req.gateway.headers.items())
     return {
         "ANTHROPIC_BASE_URL": req.gateway.base_url,
@@ -72,7 +73,7 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
     except ImportError:
         return AgentTurnResult(
             done=False,
-            error="claude-agent-sdk não está instalado na imagem do agent-runner",
+            error="claude-agent-sdk is not installed in the agent-runner image",
             error_kind="substrate_error",
         )
 
@@ -81,9 +82,9 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
         cwd=req.workspace_dir,
         allowed_tools=list(req.allowed_tools),
         permission_mode="acceptEdits",
-        # "project" = SÓ o workspace: skills materializadas/commitadas no repo
-        # alvo. Dentro do sandbox não existe "user" do host para vazar, mas a
-        # lista explícita mantém paridade com o substrato do worker.
+        # "project" = ONLY the workspace: skills materialized/committed in the
+        # target repo. Inside the sandbox there is no host "user" scope to leak
+        # from, but the explicit list keeps parity with the worker substrate.
         setting_sources=["project"],
         env=build_claude_gateway_env(req),
     )
@@ -119,7 +120,7 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
             error=f"turno excedeu {req.timeout_seconds:.0f}s sem concluir",
             error_kind="timeout",
         )
-    except Exception as exc:  # noqa: BLE001 — P6: falha estruturada, nunca crua
+    except Exception as exc:  # noqa: BLE001 — P6: structured failure, never raw
         return AgentTurnResult(
             done=False,
             thoughts=_capped(thoughts),
@@ -142,11 +143,11 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
 
 
 def _run_openhands(req: AgentTurnRequest) -> AgentTurnResult:
-    """OpenHands DENTRO do sandbox: aqui `LocalWorkspace` é o desenho CERTO —
-    o SDK inteiro (e a execução de ferramentas dele) já está confinado ao
-    container/pod; era rodá-lo no worker que quebrava o modelo de ameaça.
-    Wiring gateway-only idêntico ao do worker (base_url + virtual key +
-    headers do contrato). Instalação é opt-in da imagem
+    """OpenHands INSIDE the sandbox: here `LocalWorkspace` is the RIGHT design —
+    the whole SDK (and its tool execution) is already confined to the
+    container/pod; it was running it in the worker that broke the threat model.
+    Gateway-only wiring identical to the worker's (base_url + virtual key +
+    contract headers). Installation is opt-in per image
     (requirements-openhands.txt / build-arg INSTALL_OPENHANDS=1)."""
     try:
         import openhands.sdk as sdk
@@ -154,8 +155,8 @@ def _run_openhands(req: AgentTurnRequest) -> AgentTurnResult:
         return AgentTurnResult(
             done=False,
             error=(
-                "openhands-sdk não está instalado nesta imagem do agent-runner "
-                "(build com INSTALL_OPENHANDS=1)"
+                "openhands-sdk is not installed in this agent-runner image "
+                "(build with INSTALL_OPENHANDS=1)"
             ),
             error_kind="substrate_error",
         )
@@ -182,9 +183,9 @@ def _run_openhands(req: AgentTurnRequest) -> AgentTurnResult:
             tokens_out=int(getattr(stats, "total_tokens_out", 0) or 0),
         )
 
-    # Timeout duro por turno (mesma disciplina do claude-agent): o run é
-    # síncrono, então roda numa thread vigiada — estouro vira resultado
-    # estruturado e o processo efêmero do exec morre logo em seguida.
+    # Hard per-turn timeout (same discipline as claude-agent): the run is
+    # synchronous, so it goes on a watched thread — an overrun becomes a
+    # structured result and the ephemeral exec process dies right after.
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -210,8 +211,9 @@ def run_agent_turn(req: AgentTurnRequest) -> AgentTurnResult:
         try:
             return _run_fake(req)
         except OSError as exc:
-            # ex.: tentativa de escrever fora do /workspace num rootfs
-            # read-only — o SO nega e a negação vira resultado estruturado.
+            # e.g. an attempt to write outside /workspace on a read-only
+            # rootfs — the OS denies it and the denial becomes a structured
+            # result.
             return AgentTurnResult(
                 done=False,
                 error=f"{type(exc).__name__}: {str(exc)[:300]}",

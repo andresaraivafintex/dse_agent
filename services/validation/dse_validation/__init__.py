@@ -1,6 +1,6 @@
-"""dse_validation — WS-E: pipeline L1, PR finalizer determinístico, consumo de
-status de CI, resume de workflow por review comment (Fintex DSE, Fase 1).
+"""dse_validation — WS-E: L1 pipeline, deterministic PR finalizer, CI status
+consumption, workflow resume from review comment (Fintex DSE, Phase 1).
 
-Ver services/validation/README.md para o que está implementado, o que é
-fixture/local-mode e o que falta para produção.
+See services/validation/README.md for what is implemented, what is
+fixture/local-mode and what is still missing for production.
 """

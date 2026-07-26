@@ -1,12 +1,12 @@
-"""Endpoint mínimo de export de custo (WSD-E3-T2). Um FastAPI standalone
-opcional — o cliente Python (`cost_export.aggregate_cost`) é a peça central
-e reutilizável; isto é só uma casca HTTP fina em cima dela para permitir
-`curl` manual/dashboards simples sem escrever Python.
+"""Minimal cost export endpoint (WSD-E3-T2). An optional standalone FastAPI —
+the Python client (`cost_export.aggregate_cost`) is the central, reusable
+piece; this is just a thin HTTP shell on top of it so manual `curl` / simple
+dashboards work without writing Python.
 
-Não faz parte do caminho de chamada de modelo (não é consumido pelo Coder) —
-é observabilidade/reporting, then roda como processo separado se alguém
-quiser (`uvicorn model_gateway_client.export_api:app`). Produção: isto vira
-uma query no backend do collector do WS-F (ver cost_export.py).
+Not part of the model call path (the Coder does not consume it) — it is
+observability/reporting, and runs as a separate process if anyone wants it
+(`uvicorn model_gateway_client.export_api:app`). In production this becomes a
+query against the WS-F collector backend (see cost_export.py).
 """
 from __future__ import annotations
 

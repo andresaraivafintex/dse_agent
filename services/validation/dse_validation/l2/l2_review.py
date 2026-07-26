@@ -1,18 +1,18 @@
-"""WSE-E2-T4 — orquestração de 1 turno da revisão L2 (contexto fresco).
+"""WSE-E2-T4 — orchestration of 1 turn of the L2 review (fresh context).
 
-Ordenação cheapest-first (P5): a validação vai L1 determinístico -> L2 modelo ->
-L3 CI -> humano. Este módulo é o degrau L2: só deve rodar DEPOIS do L1 verde e
-ANTES do CI. `guard_l2_after_l1` torna essa precondição explícita e auditável em
-vez de confiar que o caller lembrou da ordem.
+Cheapest-first ordering (P5): validation goes deterministic L1 -> model L2 ->
+CI L3 -> human. This module is the L2 rung: it must only run AFTER L1 is green
+and BEFORE CI. `guard_l2_after_l1` makes that precondition explicit and auditable
+instead of trusting that the caller remembered the order.
 
-O que o WS-E é dono aqui (o WS-B chama, o WS-C provê a sessão):
-  1. chamar a sessão L2 (só com plan+diff — P3, garantido pelo tipo `L2ReviewInput`);
-  2. registrar o veredito + custo em `wse_l2_reviews` (evidência, P8);
-  3. emitir 1 linha de audit (`l2_review_run`).
+What WS-E owns here (WS-B calls it, WS-C provides the session):
+  1. call the L2 session (with plan+diff only — P3, enforced by the `L2ReviewInput` type);
+  2. record the verdict + cost in `wse_l2_reviews` (evidence, P8);
+  3. emit 1 audit line (`l2_review_run`).
 
-Nenhum LLM decide fluxo aqui (P1): a sessão só PRODUZ um veredito estruturado;
-o que fazer com ele (seguir p/ CI, voltar ao Coder, escalar) é a lógica
-determinística de `fix_loop`, chamada pelo workflow do WS-B.
+No LLM decides flow here (P1): the session only PRODUCES a structured verdict;
+what to do with it (proceed to CI, go back to the Coder, escalate) is the
+deterministic logic in `fix_loop`, called by the WS-B workflow.
 """
 from __future__ import annotations
 
@@ -28,16 +28,16 @@ except ImportError:  # pragma: no cover
 
 
 class L2PreconditionError(RuntimeError):
-    """Levantado se tentarem rodar L2 antes do L1 estar verde (viola P5)."""
+    """Raised if something tries to run L2 before L1 is green (violates P5)."""
 
 
 def guard_l2_after_l1(l1_result: L1Result) -> None:
-    """P5 cheapest-first: nunca gasta um turno L2 (modelo, caro) se o L1
-    (determinístico, barato) ainda não passou. Falha limpa na fronteira (P6)."""
+    """P5 cheapest-first: never spend an L2 turn (model, expensive) if L1
+    (deterministic, cheap) has not passed yet. Clean failure at the boundary (P6)."""
     if not l1_result.passed:
         raise L2PreconditionError(
-            f"L2 não pode rodar: L1 ainda não está verde para {l1_result.work_item_id} "
-            f"(cheapest-first/P5). Falhas L1: "
+            f"L2 cannot run: L1 is not green yet for {l1_result.work_item_id} "
+            f"(cheapest-first/P5). L1 failures: "
             f"{[f.check for f in l1_result.findings if not f.passed]}"
         )
 
@@ -52,10 +52,10 @@ def run_l2_review(
     actor: str = "system:validation",
     persist: bool = True,
 ) -> L2Verdict:
-    """Executa 1 turno L2 e registra evidência+custo. `inp` já carrega SÓ
-    plan+diff (P3). `iteration` é o índice do turno no loop de fix-retries."""
+    """Runs 1 L2 turn and records evidence+cost. `inp` already carries ONLY
+    plan+diff (P3). `iteration` is the turn index within the fix-retry loop."""
     verdict = session.review(inp)
-    # normaliza para o work_item corrente (o fake pode ter vindo genérico)
+    # normalize to the current work_item (the fake may have returned a generic one)
     verdict = verdict.model_copy(update={"work_item_id": work_item_id})
 
     if persist:

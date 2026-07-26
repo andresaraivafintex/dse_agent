@@ -1,11 +1,11 @@
-"""WSF-E2-T3b(b) — secrets de preview via External Secrets Operator REAL no
-cluster k3d `dse-preview` (infra/k8s-local/setup-eso.sh), lendo o Vault REAL
-do compose pela rede dse_net. Nada aqui é mockado: o teste prova que um
-Secret k8s materializa num namespace de preview a partir do Vault e que uma
-rotação no Vault se propaga dentro do refreshInterval.
+"""WSF-E2-T3b(b) — preview secrets through the REAL External Secrets Operator on
+the k3d `dse-preview` cluster (infra/k8s-local/setup-eso.sh), reading the REAL
+Vault from compose over the dse_net network. Nothing here is mocked: the test
+proves a k8s Secret materializes in a preview namespace from Vault and that a
+rotation in Vault propagates within the refreshInterval.
 
-Skips (com razão explícita, nunca silencioso) se o cluster/ESO não estiverem
-no ar — mesmo padrão dos testes adversariais do egress-proxy da Fase 1.
+Skips (with an explicit reason, never silently) if the cluster/ESO are not up —
+same pattern as the Phase 1 egress-proxy adversarial tests.
 """
 from __future__ import annotations
 
@@ -35,13 +35,13 @@ def cluster():
     try:
         _kubectl("get", "ns", "external-secrets")
     except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        pytest.skip(f"cluster k3d/ESO indisponível (rode infra/k8s-local/setup-eso.sh): {exc}")
+        pytest.skip(f"k3d/ESO cluster unavailable (run infra/k8s-local/setup-eso.sh): {exc}")
     ready = _kubectl(
         "get", "clustersecretstore", "dse-vault",
         "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}", check=False,
     )
     if ready.stdout.strip() != "True":
-        pytest.skip("ClusterSecretStore dse-vault não está Ready — rode setup-eso.sh")
+        pytest.skip("ClusterSecretStore dse-vault is not Ready — run setup-eso.sh")
     return True
 
 
@@ -51,7 +51,7 @@ def vault():
         client = SecretsClient()
         client.put_secret("dse/preview/eso-smoke", {"ok": "1"})
     except VaultUnavailableError as exc:
-        pytest.skip(f"Vault da fundação indisponível: {exc}")
+        pytest.skip(f"foundation Vault unavailable: {exc}")
     return client
 
 
@@ -110,13 +110,13 @@ def test_eso_deployments_available(cluster):
     assert "external-secrets" in names
     for d in deployments:
         conditions = {c["type"]: c["status"] for c in d["status"].get("conditions", [])}
-        assert conditions.get("Available") == "True", f"{d['metadata']['name']} não está Available"
+        assert conditions.get("Available") == "True", f"{d['metadata']['name']} is not Available"
 
 
 def test_secret_materializes_in_preview_namespace_from_vault(vault, preview_ns):
-    """Aceite WSF-E2-T3b(b): o Secret materializa no namespace a partir do
-    Vault, e uma rotação no Vault se propaga (secrets de preview 100% via
-    ESO — nenhum secret em manifest)."""
+    """WSF-E2-T3b(b) acceptance: the Secret materializes in the namespace from
+    Vault, and a rotation in Vault propagates (preview secrets 100% through
+    ESO — no secret ever in a manifest)."""
     path = f"dse/preview/test-{uuid.uuid4().hex[:8]}"
     marker_v1 = f"v1-{uuid.uuid4().hex}"
     vault.put_secret(path, {"database_url": marker_v1, "api_key": "k1"})
@@ -128,10 +128,10 @@ def test_secret_materializes_in_preview_namespace_from_vault(vault, preview_ns):
              "-n", preview_ns, "--timeout=90s")
 
     value = _wait_for(lambda: _read_k8s_secret_key(preview_ns, "app-secrets", "database_url"), 60)
-    assert value == marker_v1, f"Secret k8s não bate com o Vault: {value!r}"
+    assert value == marker_v1, f"k8s Secret does not match Vault: {value!r}"
 
-    # rotação REAL via o mesmo caminho do job agendado (WSF-E2-T3b(a)) —
-    # o material novo se propaga ao namespace de preview no refresh.
+    # REAL rotation through the same path as the scheduled job (WSF-E2-T3b(a)) —
+    # the new material propagates to the preview namespace on the next refresh.
     result = rotate_secret(path, actor="system:secret-rotator", client=vault)
     rotated_value = vault.get_secret(path)["database_url"]
     assert result.new_version == 2
@@ -140,13 +140,13 @@ def test_secret_materializes_in_preview_namespace_from_vault(vault, preview_ns):
         lambda: (_read_k8s_secret_key(preview_ns, "app-secrets", "database_url") == rotated_value) or None,
         90,
     )
-    assert propagated, "rotação no Vault não se propagou ao Secret do preview dentro do prazo"
+    assert propagated, "the Vault rotation did not propagate to the preview Secret in time"
 
 
 def test_preview_token_cannot_read_service_secrets(vault, preview_ns):
-    """Isolamento do escopo (deny-by-default do Vault): o token do ESO só
-    enxerga secret/dse/preview/* — um ExternalSecret apontando para um
-    secret de SERVIÇO (dse/service/...) nunca fica Ready nem materializa."""
+    """Scope isolation (Vault deny-by-default): the ESO token only sees
+    secret/dse/preview/* — an ExternalSecret pointing at a SERVICE secret
+    (dse/service/...) never becomes Ready and never materializes."""
     service_path = f"dse/service/eso-negative-{uuid.uuid4().hex[:8]}"
     vault.put_secret(service_path, {"token": "not-for-previews"})
 
@@ -157,5 +157,5 @@ def test_preview_token_cannot_read_service_secrets(vault, preview_ns):
         "wait", "--for=condition=Ready", "externalsecret/should-never-sync",
         "-n", preview_ns, "--timeout=30s", check=False,
     )
-    assert ready.returncode != 0, "ExternalSecret de path de serviço ficou Ready — policy do Vault furada!"
+    assert ready.returncode != 0, "ExternalSecret on a service path became Ready — the Vault policy is leaky!"
     assert _read_k8s_secret_key(preview_ns, "should-never-sync", "token") is None

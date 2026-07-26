@@ -72,7 +72,7 @@ from .tenant_isolation import (
 )
 
 __all__ = [
-    # tenant_config (Fase 1)
+    # tenant_config (Phase 1)
     "TenantConfig",
     "get_tenant_config",
     "upsert_tenant_config",
@@ -122,13 +122,13 @@ __all__ = [
     "query_retrieval_scoped",
     "query_audit_scoped",
     "assert_token_belongs_to_tenant",
-    # rotação agendada de secrets (WSF-E2-T3b, Fase 3)
+    # scheduled secret rotation (WSF-E2-T3b, Phase 3)
     "RotationError",
     "RotationResult",
     "default_generator",
     "rotate_secret",
     "rotate_from_manifest",
-    # retenção por classificação (WSF-E8-T2, Fase 3)
+    # retention by classification (WSF-E8-T2, Phase 3)
     "RetentionPolicy",
     "RetentionPolicyError",
     "RetentionReport",

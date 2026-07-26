@@ -1,9 +1,9 @@
-# Config do gate bloqueante de lint (make lint / CI job quality).
-# Ignores cirúrgicos para padrões DELIBERADOS do repo — nunca ignore amplo:
-# - __init__.py: re-exports de API pública (F401 é o padrão, não um esquecimento).
-# - activities.py do sandbox-runtime e fakes.py do orchestrator: imports fora
-#   do topo são intencionais (evitar ciclo de import e custo de import no
-#   worker; ver comentários nos próprios arquivos).
+# Config for the blocking lint gate (make lint / CI quality job).
+# Surgical ignores for DELIBERATE patterns in this repo — never a broad ignore:
+# - __init__.py: public API re-exports (F401 is the pattern, not an oversight).
+# - sandbox-runtime's activities.py and orchestrator's fakes.py: non-top-level
+#   imports are intentional (avoiding import cycles and import cost in the
+#   worker; see the comments in the files themselves).
 
 [lint.per-file-ignores]
 "**/__init__.py" = ["F401"]

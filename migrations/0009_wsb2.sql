@@ -1,34 +1,34 @@
--- Fintex DSE — Fase 2 — WS-B (Orquestracao Temporal)
--- Dono: WS-B. Arquivo reservado (ver CONVENTIONS.md, tabela de migracoes da
--- Fase 2) — nao editar fora do WS-B.
+-- Fintex DSE — Phase 2 — WS-B (Temporal orchestration)
+-- Owner: WS-B. Reserved file (see CONVENTIONS.md, Phase 2 migrations table) —
+-- do not edit outside WS-B.
 --
--- plan_approval_gate: registro DURAVEL e consultavel do gate de aprovacao de
--- plano por risk class (WSB-E3-T2/T3). O audit_log (append-only) ja guarda o
--- historico completo de eventos, mas e caro de consultar para responder "quais
--- WorkItems estao AGORA parados esperando aprovacao, e por quem?" — pergunta
--- que o queue board (WS-F, Fase 2) e os operadores fazem o tempo todo. Esta
--- tabela materializa esse estado atual (1 linha por work_item, upsert
--- idempotente pelo workflow) sem substituir o audit ledger.
+-- plan_approval_gate: DURABLE and queryable record of the plan approval gate by
+-- risk class (WSB-E3-T2/T3). The audit_log (append-only) already keeps the full
+-- event history, but it is expensive to query in order to answer "which
+-- WorkItems are RIGHT NOW parked waiting for approval, and by whom?" — a
+-- question the queue board (WS-F, Phase 2) and operators ask all the time. This
+-- table materializes that current state (1 row per work_item, idempotent upsert
+-- by the workflow) without replacing the audit ledger.
 --
--- P8: continua sendo o audit_log a fonte da verdade imutavel; esta tabela e
--- uma projecao mutavel de conveniencia. Toda transicao aqui e espelhada por
--- um dse_audit.emit(...) na mesma Activity.
+-- P8: the audit_log remains the immutable source of truth; this table is a
+-- mutable convenience projection. Every transition here is mirrored by a
+-- dse_audit.emit(...) in the same Activity.
 
 CREATE TABLE IF NOT EXISTS plan_approval_gate (
     work_item_id      TEXT PRIMARY KEY,
     tenant_id         TEXT NOT NULL,
-    risk_class        TEXT NOT NULL,                         -- classe EFETIVA (policy.classify_risk)
-    -- 'pending'  : estacionado, aguardando SIGNAL_PLAN_APPROVAL
-    -- 'approved' : liberado (por humano nomeado OU auto-aprovacao de politica)
-    -- 'rejected' : recusado; ver rejection_route
-    -- 'blocked'  : cascata de aprovadores VAZIA (jamais auto-aprova por ausencia)
+    risk_class        TEXT NOT NULL,                         -- EFFECTIVE class (policy.classify_risk)
+    -- 'pending'  : parked, waiting for SIGNAL_PLAN_APPROVAL
+    -- 'approved' : released (by a named human OR by policy auto-approval)
+    -- 'rejected' : refused; see rejection_route
+    -- 'blocked'  : EMPTY approver cascade (never auto-approves due to absence)
     status            TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'blocked')),
-    auto_approved     BOOLEAN NOT NULL DEFAULT false,        -- true = liberado por politica (risco baixo), sem humano
-    resolved_approvers JSONB NOT NULL DEFAULT '[]'::jsonb,   -- cascata CODEOWNERS -> access bundle
-    decided_by        TEXT,                                  -- principal do humano que decidiu (NULL se auto/pending/blocked)
+    auto_approved     BOOLEAN NOT NULL DEFAULT false,        -- true = released by policy (low risk), no human
+    resolved_approvers JSONB NOT NULL DEFAULT '[]'::jsonb,   -- cascade CODEOWNERS -> access bundle
+    decided_by        TEXT,                                  -- principal of the human who decided (NULL if auto/pending/blocked)
     rejection_route   TEXT CHECK (rejection_route IN ('re_plan', 're_clarify', 'cancel')),
-    justification     TEXT,                                  -- obrigatoria na rejeicao (WSB-E3-T3)
-    plan_round        INTEGER NOT NULL DEFAULT 0,            -- qual iteracao do Planner (re_plan incrementa)
+    justification     TEXT,                                  -- mandatory on rejection (WSB-E3-T3)
+    plan_round        INTEGER NOT NULL DEFAULT 0,            -- which Planner iteration (re_plan increments it)
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );

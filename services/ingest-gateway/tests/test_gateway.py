@@ -1,6 +1,6 @@
-"""WSA-E1-T3 — admit_work_item: escrita transacional (work_items +
-ingest_events na mesma transação), idempotência por event_id, e kill switch
-de canal bloqueando admissão (com audit row)."""
+"""WSA-E1-T3 — admit_work_item: transactional write (work_items +
+ingest_events in the same transaction), idempotency by event_id, and the
+channel kill switch blocking admission (with an audit row)."""
 from __future__ import annotations
 
 import uuid
@@ -72,8 +72,8 @@ def test_admit_work_item_is_idempotent_on_replay(tenant_id):
         requester_principal="usr_test_requester", conn=conn1,
     )
 
-    # Reentrega do MESMO webhook (mesmo event_id determinístico) —
-    # não deve criar uma segunda linha em work_items nem ingest_events.
+    # Redelivery of the SAME webhook (same deterministic event_id) —
+    # must not create a second row in work_items or ingest_events.
     conn2 = get_connection()
     id2 = admit_work_item(
         event, tenant_id=tenant_id, source="slack", channel="C123",

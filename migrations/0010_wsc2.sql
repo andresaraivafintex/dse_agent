@@ -1,21 +1,21 @@
--- WS-C — Fase 2 (WSC-E4 skill registry bootstrap + WSC-E5 retrieval/index).
--- Dono: WS-C. Aditivo — não editar 0001_foundation.sql nem 0004_wsc.sql.
+-- WS-C — Phase 2 (WSC-E4 skill registry bootstrap + WSC-E5 retrieval/index).
+-- Owner: WS-C. Additive — do not edit 0001_foundation.sql nor 0004_wsc.sql.
 --
--- `skill_registry` (WSC-E4-T1): catálogo de skills curadas, TENANT-SCOPED, lido
---   pela sessão Planner (WSC-E3-T3) para hidratar contexto. Fase 2 tem SÓ o
---   registry + a leitura — NÃO há pipeline de promoção (isso é Fase 4); as
---   linhas são semeadas por humano (`created_by` = principal humano). O gate
---   de aprovação é o campo `status` ('approved' é o único que o Planner lê).
+-- `skill_registry` (WSC-E4-T1): catalog of curated skills, TENANT-SCOPED, read
+--   by the Planner session (WSC-E3-T3) to hydrate context. Phase 2 has ONLY the
+--   registry + the read path — there is NO promotion pipeline (that is Phase 4);
+--   rows are seeded by a human (`created_by` = human principal). The approval
+--   gate is the `status` field ('approved' is the only one the Planner reads).
 --
--- `retrieval_documents` (WSC-E5, ADR-24): índice de recuperação (repo map +
---   busca lexical + embeddings self-hosted). ISOLAMENTO POR TENANT RIGOROSO —
---   `tenant_id` é NOT NULL em toda linha e toda query do RetrievalService
---   filtra por ele (ver sandbox_runtime/retrieval.py e a suíte de isolamento
---   do WS-F). O conteúdo indexado é INPUT NÃO CONFIÁVEL do Planner (marcado
---   como untrusted no bundle de contexto — nunca interpretado como instrução).
---   `embedding` guarda o vetor TF-IDF esparso serializado (JSONB term->weight)
---   — self-hosted, sem GPU (ver README: troca por sentence-transformers em
---   produção é aditiva, mesma interface).
+-- `retrieval_documents` (WSC-E5, ADR-24): retrieval index (repo map + lexical
+--   search + self-hosted embeddings). STRICT PER-TENANT ISOLATION — `tenant_id`
+--   is NOT NULL on every row and every RetrievalService query filters by it
+--   (see sandbox_runtime/retrieval.py and the WS-F isolation suite). The indexed
+--   content is UNTRUSTED INPUT for the Planner (flagged as untrusted in the
+--   context bundle — never interpreted as an instruction).
+--   `embedding` stores the serialized sparse TF-IDF vector (JSONB term->weight)
+--   — self-hosted, no GPU (see README: swapping it for sentence-transformers in
+--   production is additive, same interface).
 
 -- ---------------------------------------------------------------------------
 -- skill_registry
@@ -23,14 +23,14 @@
 CREATE TABLE IF NOT EXISTS skill_registry (
     id             BIGSERIAL PRIMARY KEY,
     tenant_id      TEXT NOT NULL,
-    skill_key      TEXT NOT NULL,          -- identificador estável por tenant (ex.: 'pci-dss-logging')
+    skill_key      TEXT NOT NULL,          -- stable identifier per tenant (e.g.: 'pci-dss-logging')
     title          TEXT NOT NULL,
-    body           TEXT NOT NULL,          -- conteúdo da skill (guidance curada por humano)
+    body           TEXT NOT NULL,          -- skill content (human-curated guidance)
     category       TEXT NOT NULL DEFAULT 'general',
-    applies_to     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- task_classes/globs a que a skill se aplica
+    applies_to     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- task_classes/globs the skill applies to
     status         TEXT NOT NULL DEFAULT 'approved'
                      CHECK (status IN ('approved', 'draft', 'retired')),
-    created_by     TEXT NOT NULL,          -- principal HUMANO que curou (P8) — nunca 'system:*'
+    created_by     TEXT NOT NULL,          -- HUMAN principal who curated it (P8) — never 'system:*'
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, skill_key)
@@ -49,20 +49,20 @@ CREATE TRIGGER trg_skill_registry_updated_at
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS retrieval_documents (
     id             BIGSERIAL PRIMARY KEY,
-    tenant_id      TEXT NOT NULL,          -- ISOLAMENTO: toda query filtra por isto
+    tenant_id      TEXT NOT NULL,          -- ISOLATION: every query filters by this
     repo           TEXT NOT NULL,
-    path           TEXT NOT NULL,          -- caminho lógico do doc (arquivo, ticket:ID, repomap)
+    path           TEXT NOT NULL,          -- logical path of the doc (file, ticket:ID, repomap)
     kind           TEXT NOT NULL DEFAULT 'file'
                      CHECK (kind IN ('file', 'repo_map', 'ticket', 'doc')),
-    content        TEXT NOT NULL,          -- conteúdo NÃO CONFIÁVEL (input do Planner)
-    content_sha    TEXT NOT NULL,          -- sha256 do content (idempotência de reindex)
-    symbols        JSONB NOT NULL DEFAULT '[]'::jsonb,  -- símbolos extraídos (repo map)
-    embedding      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- vetor TF-IDF esparso term->weight
+    content        TEXT NOT NULL,          -- UNTRUSTED content (Planner input)
+    content_sha    TEXT NOT NULL,          -- sha256 of the content (reindex idempotency)
+    symbols        JSONB NOT NULL DEFAULT '[]'::jsonb,  -- extracted symbols (repo map)
+    embedding      JSONB NOT NULL DEFAULT '{}'::jsonb,  -- sparse TF-IDF vector term->weight
     indexed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, repo, path)
 );
 
--- Índice composto começando por tenant_id: o planner nunca faz scan cross-tenant.
+-- Composite index leading with tenant_id: the planner never does a cross-tenant scan.
 CREATE INDEX IF NOT EXISTS idx_retrieval_documents_tenant_repo
     ON retrieval_documents (tenant_id, repo);
 
@@ -71,9 +71,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON retrieval_documents TO dse_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dse_app;
 
 -- ---------------------------------------------------------------------------
--- Seed de skills curadas humanas (bootstrap — WSC-E4-T1). Tenant 'dev' + um
--- segundo tenant para exercitar isolamento na suíte de testes. Idempotente.
--- created_by é um principal humano (formato do dse_identity), nunca system:*.
+-- Seed of human-curated skills (bootstrap — WSC-E4-T1). Tenant 'dev' + a second
+-- tenant to exercise isolation in the test suite. Idempotent.
+-- created_by is a human principal (dse_identity format), never system:*.
 -- ---------------------------------------------------------------------------
 INSERT INTO skill_registry (tenant_id, skill_key, title, body, category, applies_to, status, created_by) VALUES
   ('dev', 'pci-dss-logging',

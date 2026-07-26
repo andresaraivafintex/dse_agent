@@ -1,5 +1,5 @@
-"""WSE-E5-T14 — publicação consolidada + debounce (ADR-26). Postgres + Garage
-reais; GitHub representado pelo FakeGitHubClient (mesma interface do Real)."""
+"""WSE-E5-T14 — consolidated publication + debounce (ADR-26). Real Postgres +
+Garage; GitHub stood in for by FakeGitHubClient (same interface as the real one)."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,7 +26,7 @@ def _writer(client: FakeGitHubClient) -> MutableCommentWriter:
 
 def _seed_artifact(work_item_id: str, tenant_id: str, kind: str, tmp_path: Path) -> str:
     f = tmp_path / f"{kind}.bin"
-    f.write_bytes(b"evidencia-" + kind.encode())
+    f.write_bytes(b"evidence-" + kind.encode())
     return publish_artifact_core(
         PublishArtifactInput(
             work_item_id=work_item_id, tenant_id=tenant_id, kind=kind,
@@ -36,11 +36,11 @@ def _seed_artifact(work_item_id: str, tenant_id: str, kind: str, tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# Decisão de debounce (determinística, P1) — contrato consumido pelo WS-B
+# Debounce decision (deterministic, P1) — contract consumed by WS-B
 # ---------------------------------------------------------------------------
 def test_first_publication_always_refreshes(work_item_id):
     d = should_refresh_evidence(work_item_id=work_item_id, commit_sha="sha-1")
-    assert d.refresh and "primeira" in d.reason
+    assert d.refresh and "first evidence publication" in d.reason
 
 
 def test_same_commit_is_debounced_and_human_request_overrides(work_item_id, tenant_id, tmp_path):
@@ -52,7 +52,7 @@ def test_same_commit_is_debounced_and_human_request_overrides(work_item_id, tena
     )
     assert out["published"] is True
 
-    # mesmo commit => debounce (nenhum refresh, nenhum edit)
+    # same commit => debounce (no refresh, no edit)
     d = should_refresh_evidence(work_item_id=work_item_id, commit_sha="sha-1")
     assert d.refresh is False and "debounce" in d.reason
     out2 = publish_evidence_bundle(
@@ -61,11 +61,11 @@ def test_same_commit_is_debounced_and_human_request_overrides(work_item_id, tena
     )
     assert out2["published"] is False
 
-    # pedido humano EXPLÍCITO fura o debounce (ADR-26)
+    # an EXPLICIT human request pierces the debounce (ADR-26)
     d_human = should_refresh_evidence(
         work_item_id=work_item_id, commit_sha="sha-1", human_requested=True
     )
-    assert d_human.refresh is True and "humano" in d_human.reason
+    assert d_human.refresh is True and "explicit human request" in d_human.reason
 
 
 def test_docs_only_commit_is_debounced_behavior_change_is_not(work_item_id, tenant_id, tmp_path):
@@ -75,13 +75,13 @@ def test_docs_only_commit_is_debounced_behavior_change_is_not(work_item_id, tena
         work_item_id=work_item_id, tenant_id=tenant_id, commit_sha="sha-1",
         comment_writer=_writer(client), surface_ref=SURFACE,
     )
-    # commit novo SÓ de docs => não re-gera evidência (ADR-26)
+    # new commit touching ONLY docs => does not regenerate evidence (ADR-26)
     d_docs = should_refresh_evidence(
         work_item_id=work_item_id, commit_sha="sha-2",
         files_changed=["README.md", "docs/guide.md"],
     )
     assert d_docs.refresh is False
-    # commit novo que muda comportamento => refresh
+    # new commit that changes behavior => refresh
     d_code = should_refresh_evidence(
         work_item_id=work_item_id, commit_sha="sha-2",
         files_changed=["README.md", "api/handler.py"],
@@ -90,7 +90,7 @@ def test_docs_only_commit_is_debounced_behavior_change_is_not(work_item_id, tena
 
 
 # ---------------------------------------------------------------------------
-# Publicação consolidada: 1 tracking comment com TODOS os links
+# Consolidated publication: 1 tracking comment with ALL the links
 # ---------------------------------------------------------------------------
 def test_consolidated_comment_has_video_trace_diff_preview_and_logs_access(
     work_item_id, tenant_id, tmp_path
@@ -112,19 +112,19 @@ def test_consolidated_comment_has_video_trace_diff_preview_and_logs_access(
     )
     assert out["published"] is True
 
-    assert len(client._comments) == 1  # UM comentário consolidado
+    assert len(client._comments) == 1  # ONE consolidated comment
     body = next(iter(client._comments.values()))
     for key in (video_key, trace_key, diff_key):
-        assert key in body, f"link de {key} ausente do comentário consolidado"
-    assert f"preview-{work_item_id}" in body  # link do preview
-    assert "green" in body  # status de CI refletido
+        assert key in body, f"link for {key} missing from the consolidated comment"
+    assert f"preview-{work_item_id}" in body  # preview link
+    assert "green" in body  # CI status reflected
 
-    # cada link renderizado gerou LOG DE ACESSO associável ao PR (via=tracking_comment)
+    # every rendered link produced an ACCESS LOG attributable to the PR (via=tracking_comment)
     accesses = [a for a in db.list_artifact_accesses(work_item_id) if a["via"] == "tracking_comment"]
     assert len(accesses) == 3
     assert all(a["pr_number"] == 42 for a in accesses)
 
-    # segunda publicação (commit novo) EDITA o mesmo comentário
+    # second publication (new commit) EDITS the same comment
     publish_evidence_bundle(
         work_item_id=work_item_id, tenant_id=tenant_id, commit_sha="sha-2",
         comment_writer=_writer(client), surface_ref=SURFACE, pr_number=42,
@@ -134,8 +134,8 @@ def test_consolidated_comment_has_video_trace_diff_preview_and_logs_access(
 
 
 def test_quarantined_artifact_link_is_revoked_in_comment(work_item_id, tenant_id, tmp_path):
-    """Artefato quarantinado nunca vira link no comentário — aparece como
-    revogado (integra T12 <-> T14)."""
+    """A quarantined artifact never becomes a link in the comment — it shows up
+    as revoked (integrates T12 <-> T14)."""
     from dse_validation.evidence.garage import quarantine_artifacts_for_work_item
 
     client = FakeGitHubClient()
@@ -149,4 +149,4 @@ def test_quarantined_artifact_link_is_revoked_in_comment(work_item_id, tenant_id
     assert out["published"] is True
     body = next(iter(client._comments.values()))
     assert "quarantined" in body
-    assert "http://localhost:3900" not in body  # nenhum link presigned vazou
+    assert "http://localhost:3900" not in body  # no presigned link leaked

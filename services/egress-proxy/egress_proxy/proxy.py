@@ -1,24 +1,24 @@
-"""Proxy HTTP/HTTPS default-deny (WSC-E2-T1/T2), implementado em asyncio puro
-(stdlib) — sem mitmproxy — para poder rodar dentro de um container
-`python:3.11-slim` sem `pip install` (útil para o teste de isolamento de rede
-containerizado, que não pode depender de build de imagem custom).
+"""Default-deny HTTP/HTTPS proxy (WSC-E2-T1/T2), implemented in pure asyncio
+(stdlib) — no mitmproxy — so it can run inside a `python:3.11-slim` container
+with no `pip install` (useful for the containerized network isolation test,
+which cannot depend on building a custom image).
 
-Duas formas de tráfego suportadas:
-  - `CONNECT host:port` (túnel HTTPS opaco): usado para acesso ao
-    model-gateway e para qualquer host HTTPS na allowlist. Enforcement =
-    allowlist apenas (não conseguimos — nem queremos, é fora de escopo desta
-    fase — inspecionar/injetar dentro de um túnel TLS opaco sem terminar TLS,
-    o que exigiria um CA confiável instalado no sandbox; ver README).
-  - Proxy HTTP simples (`GET/POST http://host/path HTTP/1.1` como
-    request-line, forma clássica de forward-proxy): usado para o padrão de
-    "git remote relay" e chamadas ao model-gateway em texto plano — aqui SIM
-    injetamos credenciais, porque o proxy termina a conexão e monta a
-    requisição de saída ele mesmo.
+Two traffic forms are supported:
+  - `CONNECT host:port` (opaque HTTPS tunnel): used for model-gateway access and
+    for any HTTPS host on the allowlist. Enforcement = allowlist only (we cannot
+    — and do not want to, it is out of scope for this phase — inspect/inject
+    inside an opaque TLS tunnel without terminating TLS, which would require a
+    trusted CA installed in the sandbox; see README).
+  - Plain HTTP proxying (`GET/POST http://host/path HTTP/1.1` as the
+    request-line, the classic forward-proxy form): used for the "git remote
+    relay" pattern and for plaintext model-gateway calls — here we DO inject
+    credentials, because the proxy terminates the connection and builds the
+    outbound request itself.
 
-Toda recusa (host fora da allowlist) gera `dse_audit.emit(action=
-"egress_denied", ...)` — import é opcional (o proxy roda também num
-container "pelado" sem `dse_audit` instalado, caso em que cai para log em
-stdout; produção deve instalar `dse-audit` na imagem do egress-proxy).
+Every refusal (host off the allowlist) emits `dse_audit.emit(action=
+"egress_denied", ...)` — the import is optional (the proxy also runs in a "bare"
+container without `dse_audit` installed, in which case it falls back to logging
+on stdout; production must install `dse-audit` in the egress-proxy image).
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ logger = logging.getLogger("egress_proxy")
 
 try:
     from dse_audit import emit as _audit_emit
-except Exception:  # pragma: no cover - modo "container pelado" sem dse_audit instalado
+except Exception:  # pragma: no cover - "bare container" mode, dse_audit not installed
     _audit_emit = None
 
 
@@ -44,8 +44,8 @@ def _emit_audit(*, actor: str, action: str, tenant_id: str, work_item_id: str | 
         try:
             _audit_emit(actor=actor, action=action, tenant_id=tenant_id, work_item_id=work_item_id, details=details)
             return
-        except Exception:  # noqa: BLE001 - nunca deixa a recusa de egress falhar por causa do audit
-            logger.warning("falha ao gravar audit_log, caindo para log local: %s %s", action, details)
+        except Exception:  # noqa: BLE001 - never let an egress denial fail because of the audit write
+            logger.warning("failed to write audit_log, falling back to a local log: %s %s", action, details)
     logger.info("AUDIT (fallback local, sem Postgres) action=%s details=%s", action, details)
 
 
@@ -132,8 +132,8 @@ class EgressProxy:
                 await self._handle_plain_http(method, target, headers, reader, writer)
         except (ConnectionResetError, BrokenPipeError):
             pass
-        except Exception:  # noqa: BLE001 - proxy nunca deve crashar o processo por 1 conexão ruim
-            logger.exception("erro tratando conexão de egress")
+        except Exception:  # noqa: BLE001 - the proxy must never crash the process over 1 bad connection
+            logger.exception("error handling egress connection")
         finally:
             try:
                 writer.close()

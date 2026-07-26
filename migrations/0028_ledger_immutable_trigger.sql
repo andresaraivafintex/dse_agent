@@ -1,29 +1,30 @@
--- Fintex DSE — Plano 08 §F (F3) — ledger imutável por TRIGGER (defesa em
--- profundidade além do REVOKE) + REVOKE de TRUNCATE.
+-- Fintex DSE — Plan 08 §F (F3) — immutable ledger enforced by TRIGGER (defense
+-- in depth beyond the REVOKE) + REVOKE of TRUNCATE.
 --
--- Hoje audit_log já tem REVOKE UPDATE/DELETE de dse_app/PUBLIC (0001). Isso
--- para a role de app, mas NÃO para um caminho privilegiado (owner/superuser) e
--- NÃO cobre TRUNCATE. Um trigger BEFORE UPDATE OR DELETE que ABORTA é a camada
--- que falta: reforça append-only mesmo se alguém receber privilégio por engano
--- e mesmo contra o próprio dono da tabela (a menos que o trigger seja desligado
--- explicitamente).
+-- Today audit_log already has REVOKE UPDATE/DELETE from dse_app/PUBLIC (0001).
+-- That stops the app role, but NOT a privileged path (owner/superuser) and it
+-- does NOT cover TRUNCATE. A BEFORE UPDATE OR DELETE trigger that ABORTS is the
+-- missing layer: it enforces append-only even if someone is granted a privilege
+-- by mistake, and even against the table owner itself (unless the trigger is
+-- disabled explicitly).
 --
--- Break-glass (DR/retenção controlada/limpeza de teste): a operação é permitida
--- quando roda como a role de owner/superuser `dse` (a identidade de migração/DR/
--- DBA, NUNCA a de app) OU quando a sessão seta `dse.ledger_maintenance='on'`
--- deliberadamente. A role de app `dse_app` (a superfície de ameaça real — app
--- comprometido / SQL injection) é bloqueada de forma absoluta.
+-- Break-glass (DR/controlled retention/test cleanup): the operation is allowed
+-- when running as the owner/superuser role `dse` (the migration/DR/DBA identity,
+-- NEVER the app one) OR when the session deliberately sets
+-- `dse.ledger_maintenance='on'`. The app role `dse_app` (the real threat surface
+-- — compromised app / SQL injection) is blocked absolutely.
 --
--- Alvos: audit_log e model_call_ledger (ambos ledgers append-only). Aditiva e
--- idempotente. retention.py NUNCA toca esses ledgers (recusa alvos audit_log*;
--- anonimiza só ingest_events), então o trigger não interfere no GDPR.
+-- Targets: audit_log and model_call_ledger (both append-only ledgers). Additive
+-- and idempotent. retention.py NEVER touches these ledgers (it refuses
+-- audit_log* targets; it only anonymizes ingest_events), so the trigger does not
+-- interfere with GDPR.
 
 CREATE OR REPLACE FUNCTION dse_ledger_append_only() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
     IF current_user = 'dse'
        OR current_setting('dse.ledger_maintenance', true) = 'on' THEN
-        RETURN COALESCE(NEW, OLD);  -- break-glass: DR/retenção controlada/teste
+        RETURN COALESCE(NEW, OLD);  -- break-glass: DR/controlled retention/test
     END IF;
     RAISE EXCEPTION
         'ledger % é append-only (plano 08 §F F3): % negado para %',
@@ -43,9 +44,10 @@ CREATE TRIGGER trg_model_call_ledger_append_only
     BEFORE UPDATE OR DELETE ON model_call_ledger
     FOR EACH ROW EXECUTE FUNCTION dse_ledger_append_only();
 
--- REVOKE de TRUNCATE (o REVOKE de UPDATE/DELETE já existe em 0001 p/ audit_log;
--- reforça para ambos os ledgers). TRUNCATE não dispara triggers de linha, então
--- o REVOKE é a única defesa contra ele — daí ser essencial aqui.
+-- REVOKE of TRUNCATE (the REVOKE of UPDATE/DELETE already exists in 0001 for
+-- audit_log; this reinforces it for both ledgers). TRUNCATE does not fire row
+-- triggers, so the REVOKE is the only defense against it — hence it is essential
+-- here.
 REVOKE TRUNCATE ON audit_log FROM dse_app;
 REVOKE TRUNCATE ON audit_log FROM PUBLIC;
 REVOKE UPDATE, DELETE, TRUNCATE ON model_call_ledger FROM dse_app;

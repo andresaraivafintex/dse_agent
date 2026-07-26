@@ -1,27 +1,27 @@
--- Fintex DSE — Fase 3 — WS-F (arquivo reservado, ver CONVENTIONS.md §Fase 3)
--- WSF-E8-T2: retenção por classificação de dados (§12.2).
+-- Fintex DSE — Phase 3 — WS-F (reserved file, see CONVENTIONS.md §Phase 3)
+-- WSF-E8-T2: retention by data classification (§12.2).
 --
--- Política configurável por tenant/classe vive em `tenant_config.retention`
--- (JSONB) — a tabela é do próprio WS-F (0007_wsf.sql), então o ALTER abaixo
--- não toca schema de outro workstream. Shape do JSONB (validado em
--- dse_platform/retention.py, nunca "schema-less de verdade"):
+-- The per-tenant/per-class configurable policy lives in `tenant_config.retention`
+-- (JSONB) — the table belongs to WS-F itself (0007_wsf.sql), so the ALTER below
+-- does not touch another workstream's schema. Shape of the JSONB (validated in
+-- dse_platform/retention.py, never "truly schema-less"):
 --
 --   {"<data_class>": {"days": <int > 0>}, ...}
---   ex.: {"internal": {"days": 90}, "restricted": {"days": 30}}
+--   e.g.: {"internal": {"days": 90}, "restricted": {"days": 30}}
 --
--- Classe SEM entrada = SEM expurgo (conservador por default: retenção é uma
--- decisão explícita por tenant, nunca um default silencioso que apaga dados).
+-- A class WITHOUT an entry = NO purge (conservative by default: retention is an
+-- explicit decision per tenant, never a silent default that deletes data).
 --
--- audit_log NÃO entra em nenhuma política daqui: é append-only com retenção
--- compliance-grade própria (0001_foundation.sql revoga UPDATE/DELETE até da
--- role de app — a garantia é estrutural). dse_platform/retention.py também
--- recusa qualquer alvo 'audit_log%' em código (defesa em profundidade).
+-- audit_log is NOT covered by any policy here: it is append-only with its own
+-- compliance-grade retention (0001_foundation.sql revokes UPDATE/DELETE even
+-- from the app role — the guarantee is structural). dse_platform/retention.py
+-- also refuses any 'audit_log%' target in code (defense in depth).
 
 ALTER TABLE tenant_config
     ADD COLUMN IF NOT EXISTS retention JSONB NOT NULL DEFAULT '{}'::jsonb;
 
--- Índice de apoio ao job de expurgo (varre por idade). Objeto NOVO sobre a
--- tabela da fundação (não edita 0001) — mesma regra dos GRANTs aditivos.
+-- Supporting index for the purge job (it scans by age). A NEW object on top of
+-- the foundation table (it does not edit 0001) — same rule as additive GRANTs.
 CREATE INDEX IF NOT EXISTS idx_ingest_events_received_at
     ON ingest_events (received_at);
 

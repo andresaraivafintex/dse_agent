@@ -1,7 +1,7 @@
 {{/*
-Contenção L3/L4. NetworkPolicy padrão não entende FQDN: só o egress-proxy
-recebe rota para CIDRs externos; a decisão por hostname continua no proxy.
-O CNI do cluster deve aplicar NetworkPolicy (Calico/Cilium etc.).
+L3/L4 containment. Stock NetworkPolicy does not understand FQDNs: only the
+egress-proxy gets a route to external CIDRs; the per-hostname decision stays in
+the proxy. The cluster CNI must enforce NetworkPolicy (Calico/Cilium etc.).
 */}}
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
@@ -16,7 +16,7 @@ spec:
   policyTypes: ["Egress"]
   egress: []
 ---
-# Todos os pods podem falar apenas com o DNS do cluster para resolução.
+# Every pod may talk only to the cluster DNS for resolution.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -39,7 +39,7 @@ spec:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
-# Workloads de aplicação só alcançam dependências internas enumeradas.
+# Application workloads only reach the enumerated internal dependencies.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -55,6 +55,15 @@ spec:
         values:
           - adapter-slack
           - adapter-github
+          # The two Jira workers carry their own component name, so they need
+          # explicit entries: without them they fall under default-deny and the
+          # poller cannot even reach Postgres.
+          - adapter-jira
+          - adapter-jira-poller
+          - adapter-jira-transition
+          # Reads the system of record and writes console_rm — both in the same
+          # Postgres, so the existing rule below is all it needs.
+          - console-projector
           - ingest-gateway
           - validation
           - orchestrator
@@ -104,8 +113,33 @@ spec:
               app.kubernetes.io/name: vault
       ports:
         - { protocol: TCP, port: 8200 }
+    # Outbound status comment: the orchestrator posts the tracking comment by
+    # calling the adapter's HTTP endpoint (DSE_ADAPTER_*_URL). Without this route
+    # post_tracking_comment gets Connection refused under the default-deny and
+    # Slack/GitHub get no feedback (the PR still lands because finalize_pr goes
+    # straight to the API through the egress-proxy). Enumerated, not wildcarded.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adapter-slack
+      ports:
+        - { protocol: TCP, port: {{ .Values.adapters.slack.port }} }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adapter-github
+      ports:
+        - { protocol: TCP, port: {{ .Values.adapters.github.port }} }
+    {{- if .Values.adapters.jira.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: adapter-jira
+      ports:
+        - { protocol: TCP, port: {{ .Values.adapters.jira.port }} }
+    {{- end }}
 ---
-# Temporal self-hosted precisa somente do Postgres interno.
+# Self-hosted Temporal only needs the internal Postgres.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -146,7 +180,7 @@ spec:
       ports:
         - { protocol: TCP, port: 7233 }
 ---
-# Sandboxes futuros nascem sob default-deny e recebem somente proxy/gateway.
+# Future sandboxes are born under default-deny and get only proxy/gateway.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -173,7 +207,7 @@ spec:
       ports:
         - { protocol: TCP, port: {{ .Values.modelGateway.port }} }
 ---
-# Única exceção externa. Redes internas e metadata devem constar em `except`.
+# The only external exception. Internal networks and metadata must be listed in `except`.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -219,9 +253,9 @@ spec:
     {{- end }}
 {{- if .Values.runtime.sandboxRbac.create }}
 ---
-# Rota do worker do orchestrator até o API server do K8s — o kubectl que cria
-# os Pods de sandbox. Só existe com sandboxDriver=k8s; sob default-deny o
-# orchestrator não alcançaria o apiserver sem esta regra.
+# Route from the orchestrator worker to the K8s API server — the kubectl that
+# creates the sandbox Pods. Only exists with sandboxDriver=k8s; under the
+# default-deny the orchestrator would not reach the apiserver without this rule.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

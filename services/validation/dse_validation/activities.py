@@ -1,18 +1,18 @@
-"""Activities Temporal do WS-E, registradas com os nomes de
+"""WS-E's Temporal Activities, registered under the names from
 `dse_contracts.activities` (ACTIVITY_RUN_L1_PIPELINE, ACTIVITY_FINALIZE_PR,
-ACTIVITY_CONSUME_CI_STATUS) para que o Worker único do WS-B
-(`services/orchestrator/worker.py`) as importe e registre.
+ACTIVITY_CONSUME_CI_STATUS) so that WS-B's single Worker
+(`services/orchestrator/worker.py`) imports and registers them.
 
-Cada `@activity.defn` aqui é só um wrapper fino: monta os objetos reais
-(executor a partir do `SandboxHandle`, `GitHubClient` a partir das env vars)
-e chama a função core testável do módulo correspondente. Os testes deste
-workstream chamam as funções core diretamente com fakes injetados — nunca
-precisam do runtime do Temporal nem do Docker real para validar a LÓGICA
-(mas o teste de review_signal roda contra o Temporal real, ver README).
+Every `@activity.defn` here is just a thin wrapper: it assembles the real objects
+(executor from the `SandboxHandle`, `GitHubClient` from the env vars) and calls
+the corresponding module's testable core function. This workstream's tests call
+the core functions directly with injected fakes — they never need the Temporal
+runtime or real Docker to validate the LOGIC (but the review_signal test does run
+against the real Temporal, see README).
 
-Import defensivo: se `temporalio` não estiver instalado no ambiente que
-importar este módulo, o resto de `dse_validation` continua utilizável (os
-testes de lógica pura não dependem do decorator `@activity.defn`).
+Defensive import: if `temporalio` is not installed in the environment importing
+this module, the rest of `dse_validation` remains usable (the pure-logic tests do
+not depend on the `@activity.defn` decorator).
 """
 from __future__ import annotations
 
@@ -61,26 +61,26 @@ from dse_validation.l2.l2_review import run_l2_review
 from dse_validation.l2.session import L2ReviewInput, L2ReviewSession, build_l2_session
 from dse_validation.sandbox_exec import executor_for_handle
 
-# Nomes de Activity que o WS-E é dono na Fase 2. `ACTIVITY_RUN_L2_REVIEW`
-# (dse_contracts) é a SESSÃO L2, dona do WS-C — o WS-E NÃO a registra; o WS-E
-# registra a ORQUESTRAÇÃO em torno dela (recording de veredito/custo, decisão do
-# loop de fix-retries, adoção de PR no modo estrito). Nomes distintos para não
-# colidirem no Worker único.
-WSE_ACTIVITY_RUN_L2_REVIEW = "wse_run_l2_review"  # orquestra a sessão + grava evidência
+# Activity names WS-E owns in Phase 2. `ACTIVITY_RUN_L2_REVIEW` (dse_contracts)
+# is the L2 SESSION, owned by WS-C — WS-E does NOT register it; WS-E registers the
+# ORCHESTRATION around it (verdict/cost recording, fix-retry loop decision, PR
+# adoption in strict mode). Distinct names so they do not collide in the single
+# Worker.
+WSE_ACTIVITY_RUN_L2_REVIEW = "wse_run_l2_review"  # orchestrates the session + records evidence
 WSE_ACTIVITY_RECORD_FIX_LOOP = "wse_record_fix_loop"
 WSE_ACTIVITY_ADOPT_PR = "wse_adopt_pr"
 
-# Fase 3 — os 4 nomes do CONTRATO (dse_contracts) são do WS-E (dono declarado
-# no próprio contrato): run_demo_evidence, publish_artifact, trigger_preview,
-# run_visual_diff. Os auxiliares abaixo têm prefixo wse_ (não-contratuais).
+# Phase 3 — the 4 CONTRACT names (dse_contracts) belong to WS-E (owner declared in
+# the contract itself): run_demo_evidence, publish_artifact, trigger_preview,
+# run_visual_diff. The helpers below carry the wse_ prefix (non-contractual).
 WSE_ACTIVITY_QUARANTINE_ARTIFACTS = "wse_quarantine_artifacts"
 WSE_ACTIVITY_REAP_PREVIEWS = "wse_reap_previews"
 WSE_ACTIVITY_SHOULD_REFRESH_EVIDENCE = "wse_should_refresh_evidence"
 WSE_ACTIVITY_PUBLISH_EVIDENCE = "wse_publish_evidence"
 
-# Fase 4 — ACTIVITY_UPDATE_BASE_BRANCH (dse_contracts) é do WS-E (merge-base,
-# WSE-E6-T16). O episódio de review-feedback (WSE-E6-T18) é auxiliar (prefixo
-# wse_, não-contratual — só grava o episódio; a promoção é do WS-C).
+# Phase 4 — ACTIVITY_UPDATE_BASE_BRANCH (dse_contracts) belongs to WS-E
+# (merge-base, WSE-E6-T16). The review-feedback episode (WSE-E6-T18) is a helper
+# (wse_ prefix, non-contractual — it only records the episode; promotion is WS-C's).
 WSE_ACTIVITY_RECORD_REVIEW_EPISODE = "wse_record_review_episode"
 
 try:
@@ -92,13 +92,13 @@ except ImportError:  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
-# Modelos de input — Temporal Activities recebem 1 argumento pydantic único
-# (facilita versionamento futuro sem quebrar a assinatura posicional).
+# Input models — Temporal Activities take a single pydantic argument (makes future
+# versioning easier without breaking the positional signature).
 #
-# RunL1PipelineInput: usa o CANÔNICO de dse_contracts (achado do disparo real
-# 2026-07-22: um shadow local ficou para trás sem work_item_id/base_sha —
-# AttributeError em produção enquanto os testes de contrato passavam no
-# canônico). Nunca redefina modelos de contrato localmente.
+# RunL1PipelineInput: uses the CANONICAL one from dse_contracts (found during the
+# real run on 2026-07-22: a local shadow fell behind, missing work_item_id/base_sha
+# — AttributeError in production while the contract tests passed against the
+# canonical model). Never redefine contract models locally.
 # ---------------------------------------------------------------------------
 from dse_contracts.activities import RunL1PipelineInput  # noqa: E402
 
@@ -115,27 +115,27 @@ class FinalizePrInput(BaseModel):
     issue_ref: dict | None = None
     sandbox: SandboxHandle | None = None
     repo_dir: str = "/workspace/repo"
-    # Fase 2 (WSE-E3-T8): modo estrito. Se None, resolve por repo/tenant via
-    # StrictModeConfig; se explicitamente setado, ganha. `surface_ref` é a
-    # superfície do tracking comment onde postar o compare link.
+    # Phase 2 (WSE-E3-T8): strict mode. If None, it is resolved per repo/tenant via
+    # StrictModeConfig; if explicitly set, that wins. `surface_ref` is the surface
+    # of the tracking comment where the compare link is posted.
     strict_mode: bool | None = None
     surface_ref: dict | None = None
 
 
 class RunL2ReviewInput(BaseModel):
-    """WSE-E2-T4. P3: só plan+diff atravessam — sem histórico do Coder."""
+    """WSE-E2-T4. P3: only plan+diff cross over — no Coder history."""
 
     work_item_id: str
     tenant_id: str
     plan: PlanArtifact
     diff: str
     iteration: int = 0
-    l1_passed: bool = True  # guard cheapest-first (P5); o workflow passa o L1Result.passed
+    l1_passed: bool = True  # cheapest-first guard (P5); the workflow passes L1Result.passed
 
 
 class RecordFixLoopInput(BaseModel):
-    """WSE-E2-T5 — espelha o contador durável do loop mantido pelo workflow
-    (WS-B é dono do estado; esta activity persiste evidência + audita)."""
+    """WSE-E2-T5 — mirrors the loop's durable counter maintained by the workflow
+    (WS-B owns the state; this activity persists evidence + audits)."""
 
     work_item_id: str
     tenant_id: str
@@ -148,7 +148,7 @@ class RecordFixLoopInput(BaseModel):
 
 
 class AdoptPrInput(BaseModel):
-    """WSE-E3-T8 — humano abriu o PR a partir do compare link; adota (mesmo WI)."""
+    """WSE-E3-T8 — a human opened the PR from the compare link; adopt it (same WI)."""
 
     work_item_id: str
     tenant_id: str
@@ -159,29 +159,29 @@ class AdoptPrInput(BaseModel):
 
 
 class ConsumeCiStatusInput(BaseModel):
-    """Lição de robustez (auditoria pós-S7, observada AO VIVO): payloads de
-    activity ficam GRAVADOS na história do Temporal — um call site antigo que
-    agendou esta activity com {work_item_id, pr_number} retenta com esse
-    payload PARA SEMPRE; corrigir o call site não cura workflows em voo. Por
-    isso tenant_id/repo/ref têm default vazio e são RESOLVIDOS do banco pela
-    activity quando ausentes (work_items + wse_pr_tracking) — payload antigo
-    decodifica e o workflow se auto-cura no próximo retry."""
+    """Robustness lesson (post-S7 audit, observed LIVE): activity payloads are
+    RECORDED in Temporal's history — an old call site that scheduled this activity
+    with {work_item_id, pr_number} retries with that payload FOREVER; fixing the
+    call site does not heal in-flight workflows. That is why tenant_id/repo/ref
+    default to empty and are RESOLVED from the database by the activity when
+    missing (work_items + wse_pr_tracking) — an old payload still decodes and the
+    workflow self-heals on the next retry."""
 
     work_item_id: str
     tenant_id: str = ""
     repo: str = ""
     pr_number: int
     ref: str = Field(default="", description="commit sha (ou nome de branch) para consultar check-runs")
-    # Fase 3 (WSE-E4-T9b) — aditivo: quando `surface_ref` vem preenchido, o
-    # consumo L3 reflete o status no tracking comment único do PR e habilita
-    # targeted re-runs/episódios de repair. Payloads da Fase 1/2 (sem o campo)
-    # continuam decodificando igual.
+    # Phase 3 (WSE-E4-T9b) — additive: when `surface_ref` comes populated, the L3
+    # consumption reflects the status in the PR's single tracking comment and
+    # enables targeted re-runs/repair episodes. Phase 1/2 payloads (without the
+    # field) keep decoding the same way.
     surface_ref: dict | None = None
 
 
 class QuarantineArtifactsInput(BaseModel):
-    """WSE-E5-T12 — aceite do WS-F: artefato de work item quarantinado é movido
-    p/ prefixo de quarentena e o acesso é invalidado antes do TTL."""
+    """WSE-E5-T12 — WS-F acceptance: a quarantined work item's artifact is moved to
+    the quarantine prefix and access is invalidated before the TTL."""
 
     work_item_id: str
     tenant_id: str
@@ -189,10 +189,10 @@ class QuarantineArtifactsInput(BaseModel):
 
 
 class ShouldRefreshEvidenceInput(BaseModel):
-    """WSE-E5-T14 / ADR-26 — contrato de decisão de debounce consumido pelo
-    workflow do WS-B (em construção paralela): re-gerar evidência SÓ a pedido
-    humano explícito ou commit que muda comportamento. Retorno:
-    {"refresh": bool, "reason": str} — decisão 100% determinística (P1)."""
+    """WSE-E5-T14 / ADR-26 — debounce decision contract consumed by WS-B's workflow
+    (being built in parallel): regenerate evidence ONLY on an explicit human
+    request or a commit that changes behavior. Returns:
+    {"refresh": bool, "reason": str} — a 100% deterministic decision (P1)."""
 
     work_item_id: str
     tenant_id: str
@@ -202,8 +202,8 @@ class ShouldRefreshEvidenceInput(BaseModel):
 
 
 class PublishEvidenceInput(BaseModel):
-    """WSE-E5-T14 — publicação consolidada (vídeo/preview/diff/trace num único
-    tracking comment) com debounce embutido."""
+    """WSE-E5-T14 — consolidated publication (video/preview/diff/trace in a single
+    tracking comment) with debounce built in."""
 
     work_item_id: str
     tenant_id: str
@@ -215,8 +215,8 @@ class PublishEvidenceInput(BaseModel):
 
 
 class RecordReviewEpisodeInput(BaseModel):
-    """WSE-E6-T18 — grava 1 episódio de skill-learning de review feedback ACEITO.
-    NENHUMA skill é criada/ativada (só o episódio; promoção é do WS-C)."""
+    """WSE-E6-T18 — records 1 skill-learning episode from ACCEPTED review feedback.
+    NO skill is created/activated (only the episode; promotion is WS-C's)."""
 
     work_item_id: str
     tenant_id: str
@@ -229,15 +229,15 @@ class RecordReviewEpisodeInput(BaseModel):
 
 
 def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
-    # Boundary bug corrigido no disparo real (2026-07-22): o core mudou para
-    # base_sha/head_sha (sha-bound-validation-inputs-v1) e este wrapper seguia
-    # passando base_branch — os testes chamam o CORE direto e nunca viram o
-    # boundary (test_l1_wrapper_matches_core_signature agora trava isso).
+    # Boundary bug fixed during the real run (2026-07-22): the core moved to
+    # base_sha/head_sha (sha-bound-validation-inputs-v1) and this wrapper kept
+    # passing base_branch — the tests call the CORE directly and never saw the
+    # boundary (test_l1_wrapper_matches_core_signature now pins this).
     executor = executor_for_handle(inp.sandbox, repo_dir=inp.repo_dir)
-    # cfg=None → o core carrega o MANIFESTO CONFIÁVEL do repo
-    # (.dse/validation.json lido do base_sha imutável). Passar L1Config()
-    # default aqui reprovava TUDO (manifest NOT_CONFIGURED) — achado do
-    # disparo real; o L1 de verdade é o do manifesto commitado no repo alvo.
+    # cfg=None → the core loads the repo's TRUSTED MANIFEST (.dse/validation.json
+    # read from the immutable base_sha). Passing a default L1Config() here failed
+    # EVERYTHING (manifest NOT_CONFIGURED) — found during the real run; the real L1
+    # is the one from the manifest committed in the target repo.
     return run_l1_pipeline_core(
         executor=executor,
         work_item_id=inp.work_item_id,
@@ -262,7 +262,7 @@ def _finalize_pr(inp: FinalizePrInput) -> PrRef:
     github_client = build_github_client(GitHubConfig())
     executor = executor_for_handle(inp.sandbox, repo_dir=inp.repo_dir) if inp.sandbox else None
     if executor is None:
-        raise ValueError("finalize_pr requer um SandboxHandle válido para dar `git push`")
+        raise ValueError("finalize_pr requires a valid SandboxHandle to run `git push`")
 
     strict = inp.strict_mode
     if strict is None:
@@ -293,14 +293,14 @@ def _finalize_pr(inp: FinalizePrInput) -> PrRef:
 
 
 def _verify_merge_state(inp: VerifyMergeInput, github_client=None) -> MergeVerification:
-    """Plano 08 §F (F1) — confirma na API do GitHub que o PR está REALMENTE
-    merged (e, se dado, com o head_sha esperado). Fail-safe: qualquer erro/dúvida
-    => verified=False (o workflow nunca conclui como done com base nisso). O
-    `github_client` é injetável para teste; em produção vem das env vars."""
+    """plano 08 §F (F1) — confirms via the GitHub API that the PR is REALLY merged
+    (and, if given, with the expected head_sha). Fail-safe: any error/doubt =>
+    verified=False (the workflow never concludes as done based on that). The
+    `github_client` is injectable for tests; in production it comes from env vars."""
     client = github_client or build_github_client(GitHubConfig())
     try:
         pr = client.get_pull_request(inp.repo, inp.pr_number)
-    except Exception as exc:  # rede/credencial: fail-safe (não verificado)
+    except Exception as exc:  # network/credential: fail-safe (not verified)
         return MergeVerification(verified=False, reason=f"api_error:{type(exc).__name__}")
     if pr is None:
         return MergeVerification(exists=False, verified=False, reason="pr_not_found")
@@ -325,18 +325,18 @@ def _verify_merge_state(inp: VerifyMergeInput, github_client=None) -> MergeVerif
 
 
 def _run_l2_review(inp: RunL2ReviewInput, session: L2ReviewSession | None = None) -> L2Verdict:
-    # P5 cheapest-first: L2 só roda depois do L1 verde. O workflow passa
-    # `l1_passed`; se falso, falha limpa na fronteira (P6) em vez de gastar L2.
+    # P5 cheapest-first: L2 only runs after L1 is green. The workflow passes
+    # `l1_passed`; if false, fail cleanly at the boundary (P6) instead of spending L2.
     if not inp.l1_passed:
         raise ValueError(
-            f"L2 não pode rodar antes do L1 verde (cheapest-first/P5) para {inp.work_item_id}"
+            f"L2 cannot run before L1 is green (cheapest-first/P5) for {inp.work_item_id}"
         )
     session = session or build_l2_session()
     review_input = L2ReviewInput(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
         plan=inp.plan,
-        diff=inp.diff,  # P3: só plan+diff; L2ReviewInput não tem campo de histórico do Coder
+        diff=inp.diff,  # P3: plan+diff only; L2ReviewInput has no Coder-history field
         iteration=inp.iteration,
     )
     return run_l2_review(
@@ -352,7 +352,7 @@ def _record_fix_loop(inp: RecordFixLoopInput) -> dict:
     state = _fix_loop.FixLoopState(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
-        iterations=max(0, inp.iterations - 1),  # estado ANTES desta iteração
+        iterations=max(0, inp.iterations - 1),  # state BEFORE this iteration
     )
     if inp.action == "retry_coder":
         new_state = _fix_loop.register_retry(
@@ -365,7 +365,7 @@ def _record_fix_loop(inp: RecordFixLoopInput) -> dict:
             objections=inp.objections,
         )
     else:  # pragma: no cover - guard
-        raise ValueError(f"ação de fix-loop desconhecida: {inp.action}")
+        raise ValueError(f"unknown fix-loop action: {inp.action}")
     return new_state.model_dump()
 
 
@@ -383,9 +383,9 @@ def _adopt_pr(inp: AdoptPrInput) -> PrRef | None:
 
 
 def _resolve_ci_input_gaps(inp: ConsumeCiStatusInput) -> ConsumeCiStatusInput:
-    """Preenche tenant_id/repo/ref ausentes (payload antigo na história do
-    Temporal — ver docstring do modelo) a partir de work_items +
-    wse_pr_tracking. Deterministico; no-op quando o payload já veio completo."""
+    """Fills in missing tenant_id/repo/ref (old payload in Temporal's history — see
+    the model's docstring) from work_items + wse_pr_tracking. Deterministic; a
+    no-op when the payload already arrived complete."""
     if inp.tenant_id and inp.repo and inp.ref:
         return inp
     from dse_validation.db import get_connection
@@ -415,7 +415,7 @@ def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
     inp = _resolve_ci_input_gaps(inp)
     github_client = build_github_client(GitHubConfig())
     if inp.surface_ref is None:
-        # comportamento Fase 1/2 inalterado (poll + agregação + persistência)
+        # Phase 1/2 behavior unchanged (poll + aggregation + persistence)
         return consume_ci_status_core(
             github_client=github_client,
             work_item_id=inp.work_item_id,
@@ -424,8 +424,8 @@ def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
             pr_number=inp.pr_number,
             ref=inp.ref,
         )
-    # Fase 3 (WSE-E4-T9b): L3 completo — reflexão no tracking comment +
-    # targeted re-runs em fix commit + episódios de CI-repair.
+    # Phase 3 (WSE-E4-T9b): full L3 — reflection in the tracking comment +
+    # targeted re-runs on a fix commit + CI-repair episodes.
     from dse_contracts.mutable_comment import MutableCommentWriter
 
     from dse_validation.db import PostgresCommentStateStore
@@ -448,24 +448,24 @@ def _consume_ci_status(inp: ConsumeCiStatusInput) -> CiStatusResult:
 
 
 # ---------------------------------------------------------------------------
-# Fase 4 — merge-base (WSE-E6-T16) e episódio de review-feedback (WSE-E6-T18)
+# Phase 4 — merge-base (WSE-E6-T16) and review-feedback episode (WSE-E6-T18)
 # ---------------------------------------------------------------------------
 def _update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
-    """Wrapper de Activity: resolve o workspace git e as threads de review
-    ancoradas (via PR rastreado + GitHub client) e chama o core determinístico.
-    Como o LocalFakeSandbox no L1, os TESTES chamam `update_base_branch_core`
-    diretamente com um bare repo local real — este wrapper é o seam de
-    integração com o WS-C (workspace do sandbox) + GitHub App reais."""
+    """Activity wrapper: resolves the git workspace and the anchored review threads
+    (via the tracked PR + GitHub client) and calls the deterministic core. Like
+    LocalFakeSandbox for L1, the TESTS call `update_base_branch_core` directly with
+    a real local bare repo — this wrapper is the integration seam with the real
+    WS-C (sandbox workspace) + GitHub App."""
     from dse_validation.github.client import build_github_client
     from dse_validation.merge_base import MergeBaseConfig, update_base_branch_core
 
     _origin, workspace_dir = MergeBaseConfig().locations(inp.work_item_id)
 
-    # threads de review ancoradas em commits — resolvidas pelo PR rastreado.
+    # review threads anchored to commits — resolved via the tracked PR.
     anchored: list[str] = []
-    # fix (observado ao vivo no review loop): `db` nunca foi importado neste
-    # módulo — NameError em todo update_base_branch real. Import local, no
-    # estilo dos demais deste arquivo.
+    # fix (observed live in the review loop): `db` was never imported in this
+    # module — NameError on every real update_base_branch. Local import, in the
+    # style of the others in this file.
     from dse_validation import db as _db
     tracked = _db.get_tracked_pr(inp.work_item_id)
     pr_number = tracked.get("pr_number") if tracked else None
@@ -504,7 +504,7 @@ def _record_review_episode(inp: RecordReviewEpisodeInput) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Fase 3 — cores das Activities de evidência (contrato)
+# Phase 3 — cores of the evidence Activities (contract)
 # ---------------------------------------------------------------------------
 def _publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
     from dse_validation.evidence.garage import publish_artifact_core
@@ -577,13 +577,13 @@ def _publish_evidence(inp: PublishEvidenceInput) -> dict:
     )
 
 
-# REGRA (achado do disparo real 2026-07-23, wi_150d): todo wrapper abaixo é
-# `async def` num worker de UM event loop compartilhado com as activities do
-# sandbox-runtime. Impl síncrono chamado DIRETO no loop (L1 = npm/subprocess,
-# L2 = chat_completion, visual diff = Playwright…) bloqueia o loop por minutos
-# e os heartbeats de TODAS as activities param → o server cancela coder/tester
-# em pleno trabalho e o retry re-paga o modelo. Por isso: SEMPRE
-# `await asyncio.to_thread(_impl, inp)` — nunca `_impl(inp)` direto.
+# RULE (found during the real run 2026-07-23, wi_150d): every wrapper below is
+# `async def` in a worker with ONE event loop shared with the sandbox-runtime
+# activities. A sync impl called DIRECTLY on the loop (L1 = npm/subprocess,
+# L2 = chat_completion, visual diff = Playwright…) blocks the loop for minutes and
+# the heartbeats of ALL activities stop → the server cancels coder/tester
+# mid-work and the retry pays for the model again. Hence: ALWAYS
+# `await asyncio.to_thread(_impl, inp)` — never `_impl(inp)` directly.
 if _HAS_TEMPORAL:
 
     @activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)
@@ -614,7 +614,7 @@ if _HAS_TEMPORAL:
     async def wse_adopt_pr(inp: AdoptPrInput) -> PrRef | None:
         return await asyncio.to_thread(_adopt_pr, inp)
 
-    # --- Fase 3: Activities de evidência do CONTRATO (dono: WS-E) ---
+    # --- Phase 3: CONTRACT evidence Activities (owner: WS-E) ---
     @activity.defn(name=ACTIVITY_PUBLISH_ARTIFACT)
     async def publish_artifact(inp: PublishArtifactInput) -> ArtifactRef:
         return await asyncio.to_thread(_publish_artifact, inp)
@@ -631,7 +631,7 @@ if _HAS_TEMPORAL:
     async def run_visual_diff(inp: RunVisualDiffInput) -> VisualDiffResult:
         return await asyncio.to_thread(_run_visual_diff, inp)
 
-    # --- Fase 3: auxiliares (não-contratuais, prefixo wse_) ---
+    # --- Phase 3: helpers (non-contractual, wse_ prefix) ---
     @activity.defn(name=WSE_ACTIVITY_QUARANTINE_ARTIFACTS)
     async def wse_quarantine_artifacts(inp: QuarantineArtifactsInput) -> list[str]:
         return await asyncio.to_thread(_quarantine_artifacts, inp)
@@ -648,7 +648,7 @@ if _HAS_TEMPORAL:
     async def wse_publish_evidence(inp: PublishEvidenceInput) -> dict:
         return await asyncio.to_thread(_publish_evidence, inp)
 
-    # --- Fase 4: merge-base (contrato) + episódio de review-feedback (aux) ---
+    # --- Phase 4: merge-base (contract) + review-feedback episode (helper) ---
     @activity.defn(name=ACTIVITY_UPDATE_BASE_BRANCH)
     async def update_base_branch(inp: UpdateBaseBranchInput) -> UpdateBaseBranchResult:
         return await asyncio.to_thread(_update_base_branch, inp)
@@ -665,7 +665,7 @@ if _HAS_TEMPORAL:
         wse_run_l2_review,
         wse_record_fix_loop,
         wse_adopt_pr,
-        # Fase 3
+        # Phase 3
         publish_artifact,
         run_demo_evidence,
         trigger_preview,
@@ -674,14 +674,14 @@ if _HAS_TEMPORAL:
         wse_reap_previews,
         wse_should_refresh_evidence,
         wse_publish_evidence,
-        # Fase 4
+        # Phase 4
         update_base_branch,
         wse_record_review_episode,
     ]
 else:  # pragma: no cover
     ALL_ACTIVITIES = []
 
-# Alias esperado pelo loader defensivo do worker unico (services/orchestrator/
-# src/dse_orchestrator/worker.py:_load_cross_workstream_activities), que
-# procura `ACTIVITIES` (nao `ALL_ACTIVITIES`) neste modulo.
+# Alias expected by the single worker's defensive loader (services/orchestrator/
+# src/dse_orchestrator/worker.py:_load_cross_workstream_activities), which looks
+# for `ACTIVITIES` (not `ALL_ACTIVITIES`) in this module.
 ACTIVITIES = ALL_ACTIVITIES

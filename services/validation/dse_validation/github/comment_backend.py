@@ -1,12 +1,12 @@
-"""WSE-E3-T7 — backend GitHub para `dse_contracts.mutable_comment.CommentBackend`,
-reutilizado pelo `MutableCommentWriter` já pronto na fundação (não reimplementa
-o comentário mutável, só o transporte GitHub). Se `services/adapter-github`
-(WS-A) já tiver publicado um backend equivalente para comentários de issue
-quando este código for integrado, prefira aquele — ver README §Cross-workstream
-para a decisão de qual módulo é fonte de verdade.
+"""WSE-E3-T7 — GitHub backend for `dse_contracts.mutable_comment.CommentBackend`,
+reused by the `MutableCommentWriter` already available in the foundation (does
+not reimplement the mutable comment, only the GitHub transport). If
+`services/adapter-github` (WS-A) has already published an equivalent backend for
+issue comments by the time this code is integrated, prefer that one — see README
+§Cross-workstream for the decision on which module is the source of truth.
 
-`surface_ref` esperado: `{"repo": "org/name", "issue_number": 42}` (PRs no
-GitHub usam a mesma API de comentário de issue que issues comuns)."""
+Expected `surface_ref`: `{"repo": "org/name", "issue_number": 42}` (PRs on
+GitHub use the same issue-comment API as regular issues)."""
 from __future__ import annotations
 
 from dse_validation.github.client import GitHubClient

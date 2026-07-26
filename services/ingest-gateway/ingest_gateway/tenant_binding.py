@@ -1,21 +1,20 @@
-"""WSA-E1-T5 — Mapeamento plataforma -> tenant.
+"""WSA-E1-T5 — Platform -> tenant mapping.
 
-Resolve o `tenant_id` a partir de uma chave de plataforma (workspace Slack
-`team_id`, installation da GitHub App `installation_id`, site Jira
-`cloud_id`/base_url) consultando `tenant_platform_bindings`
-(migrations/0008_wsa2.sql).
+Resolves the `tenant_id` from a platform key (Slack workspace `team_id`,
+GitHub App installation `installation_id`, Jira site `cloud_id`/base_url) by
+querying `tenant_platform_bindings` (migrations/0008_wsa2.sql).
 
-Fallback DOCUMENTADO (P6 decline-never-truncate, mas aqui é decline-para-o-
-default-single-tenant, não truncate): binding ausente -> `DSE_TENANT_ID`
-(env, default `tenant_dev`) COM uma audit row de aviso
-(`action="tenant_binding_missing_fallback_default"`) — nunca adivinha um
-tenant, sempre deixa evidência de que caiu no default. Quando o mapeamento
-real existir (multi-tenant, §2.3 do adendo Fase 2), preencher
-`tenant_platform_bindings` faz a resolução parar de cair no fallback sem
-nenhuma mudança de código nos adapters.
+DOCUMENTED fallback (P6 decline-never-truncate, but here it is
+decline-to-the-single-tenant-default, not truncate): missing binding ->
+`DSE_TENANT_ID` (env, default `tenant_dev`) WITH a warning audit row
+(`action="tenant_binding_missing_fallback_default"`) — it never guesses a
+tenant, it always leaves evidence that it fell back to the default. Once the
+real mapping exists (multi-tenant, §2.3 of the Phase 2 addendum), populating
+`tenant_platform_bindings` stops the resolution from falling back, with no code
+change in the adapters.
 
-Assinatura estável `(conn, platform, binding_key) -> ResolvedTenant` para o
-WS-F trocar a fonte (identity map / ADR-22) sem quebrar os adapters.
+Stable signature `(conn, platform, binding_key) -> ResolvedTenant` so WS-F can
+swap the source (identity map / ADR-22) without breaking the adapters.
 """
 from __future__ import annotations
 
@@ -27,12 +26,12 @@ from dse_audit import emit as audit_emit
 
 class ResolvedTenant(NamedTuple):
     tenant_id: str
-    from_binding: bool  # True se veio de tenant_platform_bindings; False se fallback default
+    from_binding: bool  # True if it came from tenant_platform_bindings; False if default fallback
 
 
 def default_tenant() -> str:
-    """Tenant single-tenant de fallback (mesma env var que os adapters da
-    Fase 1 já usavam em `config.get_tenant_id`)."""
+    """Single-tenant fallback tenant (same env var the Phase 1 adapters already
+    used in `config.get_tenant_id`)."""
     return os.environ.get("DSE_TENANT_ID", "tenant_dev")
 
 
@@ -43,17 +42,17 @@ def resolve_tenant(
     binding_key: str | None,
     audit_on_fallback: bool = True,
 ) -> ResolvedTenant:
-    """Resolve o tenant de um evento de plataforma.
+    """Resolves the tenant of a platform event.
 
-    `binding_key` ausente/None (ex.: um webhook que não carrega o
-    identificador de workspace/installation/site) OU sem linha correspondente
-    em `tenant_platform_bindings` -> cai no `DSE_TENANT_ID` default, emitindo
-    uma audit row de aviso (a menos que `audit_on_fallback=False`, usado quando
-    o caller já vai emitir seu próprio contexto).
+    A missing/None `binding_key` (e.g. a webhook that does not carry the
+    workspace/installation/site identifier) OR no matching row in
+    `tenant_platform_bindings` -> falls back to the default `DSE_TENANT_ID`,
+    emitting a warning audit row (unless `audit_on_fallback=False`, used when
+    the caller is going to emit its own context anyway).
 
-    Nota de transação: usa `conn` para a leitura e para a audit row do
-    fallback mas NÃO comita — segue a convenção de `dse_audit.emit(conn=...)`,
-    o caller controla a fronteira de transação.
+    Transaction note: it uses `conn` for the read and for the fallback audit
+    row but does NOT commit — it follows the `dse_audit.emit(conn=...)`
+    convention, the caller owns the transaction boundary.
     """
     fallback = default_tenant()
 

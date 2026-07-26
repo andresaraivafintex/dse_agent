@@ -1,7 +1,7 @@
-# Plano 08 §G — pré-requisitos cluster-side do runtime isolado de sandbox.
-# Aplicar UMA vez no cluster do piloto (`kubectl apply -f`). A prova viva do
-# isolamento (o Pod rodando sob gVisor/Kata) depende do RuntimeClass estar
-# instalado no cluster — decisão de infra do time de plataforma.
+# Plan 08 §G — cluster-side prerequisites for the isolated sandbox runtime.
+# Apply ONCE on the pilot cluster (`kubectl apply -f`). The live proof of
+# isolation (the Pod running under gVisor/Kata) depends on the RuntimeClass being
+# installed in the cluster — an infra decision owned by the platform team.
 ---
 apiVersion: v1
 kind: Namespace
@@ -9,13 +9,13 @@ metadata:
   name: dse-sandboxes
   labels:
     dse.fintex/purpose: sandbox-isolation
-    # baseline Pod Security Admission "restricted": reforça, no admission, o
-    # mesmo endurecimento que o build_pod_manifest já pede (defesa em prof.).
+    # Pod Security Admission "restricted" baseline: enforces at admission time
+    # the same hardening build_pod_manifest already asks for (defence in depth).
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest
 ---
-# SA mínima: sem RBAC (nenhum RoleBinding) → o token (nem montado) não fala com
-# a API do cluster. automountServiceAccountToken=false também no Pod.
+# Minimal SA: no RBAC (no RoleBinding) → the token (not even mounted) cannot talk
+# to the cluster API. automountServiceAccountToken=false on the Pod as well.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -23,16 +23,16 @@ metadata:
   namespace: dse-sandboxes
 automountServiceAccountToken: false
 ---
-# RuntimeClass de isolamento forte (gVisor). O handler ('runsc') tem que estar
-# instalado nos nodes (containerd + runsc). Kata é a alternativa (handler
-# 'kata'); troque DSE_SANDBOX_RUNTIME_CLASS de acordo.
+# Strong-isolation RuntimeClass (gVisor). The handler ('runsc') has to be
+# installed on the nodes (containerd + runsc). Kata is the alternative (handler
+# 'kata'); switch DSE_SANDBOX_RUNTIME_CLASS accordingly.
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
   name: gvisor
 handler: runsc
 ---
-# NetworkPolicy default-deny de egress: o sandbox NÃO fala com nada por padrão.
+# Egress default-deny NetworkPolicy: the sandbox talks to NOTHING by default.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -43,15 +43,15 @@ spec:
     matchLabels:
       app.kubernetes.io/managed-by: dse-sandbox
   policyTypes: ["Egress"]
-  egress: []   # nada — o allow abaixo é o único caminho
+  egress: []   # nothing — the allow below is the only path
 ---
-# Único egress permitido: DNS + egress-proxy (que aplica o allowlist real de
-# hosts) + model-gateway (o turno faz chamada de modelo). Todo o resto do
-# tráfego de saída do agente passa pelo proxy auditável.
-# Selectors/portas ALINHADOS ao chart (deploy real): label
-# app.kubernetes.io/name (não {app: ...}) e porta do egress-proxy 8806
-# (values.yaml egressProxy.port) — o valor antigo (3128) deixava o Pod sem
-# rota ao proxy sob default-deny.
+# The only permitted egress: DNS + egress-proxy (which enforces the real host
+# allowlist) + model-gateway (the turn makes a model call). All the rest of the
+# agent's outbound traffic goes through the auditable proxy.
+# Selectors/ports ALIGNED with the chart (real deploy): label
+# app.kubernetes.io/name (not {app: ...}) and egress-proxy port 8806
+# (values.yaml egressProxy.port) — the old value (3128) left the Pod with no
+# route to the proxy under default-deny.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -69,7 +69,7 @@ spec:
             matchLabels: {app.kubernetes.io/name: egress-proxy}
       ports:
         - {protocol: TCP, port: 8806}
-    - to:  # model-gateway (chamada de modelo do turno)
+    - to:  # model-gateway (the turn's model call)
         - namespaceSelector: {}
           podSelector:
             matchLabels: {app.kubernetes.io/name: model-gateway}

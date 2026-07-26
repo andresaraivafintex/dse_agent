@@ -1,26 +1,27 @@
-"""WSF-E2-T3b(a) — Rotação AGENDADA de secrets de serviço (ADR-28 completo).
+"""WSF-E2-T3b(a) — SCHEDULED rotation of service secrets (ADR-28, complete).
 
-Mecânica de zero-downtime: o backend é Vault KV **v2** — cada rotação é um
-``create_or_update`` que grava uma VERSÃO NOVA atomicamente. Um leitor ativo
-(adapter lendo o webhook secret, gateway lendo credencial de provider) nunca
-observa "path vazio" nem erro durante a troca: cada GET devolve ou a versão
-antiga completa ou a nova completa. O teste real
-(``tests/test_secret_rotation.py``) prova isso com um leitor concorrente em
-loop durante N rotações — zero janela de erro.
+Zero-downtime mechanics: the backend is Vault KV **v2** — each rotation is a
+``create_or_update`` that writes a NEW VERSION atomically. An active reader (an
+adapter reading the webhook secret, the gateway reading a provider credential)
+never observes an "empty path" nor an error during the swap: every GET returns
+either the complete old version or the complete new one. The real test
+(``tests/test_secret_rotation.py``) proves it with a concurrent reader looping
+across N rotations — zero error window.
 
-O que a rotação local NÃO faz (honesto): para credenciais de terceiros
-(Slack bot token, GitHub App key, service account Jira) a rotação de verdade
-exige chamar a API do provedor para EMITIR a credencial nova antes de gravar
-no Vault. Sem apps/credenciais reais nesta sessão, o ``generator`` default
-gera material aleatório criptograficamente forte — o mecanismo (gravação
-versionada + verificação de read-back + audit) é idêntico; plugar o provedor
-é implementar um ``generator`` por integração (interface documentada abaixo).
+What local rotation does NOT do (being honest): for third-party credentials
+(Slack bot token, GitHub App key, Jira service account) real rotation requires
+calling the provider's API to ISSUE the new credential before writing it to
+Vault. With no real apps/credentials in this session, the default ``generator``
+produces cryptographically strong random material — the mechanism (versioned
+write + read-back verification + audit) is identical; plugging in the provider
+means implementing one ``generator`` per integration (interface documented
+below).
 
-P1: nenhuma decisão por LLM — agenda + generators determinísticos.
-P6: falha de verificação => RotationError limpo; a versão anterior continua
-    íntegra no Vault (KV v2 preserva histórico), nada é truncado.
-P8: UMA linha de audit por rotação (``service_secret_rotated``) com path,
-    versões antiga/nova e nomes das chaves — NUNCA os valores.
+P1: no LLM decisions — schedule + deterministic generators.
+P6: a verification failure => clean RotationError; the previous version stays
+    intact in Vault (KV v2 preserves history), nothing is truncated.
+P8: ONE audit row per rotation (``service_secret_rotated``) with path, old/new
+    versions and the key names — NEVER the values.
 """
 from __future__ import annotations
 
@@ -33,21 +34,21 @@ from dse_audit import emit
 from dse_secrets import SecretsClient
 from dse_secrets.client import VaultUnavailableError
 
-# generator: recebe o dict atual (pode ser {} se o path ainda não existe) e
-# devolve o dict NOVO completo. Implementações por provedor (Slack/GitHub/
-# Jira) devem emitir a credencial nova na API do provedor aqui dentro e só
-# então retornar — a gravação no Vault e o audit ficam com rotate_secret().
+# generator: takes the current dict (may be {} if the path does not exist yet)
+# and returns the complete NEW dict. Per-provider implementations (Slack/GitHub/
+# Jira) must issue the new credential on the provider's API in here and only
+# then return — writing to Vault and auditing stay with rotate_secret().
 Generator = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 class RotationError(RuntimeError):
-    """Rotação falhou de forma limpa (P6) — a versão anterior permanece."""
+    """Rotation failed cleanly (P6) — the previous version is still in place."""
 
 
 def default_generator(current: dict[str, Any]) -> dict[str, Any]:
-    """Regenera material aleatório forte para cada chave existente do secret
-    (ou uma chave ``value`` se o path estiver vazio). Serve para secrets de
-    serviço internos (HMAC de webhook, session secrets, tokens internos)."""
+    """Regenerates strong random material for every existing key of the secret
+    (or a ``value`` key if the path is empty). Intended for internal service
+    secrets (webhook HMAC, session secrets, internal tokens)."""
     keys = sorted(current.keys()) or ["value"]
     return {k: _pysecrets.token_urlsafe(32) for k in keys}
 
@@ -62,14 +63,14 @@ class RotationResult:
 
 
 def _current_version(client: SecretsClient, path: str) -> int | None:
-    """Versão corrente no metadata KV v2 (None se o path não existe)."""
+    """Current version from the KV v2 metadata (None if the path does not exist)."""
     import requests
 
     url = f"{client.vault_addr}/v1/{client.mount_point}/metadata/{path}"
     try:
         resp = requests.get(url, headers={"X-Vault-Token": client.token}, timeout=client.timeout)
     except requests.RequestException as exc:
-        raise VaultUnavailableError(f"Vault inacessível lendo metadata de '{path}': {exc}") from exc
+        raise VaultUnavailableError(f"Vault unreachable while reading metadata of '{path}': {exc}") from exc
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
@@ -86,14 +87,14 @@ def rotate_secret(
     client: SecretsClient | None = None,
     conn=None,
 ) -> RotationResult:
-    """Rotaciona UM secret de serviço, sem downtime para leitores ativos.
+    """Rotates ONE service secret with no downtime for active readers.
 
-    Sequência: lê o valor atual (se existir) → ``generator`` produz o novo →
-    grava (versão nova, atômica) → **verifica por read-back** que a versão
-    corrente devolve exatamente o material novo → audita. Qualquer falha
-    levanta ``RotationError``/``VaultUnavailableError`` — nunca deixa o
-    secret num estado intermediário (KV v2 é versionado; não existe estado
-    intermediário possível)."""
+    Sequence: read the current value (if any) → ``generator`` produces the new
+    one → write (new version, atomic) → **verify by read-back** that the current
+    version returns exactly the new material → audit. Any failure raises
+    ``RotationError``/``VaultUnavailableError`` — it never leaves the secret in
+    an intermediate state (KV v2 is versioned; no intermediate state is even
+    possible)."""
     client = client or SecretsClient()
 
     old_version = _current_version(client, path)
@@ -103,22 +104,22 @@ def rotate_secret(
 
     new_data = generator(current)
     if not isinstance(new_data, dict) or not new_data:
-        raise RotationError(f"generator de '{path}' devolveu material inválido (dict não-vazio esperado)")
+        raise RotationError(f"generator of '{path}' returned invalid material (a non-empty dict was expected)")
     if new_data == current:
-        raise RotationError(f"generator de '{path}' devolveu o MESMO material — rotação sem efeito recusada (P6)")
+        raise RotationError(f"generator of '{path}' returned the SAME material — a no-op rotation is refused (P6)")
 
     client.put_secret(path, new_data)
 
-    # Verificação de read-back: o que um leitor vê AGORA é o material novo.
+    # Read-back verification: what a reader sees NOW is the new material.
     readback = client.get_secret(path)
     if readback != new_data:
         raise RotationError(
-            f"verificação pós-rotação de '{path}' falhou: read-back não bate com o material novo"
+            f"post-rotation verification of '{path}' failed: read-back does not match the new material"
         )
     new_version = _current_version(client, path)
     if new_version is None or (old_version is not None and new_version <= old_version):
         raise RotationError(
-            f"rotação de '{path}' não avançou a versão KV v2 (old={old_version}, new={new_version})"
+            f"rotation of '{path}' did not advance the KV v2 version (old={old_version}, new={new_version})"
         )
 
     rotated_at = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -131,7 +132,7 @@ def rotate_secret(
             "mount": client.mount_point,
             "old_version": old_version,
             "new_version": new_version,
-            "rotated_keys": sorted(new_data.keys()),  # nomes, NUNCA valores
+            "rotated_keys": sorted(new_data.keys()),  # names, NEVER values
             "rotated_at": rotated_at,
         },
         conn=conn,
@@ -151,10 +152,10 @@ def rotate_from_manifest(
     actor: str = "system:secret-rotator",
     client: SecretsClient | None = None,
 ) -> list[RotationResult | RotationError]:
-    """Rotaciona a lista de secrets do manifest (job agendado). Cada entrada:
-    ``{"path": "dse/service/<nome>", "tenant_id": "platform"}``. Uma falha
-    NÃO aborta as demais (cada rotação é independente); falhas são
-    retornadas (e o chamador loga) — nunca engolidas."""
+    """Rotates the list of secrets in the manifest (scheduled job). Each entry:
+    ``{"path": "dse/service/<name>", "tenant_id": "platform"}``. One failure does
+    NOT abort the rest (each rotation is independent); failures are returned (and
+    the caller logs them) — never swallowed."""
     results: list[RotationResult | RotationError] = []
     for entry in manifest:
         try:

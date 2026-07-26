@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-platform"
 version = "0.1.0"
-description = "WS-F: plataforma, segurança, compliance e operações do Fintex DSE (Fase 1)"
+description = "WS-F: Fintex DSE platform, security, compliance and operations (Phase 1)"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
@@ -21,8 +21,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# temporalio: envio real de signals do queue board (WSF-E6-T2). Opcional porque
-# os testes usam FakeSignalSender; instale para o TemporalSignalSender real.
+# temporalio: real signal sending from the queue board (WSF-E6-T2). Optional
+# because the tests use FakeSignalSender; install it for the real TemporalSignalSender.
 temporal = ["temporalio>=1.7"]
 dev = ["pytest>=8.0", "httpx>=0.27"]
 

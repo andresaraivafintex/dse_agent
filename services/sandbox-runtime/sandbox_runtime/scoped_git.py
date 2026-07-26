@@ -1,32 +1,33 @@
-"""Git de escopo limitado para a sessão Coder (WSC-E3-T2).
+"""Scope-limited git for the Coder session (WSC-E3-T2).
 
-Duas camadas de enforcement, independentes uma da outra:
+Two enforcement layers, independent of each other:
 
-1. **Toolset** — `ScopedGitSession` é a ÚNICA forma pela qual o código do
-   sandbox (a Activity `run_coder_turn`, nunca o LLM/substrato diretamente —
-   ver `activities.py`) grava no git. Ela expõe apenas `.commit()` e
-   `.push()`; `.push()` tem o refspec (`HEAD:refs/heads/<branch>`)
-   *hardcoded* — não existe parâmetro para passar `--force` ou outro branch.
-   Não existe nenhum método `run_git_command(*args)` de escape, nem
-   `open_pull_request()`. O LLM nunca recebe uma ferramenta de git — ele só
-   edita arquivos no workspace (P1: nenhuma decisão de fluxo por LLM).
+1. **Toolset** — `ScopedGitSession` is the ONLY way the sandbox code (the
+   `run_coder_turn` Activity, never the LLM/substrate directly — see
+   `activities.py`) writes to git. It exposes only `.commit()` and `.push()`;
+   `.push()` has the refspec (`HEAD:refs/heads/<branch>`) *hardcoded* — there is
+   no parameter to pass `--force` or another branch. There is no escape-hatch
+   `run_git_command(*args)` method, and no `open_pull_request()`. The LLM never
+   receives a git tool — it only edits files in the workspace (P1: no flow
+   decision made by an LLM).
 
-2. **Escopo do remoto (server-side)** — o "origin" de checkpoint (bare repo
-   local que simula o remoto de verdade nesta fase, ver `git_checkpoint.py`)
-   tem um hook real `pre-receive` instalado (`install_pre_receive_guard`) que
-   recusa: (a) qualquer ref que não seja o branch permitido da tarefa, (b)
-   qualquer update non-fast-forward (force-push). Isso é reforçado mesmo se
-   alguém contornar `ScopedGitSession` e rodar `git push --force` cru — o
-   hook roda no lado do "servidor" (o bare repo), não no lado do cliente, e
-   portanto vale independentemente do código que fez o push.
+2. **Remote scope (server-side)** — the checkpoint "origin" (a local bare repo
+   standing in for the real remote at this phase, see `git_checkpoint.py`) has a
+   real `pre-receive` hook installed (`install_pre_receive_guard`) that rejects:
+   (a) any ref other than the task's allowed branch, (b) any non-fast-forward
+   update (force-push). This holds even if someone bypasses `ScopedGitSession`
+   and runs a raw `git push --force` — the hook runs on the "server" side (the
+   bare repo), not the client side, so it applies regardless of which code
+   performed the push.
 
-   Em produção (push real para GitHub via egress-proxy) o equivalente é o
-   escopo do token do GitHub App injetado pelo proxy (`egress_proxy.credentials
-   .ScopedCredential`) — o token nunca tem a permissão `pull_requests:write`,
-   então uma tentativa de `gh pr create`/`POST /repos/.../pulls` feita de
-   dentro do sandbox falha por falta de permissão do próprio token, não por
-   "boa vontade" do código. `ScopedCredential.create_pull_request()` (ver
-   `egress_proxy/credentials.py`) modela isso mesmo no modo fixture local.
+   In production (a real push to GitHub through the egress-proxy) the equivalent
+   is the scope of the GitHub App token injected by the proxy
+   (`egress_proxy.credentials.ScopedCredential`) — the token never carries the
+   `pull_requests:write` permission, so a `gh pr create`/`POST /repos/.../pulls`
+   attempt made from inside the sandbox fails on the token's own missing
+   permission, not on the code's "good will". `ScopedCredential.create_pull_request()`
+   (see `egress_proxy/credentials.py`) models exactly that, even in local
+   fixture mode.
 """
 from __future__ import annotations
 
@@ -57,8 +58,8 @@ def main():
         )
         if is_force:
             sys.stderr.write(
-                "dse-scope: recusado — non-fast-forward (force-push) bloqueado "
-                "pelo escopo da tarefa\\n"
+                "dse-scope: refused — non-fast-forward (force-push) blocked "
+                "by the task scope\\n"
             )
             rejected = True
     if rejected:
@@ -84,13 +85,13 @@ if __name__ == "__main__":
 
 
 class GitScopeViolation(Exception):
-    """Levantado quando uma operação git tenta sair do escopo da tarefa."""
+    """Raised when a git operation tries to leave the task's scope."""
 
 
 def install_pre_receive_guard(bare_repo_path: str, allowed_branch: str) -> None:
-    """Instala um hook `pre-receive` real no bare repo de checkpoint,
-    recusando pushes fora do branch da tarefa ou non-fast-forward (force).
-    Idempotente — sobrescreve o hook existente."""
+    """Install a real `pre-receive` hook in the checkpoint bare repo, rejecting
+    pushes outside the task branch or non-fast-forward (force) ones.
+    Idempotent — it overwrites any existing hook."""
     hooks_dir = Path(bare_repo_path) / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     hook_path = hooks_dir / "pre-receive"
@@ -99,13 +100,13 @@ def install_pre_receive_guard(bare_repo_path: str, allowed_branch: str) -> None:
 
 
 def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
-    """Plano 08 §F (F6) — escreve o marcador `.dse-task-branch` (usado por
-    resume/checkpoint para redescobrir o branch da tarefa) E o exclui de TODO
-    commit via `.git/info/exclude`. O marcador é infraestrutura do DSE — não
-    deve vazar para o PR do cliente. Como o `commit()` usa `--allow-empty`, o
-    commit inicial (workspace vazio) segue criando um HEAD válido mesmo com o
-    único arquivo excluído. Best-effort no exclude (se falhar, o marcador ainda
-    existe e o resume funciona; só o PR poderia carregá-lo)."""
+    """plano 08 §F (F6) — writes the `.dse-task-branch` marker (used by
+    resume/checkpoint to rediscover the task branch) AND excludes it from EVERY
+    commit via `.git/info/exclude`. The marker is DSE infrastructure — it must
+    not leak into the customer's PR. Because `commit()` uses `--allow-empty`, the
+    initial commit (empty workspace) still creates a valid HEAD even with its
+    only file excluded. The exclude is best-effort (if it fails, the marker still
+    exists and resume works; only the PR could end up carrying it)."""
     ws = Path(workspace_dir)
     exclude = ws / ".git" / "info" / "exclude"
     try:
@@ -115,15 +116,14 @@ def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
             prefix = existing if existing.endswith("\n") or not existing else existing + "\n"
             exclude.write_text(prefix + ".dse-task-branch\n")
     except OSError:
-        pass  # best-effort — nunca derruba o clone/checkpoint por causa do exclude
+        pass  # best-effort — never fail the clone/checkpoint because of the exclude
     (ws / ".dse-task-branch").write_text(branch)
 
 
 @dataclass
 class ScopedGitSession:
-    """Única superfície de escrita em git disponível para a Activity
-    `run_coder_turn`. Não expõe force-push, não expõe criação de PR, não
-    expõe um `run(*args)` genérico."""
+    """The only git write surface available to the `run_coder_turn` Activity.
+    It exposes no force-push, no PR creation, and no generic `run(*args)`."""
 
     workspace_dir: str
     branch: str
@@ -158,15 +158,15 @@ class ScopedGitSession:
         return sha
 
     def push(self) -> None:
-        """Push hardcoded para `HEAD:refs/heads/<branch>` no remoto
-        configurado — não há forma de passar `--force` ou outro refspec por
-        esta API. Falhas do hook `pre-receive` do lado do servidor propagam
-        como `subprocess.CalledProcessError` (P6: falha limpa, não engolida)."""
+        """Push hardcoded to `HEAD:refs/heads/<branch>` on the configured remote
+        — there is no way to pass `--force` or another refspec through this API.
+        Server-side `pre-receive` hook failures propagate as
+        `subprocess.CalledProcessError` (P6: clean failure, not swallowed)."""
         try:
             self._run(["push", self.remote_name, f"HEAD:refs/heads/{self.branch}"])
         except subprocess.CalledProcessError as e:
             raise GitScopeViolation(
-                f"push recusado pelo remoto (escopo): {e.stderr}"
+                f"push refused by the remote (scope): {e.stderr}"
             ) from e
 
     def current_sha(self) -> str:
@@ -177,9 +177,9 @@ class ScopedGitSession:
         return [line for line in result.stdout.splitlines() if line]
 
 
-# Assinatura de "conjunto de ferramentas seguro": usado pelo teste adversarial
-# para provar que a API pública de ScopedGitSession não contém nenhum escape
-# hatch de force-push / PR / comando genérico.
+# "Safe toolset" signature: used by the adversarial test to prove that
+# ScopedGitSession's public API contains no force-push / PR / generic-command
+# escape hatch.
 FORBIDDEN_METHOD_NAMES = {
     "force_push",
     "push_force",

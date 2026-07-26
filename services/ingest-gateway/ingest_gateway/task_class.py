@@ -1,8 +1,8 @@
-"""Classificação determinística de task_class (Plano 08 §A).
+"""Deterministic task_class classification (Plano 08 §A).
 
-A classe da tarefa alimenta o ROI (horas humanas por classe) e os gráficos
-"por categoria" do Analytics. Decidida no INTAKE por label (GitHub) /
-issue-type (Jira) — mapa fixo, nenhum LLM decide (P1). Vocabulário fechado:
+The task class feeds the ROI (human hours per class) and the Analytics
+"by category" charts. Decided at INTAKE from the label (GitHub) / issue-type
+(Jira) — a fixed map, no LLM decides (P1). Closed vocabulary:
 bug_fix | feature_small | test_coverage | dependency_update | docs | refactor
 | chore (default).
 """
@@ -14,9 +14,9 @@ TASK_CLASSES = (
 )
 DEFAULT_TASK_CLASS = "chore"
 
-# label do GitHub (lower) -> task_class. Cobre os labels convencionais + os do
-# dependabot. Precedência: a primeira classe não-chore encontrada ganha, na
-# ordem de especificidade abaixo.
+# GitHub label (lowercased) -> task_class. Covers the conventional labels + the
+# dependabot ones. Precedence: the first non-chore class found wins, in the
+# specificity order below.
 _LABEL_MAP: dict[str, str] = {
     "bug": "bug_fix",
     "defect": "bug_fix",
@@ -37,7 +37,7 @@ _LABEL_MAP: dict[str, str] = {
     "chore": "chore",
 }
 
-# issue-type do Jira (lower) -> task_class.
+# Jira issue-type (lowercased) -> task_class.
 _JIRA_TYPE_MAP: dict[str, str] = {
     "bug": "bug_fix",
     "story": "feature_small",
@@ -48,7 +48,7 @@ _JIRA_TYPE_MAP: dict[str, str] = {
     "documentation": "docs",
 }
 
-# ordem de especificidade quando há múltiplos labels (o mais informativo ganha).
+# specificity order when there are multiple labels (the most informative wins).
 _PRECEDENCE = (
     "bug_fix", "dependency_update", "test_coverage", "docs", "refactor",
     "feature_small", "chore",
@@ -56,9 +56,9 @@ _PRECEDENCE = (
 
 
 def classify_task_class(labels: list[str] | None = None, issue_type: str | None = None) -> str:
-    """Retorna a task_class do vocabulário fechado. Determinístico: labels do
-    GitHub têm prioridade (mais granulares); Jira issue-type como fallback;
-    nada casou -> chore."""
+    """Returns the task_class from the closed vocabulary. Deterministic: GitHub
+    labels take priority (more granular); Jira issue-type as fallback; nothing
+    matched -> chore."""
     hits: set[str] = set()
     for label in labels or []:
         cls = _LABEL_MAP.get(str(label).strip().lower())

@@ -1,13 +1,12 @@
-"""Fase 3 — ativacao do alerta de aproximacao do limite de history do Temporal
-(infra/ALERTING-RULES.md §3, em conjunto com o WS-F).
+"""Phase 3 — feeds the alert for approaching Temporal's history limit
+(infra/ALERTING-RULES.md §3, together with WS-F).
 
-O workflow LE `workflow.info().get_current_history_length()/size()` (replay-
-safe) e a Activity local `emit_history_metric` EMITE a metrica OTel
-`dse.workflow.history_length` (+ size em bytes + contagem de Continue-As-New)
-para o collector. Aqui injetamos um InMemoryMetricReader real do SDK OTel no
-modulo de metricas (as Activities rodam in-process no Worker de teste) e
-provamos que um lifecycle completo emite a metrica com os atributos que a
-regra de alerta do WS-F consulta.
+The workflow READS `workflow.info().get_current_history_length()/size()`
+(replay-safe) and the local Activity `emit_history_metric` EMITS the OTel metric
+`dse.workflow.history_length` (+ size in bytes + Continue-As-New count) to the
+collector. Here we inject a real OTel SDK InMemoryMetricReader into the metrics
+module (the Activities run in-process on the test Worker) and prove that a full
+lifecycle emits the metric with the attributes WS-F's alert rule queries.
 """
 from __future__ import annotations
 
@@ -69,18 +68,18 @@ async def test_full_lifecycle_emits_history_metric_with_work_item_attrs(time_ski
 
     points = _collect_points(reader, metrics.METRIC_HISTORY_LENGTH)
     mine = [p for p in points if dict(p.attributes).get(OTEL_ATTR_WORK_ITEM) == work_item_id]
-    assert mine, "nenhum data point de history_length com o work_item_id esperado"
-    # emitido em mais de uma fronteira: continue_as_new (intake->impl),
-    # pr_finalized e cada volta do review loop
+    assert mine, "no history_length data point with the expected work_item_id"
+    # emitted at more than one boundary: continue_as_new (intake->impl),
+    # pr_finalized and every pass of the review loop
     total = sum(p.count for p in mine)
     assert total >= 3
-    # history length real e sempre > 0 e cresce ao longo do run
+    # the real history length is always > 0 and grows over the run
     assert max(p.max for p in mine) > 10
     attrs = dict(mine[0].attributes)
     assert attrs[OTEL_ATTR_TENANT] == "test-tenant"
     assert OTEL_ATTR_STAGE in attrs and metrics.ATTR_CHECKPOINT in attrs
 
-    # contagem de Continue-As-New tambem emitida (>=1: intake->implementacao)
+    # the Continue-As-New count is emitted too (>=1: intake->implementation)
     can_points = _collect_points(reader, metrics.METRIC_CONTINUE_AS_NEW)
     can_mine = [p for p in can_points if dict(p.attributes).get(OTEL_ATTR_WORK_ITEM) == work_item_id]
     assert can_mine and max(p.max for p in can_mine) >= 1

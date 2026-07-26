@@ -1,16 +1,16 @@
--- Fintex DSE — Plano 08 §E — rollup de custo/uso para o Analytics do console.
--- Agrega model_call_ledger (a fonte de verdade de custo, P8) por
--- dia×repo×model×task_class. Recalculado pelo console-projector a partir do
--- SoR — o teste de reconciliação (CI) garante rollup == ledger. Aditiva e
--- idempotente.
+-- Fintex DSE — Plan 08 §E — cost/usage rollup for the console Analytics.
+-- Aggregates model_call_ledger (the source of truth for cost, P8) by
+-- day×repo×model×task_class. Recomputed by the console-projector from the
+-- SoR — the reconciliation test (CI) guarantees rollup == ledger. Additive and
+-- idempotent.
 
--- task_class no read model → gráficos "por categoria" (§E) e detalhe.
+-- task_class in the read model → "by category" charts (§E) and detail view.
 ALTER TABLE console_rm.work_items_view ADD COLUMN IF NOT EXISTS task_class TEXT;
 
 CREATE TABLE IF NOT EXISTS console_rm.cost_rollup (
     tenant_id   TEXT NOT NULL,
     day         DATE NOT NULL,
-    repo        TEXT NOT NULL,              -- '(unknown)' quando o ledger não resolve repo
+    repo        TEXT NOT NULL,              -- '(unknown)' when the ledger does not resolve a repo
     model       TEXT NOT NULL,
     task_class  TEXT NOT NULL,
     run_count   INTEGER NOT NULL DEFAULT 0,

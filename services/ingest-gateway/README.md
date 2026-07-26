@@ -1,251 +1,251 @@
-# WS-A — Ingestão e adaptadores (Fintex DSE, Fase 1 + Fase 2)
+# WS-A — Ingestion and adapters (Fintex DSE, Phase 1 + Phase 2)
 
-Este README documenta o workstream inteiro (WS-A): `services/ingest-gateway/`
-(este diretório, o núcleo), `services/adapter-slack/`,
-`services/adapter-github/` e (Fase 2) `services/adapter-jira/`. Todos os
-adapters importam `ingest_gateway` como biblioteca — toda a lógica de admissão,
-correlação, defesas de intake, steering allowlist e (Fase 2) tenant binding
-vive aqui e é compartilhada, não duplicada.
+This README documents the whole workstream (WS-A): `services/ingest-gateway/`
+(this directory, the core), `services/adapter-slack/`,
+`services/adapter-github/` and (Phase 2) `services/adapter-jira/`. Every
+adapter imports `ingest_gateway` as a library — all the admission, correlation,
+intake defense, steering allowlist and (Phase 2) tenant binding logic lives here
+and is shared, not duplicated.
 
-> **Fase 2 ("Judgment & queue"):** ver a seção
-> [Fase 2 — o que WS-A adicionou](#fase-2--o-que-ws-a-adicionou) no fim deste
-> arquivo. O restante descreve a base da Fase 1 (que continua válida).
+> **Phase 2 ("Judgment & queue"):** see the
+> [Phase 2 — what WS-A added](#phase-2--what-ws-a-added) section at the end of
+> this file. The rest describes the Phase 1 baseline (which still holds).
 
-## O que está implementado e funcionando
+## What is implemented and working
 
-### WSA-E1-T3 — Gateway transacional + dispatcher outbox
-- `ingest_gateway.gateway.admit_work_item(event, ...)`: grava `work_items` +
-  `ingest_events` na MESMA transação Postgres. `work_item_id` e
-  `idempotency_key` são derivados deterministicamente de
-  `ConversationEvent.event_id` (sha256) — reentregas do mesmo webhook
-  convergem via `ON CONFLICT ... DO NOTHING`, nunca duplicando.
-- `ingest_gateway.gateway.record_signal_event(...)`: grava um evento de
-  sinal (Path B) no mesmo outbox, sem criar `work_items` novo.
-- Kill switch por `(tenant_id, channel)` (`channel_kill_switches`,
-  `migrations/0002_wsa.sql`) checado ANTES de qualquer INSERT — canal
-  desligado não cria WorkItem nem processa, e gera
-  `dse_audit.emit(action="admission_blocked_kill_switch")`. Também respeita
-  o kill switch tenant-wide do WS-F (`tenant_config.kill_switch_enabled`,
-  best-effort/import defensivo — funciona mesmo se essa tabela não existir
-  no ambiente).
-- `ingest_gateway.dispatcher.Dispatcher`: drena `ingest_events` não
-  processados com `SELECT ... FOR UPDATE SKIP LOCKED`. Para
-  `kind == "task_request"` chama `Temporal.start_workflow(WORKFLOW_TYPE,
-  work_item_id, id=work_item_id, task_queue=TASK_QUEUE)`; para os demais
-  kinds, `WorkflowHandle.signal(SIGNAL_NAME, payload)` no workflow já em
-  andamento. `WorkflowAlreadyStartedError` é tratada como sucesso
-  idempotente (nunca re-lançada). `processed=true` só é marcado depois da
-  confirmação Temporal (ou da exceção de duplicado).
-  - **Teste central** (`tests/test_dispatcher.py::test_two_concurrent_dispatchers_drain_without_duplication_or_loss`):
-    20 ingest_events distintos, 2 dispatchers concorrentes (threads
-    separadas, cada uma com seu próprio `Client` Temporal e conexão
-    Postgres) drenando a MESMA fila — prova, contra o Temporal e Postgres
-    **reais** da infra (não mockados), que não há duplicação nem perda.
-    Este é o núcleo do chaos test de saída da Fase 1 (NFR-01) do lado do
-    intake.
+### WSA-E1-T3 — Transactional gateway + outbox dispatcher
+- `ingest_gateway.gateway.admit_work_item(event, ...)`: writes `work_items` +
+  `ingest_events` in the SAME Postgres transaction. `work_item_id` and
+  `idempotency_key` are derived deterministically from
+  `ConversationEvent.event_id` (sha256) — redeliveries of the same webhook
+  converge via `ON CONFLICT ... DO NOTHING`, never duplicating.
+- `ingest_gateway.gateway.record_signal_event(...)`: writes a signal event
+  (Path B) to the same outbox, without creating a new `work_items` row.
+- Kill switch per `(tenant_id, channel)` (`channel_kill_switches`,
+  `migrations/0002_wsa.sql`) checked BEFORE any INSERT — a disabled channel
+  creates no WorkItem and does no processing, and produces
+  `dse_audit.emit(action="admission_blocked_kill_switch")`. It also honors
+  WS-F's tenant-wide kill switch (`tenant_config.kill_switch_enabled`,
+  best-effort/defensive import — it works even if that table does not exist in
+  the environment).
+- `ingest_gateway.dispatcher.Dispatcher`: drains unprocessed
+  `ingest_events` with `SELECT ... FOR UPDATE SKIP LOCKED`. For
+  `kind == "task_request"` it calls `Temporal.start_workflow(WORKFLOW_TYPE,
+  work_item_id, id=work_item_id, task_queue=TASK_QUEUE)`; for the other
+  kinds, `WorkflowHandle.signal(SIGNAL_NAME, payload)` on the workflow already
+  in flight. `WorkflowAlreadyStartedError` is treated as an idempotent
+  success (never re-raised). `processed=true` is only set after Temporal
+  confirms (or after the duplicate exception).
+  - **Core test** (`tests/test_dispatcher.py::test_two_concurrent_dispatchers_drain_without_duplication_or_loss`):
+    20 distinct ingest_events, 2 concurrent dispatchers (separate threads,
+    each with its own Temporal `Client` and Postgres connection) draining the
+    SAME queue — this proves, against the **real** Temporal and Postgres of the
+    infra (not mocked), that there is neither duplication nor loss.
+    This is the core of the Phase 1 exit chaos test (NFR-01) on the intake
+    side.
 
-### WSA-E2-T1 — Verificação de assinatura
-- `ingest_gateway.security.verify_slack_signature`: HMAC-SHA256 do signing
-  secret sobre `v0:{timestamp}:{body}`, com janela de replay de 5 minutos.
-- `ingest_gateway.security.verify_github_signature`: HMAC-SHA256 do webhook
-  secret sobre o corpo bruto (`X-Hub-Signature-256`).
-- Ambos os adapters rejeitam com 401 + `dse_audit.emit(action=
-  "signature_rejected")` qualquer evento não verificável — corpus de
-  forgery testado (sem assinatura, assinatura errada, timestamp expirado,
-  replay de assinatura antiga válida, corpo alterado após assinado): 100%
-  rejeitado (`tests/test_security.py` + `test_signature_pipeline.py` em
-  cada adapter).
-- Segredos lidos via `dse_secrets` (WS-F, `services/platform/`,
-  WSF-E2-T3a) **que já existe nesta sessão** — import real, com fallback
-  automático para env var local (`SLACK_SIGNING_SECRET`/
-  `GITHUB_WEBHOOK_SECRET`) quando o Vault não tem a versão gravada (nenhum
-  Slack App/GitHub App real foi registrado nesta sessão).
+### WSA-E2-T1 — Signature verification
+- `ingest_gateway.security.verify_slack_signature`: HMAC-SHA256 of the signing
+  secret over `v0:{timestamp}:{body}`, with a 5-minute replay window.
+- `ingest_gateway.security.verify_github_signature`: HMAC-SHA256 of the webhook
+  secret over the raw body (`X-Hub-Signature-256`).
+- Both adapters reject with 401 + `dse_audit.emit(action=
+  "signature_rejected")` any event that cannot be verified — the forgery corpus
+  was tested (no signature, wrong signature, expired timestamp,
+  replay of an old valid signature, body altered after signing): 100%
+  rejected (`tests/test_security.py` + `test_signature_pipeline.py` in
+  each adapter).
+- Secrets read via `dse_secrets` (WS-F, `services/platform/`,
+  WSF-E2-T3a) **which already exists in this session** — a real import, with
+  automatic fallback to a local env var (`SLACK_SIGNING_SECRET`/
+  `GITHUB_WEBHOOK_SECRET`) when Vault does not have the version stored (no
+  real Slack App/GitHub App was registered in this session).
 
-### WSA-E2-T2 — Snapshot TOCTOU
-- `content_snapshot` é lido diretamente do corpo do webhook recebido —
-  nenhum adapter jamais chama `conversations.history`/
-  `conversations.replies` (Slack) ou `GET /repos/.../issues/{n}` (GitHub)
-  depois. Provado em teste (`test_toctou_snapshot_freezes_content_at_event_time`
-  no adapter-slack, `test_toctou_snapshot_not_refetched_on_redelivery_with_edited_body`
-  no adapter-github): reenviar o "mesmo" webhook com texto editado é
-  deduplicado por `event_id` — o snapshot já persistido nunca é
-  sobrescrito.
+### WSA-E2-T2 — TOCTOU snapshot
+- `content_snapshot` is read directly from the received webhook body — no
+  adapter ever calls `conversations.history`/
+  `conversations.replies` (Slack) or `GET /repos/.../issues/{n}` (GitHub)
+  afterwards. Proven in tests (`test_toctou_snapshot_freezes_content_at_event_time`
+  in adapter-slack, `test_toctou_snapshot_not_refetched_on_redelivery_with_edited_body`
+  in adapter-github): resending the "same" webhook with edited text is
+  deduplicated by `event_id` — the already-persisted snapshot is never
+  overwritten.
 
-### WSA-E2-T3 — Sanitização de conteúdo inbound
-- `ingest_gateway.sanitize.sanitize_content`: remove Unicode
-  invisível/controle (zero-width space/joiner, bidi override — categorias
-  Unicode `Cf`/`Cc`) e redige padrões óbvios de token/secret (`ghp_`,
-  `xox[bpears]-`, AWS access key id, bloco de chave privada PEM, bearer
-  token genérico).
-- **Documentado explicitamente como MITIGAÇÃO, não CONTENÇÃO** (ver
-  docstring de `ingest_gateway/sanitize.py`): a contenção real que impede
-  exfiltração mesmo se um modelo for enganado é o egress proxy
-  default-deny do WS-C (`services/egress-proxy/`).
-- `content_snapshot` original (o congelado pela defesa TOCTOU) nunca é
-  sobrescrito — a versão sanitizada é anexada separadamente como
-  `sanitized_content` no `payload` de `ingest_events` (é essa versão que
-  deve seguir para qualquer estágio que envolva um modelo).
+### WSA-E2-T3 — Inbound content sanitization
+- `ingest_gateway.sanitize.sanitize_content`: strips invisible/control
+  Unicode (zero-width space/joiner, bidi override — Unicode categories
+  `Cf`/`Cc`) and redacts obvious token/secret patterns (`ghp_`,
+  `xox[bpears]-`, AWS access key id, PEM private key block, generic bearer
+  token).
+- **Explicitly documented as MITIGATION, not CONTAINMENT** (see the
+  docstring of `ingest_gateway/sanitize.py`): the real containment that
+  prevents exfiltration even if a model is tricked is WS-C's default-deny
+  egress proxy (`services/egress-proxy/`).
+- The original `content_snapshot` (the one frozen by the TOCTOU defense) is
+  never overwritten — the sanitized version is attached separately as
+  `sanitized_content` in the `ingest_events` `payload` (that is the version
+  that must flow to any stage involving a model).
 
-### WSA-E3 — Adapter Slack (`services/adapter-slack/`)
-- **Inbound** (`adapter_slack/app.py`, `POST /slack/events` e
-  `POST /slack/interactions`): `app_mention` cria `task_request`; mensagem
-  comum numa thread existente correlaciona via `thread_ts`
-  (`clarification_answer`); clique de botão (`block_actions`) vira
-  `kind=approval`. Tudo passa pelas 4 defesas antes de `correlate()`
-  decidir Path A/B. Adapter 100% stateless.
-- **Outbound** (`POST /internal/status-comment`): usa
-  `dse_contracts.mutable_comment.MutableCommentWriter` com
+### WSA-E3 — Slack adapter (`services/adapter-slack/`)
+- **Inbound** (`adapter_slack/app.py`, `POST /slack/events` and
+  `POST /slack/interactions`): `app_mention` creates a `task_request`; a plain
+  message in an existing thread correlates via `thread_ts`
+  (`clarification_answer`); a button click (`block_actions`) becomes
+  `kind=approval`. Everything goes through the 4 defenses before `correlate()`
+  decides Path A/B. The adapter is 100% stateless.
+- **Outbound** (`POST /internal/status-comment`): uses
+  `dse_contracts.mutable_comment.MutableCommentWriter` with
   `SlackCommentBackend` (real, `slack_sdk.WebClient`,
-  `chat.postMessage`/`chat.update`) — exatamente 1 mensagem de status por
-  tarefa, editada in-place, nunca uma nova por update. `comment_ref`
-  persistido em Postgres (`comment_state`), não em memória — sobrevive a
-  reinício do processo.
-  - Sem credencial real de Slack App: `FakeSlackClient` in-memory
-    documentado substitui o transporte; a lógica (`SlackCommentBackend`,
-    `MutableCommentWriter`) é 100% real e é exatamente o que rodaria contra
-    a API de verdade.
+  `chat.postMessage`/`chat.update`) — exactly 1 status message per task,
+  edited in place, never a new one per update. `comment_ref` is persisted in
+  Postgres (`comment_state`), not in memory — it survives a process restart.
+  - Without real Slack App credentials: a documented in-memory
+    `FakeSlackClient` replaces the transport; the logic (`SlackCommentBackend`,
+    `MutableCommentWriter`) is 100% real and is exactly what would run against
+    the real API.
 
-### WSA-E4 — Adapter GitHub (`services/adapter-github/`)
-- **Inbound** (`adapter_github/app.py`, `POST /github/webhook`): issue
-  `assigned`/`labeled` (com a label configurável, default `dse`) cria
-  `task_request`; comentário de issue comum com `@<bot_login>` cria
-  `task_request`; comentário SEM menção numa issue sem WorkItem ativo é
-  ignorado (`path: ignored_no_mention`, zero I/O de escrita).
-  **Comentário em PR** (via `issue_comment` numa issue que é PR, ou via
-  `pull_request_review_comment`) **NUNCA cria WorkItem novo** — só
-  correlaciona a um WorkItem ativo por número de PR/issue
-  (`kind=review_comment`); sem match, é ignorado com audit
-  (`review_comment_ignored_no_active_work_item`). Testado explicitamente
+### WSA-E4 — GitHub adapter (`services/adapter-github/`)
+- **Inbound** (`adapter_github/app.py`, `POST /github/webhook`): an issue
+  `assigned`/`labeled` (with the configurable label, default `dse`) creates a
+  `task_request`; a plain issue comment containing `@<bot_login>` creates a
+  `task_request`; a comment WITHOUT a mention on an issue with no active
+  WorkItem is ignored (`path: ignored_no_mention`, zero write I/O).
+  **A comment on a PR** (via `issue_comment` on an issue that is a PR, or via
+  `pull_request_review_comment`) **NEVER creates a new WorkItem** — it only
+  correlates to an active WorkItem by PR/issue number
+  (`kind=review_comment`); with no match it is ignored with an audit row
+  (`review_comment_ignored_no_active_work_item`). Explicitly tested
   (`test_pr_issue_comment_never_creates_work_item_even_without_match`).
-- **Outbound** (`POST /internal/status-comment`): mesma
+- **Outbound** (`POST /internal/status-comment`): the same
   `MutableCommentWriter`, backend `GithubCommentBackend` (real,
   `POST`/`PATCH /repos/{repo}/issues/{issue}/comments` via `requests`),
-  autenticado como **GitHub App** (`adapter_github.auth`: JWT RS256 +
-  troca por installation access token) — nunca token pessoal.
-  - Sem GitHub App real registrada: `FakeGithubClient` in-memory
-    documentado substitui o transporte; a lógica de autenticação App
-    (`generate_app_jwt`/`get_installation_access_token`) é real (PyJWT +
-    `requests` contra `api.github.com`), só faltam
+  authenticated as a **GitHub App** (`adapter_github.auth`: JWT RS256 +
+  exchange for an installation access token) — never a personal token.
+  - Without a real GitHub App registered: a documented in-memory
+    `FakeGithubClient` replaces the transport; the App authentication logic
+    (`generate_app_jwt`/`get_installation_access_token`) is real (PyJWT +
+    `requests` against `api.github.com`), only the real
     `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_INSTALLATION_ID`
-    reais.
+    are missing.
 
-### WSA-E6-T1 — Correlação Path A/B
+### WSA-E6-T1 — Path A/B correlation
 - `ingest_gateway.correlate.correlate(conn, tenant_id=, event=,
   requester_principal=)` → `CorrelationResult(kind, work_item_id,
-  provenance_work_item_id)`. Lookup determinístico por `source_ref`
-  (`{channel,thread_ts}` para Slack, `{repo,number}` para GitHub — o mesmo
-  número serve para issue e PR) contra `work_items` com status
-  não-terminal.
-  - Sem match → `"new_task"` (Path A).
-  - Match em item ativo → `"signal"` (Path B) — quem chama decide
-    `signal_workflow` (o adapter, neste workstream; ou o WS-B via Temporal
+  provenance_work_item_id)`. Deterministic lookup by `source_ref`
+  (`{channel,thread_ts}` for Slack, `{repo,number}` for GitHub — the same
+  number serves both issue and PR) against `work_items` with a
+  non-terminal status.
+  - No match → `"new_task"` (Path A).
+  - Match on an active item → `"signal"` (Path B) — the caller decides
+    `signal_workflow` (the adapter, in this workstream; or WS-B via the Temporal
     client).
-  - Match em item **terminal** (`done`/`failed`) → `"new_task"` +
-    `provenance_work_item_id` preenchido (o caller grava o link de
-    proveniência no audit da nova admissão).
+  - Match on a **terminal** item (`done`/`failed`) → `"new_task"` +
+    `provenance_work_item_id` filled in (the caller writes the provenance link
+    into the audit of the new admission).
 
 ### WSA-E6-T2a — Steering allowlist fallback
 - `ingest_gateway.steering.is_authorized_to_steer(tenant_id, principal_id)
-  -> bool`: fallback explícito de allowlist por tenant
-  (`tenant_steering_allowlist`, `migrations/0002_wsa.sql`). Ausência de
-  linha = **não autorizado** — nunca "qualquer um pode steerar".
-  Assinatura estável (`(tenant_id, principal_id) -> bool`, sem `conn` no
-  contrato público) para o WS-F trocar a implementação por um identity-map
-  real na Fase 4 sem quebrar `correlate()`/os adapters.
-- `correlate()` aplica este gate para `kind in {steering, review_comment}`
-  (as duas formas de "alguém injeta direção nova numa tarefa ativa" via
-  comentário) — `clarification_answer`/`approval` são respostas esperadas
-  do próprio fluxo e não passam pelo gate. Rejeição gera
-  `dse_audit.emit(action="steering_rejected_unauthorized")` e retorna
-  `"unauthorized"` em vez de `"signal"`.
+  -> bool`: an explicit per-tenant allowlist fallback
+  (`tenant_steering_allowlist`, `migrations/0002_wsa.sql`). No row =
+  **not authorized** — never "anyone can steer".
+  A stable signature (`(tenant_id, principal_id) -> bool`, no `conn` in the
+  public contract) so WS-F can swap the implementation for a real identity map
+  in Phase 4 without breaking `correlate()`/the adapters.
+- `correlate()` applies this gate for `kind in {steering, review_comment}`
+  (the two forms of "someone injects new direction into an active task" via a
+  comment) — `clarification_answer`/`approval` are expected replies from the
+  flow itself and do not go through the gate. Rejection produces
+  `dse_audit.emit(action="steering_rejected_unauthorized")` and returns
+  `"unauthorized"` instead of `"signal"`.
 
-### WSA-E6-T2b (Fase 4) — Steering sobre o identity map REAL
-A implementação de `is_authorized_to_steer` foi trocada por baixo (a
-assinatura `(tenant_id, principal_id) -> bool` **não mudou** — contrato
-estável desde a Fase 1). Agora resolve **papel**, não só pertencimento a
-lista, usando as fontes da verdade do WS-F (Fase 2). Ordem determinística
-(P1), nega por default:
-  0. **Offboarding sobrepõe tudo** (WSF-E3-T3): principal com linha em
-     `dse_console_identity` inativa/expirada → negado, mesmo em allowlist/bundle.
-  1. **Papel RBAC via `dse_console_identity.roles`** (∩ `STEERING_ROLES` =
-     operator/approver/steerer/maintainer/platform_admin/admin), escopado ao
-     home tenant (ou `tenant_id IS NULL` = operador de plataforma).
-  2. **Papel de approver via `dse_access_bundle.designated_approvers`** do
-     bundle efetivo (channel default) do tenant.
-  3. **Fallback documentado**: a allowlist explícita da Fase 1
-     (`tenant_steering_allowlist`) = requester + CODEOWNERS-equivalentes,
-     enquanto o identity map não resolve um papel.
-  - **P8**: o GRANT emite `dse_audit.emit(action="steering_authorized")` com o
-    `method` de resolução; a REJEIÇÃO continua auditada por `correlate`
-    (`steering_rejected_unauthorized`) — invariante da Fase 1 preservada.
-  - A troca não quebra os testes de steering da Fase 1 (allowlist ainda
-    autoriza). Ver `tests/test_steering.py`.
+### WSA-E6-T2b (Phase 4) — Steering over the REAL identity map
+The implementation of `is_authorized_to_steer` was swapped underneath (the
+`(tenant_id, principal_id) -> bool` signature **did not change** — a stable
+contract since Phase 1). It now resolves a **role**, not just membership in a
+list, using WS-F's sources of truth (Phase 2). Deterministic order
+(P1), deny by default:
+  0. **Offboarding overrides everything** (WSF-E3-T3): a principal with an
+     inactive/expired row in `dse_console_identity` → denied, even if on the
+     allowlist/bundle.
+  1. **RBAC role via `dse_console_identity.roles`** (∩ `STEERING_ROLES` =
+     operator/approver/steerer/maintainer/platform_admin/admin), scoped to the
+     home tenant (or `tenant_id IS NULL` = platform operator).
+  2. **Approver role via `dse_access_bundle.designated_approvers`** of the
+     tenant's effective bundle (default channel).
+  3. **Documented fallback**: the explicit Phase 1 allowlist
+     (`tenant_steering_allowlist`) = requester + CODEOWNERS-equivalents,
+     for as long as the identity map does not resolve a role.
+  - **P8**: the GRANT emits `dse_audit.emit(action="steering_authorized")` with
+    the resolution `method`; the REJECTION is still audited by `correlate`
+    (`steering_rejected_unauthorized`) — the Phase 1 invariant is preserved.
+  - The swap does not break the Phase 1 steering tests (the allowlist still
+    authorizes). See `tests/test_steering.py`.
 
-## O que é fixture/mock local (documentado, não é produção)
+## What is a local fixture/mock (documented, not production)
 
-- `FakeSlackClient` (`adapter_slack/backend.py`) e `FakeGithubClient`
-  (`adapter_github/backend.py`): in-memory, usados nos testes no lugar do
-  transporte HTTP real. A lógica de negócio ao redor deles
+- `FakeSlackClient` (`adapter_slack/backend.py`) and `FakeGithubClient`
+  (`adapter_github/backend.py`): in-memory, used in the tests in place of the
+  real HTTP transport. The business logic around them
   (`MutableCommentWriter`, `SlackCommentBackend`/`GithubCommentBackend`,
-  `PgCommentStateStore`) é 100% real.
-- Segredos (`SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`,
-  `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_*`): lidos de env var como fallback
-  quando o Vault (via `dse_secrets`) não tem o path gravado — nenhum app
-  Slack/GitHub real foi registrado nesta sessão de desenvolvimento.
-- `DSE_TENANT_ID` (default `tenant_dev`): Fase 1 é single-tenant de
-  desenvolvimento — ver "O que precisa de decisão do arquiteto" abaixo.
+  `PgCommentStateStore`) is 100% real.
+- Secrets (`SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN`,
+  `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_*`): read from env vars as a fallback
+  when Vault (via `dse_secrets`) does not have the path stored — no real
+  Slack/GitHub app was registered in this development session.
+- `DSE_TENANT_ID` (default `tenant_dev`): Phase 1 is single-tenant for
+  development — see "What needs an architect decision" below.
 
-## O que precisa de credencial/infra real para produção
+## What needs real credentials/infra for production
 
-1. **Slack App real**: registrar o app, configurar Events API
-   (`app_mention`, `message.channels`) e Interactivity apontando para
-   `/slack/events`/`/slack/interactions`, gravar `bot_token`/
-   `signing_secret` no Vault em `dse/slack/webhook` (chaves `bot_token`,
+1. **Real Slack App**: register the app, configure the Events API
+   (`app_mention`, `message.channels`) and Interactivity pointing at
+   `/slack/events`/`/slack/interactions`, store `bot_token`/
+   `signing_secret` in Vault at `dse/slack/webhook` (keys `bot_token`,
    `signing_secret`) via `dse_secrets.put_secret`.
-2. **GitHub App real**: registrar a App, gerar a chave privada RSA,
-   instalar no(s) repo(s) do tenant, gravar `app_id`/`private_key`/
-   `installation_id`/`webhook_secret` no Vault em `dse/github/app`.
-3. **Vault de produção**: hoje aponta para o Vault dev
-   (`localhost:8200`, root token `dse_dev_root`) — produção precisa de um
-   Vault real com política de acesso por serviço (não root token).
-4. **Multi-tenant real**: `ConversationEvent` não carrega `tenant_id` (é
-   puramente um conceito de plataforma) — o mapeamento
-   workspace-Slack/org-GitHub → tenant é hoje um único
-   `DSE_TENANT_ID` fixo por processo. Produção precisa de uma tabela de
-   mapeamento (workspace/org → tenant_id), escopo natural de WS-F/Fase 2
-   (identity map completo, ADR-22).
+2. **Real GitHub App**: register the App, generate the RSA private key,
+   install it on the tenant's repo(s), store `app_id`/`private_key`/
+   `installation_id`/`webhook_secret` in Vault at `dse/github/app`.
+3. **Production Vault**: today it points at the dev Vault
+   (`localhost:8200`, root token `dse_dev_root`) — production needs a real
+   Vault with per-service access policy (not a root token).
+4. **Real multi-tenancy**: `ConversationEvent` does not carry `tenant_id` (it is
+   purely a platform concept) — the mapping
+   Slack workspace/GitHub org → tenant is today a single fixed
+   `DSE_TENANT_ID` per process. Production needs a mapping table
+   (workspace/org → tenant_id), a natural scope for WS-F/Phase 2
+   (full identity map, ADR-22).
 
-## Pedido ao arquiteto / decisão pendente
+## Request to the architect / pending decision
 
-- **`SIGNAL_NAME`** (`ingest_gateway/dispatcher.py`, hoje
-  `"conversation_signal"`) não está em `dse_contracts.constants` — só
-  `TASK_QUEUE`/`WORKFLOW_TYPE` existem lá. Não editei `packages/contracts`
-  (fora do meu escopo). Pedido: promover esta constante para
-  `dse_contracts.constants.SIGNAL_NAME` assim que o workflow do WS-B
-  registrar o signal handler real, para os dois lados importarem do mesmo
-  lugar em vez de duplicar a string.
-- **Desambiguação clarification vs. steering** em resposta de thread
-  comum (Slack) ou comentário de issue comum (GitHub): Fase 1 assume
-  default `clarification_answer` porque o adapter não sabe se o bot está
-  "aguardando resposta" — esse estado vive no workflow do WS-B. Se o WS-B
-  quiser expor esse estado (ex.: via uma coluna em `work_items` ou um
-  campo no `plan`), o adapter pode consumir para desambiguar melhor.
-- **Colisão de `conftest.py`/pacote `tests` entre serviços**: rodar
-  `pytest -q packages services` (o alvo `make test` da raiz) hoje falha
-  com `ValueError: Plugin already registered under a different name`
-  porque múltiplos serviços (não só os meus) têm um diretório `tests/`
-  com `__init__.py` + `conftest.py` do mesmo nome relativo. Cada serviço
-  individualmente roda limpo (`cd services/X && pytest -q` — é o fluxo
-  documentado no próprio `CONVENTIONS.md`). Uma correção monorepo-wide
-  (ex.: `[tool.pytest.ini_options] addopts = "--import-mode=importlib"`
-  num `pyproject.toml`/`pytest.ini` na raiz, ou nomes de pacote de teste
-  únicos por serviço) é decisão da fundação — não editei `Makefile`/raiz
-  por estar fora do meu escopo de diretórios.
+- **`SIGNAL_NAME`** (`ingest_gateway/dispatcher.py`, currently
+  `"conversation_signal"`) is not in `dse_contracts.constants` — only
+  `TASK_QUEUE`/`WORKFLOW_TYPE` live there. I did not edit `packages/contracts`
+  (out of my scope). Request: promote this constant to
+  `dse_contracts.constants.SIGNAL_NAME` as soon as the WS-B workflow
+  registers the real signal handler, so both sides import from the same
+  place instead of duplicating the string.
+- **Disambiguating clarification vs. steering** on a plain thread reply
+  (Slack) or a plain issue comment (GitHub): Phase 1 defaults to
+  `clarification_answer` because the adapter does not know whether the bot is
+  "awaiting a reply" — that state lives in the WS-B workflow. If WS-B wants to
+  expose that state (e.g. via a column in `work_items` or a field in the
+  `plan`), the adapter can consume it to disambiguate better.
+- **`conftest.py`/`tests` package collision across services**: running
+  `pytest -q packages services` (the root `make test` target) currently fails
+  with `ValueError: Plugin already registered under a different name`
+  because multiple services (not just mine) have a `tests/` directory
+  with an `__init__.py` + `conftest.py` at the same relative name. Each service
+  runs clean on its own (`cd services/X && pytest -q` — the flow documented in
+  `CONVENTIONS.md` itself). A monorepo-wide fix
+  (e.g. `[tool.pytest.ini_options] addopts = "--import-mode=importlib"`
+  in a root `pyproject.toml`/`pytest.ini`, or unique test package names per
+  service) is a foundation decision — I did not edit `Makefile`/the root as
+  it is outside my directory scope.
 
-## Como rodar os testes
+## How to run the tests
 
-Cada serviço tem seu próprio `pyproject.toml` e roda isolado (evita a
-colisão de `conftest.py` descrita acima):
+Each service has its own `pyproject.toml` and runs in isolation (which avoids
+the `conftest.py` collision described above):
 
 ```bash
 source /Users/saraiva/Documents/DSE/fase1/.venv-wsa/bin/activate
@@ -255,13 +255,13 @@ cd /Users/saraiva/Documents/DSE/fase1/services/adapter-slack && pytest -q
 cd /Users/saraiva/Documents/DSE/fase1/services/adapter-github && pytest -q
 ```
 
-Requer a infra real da fundação no ar (Postgres `localhost:5432`,
-Temporal `localhost:7233`) — os testes de `admit_work_item`, `correlate`,
-`is_authorized_to_steer` e, principalmente, do `Dispatcher` rodam contra
-Postgres e Temporal **reais**, nunca mocks (CONVENTIONS.md: mockar
-durabilidade/idempotência anularia o próprio ponto do teste).
+Requires the foundation's real infra to be up (Postgres `localhost:5432`,
+Temporal `localhost:7233`) — the tests for `admit_work_item`, `correlate`,
+`is_authorized_to_steer` and, above all, for the `Dispatcher` run against
+**real** Postgres and Temporal, never mocks (CONVENTIONS.md: mocking
+durability/idempotency would defeat the whole point of the test).
 
-### Resultado real desta sessão
+### Real result from this session
 
 ```
 services/ingest-gateway  : 37 passed
@@ -270,116 +270,119 @@ services/adapter-github  : 19 passed
 TOTAL                    : 70 passed, 0 failed
 ```
 
-Os 3 `Dockerfile` (`services/{ingest-gateway,adapter-slack,adapter-github}/Dockerfile`)
-foram testados com `docker build` real nesta sessão (build a partir da
-raiz do monorepo) e todos completam com sucesso.
+The 3 `Dockerfile`s (`services/{ingest-gateway,adapter-slack,adapter-github}/Dockerfile`)
+were tested with a real `docker build` in this session (built from the
+monorepo root) and all complete successfully.
 
-## Nota operacional: Temporal caiu durante esta sessão
+## Operational note: Temporal went down during this session
 
-Durante o desenvolvimento, o container `dse_temporal` (fundação) estava
-`Exited` por um bug de imagem (`DYNAMIC_CONFIG_FILE_PATH` aponta para
-`config/dynamicconfig/development-sql.yaml`, que não existe na imagem
-`temporalio/auto-setup:1.24` usada pelo `docker-compose.yml`). Sem editar
-`docker-compose.yml` (fora do meu escopo), corrigi copiando um arquivo de
-dynamic config mínimo vazio para dentro do container parado
-(`docker cp` + `docker start dse_temporal`) — não usei `make up`/`down`
-nem `docker compose down`, só reiniciei o container já existente. Isso
-afeta TODOS os workstreams que dependem de Temporal (WS-B em especial) —
-vale o arquiteto adicionar esse arquivo (mesmo vazio) ao repo/imagem para
-o próximo `docker compose up` não recriar o container sem ele.
+During development, the `dse_temporal` container (foundation) was
+`Exited` due to an image bug (`DYNAMIC_CONFIG_FILE_PATH` points at
+`config/dynamicconfig/development-sql.yaml`, which does not exist in the
+`temporalio/auto-setup:1.24` image used by `docker-compose.yml`). Without editing
+`docker-compose.yml` (out of my scope), I fixed it by copying a minimal empty
+dynamic config file into the stopped container
+(`docker cp` + `docker start dse_temporal`) — I did not use `make up`/`down`
+nor `docker compose down`, I only restarted the existing container. This
+affects ALL workstreams that depend on Temporal (WS-B in particular) —
+the architect should consider adding that file (even empty) to the repo/image so
+the next `docker compose up` does not recreate the container without it.
 
 ---
 
-## Fase 2 — o que WS-A adicionou
+## Phase 2 — what WS-A added
 
-A Fase 2 do WS-A ("Judgment & queue") adiciona a superfície Jira, o mapeamento
-de tenant, o webhook de merge e o roteamento de signal por status. Migração:
+WS-A's Phase 2 ("Judgment & queue") adds the Jira surface, tenant mapping,
+the merge webhook and status-based signal routing. Migration:
 `migrations/0008_wsa2.sql`. Fragment: `docker-compose.wsa.yml` (adapter-jira +
-workers, porta 8804). Contratos importados de `dse_contracts` (não redefinidos):
+workers, port 8804). Contracts imported from `dse_contracts` (not redefined):
 `SIGNAL_PLAN_APPROVAL`, `SIGNAL_MERGED_BY_HUMAN`.
 
-### WSA-E5 — Adapter Jira (`services/adapter-jira/`)
-Novo serviço espelhando o adapter-github. Inbound (webhook + poller fallback
-obrigatório), transições serializadas por ticket, status comment único via a
-mesma `MutableCommentWriter`. Detalhes completos e gaps em
-[`../adapter-jira/README.md`](../adapter-jira/README.md). Ganchos novos em
-`ingest_gateway`: `verify_jira_signature` (defesa #1, `X-Hub-Signature`).
+### WSA-E5 — Jira adapter (`services/adapter-jira/`)
+A new service mirroring adapter-github. Inbound (webhook + mandatory poller
+fallback), per-ticket serialized transitions, a single status comment via the
+same `MutableCommentWriter`. Full details and gaps in
+[`../adapter-jira/README.md`](../adapter-jira/README.md). New hooks in
+`ingest_gateway`: `verify_jira_signature` (defense #1, `X-Hub-Signature`).
 
-### WSA-E1-T5 — Mapeamento plataforma → tenant
-- Tabela `tenant_platform_bindings(platform, binding_key, tenant_id)`
+### WSA-E1-T5 — Platform → tenant mapping
+- Table `tenant_platform_bindings(platform, binding_key, tenant_id)`
   (`0008_wsa2.sql`).
 - `ingest_gateway.resolve_tenant(conn, platform=, binding_key=)` →
-  `ResolvedTenant(tenant_id, from_binding)`. Resolvido nos **3 adapters**:
-  workspace Slack (`team_id`), installation GitHub (`installation.id`), site
-  Jira (host de `issue.self`).
-- **Fallback documentado** (P6): binding ausente → `DSE_TENANT_ID` (single-tenant)
-  **com audit row de aviso** (`tenant_binding_missing_fallback_default`) — nunca
-  adivinha um tenant. Preencher a tabela faz a resolução parar de cair no
-  fallback sem mudança de código.
+  `ResolvedTenant(tenant_id, from_binding)`. Resolved in **all 3 adapters**:
+  Slack workspace (`team_id`), GitHub installation (`installation.id`), Jira
+  site (host from `issue.self`).
+- **Documented fallback** (P6): missing binding → `DSE_TENANT_ID` (single-tenant)
+  **with a warning audit row** (`tenant_binding_missing_fallback_default`) — it
+  never guesses a tenant. Filling in the table makes resolution stop hitting the
+  fallback with no code change.
 
-### WSA-E4-T3 — Webhook `pull_request` merged → `merged_by_human`
-- Handler no adapter-github para `pull_request` (action=`closed`,
-  `merged=true`), correlacionado por número de PR ao WorkItem ativo. Grava um
-  ingest_event com o marcador determinístico `merged_by_human` no payload; o
-  dispatcher dispara `SIGNAL_MERGED_BY_HUMAN` com o principal de quem mergeou.
-- **PR fechado SEM merge NÃO dispara nada** (rota `ignored_pr_closed_unmerged`,
-  testada). Reentrega deduplica por `event_id` (derivado do `merge_commit_sha`).
+### WSA-E4-T3 — `pull_request` merged webhook → `merged_by_human`
+- A handler in adapter-github for `pull_request` (action=`closed`,
+  `merged=true`), correlated by PR number to the active WorkItem. It writes an
+  ingest_event with the deterministic `merged_by_human` marker in the payload;
+  the dispatcher fires `SIGNAL_MERGED_BY_HUMAN` with the principal of whoever
+  merged.
+- **A PR closed WITHOUT a merge fires NOTHING** (route `ignored_pr_closed_unmerged`,
+  tested). Redelivery is deduplicated by `event_id` (derived from
+  `merge_commit_sha`).
 
-### WSA-E6-T3 — Roteamento de signal por status do WorkItem
-- O mapa fixo `kind → signal` da Fase 1 foi substituído por
-  `dispatcher._route_signal(status, kind, payload)`, que consulta
+### WSA-E6-T3 — Signal routing by WorkItem status
+- The fixed Phase 1 `kind → signal` map was replaced by
+  `dispatcher._route_signal(status, kind, payload)`, which reads
   `work_items.status`:
   - `kind=approval` + status `awaiting_plan_approval` → `SIGNAL_PLAN_APPROVAL`
-    (verdict/route lidos de marcadores determinísticos no payload).
+    (verdict/route read from deterministic markers in the payload).
   - `kind=approval` + status `pr_ready`/`review_feedback` → `SIGNAL_REVIEW_COMMENT`.
-  - `kind=approval` + status inesperado → **audit row + não sinaliza** (nunca
-    adivinha, P6; consumido com `dispatch_declined_unexpected_status`).
-  - marcador `merged_by_human` → `SIGNAL_MERGED_BY_HUMAN` (independe do status).
-  - `clarification_answer`/`review_comment`/`steering` → **comportamento da
-    Fase 1 preservado**.
-- Determinístico (P1): nenhuma decisão de fluxo por LLM — só `status` +
-  marcadores postos pelo adapter.
+  - `kind=approval` + unexpected status → **audit row + no signal** (it never
+    guesses, P6; consumed as `dispatch_declined_unexpected_status`).
+  - `merged_by_human` marker → `SIGNAL_MERGED_BY_HUMAN` (regardless of status).
+  - `clarification_answer`/`review_comment`/`steering` → **Phase 1 behavior
+    preserved**.
+- Deterministic (P1): no flow decision made by an LLM — only `status` +
+  markers set by the adapter.
 
-### Princípios preservados
-- **P1** roteamento 100% determinístico (status + marcadores, nunca LLM).
-- **P6** status inesperado declina com evidência, nunca adivinha; kill switch e
-  fallback de tenant sempre deixam audit row.
-- **P8** toda decisão consequente (bind fallback, merge, transição, aprovação,
-  declínio) vira audit row via `dse_audit.emit`.
+### Preserved principles
+- **P1** 100% deterministic routing (status + markers, never an LLM).
+- **P6** an unexpected status declines with evidence, it never guesses; the kill
+  switch and tenant fallback always leave an audit row.
+- **P8** every consequential decision (binding fallback, merge, transition,
+  approval, decline) becomes an audit row via `dse_audit.emit`.
 
-### Resultado real de `pytest -q` desta sessão (Fase 1 + Fase 2, WS-A)
+### Real `pytest -q` result from this session (Phase 1 + Phase 2, WS-A)
 
 ```
-services/ingest-gateway  : 52 passed   (37 Fase 1 + 15 novos: routing + tenant binding)
-services/adapter-slack   : 14 passed   (Fase 1; tenant binding via env fallback, sem regressão)
-services/adapter-github  : 24 passed   (19 Fase 1 + 5 novos: merge webhook + tenant binding)
-services/adapter-jira    : 17 passed   (novo serviço)
+services/ingest-gateway  : 52 passed   (37 Phase 1 + 15 new: routing + tenant binding)
+services/adapter-slack   : 14 passed   (Phase 1; tenant binding via env fallback, no regression)
+services/adapter-github  : 24 passed   (19 Phase 1 + 5 new: merge webhook + tenant binding)
+services/adapter-jira    : 17 passed   (new service)
 TOTAL                    : 107 passed, 0 failed
 ```
 
-Rodados contra Postgres e Temporal **reais** (nunca mockados para
-durabilidade/idempotência — P8). Os 4 `Dockerfile` (incluindo o novo
-`adapter-jira/Dockerfile`) buildam com sucesso; `docker compose config` do
-merge fundação+wsa valida.
+Run against **real** Postgres and Temporal (never mocked for
+durability/idempotency — P8). The 4 `Dockerfile`s (including the new
+`adapter-jira/Dockerfile`) build successfully; `docker compose config` of the
+foundation+wsa merge validates.
 
-### Notas honestas / gaps de ambiente
+### Honest notes / environment gaps
 
-- **Container `dse_ingest_dispatcher` roda código da Fase 1.** O container de
-  dispatcher que está no ar na infra compartilhada foi buildado na Fase 1
-  (roteamento por `kind` antigo) e é um **consumidor concorrente** do mesmo
-  outbox `ingest_events` (via `SELECT ... FOR UPDATE SKIP LOCKED`). Impacto nos
-  testes: (a) o chaos test `test_two_concurrent_dispatchers_...` teve sua
-  asserção `sum(results) == N` relaxada para `<= N` (os 2 dispatchers do teste
-  processam no máximo N; o resto pode ser drenado pelo container) — a invariante
-  real de NFR-01 (nenhuma perda, nenhuma duplicação, exatamente-uma-vez)
-  continua provada pelas asserções de banco, robustas a qualquer nº de
-  consumidores; (b) os testes de INTEGRAÇÃO de roteamento (WSA-E6-T3) exercitam
-  `_dispatch_row` diretamente (código novo + signal Temporal real) em vez de
-  passar pelo outbox disputado, para não colher um roteamento antigo do
-  container. Recomendação ao integrador: rebuildar `dse_ingest_dispatcher` na
-  consolidação da Fase 2.
-- **`SIGNAL_PLAN_APPROVAL`**: o dispatcher já roteia para o nome correto; o
-  `@workflow.signal plan_approval` é construído por WS-B (WSB-E3-T2) em paralelo.
-- **Multi-tenant real**: `resolve_tenant` está pronto; falta popular
-  `tenant_platform_bindings` com os workspaces/installations/sites reais (é dado
-  operacional, não engenharia).
+- **The `dse_ingest_dispatcher` container runs Phase 1 code.** The dispatcher
+  container currently up on the shared infra was built in Phase 1
+  (old `kind`-based routing) and is a **concurrent consumer** of the same
+  `ingest_events` outbox (via `SELECT ... FOR UPDATE SKIP LOCKED`). Impact on
+  the tests: (a) the chaos test `test_two_concurrent_dispatchers_...` had its
+  `sum(results) == N` assertion relaxed to `<= N` (the test's 2 dispatchers
+  process at most N; the rest may be drained by the container) — the real
+  NFR-01 invariant (no loss, no duplication, exactly-once)
+  is still proven by the database assertions, which are robust to any number of
+  consumers; (b) the routing INTEGRATION tests (WSA-E6-T3) exercise
+  `_dispatch_row` directly (new code + a real Temporal signal) instead of
+  going through the contended outbox, so as not to pick up old routing from the
+  container. Recommendation to the integrator: rebuild `dse_ingest_dispatcher` in
+  the Phase 2 consolidation.
+- **`SIGNAL_PLAN_APPROVAL`**: the dispatcher already routes to the correct name;
+  the `@workflow.signal plan_approval` is being built by WS-B (WSB-E3-T2) in
+  parallel.
+- **Real multi-tenancy**: `resolve_tenant` is ready; what is missing is
+  populating `tenant_platform_bindings` with the real
+  workspaces/installations/sites (operational data, not engineering).

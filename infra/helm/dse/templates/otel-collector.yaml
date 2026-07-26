@@ -1,10 +1,10 @@
 {{/*
-OTel collector (WSF-E7-T1). Config inline mínima: recebe OTLP grpc/http de
-todos os serviços (dse_contracts.constants.OTEL_ATTR_* nos atributos de
-span) e exporta via `logging` exporter por default (stdout — visível em
-`kubectl logs`); produção deve trocar o exporter para o backend real do
-cliente (Datadog/Grafana Cloud/Honeycomb/etc. — ver infra/ALERTING-RULES.md
-para o que cada alerta precisa do backend escolhido).
+OTel collector (WSF-E7-T1). Minimal inline config: it receives OTLP grpc/http
+from every service (dse_contracts.constants.OTEL_ATTR_* on the span attributes)
+and exports through the `logging` exporter by default (stdout — visible in
+`kubectl logs`); production must swap the exporter for the customer's real
+backend (Datadog/Grafana Cloud/Honeycomb/etc. — see infra/ALERTING-RULES.md for
+what each alert needs from the chosen backend).
 */}}
 {{- if .Values.otelCollector.enabled }}
 apiVersion: v1
@@ -36,8 +36,8 @@ data:
     exporters:
       debug:
         verbosity: detailed
-      # Produção: substituir/adicionar exporter real (otlphttp para o
-      # backend do cliente) — ver infra/ALERTING-RULES.md.
+      # Production: replace/add a real exporter (otlphttp pointing at the
+      # customer's backend) — see infra/ALERTING-RULES.md.
     service:
       extensions: [health_check]
       pipelines:

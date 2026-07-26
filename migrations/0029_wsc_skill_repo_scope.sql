@@ -1,17 +1,17 @@
--- Fintex DSE — Skills por repositório (integração console ⇄ engine).
--- Dono: WS-C. Aditiva e idempotente.
+-- Fintex DSE — Skills per repository (console ⇄ engine integration).
+-- Owner: WS-C. Additive and idempotent.
 --
--- O console (dse_console_pane, Skill Registry) é o banco central de skills:
--- não existe "install" — o operador TICKA por repo quais skills rodam. O tick
--- vive aqui, em `repo_scope`:
---   NULL           -> skill global (legado/nativa do fase1; serve em qualquer repo)
---   '["*"]'        -> tickada para todos os repos
---   '["o/r", ...]' -> tickada só para esses repos (owner/name)
---   '[]'           -> tickada para nenhum repo (não é servida a runs)
--- A leitura tenant-scoped continua em read_approved_skills (P6 fail-closed);
--- o filtro por repo é aplicado lá. O corpo (SKILL.md) segue em `body` e é
--- materializado em `.claude/skills/<skill_key>/SKILL.md` do workspace do
--- sandbox antes do turno do agente (WSC — skill_files.py).
+-- The console (dse_console_pane, Skill Registry) is the central skill store:
+-- there is no "install" — the operator TICKS, per repo, which skills run. That
+-- tick lives here, in `repo_scope`:
+--   NULL           -> global skill (legacy/native to fase1; serves any repo)
+--   '["*"]'        -> ticked for every repo
+--   '["o/r", ...]' -> ticked only for those repos (owner/name)
+--   '[]'           -> ticked for no repo (not served to runs)
+-- The tenant-scoped read stays in read_approved_skills (P6 fail-closed); the
+-- per-repo filter is applied there. The body (SKILL.md) remains in `body` and is
+-- materialized into `.claude/skills/<skill_key>/SKILL.md` in the sandbox
+-- workspace before the agent's turn (WSC — skill_files.py).
 
 ALTER TABLE skill_registry ADD COLUMN IF NOT EXISTS repo_scope JSONB DEFAULT NULL;
 

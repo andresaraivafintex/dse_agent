@@ -1,8 +1,8 @@
-"""WSF-E2-T3a — cliente do secrets backend (Vault).
+"""WSF-E2-T3a — secrets backend (Vault) client.
 
-Roda contra o Vault dev real (localhost:8200, root token `dse_dev_root`) já
-levantado pela fundação — nunca mocka o Vault, é o próprio ponto do teste
-(provar que o cliente fala HTTP de verdade com o backend real)."""
+Runs against the real dev Vault (localhost:8200, root token `dse_dev_root`)
+already brought up by the foundation — it never mocks Vault, which is the whole
+point of the test (prove the client really speaks HTTP to the real backend)."""
 from __future__ import annotations
 
 import os
@@ -27,7 +27,7 @@ def _vault_reachable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _vault_reachable(), reason="Vault dev não está acessível em VAULT_ADDR — infra da fundação não está no ar"
+    not _vault_reachable(), reason="dev Vault is not reachable at VAULT_ADDR — the foundation infra is not up"
 )
 
 
@@ -71,10 +71,10 @@ def test_delete_then_get_raises(secret_path):
 
 def test_no_plaintext_token_in_repr(secret_path):
     client = SecretsClient()
-    # o token não deve vazar em repr/str default do objeto (defesa mínima
-    # contra logging acidental de credenciais)
+    # the token must not leak through the object's default repr/str (minimal
+    # defense against accidentally logging credentials)
     assert client.token not in repr(client.__dict__.get("_hvac_client"))
-    # __dict__ do próprio client contém o token (necessário para funcionar);
-    # a garantia real é que nenhum log/exception message do client vaza o
-    # valor do token, o que é verdade pelas mensagens de erro acima (elas
-    # nunca interpolam self.token).
+    # the client's own __dict__ does hold the token (required for it to work);
+    # the real guarantee is that no log/exception message from the client leaks
+    # the token value, which holds for the error messages above (they never
+    # interpolate self.token).

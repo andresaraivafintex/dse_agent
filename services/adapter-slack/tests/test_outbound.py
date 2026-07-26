@@ -1,8 +1,8 @@
-"""WSA-E3-T2 — outbound: exatamente 1 mensagem de status por WorkItem,
-editada in-place via `MutableCommentWriter` + `SlackCommentBackend`. Sem
-credencial real de Slack App: `FakeSlackClient` in-memory documentado
-substitui `slack_sdk.WebClient` — a lógica (`MutableCommentWriter`,
-`SlackCommentBackend`, `PgCommentStateStore`) é 100% real."""
+"""WSA-E3-T2 — outbound: exactly 1 status message per WorkItem, edited
+in-place via `MutableCommentWriter` + `SlackCommentBackend`. With no real
+Slack App credential: the documented in-memory `FakeSlackClient` stands in for
+`slack_sdk.WebClient` — the logic (`MutableCommentWriter`,
+`SlackCommentBackend`, `PgCommentStateStore`) is 100% real."""
 from __future__ import annotations
 
 import json
@@ -67,21 +67,21 @@ def test_subsequent_updates_edit_in_place_never_post_new_message(tenant_id, monk
         )
         assert resp.status_code == 200
 
-    # exatamente 1 post inicial + 2 edições — NUNCA 3 posts.
+    # exactly 1 initial post + 2 edits — NEVER 3 posts.
     assert len(fake_client.post_calls) == 1
     assert len(fake_client.update_calls) == 2
     assert fake_client.update_calls[-1]["text"] == "Task done"
 
-    # a única mensagem viva reflete o último corpo.
+    # the single live message reflects the latest body.
     (ts, text), = [(t, v) for t, v in fake_client.messages.items()]
     assert text == "Task done"
 
 
 def test_status_comment_ref_persisted_across_process_restart_simulation(tenant_id, monkeypatch):
-    """Adapter é 100% stateless — simula 'reiniciar o processo' criando um
-    SEGUNDO FakeSlackClient e um SEGUNDO writer (novo PgCommentStateStore)
-    para a MESMA work_item_id; deve continuar editando o comment_ref já
-    persistido no Postgres, não postar de novo."""
+    """The adapter is 100% stateless — this simulates 'restarting the process'
+    by creating a SECOND FakeSlackClient and a SECOND writer (a new
+    PgCommentStateStore) for the SAME work_item_id; it must keep editing the
+    comment_ref already persisted in Postgres, not post again."""
     shared_client = FakeSlackClient()
     monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: shared_client)
 
@@ -91,9 +91,9 @@ def test_status_comment_ref_persisted_across_process_restart_simulation(tenant_i
         "/internal/status-comment",
         json={"work_item_id": work_item_id, "channel": "C_STATUS", "body": "first", "actor": "system:orchestrator"},
     )
-    # "restart": nova instância de FakeSlackClient perderia o estado em
-    # memória, mas o comment_ref persiste no Postgres (comment_state) — só
-    # trocamos o client aqui para simular; o store é sempre Postgres.
+    # "restart": a new FakeSlackClient instance would lose the in-memory
+    # state, but the comment_ref persists in Postgres (comment_state) — we
+    # only swap the client here to simulate it; the store is always Postgres.
     client.post(
         "/internal/status-comment",
         json={"work_item_id": work_item_id, "channel": "C_STATUS", "body": "second", "actor": "system:orchestrator"},
@@ -114,10 +114,10 @@ def test_status_comment_ref_persisted_across_process_restart_simulation(tenant_i
 
 
 def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
-    """Fase B (relatório 07): no status awaiting_plan_approval a mensagem sai
-    com Block Kit (Approve/Reject) — os action_id/value são os marcadores que
-    parse_slack_approval (C1) lê. Fecha o loop: sem postar os botões, o humano
-    não tinha como aprovar/rejeitar pelo Slack."""
+    """Phase B (report 07): on status awaiting_plan_approval the message goes
+    out with Block Kit (Approve/Reject) — the action_id/value are the markers
+    that parse_slack_approval (C1) reads. This closes the loop: without posting
+    the buttons, the human had no way to approve/reject from Slack."""
     fake_client = FakeSlackClient()
     monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake_client)
     work_item_id = _make_work_item(tenant_id)
@@ -139,7 +139,7 @@ def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
     action_ids = {e["action_id"] for e in action_block["elements"]}
     assert action_ids == {"dse_plan_approve", "dse_plan_reject"}
     values = {e["value"] for e in action_block["elements"]}
-    assert "reject:re_plan" in values  # o marcador de rejeição que o C1 parseia
+    assert "reject:re_plan" in values  # the rejection marker that C1 parses
 
 
 def test_non_approval_status_stays_plain_text(tenant_id, monkeypatch):
@@ -151,4 +151,4 @@ def test_non_approval_status_stays_plain_text(tenant_id, monkeypatch):
         json={"work_item_id": work_item_id, "channel": "C1", "body": "⚙️ implementando",
               "actor": "system:orchestrator", "status": "implementing"},
     )
-    assert fake_client.post_calls[0]["blocks"] is None  # sem botões fora da aprovação
+    assert fake_client.post_calls[0]["blocks"] is None  # no buttons outside approval

@@ -18,9 +18,9 @@ def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> Path:
-    """Repo git real (não mockado) com um commit inicial em `main` — usado
-    pelos testes de plan_compliance (git diff --numstat real) e de quality
-    checks (lint/typecheck/test/build reais via LocalFakeSandbox)."""
+    """Real (unmocked) git repo with an initial commit on `main` — used by the
+    plan_compliance tests (real git diff --numstat) and by the quality-check
+    tests (real lint/typecheck/test/build via LocalFakeSandbox)."""
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     _git(repo_dir, "init", "-q", "-b", "main")
@@ -55,8 +55,8 @@ def git_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def feature_branch(git_repo: Path):
-    """Cria e faz checkout de um branch de feature a partir de `main` —
-    devolve uma função para commitar mudanças adicionais no branch."""
+    """Creates and checks out a feature branch off `main` — returns a function
+    to commit additional changes on that branch."""
     _git(git_repo, "checkout", "-q", "-b", "feature/test")
 
     def commit_change(relpath: str, content: str, message: str = "feature change") -> None:
@@ -76,7 +76,7 @@ def sandbox(git_repo: Path) -> LocalFakeSandbox:
 
 @pytest.fixture
 def git_sha(git_repo: Path):
-    """Resolve SHAs no instante da chamada, depois de eventuais commits."""
+    """Resolves SHAs at call time, after any commits that may have happened."""
 
     def resolve(ref: str = "HEAD") -> str:
         return _git(git_repo, "rev-parse", ref).stdout.strip()

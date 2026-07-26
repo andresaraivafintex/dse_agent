@@ -1,16 +1,16 @@
 """Skill registry bootstrap (WSC-E4-T1).
 
-Registry tenant-scoped de skills curadas por humano, lido pela sessão Planner
-(WSC-E3-T3) para hidratar contexto. Fase 2 tem SÓ o registry + a leitura — o
-pipeline de promoção (curadoria automática de skills a partir de execuções) é
-Fase 4, deliberadamente fora de escopo aqui.
+Tenant-scoped registry of human-curated skills, read by the Planner session
+(WSC-E3-T3) to hydrate context. Fase 2 has ONLY the registry + the read path —
+the promotion pipeline (automatic skill curation out of executions) is Fase 4,
+deliberately out of scope here.
 
-Isolamento por tenant: `read_approved_skills(tenant_id)` só devolve linhas do
-`tenant_id` pedido e `status='approved'` — o Planner nunca vê skills de outro
-tenant nem rascunhos. Import de `psycopg2` é obrigatório aqui (a leitura de
-skills é parte do contexto do Planner, não bookkeeping best-effort) — se o
-Postgres cair, a leitura FALHA limpo (P6), nunca degrada para "sem skills"
-silenciosamente. Use `allow_empty_on_unavailable=True` só em teste/dev.
+Per-tenant isolation: `read_approved_skills(tenant_id)` only returns rows for
+the requested `tenant_id` with `status='approved'` — the Planner never sees
+another tenant's skills nor drafts. The `psycopg2` import is mandatory here
+(reading skills is part of the Planner's context, not best-effort bookkeeping)
+— if Postgres goes down the read FAILS cleanly (P6), it never silently degrades
+to "no skills". Use `allow_empty_on_unavailable=True` in test/dev only.
 """
 from __future__ import annotations
 
@@ -33,9 +33,9 @@ class Skill:
     body: str
     category: str
     applies_to: list[str] = field(default_factory=list)
-    # Ticks por repo vindos do console (migração 0029): None = global
-    # (skill nativa/legada), ["*"] = todos os repos, ["owner/name", ...] = só
-    # esses, [] = nenhum (não servida a run algum).
+    # Per-repo checkboxes coming from the console (migration 0029): None =
+    # global (native/legacy skill), ["*"] = every repo, ["owner/name", ...] =
+    # only those, [] = none (not served to any run).
     repo_scope: list[str] | None = None
 
     def enabled_for_repo(self, repo: str) -> bool:
@@ -44,15 +44,15 @@ class Skill:
         return "*" in self.repo_scope or repo in self.repo_scope
 
     def as_context_block(self) -> str:
-        """Renderização determinística da skill para o bundle do Planner.
-        Skills SÃO confiáveis (curadas por humano) — ao contrário do conteúdo
-        de retrieval — então entram como guidance, não como dado untrusted."""
+        """Deterministic rendering of the skill for the Planner bundle.
+        Skills ARE trusted (human-curated) — unlike retrieval content — so they
+        go in as guidance, not as untrusted data."""
         applies = ", ".join(self.applies_to) if self.applies_to else "general"
         return f"### skill:{self.skill_key} [{self.category}; applies to: {applies}]\n{self.title}\n{self.body}"
 
 
 class SkillRegistryUnavailable(Exception):
-    """Postgres indisponível ao ler o registry — falha limpa (P6)."""
+    """Postgres unavailable while reading the registry — clean failure (P6)."""
 
 
 def _connect():
@@ -66,31 +66,31 @@ def read_approved_skills(
     repo: str | None = None,
     conn=None,
 ) -> list[Skill]:
-    """Skills SERVIDAS do tenant (o Planner de produção). Se `task_class` for
-    dado, filtra para as que se aplicam a esse task_class (ou marcadas
-    'default'); senão devolve todas as servidas do tenant. Se `repo` for dado
-    (owner/name), filtra pelos ticks por repo do console (`repo_scope`,
-    migração 0029): NULL = global, "*" = todos, lista = membership.
+    """The tenant's SERVED skills (the production Planner). If `task_class` is
+    given, filters down to the ones that apply to that task_class (or are marked
+    'default'); otherwise returns every served skill of the tenant. If `repo` is
+    given (owner/name), filters by the console's per-repo checkboxes
+    (`repo_scope`, migration 0029): NULL = global, "*" = all, list = membership.
 
-    ISOLAMENTO (coordenado com a suíte do WS-F): a query tem `tenant_id = %s`
-    hardcoded — não existe caminho que devolva skill de outro tenant, e não há
-    parâmetro para "todos os tenants".
+    ISOLATION (coordinated with the WS-F suite): the query hardcodes
+    `tenant_id = %s` — there is no path that returns another tenant's skill, and
+    no parameter for "all tenants".
 
-    ESTADOS SERVIDOS (Fase 4): `status IN ('approved','active')` — hardcoded.
-    `approved` = curada/aprovada por humano (inclui os seeds da Fase 2);
-    `active` = candidate que subiu a esteira completa (eval → aprovação →
-    canary → active, WSC-E4-T3). NUNCA são servidos: `draft`, `candidate`,
-    `canary` (= shadow nesta fase), `rolled_back`, `retired`. O índice único
-    parcial `uq_skill_registry_one_served` garante estruturalmente no máximo UMA
-    versão servida por (tenant, skill_key) — o Planner nunca vê duas versões da
-    mesma skill.
+    SERVED STATES (Fase 4): `status IN ('approved','active')` — hardcoded.
+    `approved` = human-curated/approved (includes the Fase 2 seeds);
+    `active` = a candidate that made it through the full pipeline (eval →
+    approval → canary → active, WSC-E4-T3). NEVER served: `draft`, `candidate`,
+    `canary` (= shadow at this phase), `rolled_back`, `retired`. The partial
+    unique index `uq_skill_registry_one_served` structurally guarantees at most
+    ONE served version per (tenant, skill_key) — the Planner never sees two
+    versions of the same skill.
     """
     owns = conn is None
     if owns:
         try:
             conn = _connect()
         except Exception as exc:  # noqa: BLE001
-            raise SkillRegistryUnavailable(f"skill_registry: Postgres indisponível: {exc}") from exc
+            raise SkillRegistryUnavailable(f"skill_registry: Postgres unavailable: {exc}") from exc
     try:
         with conn.cursor() as cur:
             cur.execute(

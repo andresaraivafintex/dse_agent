@@ -1,24 +1,23 @@
-"""WSE-E5-T14 — publicação CONSOLIDADA e DEBOUNCED de evidência (ADR-26).
+"""WSE-E5-T14 — CONSOLIDATED and DEBOUNCED evidence publication (ADR-26).
 
-Um único tracking comment por PR (o mesmo `MutableCommentWriter` da fundação,
-editado in-place — nunca comment-per-update) concentra TODOS os links de
-evidência: vídeo @demo, trace Playwright, preview environment, visual diff.
-O corpo é RENDERIZADO DO ESTADO DO BANCO (wse_artifacts / wse_previews /
-wse_ci_status / wse_pr_tracking) — crash-consistente: qualquer re-render
-converge para o mesmo conteúdo.
+A single tracking comment per PR (the foundation's own `MutableCommentWriter`,
+edited in place — never comment-per-update) concentrates ALL evidence links:
+@demo video, Playwright trace, preview environment, visual diff. The body is
+RENDERED FROM DATABASE STATE (wse_artifacts / wse_previews / wse_ci_status /
+wse_pr_tracking) — crash-consistent: any re-render converges to the same content.
 
-DEBOUNCE (ADR-26): re-gerar evidência é caro (Playwright + preview + diff).
-`should_refresh_evidence()` é a decisão 100% DETERMINÍSTICA (P1) que o
-workflow do WS-B consulta ANTES de re-rodar o pipeline de evidência:
-  - pedido humano explícito           => refresh (sempre; auditado);
-  - nenhuma publicação anterior       => refresh (primeira evidência);
-  - mesmo commit já publicado         => NÃO refresh (no-op);
-  - commit novo só com arquivos que não mudam comportamento (docs/markdown,
-    default configurável)             => NÃO refresh;
-  - commit novo com mudança de comportamento => refresh.
-O lado do workflow (chamada da Activity) é do WS-B, em construção paralela —
-o contrato de decisão exposto aqui é `wse_should_refresh_evidence`
-(input/output documentados em activities.py).
+DEBOUNCE (ADR-26): regenerating evidence is expensive (Playwright + preview +
+diff). `should_refresh_evidence()` is the 100% DETERMINISTIC decision (P1) that
+WS-B's workflow consults BEFORE re-running the evidence pipeline:
+  - explicit human request            => refresh (always; audited);
+  - no previous publication           => refresh (first evidence);
+  - same commit already published     => do NOT refresh (no-op);
+  - new commit touching only files that do not change behavior (docs/markdown,
+    configurable default)             => do NOT refresh;
+  - new commit with a behavior change => refresh.
+The workflow side (the Activity call) belongs to WS-B and is being built in
+parallel — the decision contract exposed here is `wse_should_refresh_evidence`
+(input/output documented in activities.py).
 """
 from __future__ import annotations
 
@@ -38,7 +37,7 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger("dse_validation.evidence.publication")
 
-# arquivos que NÃO mudam comportamento (não invalidam evidência) — ADR-26.
+# files that do NOT change behavior (do not invalidate evidence) — ADR-26.
 _DEFAULT_NON_BEHAVIOR_GLOBS = ["*.md", "docs/**", "**/*.md", "LICENSE", ".github/CODEOWNERS"]
 
 
@@ -69,25 +68,25 @@ def should_refresh_evidence(
     files_changed: list[str] | None = None,
     human_requested: bool = False,
 ) -> RefreshDecision:
-    """Decisão determinística de debounce (ADR-26). Ver docstring do módulo."""
+    """Deterministic debounce decision (ADR-26). See the module docstring."""
     if human_requested:
-        return RefreshDecision(True, "pedido humano explícito")
+        return RefreshDecision(True, "explicit human request")
     previous = db.get_evidence_publication(work_item_id)
     if previous is None:
-        return RefreshDecision(True, "primeira publicação de evidência")
+        return RefreshDecision(True, "first evidence publication")
     if previous["last_commit_sha"] == commit_sha:
-        return RefreshDecision(False, "mesmo commit da última publicação (debounce ADR-26)")
+        return RefreshDecision(False, "same commit as the last publication (debounce ADR-26)")
     if files_changed is not None and files_changed and all(
         _matches_any(f, non_behavior_globs()) for f in files_changed
     ):
         return RefreshDecision(
-            False, "commit novo só toca arquivos sem comportamento (docs) — debounce ADR-26"
+            False, "new commit only touches non-behavior files (docs) — debounce ADR-26"
         )
-    return RefreshDecision(True, "commit novo com mudança de comportamento")
+    return RefreshDecision(True, "new commit with a behavior change")
 
 
 # ---------------------------------------------------------------------------
-# Render do bloco de evidência + tracking comment consolidado
+# Evidence block render + consolidated tracking comment
 # ---------------------------------------------------------------------------
 _EVIDENCE_HEADER = "### Fintex DSE — task evidence"
 
@@ -102,9 +101,9 @@ _KIND_LABEL = {
 
 def render_evidence_section(work_item_id: str, *, accessor: str = "system:validation",
                             pr_number: int | None = None) -> str:
-    """Monta a seção de evidência a partir do ESTADO DO BANCO. Cada link
-    presigned é RESOLVIDO na hora (fresco) e o acesso é logado
-    (`via='tracking_comment'`) — insumo da métrica evidence consumption."""
+    """Builds the evidence section from DATABASE STATE. Each presigned link is
+    RESOLVED on the spot (fresh) and the access is logged
+    (`via='tracking_comment'`) — input to the evidence-consumption metric."""
     lines: list[str] = [_EVIDENCE_HEADER, ""]
 
     artifacts = db.list_artifacts(work_item_id)
@@ -159,7 +158,7 @@ def publish_evidence_bundle(
     human_requested: bool = False,
     actor: str = "system:validation",
 ) -> dict:
-    """Publicação consolidada + debounce. Retorna
+    """Consolidated publication + debounce. Returns
     {published: bool, reason: str, fingerprint: str|None}."""
     decision = should_refresh_evidence(
         work_item_id=work_item_id, commit_sha=commit_sha,

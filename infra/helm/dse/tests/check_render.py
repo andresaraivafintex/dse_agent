@@ -39,14 +39,14 @@ def main(path: str) -> None:
         name = workload["metadata"]["name"]
         pod = workload["spec"]["template"]["spec"]
         require(pod.get("serviceAccountName"), f"{name}: missing serviceAccountName")
-        # O worker do orchestrator é a ÚNICA exceção ao token não-montado: ele
-        # precisa do token para o kubectl que cria os Pods de sandbox. Exigimos
-        # que use a SA DEDICADA de menor privilégio (não a global) — o RBAC de
-        # criar pods está ligado só a essa identidade.
+        # The orchestrator worker is the ONLY exception to the unmounted token:
+        # it needs the token for the kubectl that creates the sandbox Pods. We
+        # require it to use the DEDICATED least-privilege SA (not the global
+        # one) — the pod-creation RBAC is bound to that identity alone.
         if name.endswith("-orchestrator") and pod.get("automountServiceAccountToken") is True:
             require(
                 pod.get("serviceAccountName", "").endswith("-orchestrator-worker"),
-                f"{name}: monta token mas não usa a SA dedicada do worker",
+                f"{name}: mounts a token but does not use the dedicated worker SA",
             )
         else:
             require(pod.get("automountServiceAccountToken") is False, f"{name}: token automount enabled")
@@ -83,10 +83,10 @@ def main(path: str) -> None:
     require(policies, "NetworkPolicy missing")
     external = [p for p in policies if p["metadata"]["name"].endswith("egress-proxy-external")]
     require(len(external) == 1, "expected exactly one egress-proxy external policy")
-    # Dois — e só dois — donos de CIDR externo são permitidos: (1) a saída do
-    # egress-proxy para a internet (allowlist L7 no proxy) e (2) a rota do
-    # orchestrator até o API server do K8s (kubectl dos sandboxes), escopada ao
-    # pod do orchestrator. Qualquer outra policy com ipBlock é violação.
+    # Two — and only two — owners of an external CIDR are allowed: (1) the
+    # egress-proxy path to the internet (L7 allowlist on the proxy) and (2) the
+    # orchestrator route to the K8s API server (sandbox kubectl), scoped to the
+    # orchestrator pod. Any other policy carrying an ipBlock is a violation.
     kube_api = [p for p in policies if p["metadata"]["name"].endswith("orchestrator-kube-api")]
     allowed_ip_owners = set(map(id, external + kube_api))
     for policy in policies:

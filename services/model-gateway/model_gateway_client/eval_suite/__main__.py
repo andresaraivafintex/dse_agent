@@ -1,9 +1,9 @@
-"""CLI da suite de eval Tier-2 (WSD-E5-T1).
+"""Tier-2 eval suite CLI (WSD-E5-T1).
 
     python -m model_gateway_client.eval_suite [--model ALIAS ...] [--json]
 
-Exit code 0 se nenhum caso FALHOU (skips não reprovam), 1 caso contrário — para
-uso como gate em CI/promoção de modelo.
+Exit code 0 if no case FAILED (skips do not fail the suite), 1 otherwise — for
+use as a CI / model-promotion gate.
 """
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from .runner import run_suite
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="model_gateway_client.eval_suite")
-    parser.add_argument("--model", action="append", dest="models", help="filtra por alias de modelo (repetível)")
-    parser.add_argument("--json", action="store_true", help="saída em JSON")
+    parser.add_argument("--model", action="append", dest="models", help="filter by model alias (repeatable)")
+    parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args(argv)
 
     report = run_suite(models=args.models)

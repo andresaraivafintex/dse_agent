@@ -1,8 +1,8 @@
-"""Plano 08 §D — gate deploys_preview (preview_enabled_for_repo).
+"""Plano 08 §D — deploys_preview gate (preview_enabled_for_repo).
 
-Testa a semântica determinística e fail-safe do gate direto contra o Postgres
-(sem Temporal): binding marcado → enabled; sem binding no tenant → enabled
-(retrocompat); bindings existem mas repo não marcado → disabled.
+Tests the gate's deterministic, fail-safe semantics directly against Postgres
+(no Temporal): binding marked → enabled; no binding on the tenant → enabled
+(backward compat); bindings exist but repo not marked → disabled.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _run(payload: dict) -> dict:
 
 @pytest.fixture
 def gate_tenant():
-    """Tenant isolado por teste — limpa os bindings antes e depois."""
+    """Per-test isolated tenant — clears the bindings before and after."""
     tid = f"gate-{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(DSN)
     try:
@@ -66,7 +66,7 @@ def test_binding_marked_is_enabled(gate_tenant):
 
 
 def test_bindings_exist_but_repo_not_marked_is_disabled(gate_tenant):
-    # há binding no tenant (para outro repo), mas o repo alvo não é previewável
+    # the tenant has a binding (for another repo), but the target repo is not previewable
     _insert_binding(gate_tenant, "acme/other", deploys_preview=False)
     r = _run({"tenant_id": gate_tenant, "repo": "acme/not-marked"})
     assert r["enabled"] is False

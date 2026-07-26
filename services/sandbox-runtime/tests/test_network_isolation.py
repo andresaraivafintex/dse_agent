@@ -1,16 +1,16 @@
-"""WSC-E1-T1: sandbox rootless, sem docker.sock, sem escalada a root, e sem
-acesso à internet exceto rota para o egress-proxy próprio.
+"""WSC-E1-T1: rootless sandbox, no docker.sock, no escalation to root, and no
+internet access except the route to our own egress-proxy.
 
-Topologia real criada neste teste (nada mockado — containers Docker de
-verdade, rede Docker de verdade):
+Real topology created by this test (nothing mocked — real Docker containers,
+real Docker network):
 
-  dse-test-upstream (só em dse_net)      <-- "internet" simulada
+  dse-test-upstream (only on dse_net)      <-- simulated "internet"
         ^
         | (dse_net)
-  dse-egress-proxy-test (dse_net + dse_sandbox_net)  <-- ponte controlada
+  dse-egress-proxy-test (dse_net + dse_sandbox_net)  <-- controlled bridge
         ^
-        | (dse_sandbox_net, internal=True — sem gateway de internet)
-  <sandbox sob teste>  (só em dse_sandbox_net)
+        | (dse_sandbox_net, internal=True — no internet gateway)
+  <sandbox under test>  (only on dse_sandbox_net)
 """
 from __future__ import annotations
 
@@ -71,17 +71,17 @@ def isolation_topology(docker_client, work_item_id):
         network="dse_net",
         labels={"dse.component": "sandbox-runtime-test", "dse.role": "test-egress-proxy"},
     )
-    # segunda rede: dse_sandbox_net (internal) — ponte controlada
+    # second network: dse_sandbox_net (internal) — controlled bridge
     docker_client.networks.get(docker_driver.SANDBOX_NETWORK_NAME).connect(proxy)
 
-    # espera os servidores subirem
+    # wait for the servers to come up
     for _ in range(30):
         proxy.reload()
         upstream.reload()
         if proxy.status == "running" and upstream.status == "running":
             break
         time.sleep(0.5)
-    time.sleep(1.5)  # margem para o asyncio server abrir o socket de escuta
+    time.sleep(1.5)  # slack for the asyncio server to open the listening socket
 
     yield {"upstream_name": upstream_name, "proxy_name": proxy_name, "upstream": upstream, "proxy": proxy}
 
@@ -102,16 +102,16 @@ def test_sandbox_isolation_and_egress_proxy_only_route(isolation_topology, docke
     sandbox = docker_client.containers.get(handle.container_id)
 
     try:
-        # --- T1a: sem docker.sock, sem root ----------------------------------
+        # --- T1a: no docker.sock, no root ------------------------------------
         assert docker_driver.inspect_no_docker_sock(handle.container_id)
         user = docker_driver.inspect_non_root_user(handle.container_id)
         assert user not in ("", "root", "0", "0:0")
 
         exit_code, out = _exec(sandbox, ["id", "-u"])
         assert exit_code == 0
-        assert out.strip() != "0", f"processo rodando como root dentro do sandbox: id -u = {out!r}"
+        assert out.strip() != "0", f"process running as root inside the sandbox: id -u = {out!r}"
 
-        # --- T1b: nenhum host externo alcançável -------------------------------
+        # --- T1b: no external host reachable -----------------------------------
         exit_code, out = _exec(
             sandbox,
             [
@@ -120,16 +120,16 @@ def test_sandbox_isolation_and_egress_proxy_only_route(isolation_topology, docke
                 "import urllib.request,sys\n"
                 "try:\n"
                 "    urllib.request.urlopen('http://example.com', timeout=4)\n"
-                "    sys.exit(1)\n"  # se conseguiu, FALHA o teste de isolamento
+                "    sys.exit(1)\n"  # if it got through, the isolation test FAILS
                 "except Exception as e:\n"
                 "    print('BLOCKED:', type(e).__name__)\n"
                 "    sys.exit(0)\n",
             ],
         )
-        assert exit_code == 0, f"sandbox conseguiu alcançar host externo direto — isolamento quebrado: {out}"
+        assert exit_code == 0, f"the sandbox reached an external host directly — isolation broken: {out}"
         assert "BLOCKED" in out
 
-        # --- T1c: só o egress-proxy é alcançável, e só encaminha allowlist -----
+        # --- T1c: only the egress-proxy is reachable, and it only forwards the allowlist ---
         proxy_script = (
             "import urllib.request\n"
             "handler = urllib.request.ProxyHandler({{'http': 'http://{proxy}:8806'}})\n"
@@ -160,12 +160,12 @@ def test_sandbox_isolation_and_egress_proxy_only_route(isolation_topology, docke
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id="tenant-isolation-test")))
 
 
-# Nota: a prova de que `egress_denied` grava uma linha REAL em `audit_log`
-# (P8) está em `services/egress-proxy/tests/test_allowlist_and_audit.py`,
-# rodando `EgressProxy` in-process (no venv que tem `dse_audit`/`psycopg2`
-# instalados) contra o Postgres real — não faz sentido reproduzir aqui
-# dentro do container "pelado" `python:3.11-slim` usado para o teste de
-# isolamento de rede, que deliberadamente NÃO tem `dse_audit`/`psycopg2`
-# instalados (é o cenário de container mínimo, sem `pip install`, descrito
-# no README). Lá dentro o proxy cai para o fallback de log local — o mesmo
-# código, testado em outro lugar com o caminho feliz do Postgres real.
+# Note: the proof that `egress_denied` writes a REAL row into `audit_log` (P8)
+# lives in `services/egress-proxy/tests/test_allowlist_and_audit.py`, running
+# `EgressProxy` in-process (in the venv that has `dse_audit`/`psycopg2`
+# installed) against real Postgres — it makes no sense to reproduce it here
+# inside the "bare" `python:3.11-slim` container used for the network isolation
+# test, which deliberately does NOT have `dse_audit`/`psycopg2` installed (it is
+# the minimal-container scenario, without `pip install`, described in the
+# README). In there the proxy falls back to local logging — the same code,
+# tested elsewhere on the happy path with real Postgres.

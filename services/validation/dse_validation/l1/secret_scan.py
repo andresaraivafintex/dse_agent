@@ -1,14 +1,14 @@
-"""WSE-E1-T2 (parte 2) — scanner de segredos self-contained (regex + entropia
-de Shannon), sem dependência de serviço externo. Roda DENTRO do sandbox via o
-mesmo `SandboxExecutor` dos outros checks: o scanner é um script Python puro
-(stdlib apenas) embutido como string e executado com `python3 -c` — funciona
-tanto no `DockerExecSandbox` (o container só precisa ter `python3`, que já é
-garantido pelo runtime OpenHands) quanto no `LocalFakeSandbox` de teste.
+"""WSE-E1-T2 (part 2) — self-contained secret scanner (regex + Shannon
+entropy), with no dependency on an external service. It runs INSIDE the sandbox
+through the same `SandboxExecutor` as the other checks: the scanner is a pure
+Python script (stdlib only) embedded as a string and executed with `python3 -c`
+— it works both in `DockerExecSandbox` (the container only needs `python3`,
+already guaranteed by the OpenHands runtime) and in the test `LocalFakeSandbox`.
 
-Cobre: AWS access key id, GitHub/Slack tokens, cabeçalho de chave privada PEM,
-e o caso genérico "variável com nome de segredo == literal de alta entropia".
-`detect-secrets` (se instalado no sandbox) pode substituir isto no futuro sem
-mudar a assinatura de `secret_scan_check` — ver README.
+Covers: AWS access key id, GitHub/Slack tokens, PEM private key header, and the
+generic case "variable with a secret-ish name == high-entropy literal".
+`detect-secrets` (if installed in the sandbox) could replace this later without
+changing the signature of `secret_scan_check` — see README.
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from dse_contracts import GateStatus, L1Finding
 
 from dse_validation.sandbox_exec import SandboxExecutor
 
-# Script stdlib-only executado dentro do sandbox. Emite uma linha JSON no
-# stdout com a lista de achados — parseada pelo lado de fora.
+# stdlib-only script executed inside the sandbox. It emits one JSON line on
+# stdout with the list of findings — parsed from the outside.
 _SCANNER_SCRIPT = r'''
 import json, math, os, re, sys
 
@@ -96,14 +96,14 @@ def secret_scan_check(executor: SandboxExecutor, target_dir: str = ".", timeout:
             check="secret_scan",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"python3 não encontrado no sandbox: {result.stderr.strip()}",
+            detail=f"python3 not found in the sandbox: {result.stderr.strip()}",
         )
     if result.returncode != 0:
         return L1Finding(
             check="secret_scan",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"scanner de segredos falhou (exit={result.returncode}): {result.stderr[:2000]}",
+            detail=f"secret scanner failed (exit={result.returncode}): {result.stderr[:2000]}",
         )
     try:
         payload = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else {"findings": []}
@@ -112,13 +112,13 @@ def secret_scan_check(executor: SandboxExecutor, target_dir: str = ".", timeout:
             check="secret_scan",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"saída inesperada do scanner: {result.stdout[:2000]}",
+            detail=f"unexpected scanner output: {result.stdout[:2000]}",
         )
 
     findings = payload.get("findings", [])
     if not findings:
-        return L1Finding(check="secret_scan", passed=True, detail="nenhum segredo/token detectado")
+        return L1Finding(check="secret_scan", passed=True, detail="no secret/token detected")
 
     lines = [f"- [{f['kind']}] {f['file']}:{f['line']} — {f['snippet']}" for f in findings[:20]]
-    detail = f"{len(findings)} possível(is) segredo(s) detectado(s):\n" + "\n".join(lines)
+    detail = f"{len(findings)} possible secret(s) detected:\n" + "\n".join(lines)
     return L1Finding(check="secret_scan", passed=False, detail=detail)

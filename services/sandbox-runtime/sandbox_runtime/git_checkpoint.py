@@ -1,19 +1,19 @@
-"""Checkpoint/rebuild do branch da tarefa (WSC-E1-T4).
+"""Checkpoint/rebuild of the task branch (WSC-E1-T4).
 
-Fase 1 P0: o "origin" é um bare repo LOCAL (não precisa ser um remoto real —
-ver CONVENTIONS/enunciado da tarefa) que vive num diretório próprio,
-bind-mountado no sandbox em `/checkpoint.git` (mesmo path visível pelo host
-em `checkpoint_bare_repo_path`, o que permite operar tanto via
-`docker exec` quanto via subprocess direto no host contra o mesmo conteúdo —
-ambos veem o mesmo bare repo porque é um bind mount, não uma cópia).
+Fase 1 P0: "origin" is a LOCAL bare repo (it does not need to be a real remote —
+see CONVENTIONS/the task statement) living in its own directory, bind-mounted
+into the sandbox at `/checkpoint.git` (the same path is visible from the host
+via `checkpoint_bare_repo_path`, which allows operating either through
+`docker exec` or through a plain subprocess on the host against the same
+content — both see the same bare repo because it is a bind mount, not a copy).
 
-- `provision_checkpoint_repo`: cria o bare repo (`git init --bare`) + instala
-  o hook `pre-receive` de escopo (branch único + no force-push).
-- `checkpoint`: dentro do workspace da tarefa, commit (se houver mudanças) +
-  push para o bare repo. Retorna o `CheckpointRef` (sha + fase).
-- `rebuild_from_checkpoint`: usado após `docker kill` (chaos test) — clona o
-  bare repo num workspace novo e faz `git checkout <sha>` do branch da
-  tarefa, provando que nenhum commit foi perdido mesmo com o container morto.
+- `provision_checkpoint_repo`: creates the bare repo (`git init --bare`) +
+  installs the scoping `pre-receive` hook (single branch + no force-push).
+- `checkpoint`: inside the task workspace, commit (if there are changes) +
+  push to the bare repo. Returns the `CheckpointRef` (sha + phase).
+- `rebuild_from_checkpoint`: used after `docker kill` (chaos test) — clones the
+  bare repo into a fresh workspace and runs `git checkout <sha>` of the task
+  branch, proving no commit was lost even with the container killed.
 """
 from __future__ import annotations
 
@@ -32,16 +32,16 @@ def provision_checkpoint_repo(bare_repo_path: str, branch: str) -> None:
 
 
 def init_task_workspace(workspace_dir: str, bare_repo_path: str, branch: str, base_branch: str = "main") -> None:
-    """Cria o workspace de trabalho da tarefa: um clone do bare repo (ainda
-    vazio na primeira vez) com o branch da tarefa criado localmente e um
-    commit inicial vazio para existir um HEAD válido."""
+    """Create the task working workspace: a clone of the bare repo (still
+    empty on the first run) with the task branch created locally and an
+    initial empty commit so that a valid HEAD exists."""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init"], cwd=workspace_dir, check=True, capture_output=True, text=True)
     subprocess.run(["git", "checkout", "-b", branch], cwd=workspace_dir, check=True, capture_output=True, text=True)
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
     session.ensure_identity()
-    write_task_branch_marker(workspace_dir, branch)  # F6: excluído do commit/PR
-    session.commit(f"chore(dse): inicializa workspace da tarefa no branch {branch}")
+    write_task_branch_marker(workspace_dir, branch)  # F6: excluded from the commit/PR
+    session.commit(f"chore(dse): initialize the task workspace on branch {branch}")
     subprocess.run(
         ["git", "remote", "add", "origin", bare_repo_path],
         cwd=workspace_dir,
@@ -65,9 +65,9 @@ def checkpoint(work_item_id: str, workspace_dir: str, branch: str, phase: str) -
 def rebuild_from_checkpoint(
     new_workspace_dir: str, bare_repo_path: str, branch: str, checkpoint_ref: CheckpointRef
 ) -> str:
-    """Clona o bare repo num workspace novo e faz checkout do sha do último
-    checkpoint. Retorna o sha efetivamente presente no HEAD do novo
-    workspace (para o teste de chaos comparar com `checkpoint_ref.git_ref`)."""
+    """Clone the bare repo into a fresh workspace and check out the sha of the
+    last checkpoint. Returns the sha actually present at the new workspace's
+    HEAD (so the chaos test can compare it against `checkpoint_ref.git_ref`)."""
     Path(new_workspace_dir).mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "clone", "--branch", branch, bare_repo_path, new_workspace_dir],

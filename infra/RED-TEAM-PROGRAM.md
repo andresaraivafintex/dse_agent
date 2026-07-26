@@ -1,133 +1,132 @@
-# Fintex DSE — Programa de red-team (WSF-E8-T3, Fase 4)
+# Fintex DSE — Red-team program (WSF-E8-T3, Phase 4)
 
-**Status: P0 — deve estar em pé ANTES do primeiro repositório de cliente real.**
+**Status: P0 — must be standing BEFORE the first real client repository.**
 
-Este documento define o programa contínuo de red-team do DSE: dono, cadência, escopo, e a
-fronteira honesta entre o que é **automatizado hoje** (suíte executável que falha o build) e o
-que é **item manual** do programa (ainda não automatizável neste ambiente).
+This document defines the DSE's continuous red-team program: owner, cadence, scope, and the
+honest boundary between what is **automated today** (an executable suite that fails the build) and
+what is a **manual item** of the program (not yet automatable in this environment).
 
-Companheiro obrigatório: `infra/THREAT-MODEL.md` (as ameaças que este programa exercita) e a
-suíte `services/platform/tests/test_red_team.py` (a materialização em CI).
+Mandatory companions: `infra/THREAT-MODEL.md` (the threats this program exercises) and the
+`services/platform/tests/test_red_team.py` suite (its materialization in CI).
 
 ---
 
-## 1. Dono e responsabilidades (RACI)
+## 1. Owner and responsibilities (RACI)
 
-| Papel | Nome/função | Responsabilidade |
+| Role | Name/function | Responsibility |
 |---|---|---|
-| **Dono (Accountable)** | **Security Lead do WS-F** (plataforma/segurança) | Mantém este programa, o threat model e a suíte executável; assina o pacote do pilot gate "client security/data review passed". |
-| Executor (Responsible) | Engenharia de plataforma (WS-F) + rotativo de 1 engenheiro por workstream por trimestre | Roda os drills, escreve novos ataques, corrige regressões. |
-| Consultado (Consulted) | Donos de WS-A (intake), WS-C (sandbox/egress/skill), WS-D (gateway), WS-E (validação/merge-base) | Revisam ataques contra seus controles; recebem os `spawn`/issues de regressão. |
-| Informado (Informed) | Arquiteto + stakeholder do piloto | Recebem o relatório de cada ciclo e o veredito de go/no-go de segurança. |
+| **Owner (Accountable)** | **WS-F Security Lead** (platform/security) | Maintains this program, the threat model and the executable suite; signs off the pilot gate package "client security/data review passed". |
+| Executor (Responsible) | Platform engineering (WS-F) + a rotating engineer from each workstream per quarter | Runs the drills, writes new attacks, fixes regressions. |
+| Consulted | Owners of WS-A (intake), WS-C (sandbox/egress/skill), WS-D (gateway), WS-E (validation/merge-base) | Review attacks against their controls; receive the regression `spawn`s/issues. |
+| Informed | Architect + pilot stakeholder | Receive the report for each cycle and the security go/no-go verdict. |
 
-**Dono nomeado nesta fase:** o Security Lead do WS-F é o dono default até o cliente do piloto
-nomear um contato de segurança; a partir daí o programa roda em conjunto (o cliente pode exigir
-seu próprio pentest de terceiros — ver §5, item externo).
+**Owner named in this phase:** the WS-F Security Lead is the default owner until the pilot client
+names a security contact; from then on the program runs jointly (the client may require
+their own third-party pentest — see §5, external item).
 
 ---
 
-## 2. Cadência
+## 2. Cadence
 
-| Gatilho | O que roda | Quem |
+| Trigger | What runs | Who |
 |---|---|---|
-| **Todo CI (cada PR)** | Suíte executável `test_red_team.py` inteira (21 ataques). Um controle que regride = build vermelho. | Automático |
-| **Toda release / tag** | Suíte executável + `helm template` de topologias A e B + scanner de plaintext secrets. | Automático |
-| **Antes do 1º repo de cliente (P0)** | Ciclo manual completo (§4) + revisão do threat model contra o deployment concreto do cliente (tier de modelo, topologia). | Dono + executor |
-| **Trimestral** | Ciclo manual completo; rotação do engenheiro executor; revisão de novas ameaças (novos adapters, novo substrato, novo provider). | Dono + rotativo |
-| **Ad-hoc** | A cada mudança em um controle de segurança (assinatura, egress allowlist, isolamento, promoção de skill), o autor adiciona/ajusta o ataque correspondente NO MESMO PR. | Autor da mudança |
-| **Pós-incidente** | Um novo caso de ataque reproduzindo o incidente é adicionado à suíte antes de fechar o postmortem (teste de regressão de segurança). | Dono |
+| **Every CI run (each PR)** | The entire executable `test_red_team.py` suite (21 attacks). A control that regresses = red build. | Automatic |
+| **Every release / tag** | Executable suite + `helm template` for topologies A and B + plaintext-secret scanner. | Automatic |
+| **Before the 1st client repo (P0)** | Full manual cycle (§4) + review of the threat model against the client's concrete deployment (model tier, topology). | Owner + executor |
+| **Quarterly** | Full manual cycle; rotation of the executing engineer; review of new threats (new adapters, new substrate, new provider). | Owner + rotation |
+| **Ad-hoc** | On every change to a security control (signature verification, egress allowlist, isolation, skill promotion), the author adds/adjusts the corresponding attack IN THE SAME PR. | Author of the change |
+| **Post-incident** | A new attack case reproducing the incident is added to the suite before closing the postmortem (security regression test). | Owner |
 
 ---
 
-## 3. Escopo — ameaças exercitadas (mapeadas ao threat model)
+## 3. Scope — threats exercised (mapped to the threat model)
 
-O escopo é exatamente o conjunto de ameaças do `THREAT-MODEL.md`. Estado A = automatizado na
-suíte; M = item manual (§5).
+The scope is exactly the set of threats in `THREAT-MODEL.md`. State A = automated in the
+suite; M = manual item (§5).
 
-| Ameaça (threat model §) | Ataque | Estado |
+| Threat (threat model §) | Attack | State |
 |---|---|---|
-| Forged task injection (2.1) | Assinatura HMAC forjada / chave errada / ausente rejeitada; replay fora da janela | **A** (`TestForgedWebhook`) |
-| Indirect prompt injection / OWASP LLM01 (2.2) | Unicode invisível/bidi + secret plantado no `content_snapshot`; contenção via egress | **A** (`TestPromptInjection`) |
-| Exfiltração / SSRF (2.5) | GET para pastebin/telegram/metadata + bypass por confusão de host, via proxy | **A** (`TestPromptInjection::test_egress_denies_exfiltration`) |
-| Vazamento cross-tenant (2.9) | A lê skill/retrieval/audit/token/artifact de B → fail-closed + audit | **A** (`TestCrossTenant`) |
-| Skill maliciosa / auto-promoção (2.4) | Candidate tenta virar active/approved sem aprovador humano → recusado; candidate nunca é servida ao Planner | **A** (`TestMaliciousSkill`) |
-| Roubo/replay de credencial (2.5) | Replay de token efêmero contra upstream real | **M** (precisa sandbox + upstream controlado — cross-WS) |
-| Confusão de privilégio (2.2/2.8) | Steering forjado; operador não-autorizado no console | **A** (parcial: steering em `ingest-gateway/tests/test_steering.py`); **M** para o console sem IdP real |
-| Supply-chain drift (2.9) | Dependência OSS adulterada / imagem não assinada / CVE conhecido | **M** (sem SBOM/assinatura/scan de CVE no CI — item de maior prioridade da lista manual) |
-| Merge automático / P3 (2.3) | Path de merge no source | **A** (invariante estático `orchestrator/tests/test_review_loop.py::test_no_automatic_merge_path_in_source`) |
-| Adulteração do audit ledger (2.9) | UPDATE/DELETE em `audit_log` como `dse_app` | **A** (verificado no adendo 03; `packages/dse_audit/tests`) |
+| Forged task injection (2.1) | Forged HMAC signature / wrong key / missing key rejected; replay outside the window | **A** (`TestForgedWebhook`) |
+| Indirect prompt injection / OWASP LLM01 (2.2) | Invisible/bidi Unicode + a planted secret in the `content_snapshot`; containment via egress | **A** (`TestPromptInjection`) |
+| Exfiltration / SSRF (2.5) | GET to pastebin/telegram/metadata + host-confusion bypass, through the proxy | **A** (`TestPromptInjection::test_egress_denies_exfiltration`) |
+| Cross-tenant leak (2.9) | A reads B's skill/retrieval/audit/token/artifact → fail-closed + audit | **A** (`TestCrossTenant`) |
+| Malicious skill / self-promotion (2.4) | A candidate tries to become active/approved without a human approver → refused; a candidate is never served to the Planner | **A** (`TestMaliciousSkill`) |
+| Credential theft/replay (2.5) | Replay of an ephemeral token against a real upstream | **M** (needs a sandbox + a controlled upstream — cross-WS) |
+| Privilege confusion (2.2/2.8) | Forged steering; unauthorized operator on the console | **A** (partial: steering in `ingest-gateway/tests/test_steering.py`); **M** for the console without a real IdP |
+| Supply-chain drift (2.9) | Tampered OSS dependency / unsigned image / known CVE | **M** (no SBOM/signing/CVE scanning in CI — highest-priority item on the manual list) |
+| Automatic merge / P3 (2.3) | A merge path in the source | **A** (static invariant `orchestrator/tests/test_review_loop.py::test_no_automatic_merge_path_in_source`) |
+| Audit ledger tampering (2.9) | UPDATE/DELETE on `audit_log` as `dse_app` | **A** (verified in addendum 03; `packages/dse_audit/tests`) |
 
 ---
 
-## 4. Procedimento do ciclo manual (antes do 1º repo de cliente e trimestral)
+## 4. Manual cycle procedure (before the 1st client repo and quarterly)
 
-1. **Preparação**: subir a infra (`make up` num ambiente dedicado, NÃO o compartilhado), aplicar
-   migrações, ativar o venv do WS-F.
-2. **Rodar a suíte executável** e confirmar 0 falhas / 0 skips inesperados:
-   `pytest -q services/platform/tests/test_red_team.py`. Um skip é aceitável só quando o
-   controle-alvo legitimamente não está no ambiente (documentar por quê no relatório).
-3. **Ataques manuais** (os itens M da §5), com evidência anexada (logs de audit, respostas HTTP,
-   screenshots do console).
-4. **Revisão do threat model contra o deployment concreto**: o tier de modelo (1 PrivateLink / 2
-   air-gapped) e a topologia (A/B) do cliente mudam a superfície — confirmar que cada linha da
-   matriz ainda vale e que a allowlist do egress reflete só os hosts daquele cliente.
-5. **Relatório**: preencher o template (§6), listar regressões como issues/`spawn` para o WS dono,
-   e emitir o veredito de go/no-go de segurança para o dono.
+1. **Preparation**: bring up the infra (`make up` in a dedicated environment, NOT the shared one),
+   apply migrations, activate the WS-F venv.
+2. **Run the executable suite** and confirm 0 failures / 0 unexpected skips:
+   `pytest -q services/platform/tests/test_red_team.py`. A skip is acceptable only when the
+   target control is legitimately absent from the environment (document why in the report).
+3. **Manual attacks** (the M items from §5), with evidence attached (audit logs, HTTP responses,
+   console screenshots).
+4. **Review the threat model against the concrete deployment**: the model tier (1 PrivateLink / 2
+   air-gapped) and the client's topology (A/B) change the surface — confirm that every row of the
+   matrix still holds and that the egress allowlist reflects only that client's hosts.
+5. **Report**: fill in the template (§6), file regressions as issues/`spawn`s for the owning WS,
+   and issue the security go/no-go verdict to the owner.
 
 ---
 
-## 5. Itens MANUAIS do programa (ainda não automatizáveis) — honesto (P8)
+## 5. MANUAL items of the program (not yet automatable) — honest (P8)
 
-Cada item diz **por que** não está na suíte e **o que** o desbloquearia.
+Each item states **why** it is not in the suite and **what** would unblock it.
 
-1. **Replay de credencial efêmera contra upstream real.** Por quê: precisa de um sandbox real
-   (WS-C) rodando uma sessão + um upstream de teste controlado para capturar e repetir um token
-   de verdade — não é verificável só contra a interface HTTP do proxy. Desbloqueio: teste de
-   integração cross-WS (WS-C + WS-F) na consolidação. Já documentado como intenção em
+1. **Replay of an ephemeral credential against a real upstream.** Why: it needs a real sandbox
+   (WS-C) running a session + a controlled test upstream in order to capture and replay a real
+   token — it is not verifiable against the proxy's HTTP interface alone. Unblocker: a cross-WS
+   integration test (WS-C + WS-F) at consolidation. Already documented as intent in
    `services/platform/tests/test_egress_proxy_adversarial.py::TestCredentialReuse`.
-2. **Supply-chain (o item de maior prioridade da lista manual).** Por quê: hoje só há BOM manual
-   (`infra/OSS-BOM.md`) + tags pinadas no Helm; não há assinatura de imagem (cosign), SBOM
-   gerado, nem scan de CVE no CI. Desbloqueio: adicionar geração de SBOM + `cosign verify` no
-   pipeline de build e um scanner de CVE (trivy/grype) como gate. Até lá, é verificação manual a
-   cada release: diff da BOM + revisão de advisories dos pacotes de `infra/OSS-BOM.md`.
-3. **Console sem IdP real.** Por quê: o verificador OIDC é real mas nenhum IdP está provisionado
-   nesta sessão (login = 503 por design). Desbloqueio: apontar `DSE_OIDC_*` para um IdP real e
-   então automatizar "usuário sem claim de operador é recusado + auditado".
-4. **Assinatura real de GitHub App / Slack / Jira.** Por quê: a lógica HMAC é de produção, mas os
-   secrets são de env/fixture. Desbloqueio: registrar as apps reais (item administrativo de maior
-   lead time — adendo 03 §Parte 3) e re-rodar `TestForgedWebhook` contra os secrets reais.
-5. **Pentest de terceiros / bug bounty.** Por quê: um red-team interno tem ponto cego sobre o
-   próprio design. Desbloqueio: contratar pentest externo antes do go-live com cliente que o
-   exija; o cliente do piloto pode trazer o seu. Escopo entregue ao terceiro = este documento +
-   o threat model.
-6. **Escape de sandbox a nível de kernel.** Por quê: os caps de recurso e o rootless são testados
-   (`sandbox-runtime/tests/test_resource_caps_and_metrics.py`, `test_network_isolation.py`), mas
-   um 0-day de container escape está fora do que um teste de aplicação cobre. Desbloqueio:
-   defesa em profundidade de infra (gVisor/Kata, seccomp/AppArmor endurecido) + monitoramento —
-   responsabilidade compartilhada com a operação de plataforma do cliente.
+2. **Supply-chain (the highest-priority item on the manual list).** Why: today there is only a
+   manual BOM (`infra/OSS-BOM.md`) + pinned tags in Helm; there is no image signing (cosign), no
+   generated SBOM, and no CVE scanning in CI. Unblocker: add SBOM generation + `cosign verify` to
+   the build pipeline and a CVE scanner (trivy/grype) as a gate. Until then, it is a manual check
+   at each release: BOM diff + review of advisories for the packages in `infra/OSS-BOM.md`.
+3. **Console without a real IdP.** Why: the OIDC verifier is real but no IdP is provisioned
+   in this session (login = 503 by design). Unblocker: point `DSE_OIDC_*` at a real IdP and
+   then automate "a user without the operator claim is refused + audited".
+4. **Real GitHub App / Slack / Jira signatures.** Why: the HMAC logic is production code, but the
+   secrets come from env/fixture. Unblocker: register the real apps (administrative item with the
+   longest lead time — addendum 03 §Part 3) and re-run `TestForgedWebhook` against the real secrets.
+5. **Third-party pentest / bug bounty.** Why: an internal red-team has a blind spot for its
+   own design. Unblocker: contract an external pentest before go-live with any client that
+   requires it; the pilot client may bring their own. Scope handed to the third party = this
+   document + the threat model.
+6. **Kernel-level sandbox escape.** Why: the resource caps and rootless execution are tested
+   (`sandbox-runtime/tests/test_resource_caps_and_metrics.py`, `test_network_isolation.py`), but
+   a container-escape 0-day is beyond what an application test covers. Unblocker:
+   infra defense in depth (gVisor/Kata, hardened seccomp/AppArmor) + monitoring —
+   shared responsibility with the client's platform operations.
 
-Nenhum item manual é um controle **ausente** que se finge presente — todos ou têm o controle no
-código com uma lacuna de *verificação* automatizada, ou são responsabilidade de infra/negócio
-declarada.
+No manual item is an **absent** control pretending to be present — each one either has the control
+in the code with a gap in *automated verification*, or is a declared infra/business responsibility.
 
 ---
 
-## 6. Template de relatório de ciclo
+## 6. Cycle report template
 
 ```
-Ciclo de red-team — <data> — executor: <nome> — gatilho: <CI|release|pre-cliente|trimestral|incidente>
-Ambiente: <dedicado/efêmero> · tier de modelo: <1|2> · topologia: <A|B>
+Red-team cycle — <date> — executor: <name> — trigger: <CI|release|pre-client|quarterly|incident>
+Environment: <dedicated/ephemeral> · model tier: <1|2> · topology: <A|B>
 
-Suíte executável:  <N> passaram / <N> falharam / <N> skip
-  Skips (com razão): ...
-  Regressões (issue/spawn aberto p/ WS dono): ...
+Executable suite:  <N> passed / <N> failed / <N> skipped
+  Skips (with reason): ...
+  Regressions (issue/spawn opened for the owning WS): ...
 
-Ataques manuais (§5):
-  1. Replay de credencial ...... <feito|n/a> — evidência: <link>
-  2. Supply-chain (SBOM/CVE) .... <feito|n/a> — evidência: <link>
-  3. Console/IdP ................ <feito|n/a>
+Manual attacks (§5):
+  1. Credential replay .......... <done|n/a> — evidence: <link>
+  2. Supply-chain (SBOM/CVE) .... <done|n/a> — evidence: <link>
+  3. Console/IdP ................ <done|n/a>
   ...
 
-Revisão do threat model vs deployment concreto: <ok|desvios encontrados>
-Veredito de segurança: <GO | NO-GO> — justificativa: ...
+Threat model review vs concrete deployment: <ok|deviations found>
+Security verdict: <GO | NO-GO> — rationale: ...
 ```

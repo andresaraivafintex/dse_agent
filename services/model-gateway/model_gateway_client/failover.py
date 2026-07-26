@@ -1,37 +1,37 @@
-"""WSD-E4-T1 (Fase 3) — failover e degradação INTRA-TIER.
+"""WSD-E4-T1 (Phase 3) — INTRA-TIER failover and degradation.
 
-O failover em si é NATIVO do LiteLLM proxy (`router_settings.fallbacks` em
-`litellm_config.yaml`): se o deployment primário de um model group falha
-(connection refused / 5xx / timeout), o router tenta o fallback declarado —
-e somente ele. Este módulo é o lado do CLIENTE dessa história:
+The failover itself is NATIVE to the LiteLLM proxy (`router_settings.fallbacks`
+in `litellm_config.yaml`): if a model group's primary deployment fails
+(connection refused / 5xx / timeout), the router tries the declared fallback —
+and only that one. This module is the CLIENT side of that story:
 
-  1. `INTRA_TIER_FALLBACKS` — espelho declarativo do mapa de fallbacks do
-     proxy. Existe para (a) permitir mintar virtual keys que cobrem o conjunto
-     de failover completo (uma key escopada SÓ no primário faz o proxy negar o
-     fallback — comportamento correto do backstop server-side, mas então não
-     há failover), e (b) permitir o check de política do modelo servido em
-     degradação. A consistência entre este espelho e o `litellm_config.yaml`
-     é garantida por teste (test_failover_intra_tier.py) — se alguém mudar um
-     sem o outro, o CI quebra.
+  1. `INTRA_TIER_FALLBACKS` — declarative mirror of the proxy's fallback map.
+     It exists to (a) let us mint virtual keys covering the full failover set
+     (a key scoped ONLY to the primary makes the proxy deny the fallback —
+     correct server-side backstop behavior, but then there is no failover), and
+     (b) allow the policy check on the model served under degradation.
+     Consistency between this mirror and `litellm_config.yaml` is guaranteed by
+     a test (test_failover_intra_tier.py) — if someone changes one without the
+     other, CI breaks.
 
-  2. `detect_degradation(...)` — detecção determinística de que a resposta
-     veio de um fallback, pelos headers que o LiteLLM devolve
+  2. `detect_degradation(...)` — deterministic detection that the response came
+     from a fallback, using the headers LiteLLM returns
      (`x-litellm-attempted-fallbacks` > 0; `x-litellm-model-api-base`
-     identifica o endpoint que de fato serviu).
+     identifies the endpoint that actually served it).
 
-  3. `audit_degradation(...)` — o audit row de degradação (P8): failover
-     nunca é silencioso. `gateway.call_degraded_fallback` com o endpoint
-     servidor, os candidatos de fallback e o veredito de política de cada um.
+  3. `audit_degradation(...)` — the degradation audit row (P8): failover is
+     never silent. `gateway.call_degraded_fallback` with the serving endpoint,
+     the fallback candidates and the policy verdict for each of them.
 
-  4. Enforcement de política sobre o modelo servido: se NENHUM dos fallbacks
-     declarados do model group é permitido pela política do tenant/stage, a
-     resposta degradada é RECUSADA na fronteira (P6) com `policy_denied`
-     (kind=fallback_model_not_allowed) — fallback não burla política, igual
-     ao reassign (WSD-E4-T2).
+  4. Policy enforcement on the served model: if NONE of the model group's
+     declared fallbacks is permitted by the tenant/stage policy, the degraded
+     response is REFUSED at the boundary (P6) with `policy_denied`
+     (kind=fallback_model_not_allowed) — a fallback does not bypass policy,
+     same as reassign (WSD-E4-T2).
 
-Nunca há rota de fallback cruzando tier (NFR-07/P2): o teste negativo
-`test_no_fallback_route_crosses_tier` parseia o `litellm_config.yaml` e falha
-se qualquer par (primário, fallback) tiver `dse_tier` diferente.
+There is never a fallback route crossing tiers (NFR-07/P2): the negative test
+`test_no_fallback_route_crosses_tier` parses `litellm_config.yaml` and fails if
+any (primary, fallback) pair has a different `dse_tier`.
 """
 from __future__ import annotations
 
@@ -46,13 +46,13 @@ from . import policy
 
 _AUDIT_ACTOR = "system:model-gateway"
 
-# Header do LiteLLM: quantos fallbacks foram tentados até esta resposta.
+# LiteLLM header: how many fallbacks were attempted up to this response.
 ATTEMPTED_FALLBACKS_HEADER = "x-litellm-attempted-fallbacks"
-# Header do LiteLLM: o api_base do deployment que DE FATO serviu a resposta.
+# LiteLLM header: the api_base of the deployment that ACTUALLY served the response.
 MODEL_API_BASE_HEADER = "x-litellm-model-api-base"
 
-# Espelho declarativo de router_settings.fallbacks do litellm_config.yaml
-# (ver docstring §1). Sobrescrevível por env var para outros deployments.
+# Declarative mirror of router_settings.fallbacks from litellm_config.yaml
+# (see docstring §1). Overridable by env var for other deployments.
 _DEFAULT_FALLBACKS = {"eco/echo-model": ["eco/echo-model-b"]}
 
 
@@ -64,18 +64,18 @@ def intra_tier_fallbacks() -> dict[str, list[str]]:
         parsed = json.loads(raw)
         return {str(k): [str(m) for m in v] for k, v in parsed.items()}
     except (json.JSONDecodeError, TypeError, AttributeError):
-        # Config inválida não pode abrir rota de fallback surpresa: cai para
-        # o default conhecido (falha fechada para o mapa conhecido).
+        # Invalid config must not open a surprise fallback route: fall back to
+        # the known default (fail closed onto the known map).
         return dict(_DEFAULT_FALLBACKS)
 
 
 def intra_tier_failover_set(model: str) -> list[str]:
-    """O conjunto completo de modelos que uma virtual key precisa cobrir para
-    o failover intra-tier funcionar: o primário + seus fallbacks declarados.
+    """The full set of models a virtual key must cover for intra-tier failover
+    to work: the primary + its declared fallbacks.
 
-    É isto que os call sites (sessões do WS-C) devem passar em
-    `mint_virtual_key(..., models=intra_tier_failover_set(model))` — uma key
-    escopada só no primário faz o proxy (corretamente) negar o fallback."""
+    This is what call sites (WS-C sessions) should pass in
+    `mint_virtual_key(..., models=intra_tier_failover_set(model))` — a key
+    scoped only to the primary makes the proxy (correctly) deny the fallback."""
     return [model, *intra_tier_fallbacks().get(model, [])]
 
 
@@ -88,26 +88,27 @@ class Degradation:
 
 
 def _fallback_api_bases() -> frozenset[str]:
-    """api_bases dos deployments de FALLBACK conhecidos (env DSE_FALLBACK_API_BASES,
-    CSV) — espelho dos api_base de fallback do litellm_config. Opt-in: sem a env,
-    a detecção por cooldown fica desligada e vale só o header de fallback."""
+    """api_bases of the known FALLBACK deployments (env DSE_FALLBACK_API_BASES,
+    CSV) — mirror of the fallback api_bases in litellm_config. Opt-in: without
+    the env var, cooldown detection is off and only the fallback header
+    counts."""
     raw = os.environ.get("DSE_FALLBACK_API_BASES", "")
     return frozenset(b.strip() for b in raw.split(",") if b.strip())
 
 
 def detect_degradation(requested_model: str, response_headers) -> Degradation | None:
-    """Detecção determinística de que a resposta NÃO veio do primário. Dois
-    caminhos, ambos degradação auditável (P8 — nunca silenciosa):
+    """Deterministic detection that the response did NOT come from the primary.
+    Two paths, both auditable degradation (P8 — never silent):
 
-    1. Fallback em RUNTIME: `x-litellm-attempted-fallbacks` > 0 (o router tentou
-       o primário, falhou e caiu no fallback na mesma chamada).
-    2. Fallback por COOLDOWN: attempted=0 mas o `x-litellm-model-api-base` que
-       serviu é um api_base de FALLBACK conhecido (DSE_FALLBACK_API_BASES) — o
-       health-check do router já tinha tirado o primário do pool ANTES desta
-       chamada, então ela foi direto ao fallback sem "tentar" o primário. Sem
-       esta detecção, uma degradação por cooldown passaria silenciosa (achado
-       da primeira execução real do CI, 2026-07-24: no runner lento o
-       health-check corre entre o stop do primário e a chamada).
+    1. RUNTIME fallback: `x-litellm-attempted-fallbacks` > 0 (the router tried
+       the primary, it failed, and it fell to the fallback on the same call).
+    2. COOLDOWN fallback: attempted=0 but the `x-litellm-model-api-base` that
+       served is a known FALLBACK api_base (DSE_FALLBACK_API_BASES) — the
+       router's health-check had already pulled the primary out of the pool
+       BEFORE this call, so it went straight to the fallback without "trying"
+       the primary. Without this detection, a cooldown degradation would pass
+       silently (found on the first real CI run, 2026-07-24: on the slow runner
+       the health-check runs between stopping the primary and the call).
     """
     served = response_headers.get(MODEL_API_BASE_HEADER)
     raw = response_headers.get(ATTEMPTED_FALLBACKS_HEADER, "0")
@@ -130,9 +131,9 @@ def detect_degradation(requested_model: str, response_headers) -> Degradation | 
 def audit_degradation(
     headers: GatewayCallHeaders, degradation: Degradation
 ) -> dict[str, bool]:
-    """Emite o audit row de degradação (P8 — failover nunca é silencioso) e
-    devolve o veredito de política por candidato de fallback (usado pelo
-    caller para o enforcement P6 — ver gateway_call.chat_completion)."""
+    """Emits the degradation audit row (P8 — failover is never silent) and
+    returns the policy verdict per fallback candidate (used by the caller for
+    the P6 enforcement — see gateway_call.chat_completion)."""
     decision = policy.resolve_policy(
         headers.tenant_id,
         headers.stage.value,

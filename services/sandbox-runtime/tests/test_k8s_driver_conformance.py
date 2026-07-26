@@ -1,9 +1,9 @@
-"""Plano 08 §G — suíte de CONFORMIDADE de segurança do KubernetesSandboxDriver.
+"""Plano 08 §G — security CONFORMANCE suite for the KubernetesSandboxDriver.
 
-Valida que o Pod spec gerado é endurecido — SEM precisar de cluster (o núcleo
-`build_pod_manifest` é puro). A prova VIVA (Pod rodando sob gVisor/Kata) depende
-do cluster; estes testes travam a POSTURA no CI para que ninguém afrouxe o spec
-sem quebrar aqui.
+Validates that the generated Pod spec is hardened — WITHOUT needing a cluster
+(the `build_pod_manifest` core is pure). The LIVE proof (a Pod running under
+gVisor/Kata) depends on the cluster; these tests pin the POSTURE in CI so that
+nobody can loosen the spec without breaking here.
 """
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def test_readonly_rootfs_with_writable_scratch():
     mounts = {m["name"] for m in c["volumeMounts"]}
     assert {"workspace", "tmp"} <= mounts
     vols = {v["name"]: v for v in pod["spec"]["volumes"]}
-    # scratch graváveis via emptyDir (não hostPath)
+    # writable scratch via emptyDir (not hostPath)
     assert "emptyDir" in vols["workspace"] and "emptyDir" in vols["tmp"]
 
 
@@ -71,7 +71,7 @@ def test_no_host_namespaces_or_socket():
     assert spec["hostNetwork"] is False
     assert spec["hostPID"] is False
     assert spec["hostIPC"] is False
-    # nenhum volume hostPath (em especial o socket do Docker)
+    # no hostPath volume at all (the Docker socket in particular)
     for v in spec["volumes"]:
         assert "hostPath" not in v
 
@@ -93,7 +93,7 @@ def test_runtime_class_set_when_configured():
 
 
 def test_missing_runtime_class_is_flagged_not_silent():
-    # isolamento fraco (sem RuntimeClass) NUNCA é silencioso — marca annotation
+    # weak isolation (no RuntimeClass) is NEVER silent — it marks an annotation
     pod = _pod(runtime_class="")
     assert "runtimeClassName" not in pod["spec"]
     assert any("isolation-warning" in k for k in pod["metadata"]["annotations"])
@@ -113,8 +113,8 @@ def test_driver_advertises_isolated_execution():
 
 
 def test_fail_closed_without_kubectl():
-    # sem kubectl no PATH, provision/execute FALHAM (nunca rodam local)
-    cfg = K8sSandboxConfig(kubectl="kubectl-que-nao-existe-xyz")
+    # with no kubectl on PATH, provision/execute FAIL (they never run locally)
+    cfg = K8sSandboxConfig(kubectl="kubectl-that-does-not-exist-xyz")
     driver = KubernetesSandboxDriver(cfg)
     with pytest.raises(IsolatedStageExecutionUnavailable):
         driver.execute_stage(StageExecutionRequest(

@@ -1,43 +1,44 @@
-"""Constantes de integração entre workstreams — nomes fixos que todo mundo usa
-para não precisar coordenar em tempo real."""
+"""Cross-workstream integration constants — fixed names everybody uses so that
+no real-time coordination is needed."""
 
 TASK_QUEUE = "dse-core-task-queue"
 WORKFLOW_TYPE = "WorkItemLifecycleWorkflow"
 
-# Nomes de signal Temporal do WorkItemLifecycleWorkflow (services/orchestrator/
-# src/dse_orchestrator/workflows.py) — o Temporal Python SDK usa o nome do
-# método `@workflow.signal` como nome do signal por default (sem `name=`
-# explícito), então estas strings têm que bater exatamente com os nomes dos
-# métodos lá. Achado da integração da Fase 1: o ingest-gateway (WS-A) e o
-# review_signal (WS-E) tinham cada um sua própria constante de nome de signal
-# (`"conversation_signal"` e `"review_decision"`, respectivamente) que não
-# batia com NENHUM `@workflow.signal` real — todo signal enviado por eles
-# era silenciosamente descartado pelo Temporal (nome sem handler registrado
-# não é erro, só não aciona nada). Promovidas aqui como fonte única da
-# verdade; ambos os workstreams foram corrigidos para importar daqui.
+# Temporal signal names of the WorkItemLifecycleWorkflow (services/orchestrator/
+# src/dse_orchestrator/workflows.py) — the Temporal Python SDK uses the
+# `@workflow.signal` method name as the signal name by default (without an
+# explicit `name=`), so these strings must match the method names over there
+# exactly. Found during the Phase 1 integration: the ingest-gateway (WS-A) and
+# the review_signal (WS-E) each had their own signal-name constant
+# (`"conversation_signal"` and `"review_decision"`, respectively) that matched
+# NO real `@workflow.signal` — every signal they sent was silently dropped by
+# Temporal (a name with no registered handler is not an error, it just triggers
+# nothing). Promoted here as the single source of truth; both workstreams were
+# fixed to import from here.
 SIGNAL_CLARIFICATION_ANSWER = "clarification_answer"
 SIGNAL_REVIEW_COMMENT = "review_comment"
 SIGNAL_MERGED_BY_HUMAN = "merged_by_human"
 
-# Fase 2 (adendo 01 §2.2): signal do gate de aprovação de plano (WSB-E3-T2).
+# Phase 2 (adendo 01 §2.2): plan approval gate signal (WSB-E3-T2).
 # Payload: {"verdict": "approved"|"rejected", "route": "re_plan"|"re_clarify"|
-# "cancel" (obrigatório quando rejected — WSB-E3-T3), "comment": str,
-# "actor": principal resolvido}. O dispatcher do WS-A roteia `kind=approval`
-# para este signal quando work_items.status == 'awaiting_plan_approval'
-# (WSA-E6-T3) — nunca mais só pelo `kind`.
+# "cancel" (required when rejected — WSB-E3-T3), "comment": str,
+# "actor": resolved principal}. The WS-A dispatcher routes `kind=approval` to
+# this signal when work_items.status == 'awaiting_plan_approval'
+# (WSA-E6-T3) — never again by `kind` alone.
 SIGNAL_PLAN_APPROVAL = "plan_approval"
 
-# Limitação conhecida (documentar, não esconder — P8): o roteamento correto
-# de um ConversationEvent correlacionado (Path B) deveria depender do ESTADO
-# atual do WorkItem (esperando clarificação? esperando review?), não só do
-# `kind` do evento — um `kind=approval` vindo de um botão Slack, por exemplo,
-# hoje é mapeado heuristicamente para SIGNAL_REVIEW_COMMENT no dispatcher do
-# WS-A porque a Fase 1 não tem gate de aprovação de plano (isso é Fase 2,
-# WSB-E3-T2) — se/quando ele existir, este mapeamento precisa consultar
-# `work_items.status` em vez de decidir só pelo `kind`.
+# Known limitation (document it, do not hide it — P8): correctly routing a
+# correlated ConversationEvent (Path B) should depend on the CURRENT state of
+# the WorkItem (waiting for clarification? waiting for review?), not only on
+# the event `kind` — a `kind=approval` coming from a Slack button, for example,
+# is today heuristically mapped to SIGNAL_REVIEW_COMMENT in the WS-A dispatcher
+# because Phase 1 has no plan approval gate (that is Phase 2, WSB-E3-T2) —
+# if/when it exists, this mapping has to consult `work_items.status` instead of
+# deciding by `kind` alone.
 
-# Atributos de span OTel que WSD-E3 (model-gateway) emite e WSF-E7 (dashboards/
-# alerting) consome — contrato entre WS-D e WS-F sem precisar rodar juntos.
+# OTel span attributes that WSD-E3 (model-gateway) emits and WSF-E7
+# (dashboards/alerting) consumes — a contract between WS-D and WS-F without
+# them having to run together.
 OTEL_ATTR_TENANT = "dse.tenant_id"
 OTEL_ATTR_WORK_ITEM = "dse.work_item_id"
 OTEL_ATTR_STAGE = "dse.stage"
@@ -45,6 +46,6 @@ OTEL_ATTR_MODEL = "dse.model"
 OTEL_ATTR_COST_USD = "dse.cost_usd"
 OTEL_ATTR_TOKENS_IN = "dse.tokens_in"
 OTEL_ATTR_TOKENS_OUT = "dse.tokens_out"
-# Promovido do WS-D na Fase 2 (adendo 01 §4) — já era emitido como atributo
-# ad-hoc "dse.task_class" na Fase 1.
+# Promoted from WS-D in Phase 2 (adendo 01 §4) — it was already emitted as the
+# ad-hoc attribute "dse.task_class" in Phase 1.
 OTEL_ATTR_TASK_CLASS = "dse.task_class"

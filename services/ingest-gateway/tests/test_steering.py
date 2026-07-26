@@ -1,14 +1,15 @@
 """Steering authorization.
 
-Fase 1 (WSA-E6-T2a): fallback de allowlist, nunca 'qualquer um pode steerar'.
-Fase 4 (WSA-E6-T2b): resolução identity-map-backed (papel via
-`dse_console_identity` do RBAC do console + `dse_access_bundle.designated_approvers`
-do WS-F), com a allowlist da Fase 1 como fallback documentado. A ASSINATURA de
-`is_authorized_to_steer(tenant_id, principal_id) -> bool` não mudou — os testes
-da Fase 1 abaixo continuam valendo sem alteração (contrato estável).
+Phase 1 (WSA-E6-T2a): allowlist fallback, never 'anyone can steer'.
+Phase 4 (WSA-E6-T2b): identity-map-backed resolution (role via
+`dse_console_identity` from the console RBAC + WS-F's
+`dse_access_bundle.designated_approvers`), with the Phase 1 allowlist as the
+documented fallback. The SIGNATURE of
+`is_authorized_to_steer(tenant_id, principal_id) -> bool` did not change — the
+Phase 1 tests below still hold unchanged (stable contract).
 
-Testes reais contra o Postgres da infra (P8 — nunca mock de DB). O `conftest`
-autouse limpa as linhas de teste (prefixos `test_tenant_` / `usr_test_`).
+Real tests against the infra Postgres (P8 — never mock the DB). The autouse
+`conftest` cleans up the test rows (prefixes `test_tenant_` / `usr_test_`).
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ def _conn():
 
 
 def _mk_principal(display_name: str = "Test User") -> str:
-    """Cria um principal de teste (prefixo `usr_test_` p/ o cleanup do conftest)."""
+    """Creates a test principal (prefix `usr_test_` for the conftest cleanup)."""
     principal_id = f"usr_test_{uuid.uuid4().hex[:12]}"
     conn = _conn()
     with conn.cursor() as cur:
@@ -75,8 +76,8 @@ def _add_console_identity(
 
 
 def _add_bundle_approver(tenant_id: str, principal_id: str) -> None:
-    """Cria o access bundle default (channel NULL) do tenant com o principal
-    como designated_approver."""
+    """Creates the tenant's default access bundle (channel NULL) with the
+    principal as a designated_approver."""
     conn = _conn()
     with conn.cursor() as cur:
         cur.execute(
@@ -130,7 +131,7 @@ def _steering_event(stranger_principal: str) -> ConversationEvent:
 
 
 # ---------------------------------------------------------------------------
-# Fase 1 — allowlist fallback (contrato estável; devem continuar passando)
+# Phase 1 — allowlist fallback (stable contract; these must keep passing)
 # ---------------------------------------------------------------------------
 def test_absent_row_means_unauthorized(tenant_id):
     assert is_authorized_to_steer(tenant_id, "usr_never_added") is False
@@ -150,35 +151,35 @@ def test_allowlist_is_scoped_per_tenant(tenant_id):
 
 
 # ---------------------------------------------------------------------------
-# Fase 4 — identity-map-backed (papel via console RBAC + access bundle)
+# Phase 4 — identity-map-backed (role via console RBAC + access bundle)
 # ---------------------------------------------------------------------------
 def test_console_role_authorizes_steering(tenant_id):
-    """Usuário com papel resolvido (RBAC do console) steera — sem precisar de
-    linha na allowlist."""
+    """A user with a resolved role (console RBAC) can steer — no allowlist row
+    needed."""
     p = _mk_principal()
     _add_console_identity(p, roles=["operator"], tenant_id=tenant_id)
     assert is_authorized_to_steer(tenant_id, p) is True
 
 
 def test_bundle_designated_approver_authorizes_steering(tenant_id):
-    """Usuário com papel resolvido via access bundle (designated_approvers)
-    steera — a via de bundle do enunciado (WSA-E6-T2b)."""
+    """A user with a role resolved via the access bundle (designated_approvers)
+    can steer — the bundle path from the spec (WSA-E6-T2b)."""
     p = _mk_principal()
     _add_bundle_approver(tenant_id, p)
     assert is_authorized_to_steer(tenant_id, p) is True
 
 
 def test_console_identity_without_steering_role_denied(tenant_id):
-    """Ter identidade de console mas sem um papel em STEERING_ROLES (e sem
-    allowlist/bundle) NÃO autoriza — deny-by-default."""
+    """Having a console identity but no role in STEERING_ROLES (and no
+    allowlist/bundle) does NOT authorize — deny-by-default."""
     p = _mk_principal()
     _add_console_identity(p, roles=["viewer"], tenant_id=tenant_id)
     assert is_authorized_to_steer(tenant_id, p) is False
 
 
 def test_console_role_is_tenant_scoped(tenant_id):
-    """Papel de console é escopado ao home tenant: um operador do tenant A não
-    steera tarefas do tenant B só pelo papel (isolamento multi-tenant)."""
+    """A console role is scoped to the home tenant: an operator of tenant A does
+    not steer tenant B's tasks by role alone (multi-tenant isolation)."""
     other_tenant = tenant_id + "_other"
     p = _mk_principal()
     _add_console_identity(p, roles=["operator"], tenant_id=tenant_id)
@@ -187,8 +188,7 @@ def test_console_role_is_tenant_scoped(tenant_id):
 
 
 def test_platform_operator_role_spans_tenants(tenant_id):
-    """Operador de plataforma (home tenant NULL) com papel steera qualquer
-    tenant."""
+    """A platform operator (NULL home tenant) with a role steers any tenant."""
     other_tenant = tenant_id + "_other"
     p = _mk_principal()
     _add_console_identity(p, roles=["platform_admin"], tenant_id=None)
@@ -197,17 +197,18 @@ def test_platform_operator_role_spans_tenants(tenant_id):
 
 
 def test_offboarded_principal_denied_even_if_allowlisted(tenant_id):
-    """Offboarding é a autoridade que sobrepõe (WSF-E3-T3): principal desativado
-    no console NÃO steera mesmo continuando na allowlist da Fase 1."""
+    """Offboarding is the authority that overrides (WSF-E3-T3): a principal
+    deactivated in the console does NOT steer even while still on the Phase 1
+    allowlist."""
     p = _mk_principal()
     _allowlist(tenant_id, p)
-    assert is_authorized_to_steer(tenant_id, p) is True  # antes do offboarding
+    assert is_authorized_to_steer(tenant_id, p) is True  # before offboarding
     _add_console_identity(p, roles=["operator"], tenant_id=tenant_id, active=False)
     assert is_authorized_to_steer(tenant_id, p) is False
 
 
 def test_expired_contractor_denied_even_with_role(tenant_id):
-    """Contractor expirado (expires_at no passado) é negado apesar do papel."""
+    """An expired contractor (expires_at in the past) is denied despite the role."""
     p = _mk_principal()
     _add_console_identity(
         p, roles=["approver"], tenant_id=tenant_id, active=True,
@@ -217,7 +218,7 @@ def test_expired_contractor_denied_even_with_role(tenant_id):
 
 
 def test_disabled_bundle_does_not_authorize(tenant_id):
-    """Um access bundle desabilitado não concede papel (enabled=false)."""
+    """A disabled access bundle grants no role (enabled=false)."""
     p = _mk_principal()
     conn = _conn()
     with conn.cursor() as cur:
@@ -234,11 +235,11 @@ def test_disabled_bundle_does_not_authorize(tenant_id):
 
 
 # ---------------------------------------------------------------------------
-# P8 — evidência: grant emite proveniência; rejeição (via correlate) audita
+# P8 — evidence: the grant emits provenance; the rejection (via correlate) audits
 # ---------------------------------------------------------------------------
 def test_grant_emits_provenance_audit(tenant_id):
-    """Caminho positivo emite `steering_authorized` com o método de resolução
-    (evidência de COMO a autorização foi concedida — P8)."""
+    """The positive path emits `steering_authorized` with the resolution method
+    (evidence of HOW the authorization was granted — P8)."""
     p = _mk_principal()
     _add_console_identity(p, roles=["operator"], tenant_id=tenant_id)
     assert _count_audit(tenant_id, "steering_authorized") == 0
@@ -247,14 +248,15 @@ def test_grant_emits_provenance_audit(tenant_id):
 
 
 def test_unauthorized_steering_does_not_signal_and_audits(tenant_id):
-    """Invariante da Fase 1 preservada sob a nova implementação: um steering de
-    principal SEM papel/allowlist/bundle sobre uma tarefa ativa retorna
-    'unauthorized', NÃO vira signal, e gera audit `steering_rejected_unauthorized`
-    (o audit de rejeição continua sendo emitido por correlate)."""
+    """Phase 1 invariant preserved under the new implementation: steering by a
+    principal WITHOUT role/allowlist/bundle on an active task returns
+    'unauthorized', does NOT become a signal, and emits the
+    `steering_rejected_unauthorized` audit row (the rejection audit is still
+    emitted by correlate)."""
     stranger = _mk_principal("Stranger")
     conn = _conn()
     try:
-        # cria uma tarefa ATIVA correlacionável pelo source_ref do evento
+        # creates an ACTIVE task correlatable by the event's source_ref
         event = _steering_event(stranger)
         with conn.cursor() as cur:
             cur.execute(

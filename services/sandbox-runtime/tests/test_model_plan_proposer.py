@@ -1,7 +1,8 @@
-"""Planner real (proposer via modelo pelo gateway) — achado do 1º disparo real:
-o Planner SEMPRE usava o fixture (expected_files vazio) e toda tarefa escalava
-no gate anti-PR-oco. Agora, com substrato real configurado, o modelo propõe o
-plano; qualquer falha (import/chamada/JSON) cai no fixture → escala LIMPA (P6).
+"""Real Planner (proposer via model through the gateway) — found on the 1st real
+run: the Planner ALWAYS used the fixture (empty expected_files) and every task
+escalated at the anti-hollow-PR gate. Now, with a real substrate configured, the
+model proposes the plan; any failure (import/call/JSON) falls back to the
+fixture → CLEAN escalation (P6).
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from sandbox_runtime.activities import _default_plan_proposer, _model_plan_propo
 
 class _Ctx:
     def render(self) -> str:
-        return "## Tarefa\nCorrigir DELETE /api/transactions/:id que apaga a transação errada."
+        return "## Task\nFix DELETE /api/transactions/:id, which deletes the wrong transaction."
 
 
 def _inp():
@@ -28,15 +29,15 @@ def _patch_chat(monkeypatch, content: str):
     import model_gateway_client.gateway_call as gc
     import sandbox_runtime.activities as acts
     monkeypatch.setattr(gc, "chat_completion", fake_chat_completion)
-    # árvore via GitHub API: isolada nos testes (best-effort no código real)
+    # tree via the GitHub API: isolated in tests (best-effort in the real code)
     monkeypatch.setattr(acts, "_repo_tree_for_planner", lambda repo, br: [])
 
 
 def test_model_proposal_parsed_with_files(monkeypatch):
     _patch_chat(monkeypatch, json.dumps({
-        "steps": ["localizar o handler de DELETE", "corrigir o lookup por id"],
+        "steps": ["locate the DELETE handler", "fix the lookup by id"],
         "expected_files": ["server/routes/transactions.js", "server/db.js"],
-        "test_plan": "curl DELETE ids 2/12/11 e verificar exatidão",
+        "test_plan": "curl DELETE ids 2/12/11 and verify exactness",
     }))
     p = _model_plan_proposer(_Ctx(), _inp(), headers=None, virtual_key="vk")
     assert p is not None
@@ -52,12 +53,12 @@ def test_model_proposal_with_markdown_fence(monkeypatch):
 
 
 def test_unparseable_response_falls_back_to_none(monkeypatch):
-    _patch_chat(monkeypatch, "desculpe, não consigo")
+    _patch_chat(monkeypatch, "sorry, I cannot")
     assert _model_plan_proposer(_Ctx(), _inp(), headers=None, virtual_key="vk") is None
 
 
 def test_empty_expected_files_from_model_is_rejected(monkeypatch):
-    # modelo respondendo JSON com lista vazia → None → fixture → gate escala
+    # model answering JSON with an empty list → None → fixture → the gate escalates
     _patch_chat(monkeypatch, json.dumps({"steps": ["s"], "expected_files": [], "test_plan": "t"}))
     assert _model_plan_proposer(_Ctx(), _inp(), headers=None, virtual_key="vk") is None
 
@@ -73,8 +74,9 @@ def test_gateway_error_falls_back_to_none(monkeypatch):
 
 
 def test_tree_paths_flow_into_prompt(monkeypatch):
-    """Com a árvore real disponível, o prompt exige caminhos EXISTENTES —
-    o plan_compliance valida o diff contra o plano (achado do disparo real)."""
+    """With the real tree available, the prompt demands EXISTING paths —
+    plan_compliance validates the diff against the plan (found on the real
+    run)."""
     captured = {}
     def fake_chat_completion(**kwargs):
         captured["prompt"] = kwargs["messages"][0]["content"]
@@ -95,14 +97,14 @@ def test_tree_paths_flow_into_prompt(monkeypatch):
 
 def test_fixture_still_yields_empty_files():
     p = _default_plan_proposer(_Ctx(), _inp())
-    assert p["expected_files"] == []  # e o gate do WS-B escala — deliberado
+    assert p["expected_files"] == []  # and the WS-B gate escalates — deliberate
 
 
 def test_instruction_da_issue_entra_no_prompt(monkeypatch):
-    """3º disparo real: o PlannerContext não carrega a instrução (render() só
-    tem AGENTS.md/skills/repo map — todos vazios no tenant) e o modelo, sem
-    nunca ver a issue, planejou uma FEATURE genérica de wallet em vez do bug
-    de DELETE. A instrução agora entra direto na seção '## Tarefa'."""
+    """3rd real run: the PlannerContext does not carry the instruction (render()
+    only has AGENTS.md/skills/repo map — all empty for the tenant) and the model,
+    never having seen the issue, planned a generic wallet FEATURE instead of the
+    DELETE bug. The instruction now goes straight into the '## Task' section."""
     captured = {}
 
     def fake_chat_completion(**kwargs):
@@ -123,7 +125,7 @@ def test_instruction_da_issue_entra_no_prompt(monkeypatch):
     assert p is not None
     prompt = captured["prompt"]
     assert "Excluir uma transação apaga outra transação" in prompt
-    # a tarefa vem ANTES do contexto adicional (é o alvo, não nota de rodapé)
+    # the task comes BEFORE the additional context (it is the target, not a footnote)
     assert prompt.index("Excluir uma transação") < prompt.index("Additional context")
 
 

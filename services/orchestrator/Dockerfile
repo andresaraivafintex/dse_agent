@@ -35,7 +35,7 @@ WORKDIR /app
 # scripts/migrate.py: usado pelo Job de migração do chart (Fase 5). Os .sql
 # vivem em migrations/ e PRECISAM ir na imagem — migrate.py resolve
 # MIGRATIONS_DIR = <script>/../../migrations = /app/migrations. Sem este COPY o
-# hook "sucede" sem aplicar nada ("Nenhuma migração encontrada").
+# hook "sucede" sem aplicar nada ("No migration found in ...").
 COPY scripts /app/scripts
 COPY migrations /app/migrations
 COPY packages/contracts /app/packages/contracts

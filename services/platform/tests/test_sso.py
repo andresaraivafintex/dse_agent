@@ -1,6 +1,6 @@
-"""WSF-E3-T3 — SSO/OIDC do console + offboarding. Verifica assinatura RSA real
-(dev IdP mina, verifier valida), account matching por subject, e offboarding
-com efeito em cascata (approver + steering)."""
+"""WSF-E3-T3 — console SSO/OIDC + offboarding. Checks a real RSA signature (the
+dev IdP mints, the verifier validates), account matching by subject, and
+offboarding with cascading effect (approver + steering)."""
 from __future__ import annotations
 
 import uuid
@@ -65,7 +65,7 @@ def test_verify_rejects_expired(idp, verifier):
 
 
 def test_verify_rejects_foreign_signature(verifier):
-    other = DevIdP(issuer=ISSUER)  # keypair diferente
+    other = DevIdP(issuer=ISSUER)  # different keypair
     tok = other.mint_id_token(subject="x", audience=AUDIENCE)
     with pytest.raises(InvalidToken):
         verifier.verify(tok)
@@ -80,7 +80,7 @@ def test_login_provisions_console_identity_first_time(idp, verifier):
     assert is_console_active(session.principal_id) is True
     assert "console_login" in _audit_for(session.principal_id)
 
-    # segundo login: mesmo principal (account matching por subject estável)
+    # second login: same principal (account matching on the stable subject)
     session2 = login(verifier, idp.mint_id_token(subject=sub, audience=AUDIENCE))
     assert session2.principal_id == session.principal_id
 
@@ -113,7 +113,7 @@ def test_offboarding_removes_from_steering(idp, verifier):
     sub = f"sub-{uuid.uuid4().hex[:8]}"
     session = login(verifier, idp.mint_id_token(subject=sub, audience=AUDIENCE))
 
-    # coloca na allowlist de steering do WS-A (data-plane)
+    # add to the WS-A steering allowlist (data plane)
     conn = get_connection()
     try:
         with conn.cursor() as cur:

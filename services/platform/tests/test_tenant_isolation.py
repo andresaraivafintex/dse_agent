@@ -1,24 +1,23 @@
-"""WSF-E4-T3 — Suíte de verificação de isolamento de tenant (NFR-03), camada a
-camada, com TENTATIVAS ATIVAS de acesso cross-tenant que DEVEM falhar e ser
-auditadas.
+"""WSF-E4-T3 — tenant isolation verification suite (NFR-03), layer by layer,
+with ACTIVE cross-tenant access attempts that MUST fail and be audited.
 
-Camadas exercitadas contra o Postgres real:
-  - filas (fairness keys)       — namespacing determinístico, sem colisão
-  - artifacts (prefixos)        — prefixo por tenant, path traversal rejeitado
-  - skills (skill_registry WS-C)— Planner de A não carrega skill de B
-  - retrieval (WS-C E5)         — query de A não lê documento de B
-  - audit (partições)           — query de A não lê audit de B
-  - tokens (virtual_keys WS-D)  — A não apresenta key de B
+Layers exercised against the real Postgres:
+  - queues (fairness keys)      — deterministic namespacing, no collisions
+  - artifacts (prefixes)        — per-tenant prefix, path traversal rejected
+  - skills (WS-C skill_registry)— A's Planner cannot load B's skill
+  - retrieval (WS-C E5)         — A's query cannot read B's document
+  - audit (partitions)          — A's query cannot read B's audit
+  - tokens (WS-D virtual_keys)  — A cannot present B's key
 
-Cada tentativa cross-tenant é verificada em dois eixos: (1) levanta
-`CrossTenantViolation` (fail-closed), (2) deixou uma linha
-`cross_tenant_access_denied` no audit (P8).
+Each cross-tenant attempt is checked on two axes: (1) it raises
+`CrossTenantViolation` (fail-closed), (2) it left a `cross_tenant_access_denied`
+row in the audit (P8).
 
-As camadas de skills/retrieval/tokens dependem de tabelas de OUTROS workstreams
-(WS-C `skill_registry`/`retrieval_documents`, WS-D `virtual_keys`). Se alguma
-não existir (workstream ainda não subiu a migração), o teste correspondente
-SKIPA com razão clara em vez de falhar — mesmo padrão dos testes adversariais
-do egress-proxy da Fase 1.
+The skills/retrieval/tokens layers depend on tables owned by OTHER workstreams
+(WS-C `skill_registry`/`retrieval_documents`, WS-D `virtual_keys`). If one does
+not exist (that workstream has not applied its migration yet), the corresponding
+test SKIPS with a clear reason instead of failing — same pattern as the Phase 1
+egress-proxy adversarial tests.
 """
 from __future__ import annotations
 
@@ -73,7 +72,7 @@ def tenants():
 
 
 # ---------------------------------------------------------------------------
-# Camada: filas (fairness keys)
+# Layer: queues (fairness keys)
 # ---------------------------------------------------------------------------
 def test_fairness_keys_never_collide(tenants):
     a, b = tenants
@@ -83,13 +82,13 @@ def test_fairness_keys_never_collide(tenants):
 
 def test_fairness_key_rejects_malformed_tenant():
     with pytest.raises(ValueError):
-        fairness_key("evil::tenant")  # separador injetado
+        fairness_key("evil::tenant")  # injected separator
     with pytest.raises(ValueError):
         fairness_key("")
 
 
 # ---------------------------------------------------------------------------
-# Camada: artifacts (prefixos por tenant)
+# Layer: artifacts (per-tenant prefixes)
 # ---------------------------------------------------------------------------
 def test_artifact_prefix_per_tenant(tenants):
     a, b = tenants
@@ -106,27 +105,27 @@ def test_artifact_key_rejects_path_traversal(tenants):
 
 
 # ---------------------------------------------------------------------------
-# Camada: guard central (unidade)
+# Layer: central guard (unit)
 # ---------------------------------------------------------------------------
 def test_guard_same_tenant_allows_and_denies(tenants):
     a, b = tenants
-    # mesmo tenant: passa, sem audit
+    # same tenant: passes, no audit
     guard_same_tenant(requesting_tenant=a, resource_tenant=a, layer="x", resource_ref="r1")
-    # tenant diferente: levanta + audita
+    # different tenant: raises + audits
     with pytest.raises(CrossTenantViolation):
         guard_same_tenant(requesting_tenant=a, resource_tenant=b, layer="x", resource_ref="r2")
     assert _cross_tenant_denials(a, "x") >= 1
-    # recurso inexistente (None): também bloqueia (não vaza existência)
+    # nonexistent resource (None): blocks too (does not leak existence)
     with pytest.raises(CrossTenantViolation):
         guard_same_tenant(requesting_tenant=a, resource_tenant=None, layer="x", resource_ref="r3")
 
 
 # ---------------------------------------------------------------------------
-# Camada: skills (skill_registry do WS-C) — ataque ativo
+# Layer: skills (WS-C skill_registry) — active attack
 # ---------------------------------------------------------------------------
 def test_planner_cannot_load_other_tenant_skill(tenants):
     if not _table_exists("skill_registry"):
-        pytest.skip("skill_registry (WS-C) ainda não migrada")
+        pytest.skip("skill_registry (WS-C) not migrated yet")
     a, b = tenants
     conn = get_connection()
     try:
@@ -141,22 +140,22 @@ def test_planner_cannot_load_other_tenant_skill(tenants):
     finally:
         conn.close()
 
-    # tenant A tenta carregar a skill do tenant B -> negado + auditado
+    # tenant A tries to load tenant B's skill -> denied + audited
     with pytest.raises(CrossTenantViolation):
         fetch_skill_scoped(a, skill_id)
     assert _cross_tenant_denials(a, "skill") >= 1
 
-    # o dono (B) consegue ler a própria skill
+    # the owner (B) can read its own skill
     got = fetch_skill_scoped(b, skill_id)
     assert got["tenant_id"] == b
 
 
 # ---------------------------------------------------------------------------
-# Camada: retrieval index (retrieval_documents do WS-C E5) — ataque ativo
+# Layer: retrieval index (WS-C E5 retrieval_documents) — active attack
 # ---------------------------------------------------------------------------
 def test_retrieval_query_scoped_to_tenant(tenants):
     if not _table_exists("retrieval_documents"):
-        pytest.skip("retrieval_documents (WS-C E5) ainda não migrada")
+        pytest.skip("retrieval_documents (WS-C E5) not migrated yet")
     a, b = tenants
     conn = get_connection()
     try:
@@ -178,32 +177,32 @@ def test_retrieval_query_scoped_to_tenant(tenants):
 
 
 # ---------------------------------------------------------------------------
-# Camada: audit (partições por tenant) — ataque ativo
+# Layer: audit (per-tenant partitions) — active attack
 # ---------------------------------------------------------------------------
 def test_audit_query_cannot_cross_tenant(tenants):
     a, b = tenants
-    # gera uma linha de audit para cada tenant
+    # write one audit row for each tenant
     from dse_audit import emit
 
     emit(actor="system:test", action="probe", tenant_id=a, details={})
     emit(actor="system:test", action="probe", tenant_id=b, details={})
 
-    # A consultando o próprio audit: ok
+    # A querying its own audit: ok
     rows = query_audit_scoped(a, a)
     assert any(r["action"] == "probe" for r in rows)
 
-    # A tentando consultar o audit de B: negado + auditado
+    # A trying to query B's audit: denied + audited
     with pytest.raises(CrossTenantViolation):
         query_audit_scoped(a, b)
     assert _cross_tenant_denials(a, "audit") >= 1
 
 
 # ---------------------------------------------------------------------------
-# Camada: tokens (virtual_keys do WS-D) — ataque ativo
+# Layer: tokens (WS-D virtual_keys) — active attack
 # ---------------------------------------------------------------------------
 def test_token_belongs_to_tenant(tenants):
     if not _table_exists("virtual_keys"):
-        pytest.skip("virtual_keys (WS-D) ainda não migrada")
+        pytest.skip("virtual_keys (WS-D) not migrated yet")
     a, b = tenants
     alias = f"vk-{uuid.uuid4().hex[:8]}"
     conn = get_connection()
@@ -218,9 +217,9 @@ def test_token_belongs_to_tenant(tenants):
     finally:
         conn.close()
 
-    # B (dono) valida ok
+    # B (the owner) validates fine
     assert_token_belongs_to_tenant(b, alias)
-    # A apresentando a key de B: negado + auditado
+    # A presenting B's key: denied + audited
     with pytest.raises(CrossTenantViolation):
         assert_token_belongs_to_tenant(a, alias)
     assert _cross_tenant_denials(a, "token") >= 1

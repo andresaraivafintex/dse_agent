@@ -1,8 +1,8 @@
-"""Conexão Postgres compartilhada pelo pacote ingest_gateway.
+"""Postgres connection shared by the ingest_gateway package.
 
-Mesma convenção de `dse_audit`/`dse_identity`: DSN via env var, role `dse_app`
-(sem grants de UPDATE/DELETE em audit_log; grants normais nas tabelas do
-WS-A criadas em migrations/0002_wsa.sql).
+Same convention as `dse_audit`/`dse_identity`: DSN via env var, role `dse_app`
+(no UPDATE/DELETE grants on audit_log; normal grants on the WS-A tables
+created in migrations/0002_wsa.sql).
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ _DSN = os.environ.get(
 
 
 def get_connection():
-    """Nova conexão psycopg2. Caller controla commit/rollback/close (usada
-    tanto para escrita transacional isolada quanto participando de uma
-    transação maior, seguindo a mesma convenção de `dse_audit.emit(conn=...)`).
+    """New psycopg2 connection. The caller controls commit/rollback/close (used
+    both for an isolated transactional write and as part of a larger
+    transaction, following the same convention as `dse_audit.emit(conn=...)`).
     """
     return psycopg2.connect(_DSN)

@@ -1,48 +1,49 @@
-"""Toolsets stage-scoped (WSC-E3-T3/T4/T5).
+"""Stage-scoped toolsets (WSC-E3-T3/T4/T5).
 
-Cada sessão de agente da Fase 2 recebe um toolset que é a ÚNICA superfície de
-ferramentas disponível ao substrato. O enforcement é por allowlist explícita +
-guarda de caminho — não por "boa vontade" do prompt:
+Every Fase 2 agent session gets a toolset that is the ONLY tool surface
+available to the substrate. Enforcement is by explicit allowlist + path guard —
+not by the prompt's "good will":
 
-- **PlannerToolset (read-only)**: só ferramentas de leitura. Qualquer tentativa
-  de escrever arquivo, rodar teste que muta estado, ou tocar git FALHA com
-  `ToolPermissionError` (teste de conformidade WSC-E3-T3).
-- **TesterToolset**: leitura + `run_tests` + `write_file` SÓ em caminhos de
-  teste; escrever fora de test path FALHA (WSC-E3-T4). Sem git (o commit dos
-  testes é feito por código determinístico na Activity, escopado a test paths).
-  Fase 3 (WSC-E3-T4b, adendo 02): `demos/<work_item_id>/` é um path de escrita
-  PERMITIDO adicional — é onde o Tester autora o teste `@demo` Playwright que o
-  pipeline de evidência do WS-E executa. A permissão é escopada ao work_item da
-  sessão: `demos/<outro-id>/` continua BLOQUEADO (isolamento entre tarefas).
-- **ReviewerToolset**: contexto fresco — só `read_plan`/`read_diff`. Sem acesso
-  a repo, sem histórico do Coder, sem git (P3, WSC-E3-T5).
+- **PlannerToolset (read-only)**: read tools only. Any attempt to write a file,
+  run a state-mutating test, or touch git FAILS with `ToolPermissionError`
+  (conformance test WSC-E3-T3).
+- **TesterToolset**: reads + `run_tests` + `write_file` ONLY under test paths;
+  writing outside a test path FAILS (WSC-E3-T4). No git (the test commit is done
+  by deterministic code in the Activity, scoped to test paths).
+  Fase 3 (WSC-E3-T4b, adendo 02): `demos/<work_item_id>/` is an additional
+  ALLOWED write path — it is where the Tester authors the Playwright `@demo`
+  test that WS-E's evidence pipeline runs. The permission is scoped to the
+  session's work_item: `demos/<other-id>/` stays BLOCKED (per-task isolation).
+- **ReviewerToolset**: fresh context — only `read_plan`/`read_diff`. No repo
+  access, no Coder history, no git (P3, WSC-E3-T5).
 
-O substrato (`ScriptedAgentSession` em sessions.py, e em produção o adapter
-OpenHands com o registro de ferramentas filtrado por este allowlist) nunca
-executa uma tool sem passar por `Toolset.check` antes.
+The substrate (`ScriptedAgentSession` in sessions.py, and in production the
+OpenHands adapter with its tool registry filtered by this allowlist) never runs
+a tool without going through `Toolset.check` first.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Caminhos considerados "de teste" (TesterToolset só escreve aqui). Cobre os
-# layouts comuns: pytest (`tests/`, `test_*.py`, `*_test.py`, `conftest.py`),
+# Paths considered "test" paths (TesterToolset only writes here). Covers the
+# common layouts: pytest (`tests/`, `test_*.py`, `*_test.py`, `conftest.py`),
 # jest/vitest (`*.test.ts`, `*.spec.ts`, `__tests__/`), go (`*_test.go`).
-# Promovido ao contrato compartilhado (o plan_compliance do L1 também usa —
-# ver dse_contracts.paths). Re-export mantém os imports existentes.
+# Promoted to the shared contract (L1's plan_compliance uses it too — see
+# dse_contracts.paths). The re-export keeps existing imports working.
 from dse_contracts.paths import _TEST_PATH_RES, is_test_path  # noqa: F401
 
 
 def demo_dir_for(work_item_id: str) -> str:
-    """Convenção ADR-27/WSC-E3-T4b: diretório canônico do teste `@demo` de uma
-    tarefa. O default de `RunDemoEvidenceInput.demo_dir` (contrato da fundação)
-    deriva daqui — WS-E executa `npx playwright test --grep @demo` neste path."""
+    """ADR-27/WSC-E3-T4b convention: canonical directory of a task's `@demo`
+    test. The default of `RunDemoEvidenceInput.demo_dir` (foundation contract)
+    derives from here — WS-E runs `npx playwright test --grep @demo` in this
+    path."""
     return f"demos/{work_item_id}/"
 
 
 def is_demo_path(path: str, work_item_id: str) -> bool:
-    """True se `path` está DENTRO de `demos/<work_item_id>/` (deste work item —
-    nunca de outro). Recusa `..` para não permitir escapar do prefixo."""
+    """True if `path` is INSIDE `demos/<work_item_id>/` (this work item's — never
+    another's). Rejects `..` so the prefix cannot be escaped."""
     if not work_item_id:
         return False
     p = path.replace("\\", "/").lstrip("/")
@@ -52,7 +53,7 @@ def is_demo_path(path: str, work_item_id: str) -> bool:
 
 
 class ToolPermissionError(Exception):
-    """Ferramenta não permitida para o stage atual — falha limpa (P6)."""
+    """Tool not permitted for the current stage — clean failure (P6)."""
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class ToolInvocation:
 
 
 class Toolset:
-    """Base. `name`, allowlist e `check(invocation)` que levanta se negado."""
+    """Base. `name`, allowlist and `check(invocation)`, which raises when denied."""
 
     name = "base"
     allowed: frozenset[str] = frozenset()
@@ -70,8 +71,8 @@ class Toolset:
     def check(self, inv: ToolInvocation) -> None:
         if inv.tool not in self.allowed:
             raise ToolPermissionError(
-                f"toolset '{self.name}': ferramenta '{inv.tool}' não permitida "
-                f"(permitidas: {sorted(self.allowed)})"
+                f"toolset '{self.name}': tool '{inv.tool}' not allowed "
+                f"(allowed: {sorted(self.allowed)})"
             )
 
     def permits(self, tool: str) -> bool:
@@ -84,19 +85,19 @@ class Toolset:
 
 class PlannerToolset(Toolset):
     name = "planner"
-    # SÓ leitura — nenhuma escrita, nenhum git, nenhum run que mute estado.
+    # READ only — no writes, no git, no run that mutates state.
     allowed = frozenset(
         {"read_file", "search_code", "repo_map", "read_ticket", "read_agents_md", "read_codeowners", "list_skills"}
     )
 
 
 class TesterToolset(Toolset):
-    """Fase 2: write só em test paths. Fase 3 (WSC-E3-T4b): quando construído
-    com `work_item_id`, `demos/<work_item_id>/` vira um path de escrita
-    permitido ADICIONAL (convenção do teste `@demo` Playwright, ADR-27) —
-    escopado ao work item da sessão; `demos/` de outro work item continua
-    bloqueado. Construtor sem argumento preserva o comportamento da Fase 2
-    (nenhum write em `demos/`)."""
+    """Fase 2: writes only under test paths. Fase 3 (WSC-E3-T4b): when built with
+    a `work_item_id`, `demos/<work_item_id>/` becomes an ADDITIONAL allowed write
+    path (the Playwright `@demo` test convention, ADR-27) — scoped to the
+    session's work item; another work item's `demos/` stays blocked. The
+    no-argument constructor preserves the Fase 2 behavior (no writes under
+    `demos/`)."""
 
     name = "tester"
     _READ = frozenset({"read_file", "search_code", "repo_map", "read_ticket"})
@@ -114,32 +115,32 @@ class TesterToolset(Toolset):
             path = inv.args.get("path", "")
             p = path.replace("\\", "/").lstrip("/")
             if p.startswith("demos/") or p == "demos":
-                # Namespace de EVIDÊNCIA (Fase 3): escopado por work item. A
-                # regra genérica de test path (ex.: `*.spec.js` em qualquer
-                # lugar) NÃO vale aqui dentro — senão o Tester de uma tarefa
-                # escreveria no demo de outra só nomeando `*.spec.js`.
+                # EVIDENCE namespace (Fase 3): scoped per work item. The generic
+                # test-path rule (e.g. `*.spec.js` anywhere) does NOT apply in
+                # here — otherwise one task's Tester could write into another
+                # task's demo just by naming the file `*.spec.js`.
                 if is_demo_path(path, self.work_item_id):
                     return
                 raise ToolPermissionError(
-                    f"toolset 'tester': dentro de 'demos/' a escrita é permitida SÓ em "
-                    f"'{demo_dir_for(self.work_item_id) if self.work_item_id else 'demos/<work_item_id>/ (sessão sem work item: nenhuma)'}'; "
-                    f"'{path}' está fora desse escopo."
+                    f"toolset 'tester': inside 'demos/' writing is allowed ONLY in "
+                    f"'{demo_dir_for(self.work_item_id) if self.work_item_id else 'demos/<work_item_id>/ (session without a work item: none)'}'; "
+                    f"'{path}' is outside that scope."
                 )
             if is_test_path(path):
                 return
             raise ToolPermissionError(
-                f"toolset 'tester': write_file só é permitido em caminhos de teste "
-                f"ou em '{demo_dir_for(self.work_item_id) if self.work_item_id else 'demos/<work_item_id>/'}'; "
-                f"'{path}' não é nenhum dos dois. Edits de código de produção são do Coder, não do Tester."
+                f"toolset 'tester': write_file is only allowed on test paths "
+                f"or in '{demo_dir_for(self.work_item_id) if self.work_item_id else 'demos/<work_item_id>/'}'; "
+                f"'{path}' is neither. Production code edits belong to the Coder, not the Tester."
             )
         raise ToolPermissionError(
-            f"toolset 'tester': ferramenta '{inv.tool}' não permitida "
-            f"(sem git/PR — o commit dos testes é determinístico na Activity)."
+            f"toolset 'tester': tool '{inv.tool}' not allowed "
+            f"(no git/PR — the test commit is deterministic in the Activity)."
         )
 
 
 class ReviewerToolset(Toolset):
     name = "reviewer"
-    # Contexto fresco: SÓ o plano + o diff. Sem repo, sem histórico do Coder,
-    # sem git. P3 por construção (WSC-E3-T5).
+    # Fresh context: ONLY the plan + the diff. No repo, no Coder history, no
+    # git. P3 by construction (WSC-E3-T5).
     allowed = frozenset({"read_plan", "read_diff"})

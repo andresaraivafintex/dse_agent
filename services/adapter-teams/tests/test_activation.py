@@ -1,10 +1,10 @@
-"""Guard de ativação da fundação. Documenta, como teste executável, o ÚNICO
-bloqueio de código para ligar Teams: `Platform.teams` no enum congelado.
+"""Foundation activation guard. Documents, as an executable test, the ONLY code
+blocker to turning Teams on: `Platform.teams` in the frozen enum.
 
-Enquanto não ativado (estado desta sessão), `build_conversation_event` levanta
-`TeamsNotActivated` com os passos de ativação — falha limpa e explicativa (P6),
-nunca um valor de enum fabricado fora do contrato. Se/quando a fundação for
-estendida, o mesmo teste valida que a construção tipada passa a funcionar.
+While not activated (the state of this session), `build_conversation_event` raises
+`TeamsNotActivated` carrying the activation steps — a clean, explanatory failure
+(P6), never an enum value fabricated outside the contract. If/when the foundation
+is extended, the same test validates that the typed construction starts working.
 """
 from __future__ import annotations
 

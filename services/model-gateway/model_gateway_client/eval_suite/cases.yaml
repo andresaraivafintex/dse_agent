@@ -1,23 +1,23 @@
-# Suite de avaliação Tier-2 do model-gateway (WSD-E5-T1). Dono: WS-D.
+# Tier-2 evaluation suite for the model-gateway (WSD-E5-T1). Owner: WS-D.
 #
-# Cada caso tem:
-#   id          — identificador estável
-#   model       — alias LiteLLM (model_name do litellm_config.yaml)
-#   messages    — payload OpenAI-compatible enviado ao gateway
-#   assertions  — lista de checagens sobre a resposta. Tipos suportados
-#                 (ver runner.py):
-#     - equals            {value: "..."}        content == value (exato)
+# Every case has:
+#   id          — stable identifier
+#   model       — LiteLLM alias (model_name from litellm_config.yaml)
+#   messages    — OpenAI-compatible payload sent to the gateway
+#   assertions  — list of checks over the response. Supported types
+#                 (see runner.py):
+#     - equals            {value: "..."}        content == value (exact)
 #     - contains          {value: "..."}        value in content
-#     - deterministic     {}                     rodar 2x -> mesma content
-#     - tokens_positive   {}                     tokens_in>0 e tokens_out>0
+#     - deterministic     {}                     run twice -> same content
+#     - tokens_positive   {}                     tokens_in>0 and tokens_out>0
 #     - max_cost_usd      {value: 0.01}          cost_usd <= value
 #
-# Nota: os casos do `eco/echo-model` usam a transformação determinística
-# conhecida do echo provider (ECHO[<último user reverso>]) — por isso a
-# asserção `equals` é possível e estável. Casos para `bedrock/*` ficam com
-# asserções mais frouxas (contains/tokens) porque um LLM real não é
-# byte-determinístico; e são SKIPPED automaticamente se a infra AWS não estiver
-# disponível (ver runner.py).
+# Note: the `eco/echo-model` cases rely on the echo provider's known
+# deterministic transform (ECHO[<last user message reversed>]) — that is why
+# an `equals` assertion is possible and stable. Cases for `bedrock/*` use
+# looser assertions (contains/tokens) because a real LLM is not
+# byte-deterministic; they are SKIPPED automatically when the AWS infra is
+# unavailable (see runner.py).
 
 cases:
   - id: echo-determinism
@@ -51,7 +51,7 @@ cases:
       - type: max_cost_usd
         value: 1.0
 
-  # Caso de referência para o tier de produção (Bedrock). SKIPPED sem AWS.
+  # Reference case for the production tier (Bedrock). SKIPPED without AWS.
   - id: bedrock-sonnet-smoke
     model: bedrock/anthropic.claude-3-5-sonnet
     messages:

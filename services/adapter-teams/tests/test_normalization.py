@@ -1,9 +1,10 @@
-"""Normalização Teams Activity -> campos do ConversationEvent + as 4 defesas
-ao nível de função (sem depender do enum congelado `Platform.teams`).
+"""Teams Activity normalization -> ConversationEvent fields + the 4 defenses at
+the function level (without depending on the frozen `Platform.teams` enum).
 
-Estes testes exercitam a lógica REAL de extração/idempotência/sanitização do
-adapter — a parte que NÃO precisa da ativação da fundação. A construção tipada
-do ConversationEvent (que precisa) é coberta em test_activation.py.
+These tests exercise the adapter's REAL extraction/idempotency/sanitization
+logic — the part that does NOT need the foundation activation. The typed
+construction of the ConversationEvent (which does) is covered in
+test_activation.py.
 """
 from __future__ import annotations
 
@@ -21,9 +22,9 @@ def test_extracts_conversation_actor_and_content():
     assert events.service_url(act) == "https://smba.trafficmanager.net/emea/"
     assert events.aad_tenant_id(act) == "aad-tenant-guid-xyz"
     user_id, display = events.actor_of(act)
-    assert user_id == "aad-obj-jane"  # prefere o aadObjectId estável
+    assert user_id == "aad-obj-jane"  # prefers the stable aadObjectId
     assert display == "Jane Doe"
-    # defesa TOCTOU: content é o texto do payload, com a tag <at> de menção removida
+    # TOCTOU defense: content is the payload text, with the <at> mention tag stripped
     assert events.clean_text(act) == "fix the login bug"
 
 
@@ -57,19 +58,19 @@ def test_source_ref_is_conversation_scoped():
 
 
 def test_event_id_is_deterministic_and_idempotent():
-    """Defesa #4: reentrega do mesmo webhook (mesma Activity) -> mesmo event_id."""
+    """Defense #4: redelivery of the same webhook (same Activity) -> same event_id."""
     act = teams_activity(activity_id="act-777")
     a = events.compute_event_id(act)
-    b = events.compute_event_id(dict(act))  # cópia (reentrega)
+    b = events.compute_event_id(dict(act))  # copy (redelivery)
     assert a == b
-    # difere quando o id da activity muda (mensagem diferente)
+    # differs when the activity id changes (a different message)
     assert events.compute_event_id(teams_activity(activity_id="act-778")) != a
 
 
 def test_sanitization_defense_applies_to_extracted_content():
-    """Defesa #3: o gateway sanitiza o content extraído (unicode invisível é
-    removido) antes de qualquer estágio que envolva modelo."""
-    zwsp = "​"  # zero-width space (categoria Cf)
+    """Defense #3: the gateway sanitizes the extracted content (invisible unicode
+    is stripped) before any stage that involves a model."""
+    zwsp = "​"  # zero-width space (category Cf)
     act = teams_activity(text=f"<at>DSE Bot</at> hi{zwsp}there")
     cleaned = events.clean_text(act)
     assert zwsp in cleaned

@@ -1,9 +1,9 @@
 {{- if .Values.modelServer.enabled }}
-# Model server self-hosted / air-gapped (Tier 2, WSD-E5-T2/T3). Só é
-# renderizado na topologia B (`modelServer.enabled: true`). O model-gateway
-# aponta para este Service em vez de um provider externo — nenhum dado de
-# inferência sai do VPC. Sem env de credencial de provider externo: por
-# construção, este workload não tem para onde exfiltrar.
+# Self-hosted / air-gapped model server (Tier 2, WSD-E5-T2/T3). Rendered only in
+# topology B (`modelServer.enabled: true`). The model-gateway points at this
+# Service instead of an external provider — no inference data leaves the VPC. No
+# external-provider credential env: by construction, this workload has nowhere to
+# exfiltrate to.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

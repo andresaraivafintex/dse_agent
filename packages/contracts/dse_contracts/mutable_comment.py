@@ -1,10 +1,10 @@
-"""Biblioteca compartilhada: exatamente 1 comentário/mensagem de status por
-surface, editado in-place, crash-consistent (WSA-E3-T2/E4-T2; reutilizada por
-WSE-E3-T7 no PR finalizer). Comment-per-update é explicitamente rejeitado.
+"""Shared library: exactly 1 status comment/message per surface, edited
+in-place, crash-consistent (WSA-E3-T2/E4-T2; reused by WSE-E3-T7 in the PR
+finalizer). Comment-per-update is explicitly rejected.
 
-Cada adapter (Slack/GitHub/Jira) implementa `CommentBackend` com as chamadas
-nativas de post/edit da própria API; esta classe cuida da parte comum:
-idempotência (um comment_ref por WorkItem+surface) e convergência pós-crash.
+Each adapter (Slack/GitHub/Jira) implements `CommentBackend` with the native
+post/edit calls of its own API; this class handles the common part:
+idempotency (one comment_ref per WorkItem+surface) and post-crash convergence.
 """
 from __future__ import annotations
 
@@ -12,33 +12,34 @@ from typing import Protocol
 
 
 class CommentBackend(Protocol):
-    """Implementado por adapter-slack, adapter-github, (Jira na Fase 2)."""
+    """Implemented by adapter-slack, adapter-github, (Jira in Phase 2)."""
 
     def post(self, surface_ref: dict, body: str) -> str:
-        """Cria o comentário/mensagem inicial. Retorna um comment_ref opaco."""
+        """Creates the initial comment/message. Returns an opaque comment_ref."""
         ...
 
     def edit(self, surface_ref: dict, comment_ref: str, body: str) -> None:
-        """Edita in-place o comentário/mensagem existente."""
+        """Edits the existing comment/message in place."""
         ...
 
 
 class CommentStateStore(Protocol):
-    """Persistência do comment_ref por (work_item_id, surface) — normalmente uma
-    tabela pequena ou uma coluna JSONB em work_items; injetada pelo caller."""
+    """Persistence of the comment_ref per (work_item_id, surface) — usually a
+    small table or a JSONB column on work_items; injected by the caller."""
 
     def get_ref(self, work_item_id: str, surface: str) -> str | None: ...
     def save_ref(self, work_item_id: str, surface: str, comment_ref: str) -> None: ...
 
 
 class MutableCommentWriter:
-    """Uso: `writer.upsert(work_item_id, surface_ref, body)` — decide sozinho
-    se é o primeiro post (cria) ou uma edição (edita o ref já salvo). Convergente
-    após crash: se o processo morreu entre `post()` e `save_ref()`, a próxima
-    chamada de upsert detecta ausência de ref salvo e cria de novo — duplicar
-    nesse caso raro é aceitável e documentado (favor de nunca perder o comentário
-    sobre nunca duplicá-lo em um crash exatamente nessa janela); todas as demais
-    chamadas convergem para edição do mesmo ref.
+    """Usage: `writer.upsert(work_item_id, surface_ref, body)` — it decides on
+    its own whether this is the first post (create) or an edit (edits the ref
+    already saved). Convergent after a crash: if the process died between
+    `post()` and `save_ref()`, the next upsert call sees no saved ref and
+    creates again — duplicating in that rare case is acceptable and documented
+    (trading never losing the comment against never duplicating it on a crash
+    inside exactly that window); every other call converges to editing the same
+    ref.
     """
 
     def __init__(self, backend: CommentBackend, store: CommentStateStore, surface: str):

@@ -1,5 +1,5 @@
-# Plano 06 (console dados reais) — projector SoR -> console_rm.
-# Nome wsg.yml de propósito: o Makefile compõe docker-compose.ws*.yml.
+# Plan 06 (console with real data) — SoR -> console_rm projector.
+# Named wsg.yml on purpose: the Makefile composes docker-compose.ws*.yml.
 services:
   console-projector:
     build:

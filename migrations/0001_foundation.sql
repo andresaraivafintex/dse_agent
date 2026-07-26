@@ -1,6 +1,6 @@
--- Fintex DSE — Fase 1 — Fundação de schema (control plane + audit ledger + identity map)
--- Dono: fundação (contracts sprint). Não editar — workstreams usam 0002_*.sql em diante.
--- Referências: proposta técnica §10.3 (work_items/ingest_events), §10.16 (audit_log),
+-- Fintex DSE — Phase 1 — Schema foundation (control plane + audit ledger + identity map)
+-- Owner: foundation (contracts sprint). Do not edit — workstreams use 0002_*.sql onwards.
+-- References: technical proposal §10.3 (work_items/ingest_events), §10.16 (audit_log),
 -- §10.18/ADR-22 (identity map foundations, WSF-E3-T1).
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -9,8 +9,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 -- ---------------------------------------------------------------------------
--- work_items — system of record do ciclo de vida (WSA-E1-T1). id dobra como
--- Temporal workflow_id (StartWorkflow(workflow_id = work_item_id)).
+-- work_items — system of record for the lifecycle (WSA-E1-T1). id doubles as
+-- the Temporal workflow_id (StartWorkflow(workflow_id = work_item_id)).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS work_items (
     id               TEXT PRIMARY KEY,
@@ -19,11 +19,11 @@ CREATE TABLE IF NOT EXISTS work_items (
     source_ref       JSONB NOT NULL,              -- {thread_ts,channel} | {repo,issue_number} | {ticket_key}
     repo             TEXT,
     base_branch      TEXT,
-    requester        TEXT NOT NULL,               -- principal resolvido (dse_identity)
+    requester        TEXT NOT NULL,               -- resolved principal (dse_identity)
     data_class       TEXT NOT NULL DEFAULT 'internal',
-    status           TEXT NOT NULL DEFAULT 'new', -- máquina de estados §9.3
-    risk_class       TEXT,                        -- 'low' | 'high' (gate de aprovação é Fase 2)
-    plan             JSONB,                        -- PlanArtifact serializado
+    status           TEXT NOT NULL DEFAULT 'new', -- state machine §9.3
+    risk_class       TEXT,                        -- 'low' | 'high' (approval gate is Phase 2)
+    plan             JSONB,                        -- serialized PlanArtifact
     pr_number        INTEGER,
     budget           JSONB NOT NULL DEFAULT '{}'::jsonb,
     idempotency_key  TEXT NOT NULL UNIQUE,
@@ -48,8 +48,8 @@ CREATE TRIGGER trg_work_items_updated_at
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- ---------------------------------------------------------------------------
--- ingest_events — outbox transacional (WSA-E1-T1/T3). Gravado na MESMA
--- transação que o work_items correspondente (FR-06).
+-- ingest_events — transactional outbox (WSA-E1-T1/T3). Written in the SAME
+-- transaction as the corresponding work_items row (FR-06).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS ingest_events (
     id            BIGSERIAL PRIMARY KEY,
@@ -67,21 +67,21 @@ CREATE INDEX IF NOT EXISTS idx_ingest_events_unprocessed
     ON ingest_events (id) WHERE NOT processed;
 
 -- ---------------------------------------------------------------------------
--- audit_log — write-sink append-only (WSF-E1-T1). Particionado por tenant
--- (NFR-03). REVOKE de UPDATE/DELETE mesmo para a role de aplicação.
+-- audit_log — append-only write sink (WSF-E1-T1). Partitioned by tenant
+-- (NFR-03). REVOKE UPDATE/DELETE even for the application role.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit_log (
     id            BIGSERIAL,
     ts            TIMESTAMPTZ NOT NULL DEFAULT now(),
     work_item_id  TEXT,
     tenant_id     TEXT NOT NULL,
-    actor         TEXT NOT NULL,     -- principal resolvido OU 'system:<component>'
+    actor         TEXT NOT NULL,     -- resolved principal OR 'system:<component>'
     action        TEXT NOT NULL,
     details       JSONB NOT NULL DEFAULT '{}'::jsonb,
     PRIMARY KEY (tenant_id, id)
 ) PARTITION BY LIST (tenant_id);
 
--- Partição default para tenants ainda sem partição dedicada (onboarding cria a sua).
+-- Default partition for tenants that do not have a dedicated one yet (onboarding creates theirs).
 CREATE TABLE IF NOT EXISTS audit_log_default PARTITION OF audit_log DEFAULT;
 
 CREATE OR REPLACE FUNCTION create_tenant_audit_partition(p_tenant_id TEXT) RETURNS VOID AS $$
@@ -98,8 +98,8 @@ $$ LANGUAGE plpgsql;
 CREATE INDEX IF NOT EXISTS idx_audit_log_work_item ON audit_log (work_item_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log (ts);
 
--- Role de aplicação: apenas INSERT/SELECT. Nunca UPDATE/DELETE (mesmo o superuser
--- de app não deve ter o grant — a garantia é estrutural, não uma convenção).
+-- Application role: INSERT/SELECT only. Never UPDATE/DELETE (not even the app
+-- superuser should have the grant — the guarantee is structural, not a convention).
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dse_app') THEN
@@ -109,8 +109,8 @@ END
 $$;
 
 GRANT SELECT, INSERT ON work_items, ingest_events TO dse_app;
-GRANT UPDATE ON work_items TO dse_app;              -- work_items tem update legítimo (status)
-GRANT SELECT, UPDATE ON ingest_events TO dse_app;     -- marcar processed=true
+GRANT UPDATE ON work_items TO dse_app;              -- work_items has a legitimate update (status)
+GRANT SELECT, UPDATE ON ingest_events TO dse_app;     -- mark processed=true
 
 GRANT SELECT, INSERT ON audit_log TO dse_app;
 REVOKE UPDATE, DELETE ON audit_log FROM dse_app;
@@ -119,11 +119,11 @@ REVOKE UPDATE, DELETE ON audit_log FROM PUBLIC;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dse_app;
 
 -- ---------------------------------------------------------------------------
--- Identity map foundations (WSF-E3-T1). Fase 1: resolução por auto-registro
--- (sem SSO/SCIM — isso é ADR-22 / WSF-E3-T3, Fase 2).
+-- Identity map foundations (WSF-E3-T1). Phase 1: resolution via self-registration
+-- (no SSO/SCIM — that is ADR-22 / WSF-E3-T3, Phase 2).
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS principals (
-    id            TEXT PRIMARY KEY,      -- ex.: 'usr_<uuid>'
+    id            TEXT PRIMARY KEY,      -- e.g.: 'usr_<uuid>'
     display_name  TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );

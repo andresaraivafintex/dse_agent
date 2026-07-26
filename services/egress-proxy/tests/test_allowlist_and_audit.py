@@ -1,8 +1,8 @@
-"""WSC-E2-T1: proxy default-deny real (asyncio, TCP de verdade) — encaminha
-só hosts na allowlist; qualquer host fora dela é recusado e gera
-`dse_audit.emit(action="egress_denied", ...)` — GRAVADO NO POSTGRES REAL
-(nunca mockado; ver CONVENTIONS.md P8/regra de nunca mockar Postgres para
-garantias de durabilidade/evidência)."""
+"""WSC-E2-T1: real default-deny proxy (asyncio, real TCP) — forwards only hosts
+on the allowlist; any host outside it is refused and emits
+`dse_audit.emit(action="egress_denied", ...)` — WRITTEN TO THE REAL POSTGRES
+(never mocked; see CONVENTIONS.md P8 / the rule of never mocking Postgres for
+durability/evidence guarantees)."""
 from __future__ import annotations
 
 import http.client
@@ -69,8 +69,8 @@ def test_disallowed_host_denial_is_audited_in_real_postgres(running_proxy_factor
 
 
 def test_connect_tunnel_enforces_allowlist_too(running_proxy_factory, upstream_server):
-    """CONNECT (túnel HTTPS opaco) também é sujeito à allowlist — não só o
-    proxy HTTP em texto plano."""
+    """CONNECT (opaque HTTPS tunnel) is subject to the allowlist too — not just
+    the plaintext HTTP proxying path."""
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
     allowlist.entries.append(_entry_for_upstream(upstream_server))
     rp = running_proxy_factory(allowlist)

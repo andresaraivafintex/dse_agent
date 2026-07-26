@@ -1,4 +1,4 @@
-"""Contrato de migração do lifecycle atual para um SandboxDriver único."""
+"""Contract for migrating the current lifecycle onto a single SandboxDriver."""
 from __future__ import annotations
 
 import pytest
@@ -56,16 +56,16 @@ def test_docker_adapter_preserves_existing_provision_api(monkeypatch):
 
 
 def test_execute_stage_is_isolated_and_fails_closed_when_unavailable():
-    """Fase 1 (plano 09): execute_stage roda o agent-runner via docker exec.
-    Indisponibilidade (docker ausente, container inexistente, runner fora da
-    imagem) é falha LIMPA — nunca degrada para execução no worker."""
+    """Fase 1 (plano 09): execute_stage runs the agent-runner via docker exec.
+    Unavailability (no docker, nonexistent container, runner missing from the
+    image) is a CLEAN failure — it never degrades into running on the worker."""
     driver = DockerSandboxDriver()
     request = StageExecutionRequest(
         sandbox_id="dse-sandbox-inexistente-xyz",
         work_item_id="wi-driver",
         tenant_id="tenant-driver",
         stage=Stage.coder,
-        input_payload={"instruction": "não deve rodar localmente"},
+        input_payload={"instruction": "must not run locally"},
         timeout_seconds=30,
     )
 
@@ -88,7 +88,7 @@ def test_stage_contract_contains_no_host_path_or_privileged_credential_fields():
 
 
 def test_existing_module_level_driver_api_remains_available():
-    """O novo adapter é aditivo; callers antigos não quebram neste sprint."""
+    """The new adapter is additive; old callers do not break in this sprint."""
     for name in (
         "provision_container",
         "find_existing_container",

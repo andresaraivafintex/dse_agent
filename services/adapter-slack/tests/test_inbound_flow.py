@@ -1,7 +1,7 @@
-"""WSA-E3-T1 — fluxo inbound completo: app_mention cria task_request,
-reply em thread existente correlaciona via thread_ts (signal), interação de
-botão vira kind=approval, TOCTOU snapshot (WSA-E2-T2) e sanitização
-(WSA-E2-T3) fim-a-fim."""
+"""WSA-E3-T1 — full inbound flow: app_mention creates a task_request, a reply
+in an existing thread correlates via thread_ts (signal), a button interaction
+becomes kind=approval, plus TOCTOU snapshot (WSA-E2-T2) and sanitization
+(WSA-E2-T3) end-to-end."""
 from __future__ import annotations
 
 import json
@@ -92,7 +92,7 @@ def test_reply_in_existing_thread_correlates_to_signal_not_new_task():
     conn = psycopg2.connect(DSN)
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM work_items WHERE tenant_id = 'test_tenant_slack_adapter'")
-        # apenas 1 work_item criado nesse fluxo (a reply não cria um segundo)
+        # only 1 work_item created in this flow (the reply does not create a second)
         cur.execute(
             "SELECT count(*) FROM work_items WHERE tenant_id = 'test_tenant_slack_adapter' "
             "AND source_ref @> %s::jsonb",
@@ -110,10 +110,10 @@ def test_reply_in_existing_thread_correlates_to_signal_not_new_task():
 
 
 def test_toctou_snapshot_freezes_content_at_event_time():
-    """O snapshot gravado é exatamente o texto que veio no webhook — provamos
-    que não há re-fetch: mesmo simulando uma 'edição' via um segundo webhook
-    com texto diferente para a MESMA mensagem (mesmo ts), o primeiro
-    ingest_event já persistido continua com o conteúdo original."""
+    """The recorded snapshot is exactly the text that came in the webhook — we
+    prove there is no re-fetch: even simulating an 'edit' via a second webhook
+    with different text for the SAME message (same ts), the first ingest_event
+    already persisted keeps the original content."""
     original_text = "original instruction: implement feature X"
     data = _post_event(
         {
@@ -134,10 +134,10 @@ def test_toctou_snapshot_freezes_content_at_event_time():
 
     assert payload["content_snapshot"] == original_text
 
-    # Reentrega do MESMO evento (mesmo channel+ts) com texto "editado" —
-    # como platform+thread+message (ts) são idênticos, o event_id é IGUAL e
-    # a linha é deduplicada (ON CONFLICT DO NOTHING) — o snapshot já gravado
-    # NUNCA é sobrescrito por uma versão "editada".
+    # Redelivery of the SAME event (same channel+ts) with "edited" text —
+    # since platform+thread+message (ts) are identical, the event_id is the
+    # SAME and the row is deduplicated (ON CONFLICT DO NOTHING) — the snapshot
+    # already recorded is NEVER overwritten by an "edited" version.
     edited_data = _post_event(
         {
             "type": "app_mention",
@@ -157,8 +157,8 @@ def test_toctou_snapshot_freezes_content_at_event_time():
         rows = cur.fetchall()
     conn.close()
 
-    assert len(rows) == 1  # dedup — nenhuma segunda linha
-    assert rows[0][0]["content_snapshot"] == original_text  # não foi sobrescrito
+    assert len(rows) == 1  # dedup — no second row
+    assert rows[0][0]["content_snapshot"] == original_text  # was not overwritten
 
 
 def test_sanitize_pipeline_redacts_secret_before_reaching_payload_sanitized_field():
@@ -179,9 +179,9 @@ def test_sanitize_pipeline_redacts_secret_before_reaching_payload_sanitized_fiel
         payload = cur.fetchone()[0]
     conn.close()
 
-    # snapshot original intacto (auditoria) — o secret aparece aqui de propósito.
+    # original snapshot intact (audit) — the secret shows up here on purpose.
     assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" in payload["content_snapshot"]
-    # versão sanitizada (a que segue no pipeline) tem o secret redigido.
+    # sanitized version (the one that moves down the pipeline) has the secret redacted.
     assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" not in payload["sanitized_content"]
     assert "[REDACTED:github_token]" in payload["sanitized_content"]
 
@@ -226,10 +226,10 @@ def test_block_action_button_click_correlates_as_approval_signal():
 
 
 def test_reject_button_carries_rejected_verdict_not_silent_approve():
-    """C1 (relatório 07) — regressão de SEGURANÇA: um clique em 'reject' precisa
-    virar marcador `approval_verdict=rejected` no payload do signal. Sem isso o
-    dispatcher default para 'approved' e a rejeição aprovaria o plano em
-    silêncio. Espelha o caminho já correto do Jira."""
+    """C1 (report 07) — SECURITY regression: a click on 'reject' has to become
+    the `approval_verdict=rejected` marker in the signal payload. Without it the
+    dispatcher defaults to 'approved' and the rejection would silently approve
+    the plan. Mirrors the already-correct Jira path."""
     created = _post_event(
         {
             "type": "app_mention",
@@ -299,10 +299,10 @@ def test_approve_button_carries_approved_verdict():
 
 
 def test_channel_binding_resolves_repo_at_admission():
-    """C2 (relatório 07) — prova do blocker resolvido: um @mention num canal
-    COM repo_binding nasce com repo/base_branch preenchidos (não NULL), então
-    o gate de completude passa em vez de escalar. É o que faltava para uma
-    tarefa de Slack executar ponta a ponta."""
+    """C2 (report 07) — proof the blocker is resolved: an @mention in a channel
+    WITH a repo_binding is born with repo/base_branch filled in (not NULL), so
+    the completeness gate passes instead of escalating. This is what was missing
+    for a Slack task to run end-to-end."""
     import os
     tenant = os.environ.get("DSE_TENANT_ID", "dev-tenant")
     conn = psycopg2.connect(DSN.replace("dse_app:dse_app_dev_only", "dse:dse_dev_only"))
@@ -321,7 +321,7 @@ def test_channel_binding_resolves_repo_at_admission():
             "channel": "C_BOUND",
             "ts": "9300.001",
             "user": "U_REQUESTER",
-            "text": "@fintex-dse conserta o cálculo de saldo",
+            "text": "@fintex-dse fix the balance calculation",
         }
     )
     work_item_id = created["work_item_id"]
@@ -336,7 +336,7 @@ def test_channel_binding_resolves_repo_at_admission():
 
 
 def test_explicit_repo_in_text_overrides():
-    """Rung 1 da cascata: repo explícito no texto ganha (sem depender de binding)."""
+    """Rung 1 of the cascade: an explicit repo in the text wins (no binding needed)."""
     created = _post_event(
         {
             "type": "app_mention",

@@ -1,12 +1,13 @@
-# WS-F — fragment de docker-compose (ver CONVENTIONS.md). Conecta à rede
-# externa `dse_net` já declarada na fundação (docker-compose.yml). `make up`
-# faz o merge de todos os fragments `docker-compose.ws*.yml` presentes.
+# WS-F — docker-compose fragment (see CONVENTIONS.md). Connects to the
+# external network `dse_net` already declared in the foundation
+# (docker-compose.yml). `make up` merges every `docker-compose.ws*.yml`
+# fragment present.
 #
-# otel-collector (WSF-E7-T1): recebe spans/métricas OTLP dos outros serviços
-# (WS-D instrumenta o lado de quem emite, usando os atributos
-# dse_contracts.constants.OTEL_ATTR_*) e exporta para stdout via `debug`
-# exporter (nenhum backend de observabilidade real está provisionado nesta
-# sessão de dev — ver infra/ALERTING-RULES.md para o que trocar em produção).
+# otel-collector (WSF-E7-T1): receives OTLP spans/metrics from the other
+# services (WS-D instruments the emitting side, using the
+# dse_contracts.constants.OTEL_ATTR_* attributes) and exports to stdout via the
+# `debug` exporter (no real observability backend is provisioned in this dev
+# session — see infra/ALERTING-RULES.md for what to swap in production).
 
 networks:
   dse_net:
@@ -25,17 +26,17 @@ services:
       - "4318:4318" # OTLP HTTP
     networks: [dse_net]
 
-  # WSF-E6-T3 — Admin queue board (server-rendered, SEM design system) na 8890.
-  # Lê o Postgres (system of record) e envia signals ao Temporal. Login via SSO
-  # (WSF-E3-T3) — configure DSE_OIDC_* para plugar o IdP; sem isso o login fica
-  # desabilitado (503), apropriado para um deployment ainda sem IdP.
-  # WSF-E2-T3b/WSF-E8-T2 — scheduler dos jobs de plataforma (Fase 3): rotação
-  # agendada de secrets de serviço (ADR-28) + retenção por classificação
-  # (§12.2). Reusa a MESMA imagem do queue board (command override) — P7.
-  # Por que scheduler Python no compose (não CronJob no k3d): ver o docstring
-  # de dse_platform/jobs_scheduler.py — os consumidores dos secrets e o
-  # Postgres alvo vivem no compose; em K8s real o mesmo módulo roda como
-  # CronJob com `--once`.
+  # WSF-E6-T3 — Admin queue board (server-rendered, NO design system) on 8890.
+  # Reads Postgres (system of record) and sends signals to Temporal. Login via
+  # SSO (WSF-E3-T3) — set DSE_OIDC_* to plug in the IdP; without it login stays
+  # disabled (503), which is appropriate for a deployment with no IdP yet.
+  # WSF-E2-T3b/WSF-E8-T2 — platform jobs scheduler (Phase 3): scheduled
+  # rotation of service secrets (ADR-28) + retention by classification
+  # (§12.2). Reuses the SAME queue board image (command override) — P7.
+  # Why a Python scheduler in compose (not a CronJob on k3d): see the docstring
+  # of dse_platform/jobs_scheduler.py — the secret consumers and the target
+  # Postgres live in compose; on real K8s the same module runs as a CronJob
+  # with `--once`.
   platform-jobs:
     build:
       context: .
@@ -47,14 +48,15 @@ services:
       DSE_PLATFORM_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       VAULT_ADDR: http://vault:8200
-      # Dev local APENAS (Vault dev-mode da fundação). Produção: VAULT_TOKEN
-      # de policy dedicada (rotate + read/write só em dse/service/*).
+      # Local dev ONLY (the foundation's dev-mode Vault). Production: a
+      # VAULT_TOKEN from a dedicated policy (rotate + read/write on
+      # dse/service/* only).
       VAULT_DEV_ROOT_TOKEN: ${VAULT_DEV_ROOT_TOKEN:-dse_dev_root}
       DSE_ROTATION_INTERVAL_SECONDS: "86400"
       DSE_RETENTION_INTERVAL_SECONDS: "86400"
-      # Secrets de serviço internos rotacionáveis sem API de provedor externo.
-      # Slack/GitHub/Jira entram aqui quando houver apps reais (generator por
-      # provedor — ver dse_platform/secret_rotation.py).
+      # Internal service secrets rotatable without an external provider API.
+      # Slack/GitHub/Jira go in here once there are real apps (per-provider
+      # generator — see dse_platform/secret_rotation.py).
       DSE_ROTATION_MANIFEST: '[{"path": "dse/service/queue-board-session", "tenant_id": "platform"}]'
     networks: [dse_net]
 
@@ -69,7 +71,7 @@ services:
       DSE_AUDIT_DATABASE_URL: postgresql://dse_app:dse_app_dev_only@postgres:5432/dse
       DSE_TEMPORAL_TARGET: temporal:7233
       DSE_CONSOLE_SESSION_SECRET: ${DSE_CONSOLE_SESSION_SECRET:-dev-console-secret-not-for-prod-change-me-32b}
-      # Plugar o IdP: DSE_OIDC_ISSUER / DSE_OIDC_AUDIENCE / DSE_OIDC_JWKS(_FILE)
+      # To plug in the IdP: DSE_OIDC_ISSUER / DSE_OIDC_AUDIENCE / DSE_OIDC_JWKS(_FILE)
     ports:
       - "8890:8890"
     networks: [dse_net]

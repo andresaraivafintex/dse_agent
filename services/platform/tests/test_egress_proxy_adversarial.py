@@ -1,35 +1,32 @@
-"""WSF-E2 — testes adversariais do egress proxy / broker de credenciais
-(construído pelo WS-C em `services/egress-proxy/`, porta 8806 — ver
-CONVENTIONS.md). Papel do WS-F aqui é sign-off: atacar a interface HTTP
-exposta e provar (ou refutar) as garantias "default-deny" e "zero
-credenciais persistentes no sandbox".
+"""WSF-E2 — adversarial tests for the egress proxy / credential broker (built by
+WS-C in `services/egress-proxy/`, port 8806 — see CONVENTIONS.md). WS-F's role
+here is sign-off: attack the exposed HTTP interface and prove (or disprove) the
+"default-deny" and "zero persistent credentials in the sandbox" guarantees.
 
-IMPORTANTE — interface assumida: no momento em que esta suíte foi escrita,
-`services/egress-proxy/` ainda não existia neste checkout (WS-C constrói em
-paralelo). Não há uma interface documentada e publicada ainda, então estes
-testes assumem o contrato mais provável dado o que a proposta técnica
-descreve ("Proxy default-deny + injeção de credenciais efêmeras", CONVENTIONS.md):
+IMPORTANT — assumed interface: when this suite was written,
+`services/egress-proxy/` did not exist yet in this checkout (WS-C builds it in
+parallel). There is no documented, published interface yet, so these tests assume
+the most likely contract given what the technical proposal describes
+("Default-deny proxy + ephemeral credential injection", CONVENTIONS.md):
 
-  1. O proxy funciona como forward proxy HTTP/HTTPS padrão em
-     `http://localhost:8806` (o sandbox aponta HTTPS_PROXY/HTTP_PROXY para
-     cá) — CONNECT tunneling para HTTPS, allowlist de hosts de destino.
-  2. Hosts fora da allowlist recebem 403 (ou a conexão é recusada/hang up
-     no CONNECT) — nunca um encaminhamento silencioso.
-  3. Um endpoint de observabilidade/health em `GET /health` (convenção do
-     monorepo para os demais serviços HTTP) responde 200 quando o proxy
-     está operante.
+  1. The proxy works as a standard HTTP/HTTPS forward proxy at
+     `http://localhost:8806` (the sandbox points HTTPS_PROXY/HTTP_PROXY here) —
+     CONNECT tunneling for HTTPS, allowlist of destination hosts.
+  2. Hosts outside the allowlist get a 403 (or the connection is refused/hung up
+     on CONNECT) — never a silent forward.
+  3. An observability/health endpoint at `GET /health` (the monorepo convention
+     for the other HTTP services) answers 200 when the proxy is up.
 
-QUANDO O WS-C PUBLICAR A INTERFACE REAL: se ela for diferente (ex.: API
-REST tipo `POST /v1/egress {url, headers}` em vez de forward-proxy puro),
-esta suíte inteira precisa ser reescrita contra o contrato real — não é
-incremental. Os testes abaixo detectam essa divergência e SKIPAM com razão
-clara em vez de falhar silenciosamente ou dar falso-positivo (P6:
-decline-never-truncate — preferimos declarar "não pude verificar" a fingir
-que verificamos).
+WHEN WS-C PUBLISHES THE REAL INTERFACE: if it differs (e.g. a REST API like
+`POST /v1/egress {url, headers}` instead of a pure forward proxy), this whole
+suite must be rewritten against the real contract — it is not incremental. The
+tests below detect that divergence and SKIP with a clear reason instead of
+failing silently or producing a false positive (P6: decline-never-truncate — we
+would rather state "could not verify" than pretend we verified).
 
-Rode `make up` estilo WS-C (ou o compose fragment dele) antes de rodar esta
-suíte para exercitar de verdade; sem isso, todos os testes abaixo skipam com
-razão "egress-proxy não está respondendo em localhost:8806".
+Run WS-C's `make up` (or its compose fragment) before running this suite for it
+to actually exercise anything; without that, every test below skips with the
+reason "egress-proxy is not answering on localhost:8806".
 """
 from __future__ import annotations
 
@@ -58,26 +55,26 @@ _PROXY_UP = _tcp_reachable(PROXY_HOST, PROXY_PORT)
 pytestmark = pytest.mark.skipif(
     not _PROXY_UP,
     reason=(
-        f"services/egress-proxy (WS-C) não está respondendo em {PROXY_HOST}:{PROXY_PORT}. "
-        "Esta suíte adversarial (WSF-E2) precisa ser reexecutada assim que o WS-C subir o "
-        "serviço — ver services/platform/README.md secção 'Egress proxy adversarial tests' "
-        "para instruções exatas e para o que reavaliar caso a interface real difira do "
-        "forward-proxy HTTP/HTTPS assumido aqui."
+        f"services/egress-proxy (WS-C) is not answering on {PROXY_HOST}:{PROXY_PORT}. "
+        "This adversarial suite (WSF-E2) has to be re-run as soon as WS-C brings the "
+        "service up — see services/platform/README.md section 'Egress proxy adversarial tests' "
+        "for the exact instructions and for what to re-evaluate should the real interface "
+        "differ from the HTTP/HTTPS forward proxy assumed here."
     ),
 )
 
 
 def _proxy_speaks_forward_http() -> bool:
-    """Sonda leve: um forward proxy HTTP real responde a um GET simples
-    através dele (mesmo que com 403/502); um serviço REST arbitrário na
-    mesma porta tipicamente responderia com 400 a uma linha de request mal
-    formada para ele. Usado para decidir se aplicamos os testes de
-    forward-proxy ou skipamos com razão de "interface não é a assumida"."""
+    """Light probe: a real HTTP forward proxy answers a plain GET made through it
+    (even with a 403/502); an arbitrary REST service on the same port would
+    typically answer 400 to a request line that is malformed for it. Used to
+    decide whether to apply the forward-proxy tests or skip with the reason
+    "the interface is not the assumed one"."""
     try:
         requests.get("http://dse-adversarial-probe.invalid/", proxies=PROXIES, timeout=TIMEOUT)
         return True
     except requests.exceptions.ProxyError:
-        return True  # respondeu como proxy (recusou o CONNECT/GET) — é a interface esperada
+        return True  # answered as a proxy (refused the CONNECT/GET) — the expected interface
     except requests.exceptions.ConnectionError:
         return False
     except requests.exceptions.RequestException:
@@ -88,21 +85,21 @@ def _proxy_speaks_forward_http() -> bool:
 def _require_forward_proxy_interface():
     if not _proxy_speaks_forward_http():
         pytest.skip(
-            "egress-proxy está no ar mas não respondeu como forward-proxy HTTP/HTTPS padrão "
-            "(a suposição de interface documentada no topo deste arquivo). Reescreva esta "
-            "suíte contra a interface real publicada pelo WS-C."
+            "egress-proxy is up but did not answer as a standard HTTP/HTTPS forward proxy "
+            "(the interface assumption documented at the top of this file). Rewrite this "
+            "suite against the real interface published by WS-C."
         )
 
 
 # ---------------------------------------------------------------------------
-# 1) Acesso a host fora da allowlist
+# 1) Access to a host outside the allowlist
 # ---------------------------------------------------------------------------
 class TestAllowlistEnforcement:
     NON_ALLOWLISTED_HOSTS = [
         "https://evil-exfil-destination.example.com/",
         "https://pastebin.com/raw/anything",
-        "http://169.254.169.254/latest/meta-data/",  # cloud metadata SSRF clássico
-        "https://api.telegram.org/bot123/sendMessage",  # canal de exfil comum
+        "http://169.254.169.254/latest/meta-data/",  # classic cloud metadata SSRF
+        "https://api.telegram.org/bot123/sendMessage",  # common exfil channel
     ]
 
     @pytest.mark.parametrize("url", NON_ALLOWLISTED_HOSTS)
@@ -112,46 +109,46 @@ class TestAllowlistEnforcement:
             resp = requests.get(url, proxies=PROXIES, timeout=TIMEOUT)
             denied = resp.status_code in (401, 403, 407, 502, 503)
         except requests.exceptions.ProxyError:
-            denied = True  # proxy recusou o CONNECT — comportamento default-deny esperado
+            denied = True  # proxy refused the CONNECT — the expected default-deny behavior
         except requests.exceptions.ConnectionError:
-            denied = True  # conexão derrubada pelo proxy — também aceitável como "negado"
+            denied = True  # connection dropped by the proxy — also acceptable as "denied"
         except requests.exceptions.Timeout:
-            pytest.skip(f"proxy não respondeu (timeout) para {url} — inconclusivo, reexecutar")
+            pytest.skip(f"proxy did not answer (timeout) for {url} — inconclusive, re-run")
 
         assert denied, (
-            f"host fora da allowlist '{url}' NÃO foi negado pelo proxy — falha crítica de "
-            "default-deny (FR-11 violado)"
+            f"host outside the allowlist '{url}' was NOT denied by the proxy — critical "
+            "default-deny failure (FR-11 violated)"
         )
 
     def test_allowlist_denial_is_never_a_silent_forward(self):
-        """Uma negação nunca deve parecer um 200 com o conteúdo do destino de
-        verdade — isso indicaria bypass silencioso (P6: falhar visivelmente,
-        nunca truncar/mascarar)."""
+        """A denial must never look like a 200 carrying the real destination's
+        content — that would mean a silent bypass (P6: fail visibly, never
+        truncate/mask)."""
         url = "https://evil-exfil-destination.example.com/should-never-be-reachable"
         try:
             resp = requests.get(url, proxies=PROXIES, timeout=TIMEOUT)
         except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
-            return  # negado na camada de conexão — ok
+            return  # denied at the connection layer — ok
         except requests.exceptions.Timeout:
-            pytest.skip("timeout — inconclusivo")
+            pytest.skip("timeout — inconclusive")
         assert resp.status_code != 200, (
-            "proxy retornou 200 para host claramente fora de qualquer allowlist plausível — "
-            "suspeita de fail-open"
+            "proxy returned 200 for a host clearly outside any plausible allowlist — "
+            "fail-open suspected"
         )
 
 
 # ---------------------------------------------------------------------------
-# 2) Bypass de allowlist via redirect / DNS trick / confusão de host
+# 2) Allowlist bypass via redirect / DNS trick / host confusion
 # ---------------------------------------------------------------------------
 class TestBypassAttempts:
-    # Técnicas clássicas de bypass de allowlist baseada em hostname: confusão
-    # de sufixo, userinfo embutido na URL, encoding alternativo de IP,
-    # concatenação de host permitido como subdomínio de host malicioso.
+    # Classic bypass techniques against a hostname-based allowlist: suffix
+    # confusion, userinfo embedded in the URL, alternative IP encodings,
+    # concatenating an allowed host as a subdomain of a malicious host.
     BYPASS_ATTEMPTS = [
-        "https://api.github.com.evil-exfil.com/",       # sufixo confuso
-        "https://evil-exfil.com/api.github.com",         # path confuso
-        "http://2130706433/",                             # 127.0.0.1 em decimal
-        "http://0x7f000001/",                             # 127.0.0.1 em hex
+        "https://api.github.com.evil-exfil.com/",       # confusing suffix
+        "https://evil-exfil.com/api.github.com",         # confusing path
+        "http://2130706433/",                             # 127.0.0.1 in decimal
+        "http://0x7f000001/",                             # 127.0.0.1 in hex
         "http://[::ffff:127.0.0.1]/",                     # IPv4-mapped IPv6
     ]
 
@@ -163,20 +160,20 @@ class TestBypassAttempts:
         except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
             denied = True
         except requests.exceptions.Timeout:
-            pytest.skip(f"timeout para {url} — inconclusivo, reexecutar")
+            pytest.skip(f"timeout for {url} — inconclusive, re-run")
         except requests.exceptions.InvalidURL:
-            return  # o próprio parser de URL rejeitou — não chegou a testar o proxy, ok
+            return  # the URL parser itself rejected it — the proxy was never tested, ok
 
-        assert denied, f"tentativa de bypass via confusão de host '{url}' não foi negada"
+        assert denied, f"bypass attempt via host confusion '{url}' was not denied"
 
     def test_redirect_to_non_allowlisted_host_is_still_enforced(self, httpserver=None):
-        """Simula um host allowlisted (assumido: nenhum de fato está
-        configurado neste ambiente de teste isolado) que devolve um 302 para
-        um destino fora da allowlist. Sem controle sobre um host realmente
-        allowlisted neste teste, validamos a propriedade mais fraca porém
-        ainda real: `requests` com `allow_redirects=True` NÃO deve terminar
-        com 200 vindo de um destino fora de qualquer allowlist plausível
-        quando o primeiro hop já é desconhecido do proxy."""
+        """Simulates an allowlisted host (assumed: none is actually configured in
+        this isolated test environment) returning a 302 to a destination outside
+        the allowlist. Without control over a truly allowlisted host in this
+        test, we validate the weaker but still real property: `requests` with
+        `allow_redirects=True` must NOT end with a 200 coming from a destination
+        outside any plausible allowlist when the first hop is already unknown to
+        the proxy."""
         url = "https://evil-exfil-destination.example.com/redirect-to-elsewhere"
         try:
             resp = requests.get(url, proxies=PROXIES, timeout=TIMEOUT, allow_redirects=True)
@@ -184,20 +181,18 @@ class TestBypassAttempts:
         except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError):
             denied = True
         except requests.exceptions.Timeout:
-            pytest.skip("timeout — inconclusivo")
+            pytest.skip("timeout — inconclusive")
         assert denied
 
 
 # ---------------------------------------------------------------------------
-# 3) Reuso de token capturado fora da janela/escopo
+# 3) Reuse of a captured token outside its window/scope
 # ---------------------------------------------------------------------------
 class TestCredentialReuse:
-    """Estas verificações dependem de uma API de broker de credenciais que
-    ainda não está documentada publicamente pelo WS-C (endpoint de
-    emissão/introspecção de token efêmero). Tentamos os caminhos mais
-    prováveis (`/v1/credentials/*`, `/broker/*`) e SKIPAMOS com razão clara
-    se nenhum responder — não inventamos um contrato que o WS-C não
-    publicou."""
+    """These checks depend on a credential broker API that WS-C has not publicly
+    documented yet (ephemeral token issue/introspect endpoints). We try the most
+    likely paths (`/v1/credentials/*`, `/broker/*`) and SKIP with a clear reason
+    if none answers — we do not invent a contract WS-C never published."""
 
     CANDIDATE_ISSUE_PATHS = ["/v1/credentials/issue", "/broker/issue", "/v1/token"]
     CANDIDATE_INTROSPECT_PATHS = ["/v1/credentials/introspect", "/broker/introspect", "/v1/token/introspect"]
@@ -218,53 +213,51 @@ class TestCredentialReuse:
 
         if issue_path is None or introspect_path is None:
             pytest.skip(
-                "Nenhum endpoint de emissão/introspecção de credencial efêmera encontrado nos "
-                f"caminhos candidatos {self.CANDIDATE_ISSUE_PATHS + self.CANDIDATE_INTROSPECT_PATHS}. "
-                "WS-C ainda não publicou a API do broker — REEXECUTAR esta verificação assim que "
-                "publicar (ver services/platform/README.md)."
+                "No ephemeral-credential issue/introspection endpoint found among the "
+                f"candidate paths {self.CANDIDATE_ISSUE_PATHS + self.CANDIDATE_INTROSPECT_PATHS}. "
+                "WS-C has not published the broker API yet — RE-RUN this check as soon as "
+                "it does (see services/platform/README.md)."
             )
 
-        # Se algum dia um destes caminhos existir de fato, o teste real:
-        # 1. emite um token com TTL curto e escopo restrito a um host X
-        # 2. espera o TTL expirar
-        # 3. tenta introspectar/usar o token — espera rejeição (401/403)
-        # 4. tenta usar o MESMO token para um host Y fora do escopo original
-        #    — espera rejeição mesmo dentro do TTL
+        # If one of these paths ever really exists, the real test would:
+        # 1. issue a token with a short TTL and scope restricted to host X
+        # 2. wait for the TTL to expire
+        # 3. try to introspect/use the token — expect rejection (401/403)
+        # 4. try to use the SAME token against a host Y outside the original
+        #    scope — expect rejection even while inside the TTL
         pytest.skip(
-            "endpoint candidato encontrado mas o contrato de payload (campos de scope/ttl) não "
-            "está documentado — implementar o corpo do teste quando o WS-C publicar o schema."
+            "candidate endpoint found but the payload contract (scope/ttl fields) is not "
+            "documented — implement the test body once WS-C publishes the schema."
         )
 
     def test_captured_token_cannot_be_replayed_directly_against_upstream(self):
-        """Propriedade de mais alto nível ('zero credenciais no sandbox'): um
-        token supostamente injetado pelo proxy na borda não deve ser
-        reutilizável fora da requisição original se capturado (ex.: por um
-        processo dentro do sandbox tentando fazer replay direto contra o
-        upstream, pulando o proxy). Sem acesso ao sandbox real do WS-C nem a
-        um upstream de teste controlado, este teste permanece um placeholder
-        de INTENÇÃO — não inventamos uma asserção que não podemos verificar
-        de verdade (isso violaria P8: evidência sobre asserção)."""
+        """Higher-level property ('zero credentials in the sandbox'): a token
+        supposedly injected by the proxy at the edge must not be reusable outside
+        the original request if captured (e.g. by a process inside the sandbox
+        replaying it directly against the upstream, bypassing the proxy). Without
+        access to WS-C's real sandbox nor a controlled test upstream, this test
+        stays an INTENT placeholder — we do not invent an assertion we cannot
+        actually verify (that would violate P8: evidence over assertion)."""
         pytest.skip(
-            "Requer um sandbox real (services/sandbox-runtime, WS-C) executando uma sessão e "
-            "um upstream de teste controlado para capturar+repetir um token de verdade. "
-            "Não verificável apenas contra a interface HTTP do proxy isoladamente — mover para "
-            "um teste de integração cross-workstream (WS-C + WS-F) na fase de consolidação."
+            "Requires a real sandbox (services/sandbox-runtime, WS-C) running a session and "
+            "a controlled test upstream to capture+replay a real token. "
+            "Not verifiable against the proxy HTTP interface alone — move it to a "
+            "cross-workstream integration test (WS-C + WS-F) in the consolidation phase."
         )
 
 
 def test_proxy_is_listening_and_rejects_malformed_requests():
-    """Achado da integração da Fase 1: o egress-proxy do WS-C (`egress_proxy/
-    proxy.py`) é um forward proxy HTTP/CONNECT bruto, não uma API REST — não
-    existe rota `/health`. Um GET a `/health` no próprio socket do proxy é um
-    request de proxy malformado (sem absolute-URI, sem CONNECT) e o proxy
-    corretamente responde 400 (`_handle_plain_http`), não 200. O teste
-    original assumia uma convenção de `/health` nunca confirmada contra a
-    interface real (o próprio comentário original já sinalizava isso) —
-    substituído por uma asserção que reflete o comportamento real: o proxy
-    está de pé e recusa o request malformado de forma limpa (não trava, não
-    faz hang, não repassa o request adiante)."""
+    """Phase 1 integration finding: WS-C's egress-proxy (`egress_proxy/proxy.py`)
+    is a raw HTTP/CONNECT forward proxy, not a REST API — there is no `/health`
+    route. A GET to `/health` on the proxy's own socket is a malformed proxy
+    request (no absolute-URI, no CONNECT) and the proxy correctly answers 400
+    (`_handle_plain_http`), not 200. The original test assumed a `/health`
+    convention that was never confirmed against the real interface (its own
+    comment already flagged that) — replaced with an assertion that reflects the
+    real behavior: the proxy is up and refuses the malformed request cleanly (it
+    does not crash, does not hang, does not forward the request onward)."""
     try:
         resp = requests.get(f"{PROXY_URL}/health", timeout=TIMEOUT)
     except requests.exceptions.RequestException:
-        pytest.skip("proxy não está no ar em PROXY_URL")
+        pytest.skip("proxy is not up at PROXY_URL")
     assert resp.status_code == 400

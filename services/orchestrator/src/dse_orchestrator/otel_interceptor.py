@@ -1,20 +1,20 @@
-"""WSB-E1-T4 — propagacao de trace OpenTelemetry de workflow para Activity.
+"""WSB-E1-T4 — OpenTelemetry trace propagation from workflow to Activity.
 
-Em vez de reinventar a propagacao de contexto (frágil dentro do sandbox
-deterministico do workflow), usamos o interceptor oficial
-`temporalio.contrib.opentelemetry.TracingInterceptor`, que já resolve:
-  - criacao de span por workflow run / activity execution;
-  - propagacao do trace context via `headers` do Temporal (o mesmo canal
-    usado para outros metadados cross-boundary);
-  - compatibilidade com o sandbox do workflow (nao chama APIs
-    nao-deterministicas dentro do `@workflow.run`).
+Instead of reinventing context propagation (fragile inside the workflow's
+deterministic sandbox), we use the official
+`temporalio.contrib.opentelemetry.TracingInterceptor`, which already handles:
+  - span creation per workflow run / activity execution;
+  - trace context propagation via Temporal `headers` (the same channel
+    used for other cross-boundary metadata);
+  - compatibility with the workflow sandbox (does not call
+    non-deterministic APIs inside `@workflow.run`).
 
-`setup_tracing()` monta um `TracerProvider` real (opentelemetry-sdk) com
-exporter configuravel por env:
-  - `DSE_OTEL_EXPORTER=console` (default, modo local/dev sem infra de
-    observabilidade real) — imprime spans no stdout do worker;
-  - `DSE_OTEL_EXPORTER=otlp` + `DSE_OTEL_EXPORTER_OTLP_ENDPOINT=<host:porta>`
-    — para producao, quando um collector OTLP real (ex.: o da WS-F) existir.
+`setup_tracing()` builds a real `TracerProvider` (opentelemetry-sdk) with an
+exporter configurable via env:
+  - `DSE_OTEL_EXPORTER=console` (default, local/dev mode without real
+    observability infra) — prints spans to the worker's stdout;
+  - `DSE_OTEL_EXPORTER=otlp` + `DSE_OTEL_EXPORTER_OTLP_ENDPOINT=<host:port>`
+    — for production, once a real OTLP collector (e.g. WS-F's) exists.
 """
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ def _build_exporter():
         endpoint = os.environ.get("DSE_OTEL_EXPORTER_OTLP_ENDPOINT")
         if not endpoint:
             logger.warning(
-                "DSE_OTEL_EXPORTER=otlp mas DSE_OTEL_EXPORTER_OTLP_ENDPOINT nao definido; "
-                "caindo para ConsoleSpanExporter (modo local)."
+                "DSE_OTEL_EXPORTER=otlp but DSE_OTEL_EXPORTER_OTLP_ENDPOINT is not set; "
+                "falling back to ConsoleSpanExporter (local mode)."
             )
             return ConsoleSpanExporter()
         try:
@@ -49,8 +49,8 @@ def _build_exporter():
             )
         except ImportError:
             logger.warning(
-                "opentelemetry-exporter-otlp-proto-grpc nao instalado; "
-                "caindo para ConsoleSpanExporter. Instale-o para producao."
+                "opentelemetry-exporter-otlp-proto-grpc is not installed; "
+                "falling back to ConsoleSpanExporter. Install it for production."
             )
             return ConsoleSpanExporter()
         return OTLPSpanExporter(endpoint=endpoint, insecure=True)
@@ -58,8 +58,8 @@ def _build_exporter():
 
 
 def setup_tracing() -> TracingInterceptor:
-    """Configura o TracerProvider global (idempotente) e retorna o
-    interceptor pronto para `Worker(..., interceptors=[...])`."""
+    """Configure the global TracerProvider (idempotent) and return the
+    interceptor ready for `Worker(..., interceptors=[...])`."""
     provider = trace.get_tracer_provider()
     if not isinstance(provider, TracerProvider):
         provider = TracerProvider(

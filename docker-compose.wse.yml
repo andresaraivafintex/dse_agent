@@ -1,24 +1,25 @@
-# WS-E — fragment de docker-compose (ver CONVENTIONS.md §Fase 3). Conecta à
-# rede externa `dse_net` já declarada na fundação. `make up` faz o merge de
-# todos os fragments `docker-compose.ws*.yml` presentes.
+# WS-E — docker-compose fragment (see CONVENTIONS.md §Fase 3). Connects to the
+# external network `dse_net` already declared in the foundation. `make up`
+# merges every `docker-compose.ws*.yml` fragment present.
 #
-# Serviços da Fase 3 (WSE-E5-T12 / WSE-E4-T10):
+# Phase 3 services (WSE-E5-T12 / WSE-E4-T10):
 #
-#   garage        — artifact store S3 self-hosted (dxflrs/garage, tag PINADA —
-#                   P7/NFR-09, upgrade é ato explícito). Single-node dev layout;
-#                   o bootstrap de layout/bucket/chave é idempotente e feito em
-#                   código (dse_validation.evidence.garage.ensure_garage_ready)
-#                   via admin API (:3903). Portas reservadas em CONVENTIONS.md:
+#   garage        — self-hosted S3 artifact store (dxflrs/garage, PINNED tag —
+#                   P7/NFR-09, upgrades are an explicit act). Single-node dev
+#                   layout; the layout/bucket/key bootstrap is idempotent and
+#                   done in code (dse_validation.evidence.garage.ensure_garage_ready)
+#                   via the admin API (:3903). Ports reserved in CONVENTIONS.md:
 #                   3900 (S3 API) / 3903 (admin).
 #
-#   wse-gitserver — git SMART HTTP (git-http-backend atrás de nginx+fcgiwrap,
-#                   imagem própria em services/validation/gitserver/) servindo
-#                   o repo git BARE de manifests de preview para o Argo CD do
-#                   cluster k3d (rede dse_net — os pods alcançam
-#                   `dse-wse-gitserver` pelo nome). Smart HTTP é obrigatório:
-#                   o go-git do Argo CD não fala o protocolo dumb. O host
-#                   escreve no repo direto pelo filesystem (bind mount) —
-#                   fetch-only na rede, sem porta publicada no host.
+#   wse-gitserver — SMART HTTP git (git-http-backend behind nginx+fcgiwrap,
+#                   dedicated image in services/validation/gitserver/) serving
+#                   the BARE git repo of preview manifests to the Argo CD of
+#                   the k3d cluster (dse_net network — the pods reach
+#                   `dse-wse-gitserver` by name). Smart HTTP is mandatory:
+#                   Argo CD's go-git does not speak the dumb protocol. The host
+#                   writes to the repo straight through the filesystem (bind
+#                   mount) — fetch-only over the network, no port published on
+#                   the host.
 
 networks:
   dse_net:

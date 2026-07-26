@@ -1,26 +1,27 @@
-"""WSE-E6-T18 — emissão de episódios de skill-learning a partir de REVIEW
-FEEDBACK aceito repetido.
+"""WSE-E6-T18 — emission of skill-learning episodes from repeated ACCEPTED REVIEW
+FEEDBACK.
 
-Uma das três "sources at launch" de episódios (§10.17, tabela `skill_episode`
-da migração 0019): clarificação recorrente (WS-B), CI-repair (WS-E, já entregue
-na Fase 3 em `github/l3.py`), e **review feedback aceito** (WS-E, aqui).
+One of the three "sources at launch" for episodes (§10.17, `skill_episode` table
+from migration 0019): recurring clarification (WS-B), CI-repair (WS-E, already
+delivered in Phase 3 in `github/l3.py`), and **accepted review feedback** (WS-E,
+here).
 
-O que faz: quando um feedback de review humano é ACEITO (o Coder aplicou a
-mudança pedida e o revisor a aceitou), grava um `skill_episode` tenant-scoped
-com `source='review_feedback'`, um `pattern_key` DETERMINÍSTICO (agrupa
-ocorrências do mesmo padrão de feedback) e proveniência completa (PR, reviewer,
-path, comentário, diff). `occurrence_n` conta quantas vezes o MESMO padrão
-(tenant, pattern_key) já foi visto — é o sinal de "feedback repetido" que o
-WS-C usa como insumo do pipeline de promoção (WSC-E4-T2/T3).
+What it does: when a human review feedback is ACCEPTED (the Coder applied the
+requested change and the reviewer accepted it), it records a tenant-scoped
+`skill_episode` with `source='review_feedback'`, a DETERMINISTIC `pattern_key`
+(groups occurrences of the same feedback pattern) and full provenance (PR,
+reviewer, path, comment, diff). `occurrence_n` counts how many times the SAME
+pattern (tenant, pattern_key) has been seen — it is the "repeated feedback"
+signal that WS-C uses as input to the promotion pipeline (WSC-E4-T2/T3).
 
-FRONTEIRA (testada, igual aos episódios de CI-repair): NENHUMA skill é criada
-ou ativada aqui — só o episódio. A promoção candidate→eval→approved→canary→
-active é 100% do WS-C, com aprovação humana (P3: nenhuma skill se auto-promove).
+BOUNDARY (tested, same as the CI-repair episodes): NO skill is created or
+activated here — only the episode. The candidate→eval→approved→canary→active
+promotion is 100% WS-C, with human approval (P3: no skill self-promotes).
 
-P1: `pattern_key` é uma normalização determinística de texto (nenhum LLM).
-P3: só feedback ACEITO por um humano vira episódio (o produtor não gera seu
-próprio sinal de aprendizado sozinho — o aceite é o gate humano).
-P8: cada episódio emite uma linha de audit.
+P1: `pattern_key` is a deterministic text normalization (no LLM).
+P3: only feedback ACCEPTED by a human becomes an episode (the producer does not
+generate its own learning signal alone — acceptance is the human gate).
+P8: every episode emits an audit line.
 """
 from __future__ import annotations
 
@@ -38,14 +39,14 @@ logger = logging.getLogger("dse_validation.review_learning")
 
 
 def review_pattern_key(comment_body: str, path: str | None = None) -> str:
-    """Assinatura DETERMINÍSTICA do padrão de feedback de review (tenant-scoped
-    na tabela). Normaliza o texto (lower + colapsa espaços) e escopa
-    frouxamente pelo path do arquivo comentado (o mesmo pedido no mesmo tipo de
-    arquivo é o "mesmo padrão"). Hash curto, estável entre execuções.
+    """DETERMINISTIC signature of the review-feedback pattern (tenant-scoped in
+    the table). Normalizes the text (lower + collapse whitespace) and loosely
+    scopes it by the path of the commented file (the same request on the same
+    kind of file is the "same pattern"). Short hash, stable across runs.
 
-    NÃO é semântica de LLM — é normalização de string pura (P1). Dois feedbacks
-    com o mesmo texto normalizado no mesmo path colidem de propósito: é
-    exatamente o "mesmo padrão repetido" que queremos contar."""
+    This is NOT LLM semantics — it is pure string normalization (P1). Two
+    feedbacks with the same normalized text on the same path collide on purpose:
+    that collision is exactly the "same repeated pattern" we want to count."""
     normalized = " ".join((comment_body or "").lower().split())
     scope = (path or "").strip().lower()
     raw = f"{scope}|{normalized}"
@@ -64,15 +65,15 @@ def record_review_feedback_episode(
     accepted: bool = True,
     actor: str = "system:validation",
 ) -> dict | None:
-    """Grava o episódio de review-feedback (se `accepted`). Retorna
-    `{pattern_key, id, occurrence_n}` ou `None` quando `accepted is False`
-    (feedback não aceito não é sinal de aprendizado — P3).
+    """Records the review-feedback episode (if `accepted`). Returns
+    `{pattern_key, id, occurrence_n}`, or `None` when `accepted is False`
+    (feedback that was not accepted is not a learning signal — P3).
 
-    `reviewer` deve ser um principal humano resolvido (via dse_identity) — a
-    proveniência precisa ser atribuível (P8) e o aceite é o gate humano (P3)."""
+    `reviewer` must be a resolved human principal (via dse_identity) — provenance
+    has to be attributable (P8) and acceptance is the human gate (P3)."""
     if not accepted:
         logger.info(
-            "review_learning %s: feedback não-aceito — nenhum episódio gravado", work_item_id
+            "review_learning %s: feedback not accepted — no episode recorded", work_item_id
         )
         return None
 
@@ -104,7 +105,7 @@ def record_review_feedback_episode(
                 "pr_number": pr_number,
                 "reviewer": reviewer,
                 "path": path,
-                "note": "episódio apenas — nenhuma skill criada/ativada (promoção é do WS-C, WSC-E4)",
+                "note": "episode only — no skill created/activated (promotion belongs to WS-C, WSC-E4)",
             },
         )
     return {"pattern_key": pattern_key, **episode}

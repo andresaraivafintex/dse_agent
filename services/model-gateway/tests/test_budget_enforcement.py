@@ -1,15 +1,16 @@
-"""WSD-E2-T2: enforcement de budget no call time (decline-never-truncate, P6).
+"""WSD-E2-T2: call-time budget enforcement (decline-never-truncate, P6).
 
-Testes REAIS. Provam:
-  - o custo real de cada chamada é acumulado no ledger durável;
-  - budget de WorkItem exausto -> deny tipado (budget_exhausted) na fronteira +
-    audit;
-  - budget agregado do tenant (tenant_config) exausto -> deny + audit;
-  - sem cap configurado -> sem enforcement (Fase 1 preservada).
+REAL tests. They prove:
+  - the real cost of each call accumulates on the durable ledger;
+  - an exhausted WorkItem budget -> typed deny (budget_exhausted) at the
+    boundary + audit;
+  - an exhausted tenant aggregate budget (tenant_config) -> deny + audit;
+  - no cap configured -> no enforcement (Phase 1 preserved).
 
-Como o modelo eco tem custo real 0 (não é um LLM pago), forçamos "spent >= cap"
-setando o cap em 0.0 (qualquer gasto >= 0 satisfaz a fronteira) e provamos o
-accounting inserindo custo direto no ledger.
+Because the echo model has a real cost of 0 (it is not a paid LLM), we force
+"spent >= cap" by setting the cap to 0.0 (any spend >= 0 satisfies the
+boundary) and we prove the accounting by inserting cost straight into the
+ledger.
 """
 from __future__ import annotations
 
@@ -76,7 +77,7 @@ def test_successful_call_is_recorded_in_durable_ledger(unique_ids):
 
 def test_work_item_budget_exhausted_denies_next_call(unique_ids):
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
-    # cap 0 -> qualquer spent (>=0) já satisfaz a exaustão na próxima fronteira
+    # cap 0 -> any spend (>=0) already satisfies exhaustion at the next boundary
     set_work_item_budget(wi, t, 0.0)
     key = mint_virtual_key(t, wi, Stage.coder, models=[ECHO])
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
@@ -110,7 +111,7 @@ def test_tenant_aggregate_budget_exhausted_denies(unique_ids):
 def test_budget_status_reports_caps_and_spend(unique_ids):
     t, wi = unique_ids["tenant_id"], unique_ids["work_item_id"]
     set_work_item_budget(wi, t, 5.0)
-    # injeta custo direto no ledger (simula chamadas pagas anteriores)
+    # injects cost straight into the ledger (simulates earlier paid calls)
     ledger.record_call(
         tenant_id=t, work_item_id=wi, stage="coder", task_class="default",
         model=ECHO, cost_usd=1.25, tokens_in=10, tokens_out=5,

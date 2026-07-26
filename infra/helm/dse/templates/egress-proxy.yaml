@@ -44,8 +44,8 @@ spec:
           resources:
             {{- toYaml .Values.egressProxy.resources | nindent 12 }}
           readinessProbe:
-            # O proxy atual não expõe HTTP /health. TCP comprova apenas que o
-            # listener está de pé; semântica de política é gate externo.
+            # The current proxy does not expose an HTTP /health. TCP only proves
+            # the listener is up; policy semantics are an external gate.
             tcpSocket: { port: {{ .Values.egressProxy.port }} }
             initialDelaySeconds: 5
             periodSeconds: 10

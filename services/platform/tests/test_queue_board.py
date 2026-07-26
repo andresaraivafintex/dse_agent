@@ -1,6 +1,6 @@
-"""WSF-E6-T1/T2 — queue board API (projeção §9.3, budgets, trilha) + controles
-de operador (signals via FakeSignalSender + audit com identidade do operador).
-Postgres real."""
+"""WSF-E6-T1/T2 — queue board API (§9.3 projection, budgets, audit trail) +
+operator controls (signals via FakeSignalSender + audit carrying the operator
+identity). Real Postgres."""
 from __future__ import annotations
 
 import uuid
@@ -60,7 +60,7 @@ def test_list_and_group_by_state(tenant):
     assert {w1, w2} <= {i.work_item_id for i in items}
 
     grouped = work_items_by_state(tenant_id=tenant)
-    # todos os estados §9.3 presentes como chave (board mostra a máquina inteira)
+    # every §9.3 state present as a key (the board shows the whole machine)
     assert "new" in grouped and "escalated" in grouped
     assert w1 in [i.work_item_id for i in grouped["implementing"]]
     assert w2 in [i.work_item_id for i in grouped["pr_ready"]]
@@ -107,7 +107,7 @@ def _op_audit(work_item_id):
 
 def test_operator_requires_resolved_principal():
     with pytest.raises(ValueError):
-        OperatorConsole(FakeSignalSender(), operator="U12345")  # platform_user_id bruto
+        OperatorConsole(FakeSignalSender(), operator="U12345")  # raw platform_user_id
 
 
 def test_pause_sends_signal_and_audits_operator(tenant, op):
@@ -144,9 +144,9 @@ def test_quarantine_marks_durable_and_pauses(tenant, op):
     w = _insert_work_item(tenant)
     op.quarantine(w, tenant, reason="leak risk")
     assert is_quarantined(w) is True
-    # sinalizou pause
+    # signaled pause
     assert any(n == "pause" for (_, n, _) in op._sender.sent)
-    # projeção do board mostra quarentena
+    # the board projection shows the quarantine
     item = next(i for i in list_work_items(tenant_id=tenant) if i.work_item_id == w)
     assert item.quarantined is True
 
@@ -166,7 +166,7 @@ def test_operator_action_audited_even_if_signal_fails(tenant):
     op = OperatorConsole(failing, operator="usr_operator99")
     with pytest.raises(RuntimeError):
         op.pause(w, tenant, reason="x")
-    # a INTENÇÃO do operador foi auditada mesmo com o signal falhando (evidência
-    # nunca se perde — o audit vem antes do efeito)
+    # the operator's INTENT was audited even though the signal failed (evidence
+    # is never lost — the audit comes before the effect)
     rows = _op_audit(w)
     assert any(r["action"] == "operator_pause" for r in rows)

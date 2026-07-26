@@ -1,9 +1,9 @@
 {{/*
-Adapters (WS-A) + ingest-gateway (WS-A) + validation/PR finalizer (WS-E) —
-todos são serviços HTTP simples (webhook receivers), mesmo shape de
-Deployment+Service. Secrets de webhook (signing secret Slack, GitHub App
-private key) vêm do secrets backend (WSF-E2-T3a) via env var referenciando
-um Secret populado por ExternalSecret — nunca hardcoded aqui.
+Adapters (WS-A) + ingest-gateway (WS-A) + validation/PR finalizer (WS-E) — all
+of them are plain HTTP services (webhook receivers) with the same
+Deployment+Service shape. Webhook secrets (Slack signing secret, GitHub App
+private key) come from the secrets backend (WSF-E2-T3a) through an env var
+referencing a Secret populated by an ExternalSecret — never hardcoded here.
 */}}
 {{- if .Values.adapters.slack.enabled }}
 apiVersion: apps/v1
@@ -42,7 +42,7 @@ spec:
                 name: {{ include "dse.postgresSecretName" . }}
             {{- if .Values.extraEnvSecret }}
             # SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET (config._from_vault_or_env
-            # lê do ambiente). Ver extraEnvSecret em values.yaml.
+            # reads them from the environment). See extraEnvSecret in values.yaml.
             - secretRef:
                 name: {{ .Values.extraEnvSecret }}
             {{- end }}
@@ -121,8 +121,8 @@ spec:
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
             {{- if .Values.extraEnvSecret }}
-            # GITHUB_WEBHOOK_SECRET (verificação HMAC do webhook) + GitHub App
-            # (config._from_vault_or_env lê do ambiente). Ver extraEnvSecret.
+            # GITHUB_WEBHOOK_SECRET (webhook HMAC verification) + GitHub App
+            # (config._from_vault_or_env reads them from the environment). See extraEnvSecret.
             - secretRef:
                 name: {{ .Values.extraEnvSecret }}
             {{- end }}
@@ -300,4 +300,160 @@ spec:
     - port: {{ .Values.validation.port }}
       targetPort: {{ .Values.validation.port }}
       name: http
+{{- end }}
+
+{{/*
+Jira (WSA-E4) — THREE workloads, unlike the other adapters:
+
+  1. adapter-jira      HTTP receiver for POST /jira/webhook (+ the internal
+                       status-comment and transition endpoints the orchestrator
+                       calls).
+  2. adapter-jira-poller     Jira webhooks are best-effort: Atlassian drops them
+                       silently and dynamic webhooks expire. The poller re-reads
+                       updated issues on an interval and is the SOURCE OF TRUTH
+                       for delivery. Webhook and poller converge on the same
+                       event_id (message_id derives from issue STATE, not from
+                       the changelog), so a double delivery dedups instead of
+                       creating a second work item.
+  3. adapter-jira-transition  Column moves are serialized per ticket through a
+                       Postgres advisory lock. Two workflows transitioning the
+                       same card concurrently would race in the Jira API, so the
+                       queue exists to make the board converge.
+
+The workers are not HTTP servers: no port, no Service, no probes. Only the
+receiver gets a Service, because only it is addressed (by Jira and by the
+orchestrator's DSE_ADAPTER_JIRA_URL).
+*/}}
+{{- if .Values.adapters.jira.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-jira
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "adapter-jira" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "adapter-jira" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "adapter-jira" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      containers:
+        - name: adapter-jira
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.jira.image.repository "tag" .Values.adapters.jira.image.tag "digest" .Values.adapters.jira.image.digest) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.adapters.jira.port }}
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN / JIRA_WEBHOOK_SECRET
+            # (config._from_vault_or_env reads them from the environment).
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.secrets.vaultAddr | quote }}
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml .Values.adapters.jira.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.jira.port }} }
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.jira.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: {{ .Values.adapters.jira.port }} }
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-adapter-jira
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "adapter-jira" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: {{ .Values.adapters.jira.port }}
+      targetPort: {{ .Values.adapters.jira.port }}
+      name: http
+{{- range $worker := list "poller" "transition" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" $ }}-adapter-jira-{{ $worker }}
+  namespace: {{ $.Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" $ | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" (printf "adapter-jira-%s" $worker) "Release" $.Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" (printf "adapter-jira-%s" $worker) "Release" $.Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" $ | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" (printf "adapter-jira-%s" $worker) "Release" $.Release) | nindent 8 }}
+    spec:
+      {{- include "dse.appPodDefaults" $ | nindent 6 }}
+      containers:
+        - name: adapter-jira-{{ $worker }}
+          image: {{ include "dse.image" (dict "root" $ "repository" $.Values.adapters.jira.image.repository "tag" $.Values.adapters.jira.image.tag "digest" $.Values.adapters.jira.image.digest) }}
+          imagePullPolicy: {{ $.Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" $ | nindent 12 }}
+          command: ["python", "-m", "adapter_jira.{{ $worker }}_main"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" $ }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" $ }}
+            {{- if $.Values.extraEnvSecret }}
+            - secretRef:
+                name: {{ $.Values.extraEnvSecret }}
+            {{- end }}
+          env:
+            - name: VAULT_ADDR
+              value: {{ $.Values.secrets.vaultAddr | quote }}
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" $ }}-egress-proxy:{{ $.Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" $ }}-egress-proxy:{{ $.Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+          resources:
+            {{- toYaml $.Values.adapters.jira.workerResources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" $ | nindent 12 }}
+{{- end }}
 {{- end }}

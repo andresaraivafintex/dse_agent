@@ -1,8 +1,8 @@
-"""Plano 08 §F (F2) — pre-call hook server-side: núcleo evaluate_gate.
+"""Plano 08 §F (F2) — server-side pre-call hook: the evaluate_gate core.
 
-Contra o Postgres real (como as demais suítes): kill-switch e budget exaurido
-bloqueiam; sem contexto DSE ou dentro do budget, passa. É a enforcement
-não-bypassável que espelha o enforce_call do client.
+Against real Postgres (like the other suites): kill-switch and exhausted budget
+block; with no DSE context, or within budget, the call passes. This is the
+non-bypassable enforcement that mirrors the client's enforce_call.
 """
 from __future__ import annotations
 

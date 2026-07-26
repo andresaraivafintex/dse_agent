@@ -23,7 +23,7 @@ def test_conversation_event_build_is_deterministic_for_dedup():
     )
     ev1 = ConversationEvent.build(**kwargs)
     ev2 = ConversationEvent.build(**kwargs)
-    assert ev1.event_id == ev2.event_id, "mesmo platform+thread+message deve colidir (dedup)"
+    assert ev1.event_id == ev2.event_id, "the same platform+thread+message must collide (dedup)"
 
     ev3 = ConversationEvent.build(**{**kwargs, "message_id": "other"})
     assert ev3.event_id != ev1.event_id
@@ -45,8 +45,8 @@ def test_conversation_event_is_frozen():
 
 
 def test_every_internal_status_has_a_public_projection():
-    # Regressão-chave de WSA-E1-T4: adicionar um WorkItemStatus sem atualizar o
-    # mapa público deve quebrar este teste, não silenciosamente vazar "None".
+    # Key WSA-E1-T4 regression: adding a WorkItemStatus without updating the
+    # public map must break this test, not silently leak "None".
     for status in WorkItemStatus:
         projected = to_public_status(status)
         assert projected in ("running", "blocked", "done", "failed")

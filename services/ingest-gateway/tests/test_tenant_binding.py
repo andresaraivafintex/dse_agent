@@ -1,7 +1,7 @@
-"""WSA-E1-T5 — resolução plataforma -> tenant contra Postgres real.
+"""WSA-E1-T5 — platform -> tenant resolution against the real Postgres.
 
-Binding presente resolve; binding ausente cai no DSE_TENANT_ID default COM
-audit row de aviso (nunca adivinha)."""
+A present binding resolves; a missing binding falls back to the default
+DSE_TENANT_ID WITH a warning audit row (never guesses)."""
 from __future__ import annotations
 
 

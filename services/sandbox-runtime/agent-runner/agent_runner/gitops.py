@@ -1,15 +1,15 @@
-"""Ops de git executadas DENTRO do sandbox (runner `--op bootstrap|checkpoint`).
+"""Git ops executed INSIDE the sandbox (runner `--op bootstrap|checkpoint`).
 
-No Docker o worker ainda pode operar o git pelo bind mount; no K8s o workspace
-é um volume do Pod e TODA operação de git acontece aqui, via exec. As duas
-rotas usam a MESMA disciplina do worker (`scoped_git`): refspec fixo
-`HEAD:refs/heads/<branch>`, jamais force, e o hook `pre-receive` de escopo
-instalado no bare repo de checkpoint ANTES do primeiro push — o enforcement
-mora no remoto, não na boa vontade de quem chama.
+On Docker the worker can still drive git through the bind mount; on K8s the
+workspace is a Pod volume and EVERY git operation happens here, via exec. Both
+routes use the SAME discipline as the worker (`scoped_git`): fixed refspec
+`HEAD:refs/heads/<branch>`, never force, and the scope `pre-receive` hook
+installed on the bare checkpoint repo BEFORE the first push — enforcement lives
+on the remote, not on the caller's good will.
 
-Fonte única de verdade: `scoped_git.py` do sandbox_runtime é vendorado na
-imagem em build (`_scoped_git.py`); em dev/teste o import resolve direto do
-pacote instalado no venv.
+Single source of truth: sandbox_runtime's `scoped_git.py` is vendored into the
+image at build time (`_scoped_git.py`); in dev/test the import resolves
+straight from the package installed in the venv.
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from dse_contracts import (
     WorkspaceBootstrapResult,
 )
 
-try:  # dev/test: pacote do worker no venv
+try:  # dev/test: worker package in the venv
     from sandbox_runtime.scoped_git import (
         ScopedGitSession,
         install_pre_receive_guard,
         write_task_branch_marker,
     )
-except ImportError:  # imagem: cópia vendorada no build (Dockerfile)
+except ImportError:  # image: copy vendored at build time (Dockerfile)
     from ._scoped_git import (  # type: ignore[no-redef]
         ScopedGitSession,
         install_pre_receive_guard,
@@ -40,13 +40,14 @@ except ImportError:  # imagem: cópia vendorada no build (Dockerfile)
 def _git(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} falhou: {proc.stderr.strip()[:300]}")
+        raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
     return proc
 
 
 def _ensure_safe_directory() -> None:
-    """Bind mounts chegam com dono != uid do sandbox; sem isto o git recusa
-    operar ('dubious ownership'). Escopo: só o processo efêmero do exec."""
+    """Bind mounts arrive owned by a uid != the sandbox uid; without this git
+    refuses to operate ('dubious ownership'). Scope: only the ephemeral exec
+    process."""
     subprocess.run(
         ["git", "config", "--global", "--add", "safe.directory", "*"],
         capture_output=True, text=True,
@@ -68,37 +69,40 @@ def _checkpoint_has_branch(checkpoint_path: str, branch: str) -> bool:
 
 
 def _clone_target_repo(req: WorkspaceBootstrapRequest) -> str:
-    """Clona o repo real do cliente DENTRO do Pod, via o egress-proxy
-    (HTTPS_PROXY já no ambiente do runner). A URL NÃO carrega credencial — para
-    repo público o CONNECT é anônimo; para privado o proxy re-origina o TLS e
-    injeta o token (fast-follow). Depois re-aponta `origin` para o checkpoint
-    local (a URL do GitHub some do config), cria o branch da tarefa a partir da
-    base e faz o primeiro push escopado. Retorna o sha do tip da tarefa."""
+    """Clones the customer's real repo INSIDE the Pod, through the egress-proxy
+    (HTTPS_PROXY is already in the runner's environment). The URL carries NO
+    credential — for a public repo the CONNECT is anonymous; for a private one
+    the proxy re-originates the TLS and injects the token (fast-follow). It then
+    re-points `origin` at the local checkpoint (the GitHub URL disappears from
+    the config), creates the task branch off the base and does the first scoped
+    push. Returns the sha of the task tip."""
     url = f"https://{req.repo_host}/{req.repo}.git"
-    # --depth: histórico raso basta para o turno; o push do tip para o
-    # checkpoint local carrega os objetos necessários.
+    # --depth: shallow history is enough for the turn; pushing the tip to the
+    # local checkpoint carries the objects that are needed.
     _git(["clone", "--depth", "50", "--branch", req.base_branch, url, req.workspace_dir])
     session = ScopedGitSession(workspace_dir=req.workspace_dir, branch=req.branch)
     session.ensure_identity()
     _git(["checkout", "-b", req.branch], cwd=req.workspace_dir)
     write_task_branch_marker(req.workspace_dir, req.branch)
-    # origin passa a ser o checkpoint (nunca mais o GitHub) — o commit/push do
-    # turno vai para o bare local, sob o hook de escopo; o PR final é aberto
-    # deterministicamente pela Activity, nunca daqui.
+    # origin becomes the checkpoint (never GitHub again) — the turn's
+    # commit/push goes to the local bare repo, under the scope hook; the final
+    # PR is opened deterministically by the Activity, never from here.
     _git(["remote", "set-url", "origin", req.checkpoint_path], cwd=req.workspace_dir)
     session.push()
     return session.current_sha()
 
 
 def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapResult:
-    """Idempotente nos estados possíveis do runtime:
-      1. workspace já é repo git → devolve o HEAD (retomada pós-restart);
-      2. checkpoint já tem o branch → clone (+checkout) — é o rebuild do
-         chaos test, agora DENTRO do sandbox;
-      3. `repo` pedido → clona o repo real do cliente via egress-proxy
-         (`_clone_target_repo`); falha aqui é FAIL-CLOSED (nunca cai para o
-         workspace vazio quando um repo foi explicitamente pedido);
-      4. sem repo → init do zero (espelha `git_checkpoint.init_task_workspace`).
+    """Idempotent across the runtime's possible states:
+      1. workspace is already a git repo → return its HEAD (post-restart
+         resume);
+      2. checkpoint already has the branch → clone (+checkout) — this is the
+         chaos test's rebuild, now INSIDE the sandbox;
+      3. `repo` requested → clone the customer's real repo via the egress-proxy
+         (`_clone_target_repo`); failing here is FAIL-CLOSED (never fall back to
+         an empty workspace when a repo was explicitly requested);
+      4. no repo → init from scratch (mirrors
+         `git_checkpoint.init_task_workspace`).
     """
     try:
         _ensure_safe_directory()
@@ -108,7 +112,7 @@ def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapRes
         if req.provision_checkpoint and not (Path(req.checkpoint_path) / "HEAD").is_file():
             Path(req.checkpoint_path).mkdir(parents=True, exist_ok=True)
             _git(["init", "--bare", req.checkpoint_path])
-        # hook SEMPRE (re)instalado antes de qualquer push — idempotente
+        # hook ALWAYS (re)installed before any push — idempotent
         install_pre_receive_guard(req.checkpoint_path, req.branch)
 
         if _is_git_workspace(req.workspace_dir):
@@ -122,13 +126,14 @@ def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapRes
             return WorkspaceBootstrapResult(sha=sha, created=False)
 
         if req.repo:
-            # Clone do repo REAL. Falha não cai para init vazio (P6/fail-closed):
-            # um repo foi pedido; workspace vazio mascararia o problema.
+            # Clone of the REAL repo. Failure does not fall back to an empty
+            # init (P6/fail-closed): a repo was requested; an empty workspace
+            # would mask the problem.
             try:
                 sha = _clone_target_repo(req)
             except Exception as exc:  # noqa: BLE001
                 return WorkspaceBootstrapResult(
-                    error=f"clone de {req.repo!r} falhou: {type(exc).__name__}: {str(exc)[:300]}",
+                    error=f"clone of {req.repo!r} failed: {type(exc).__name__}: {str(exc)[:300]}",
                     error_kind="clone_error",
                 )
             return WorkspaceBootstrapResult(sha=sha, created=True)
@@ -138,11 +143,11 @@ def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapRes
         session = ScopedGitSession(workspace_dir=req.workspace_dir, branch=req.branch)
         session.ensure_identity()
         write_task_branch_marker(req.workspace_dir, req.branch)
-        session.commit(f"chore(dse): inicializa workspace da tarefa no branch {req.branch}")
+        session.commit(f"chore(dse): initialize the task workspace on branch {req.branch}")
         _git(["remote", "add", "origin", req.checkpoint_path], cwd=req.workspace_dir)
         session.push()
         return WorkspaceBootstrapResult(sha=session.current_sha(), created=True)
-    except Exception as exc:  # noqa: BLE001 — P6: resultado estruturado
+    except Exception as exc:  # noqa: BLE001 — P6: structured result
         return WorkspaceBootstrapResult(
             error=f"{type(exc).__name__}: {str(exc)[:400]}", error_kind="gitops_error"
         )
@@ -157,7 +162,7 @@ def checkpoint_workspace(req: CheckpointOpRequest) -> CheckpointOpResult:
             session.commit(f"checkpoint({req.phase}): {req.work_item_id}")
         session.push()
         return CheckpointOpResult(sha=session.current_sha(), phase=req.phase)
-    except Exception as exc:  # noqa: BLE001 — P6 (inclui GitScopeViolation do hook)
+    except Exception as exc:  # noqa: BLE001 — P6 (includes GitScopeViolation from the hook)
         return CheckpointOpResult(
             phase=req.phase,
             error=f"{type(exc).__name__}: {str(exc)[:400]}",

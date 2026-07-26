@@ -1,6 +1,6 @@
-"""WSC-E1-T3: provision duplicado para o mesmo work_item_id não cria dois
-containers. Chama as Activities reais (contra o Docker real) diretamente —
-nada aqui é mockado."""
+"""WSC-E1-T3: a duplicate provision for the same work_item_id does not create
+two containers. Calls the real Activities (against real Docker) directly —
+nothing here is mocked."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +37,8 @@ def test_provision_is_idempotent_by_work_item_id(work_item_id, docker_client):
         assert len(matching) == 1, f"esperava exatamente 1 container, achou {len(matching)}"
     finally:
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id="tenant-a")))
-        # teardown já remove; garante limpeza mesmo se o teste falhar antes.
+        # teardown already removes it; this guarantees cleanup even if the test
+        # failed earlier.
         try:
             existing = docker_driver.find_existing_container(work_item_id)
             if existing is not None:

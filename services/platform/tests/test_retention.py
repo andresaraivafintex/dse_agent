@@ -1,7 +1,7 @@
-"""WSF-E8-T2 — retenção por classificação de dados, contra o Postgres REAL
-da fundação (nunca mockado). Cobre: política por tenant/classe, anonimização
-de ingest_events.payload, expurgo de artifacts (wse_artifacts, WS-E), modo
-dry-run, idempotência, e as garantias de que audit_log NUNCA é alvo.
+"""WSF-E8-T2 — retention by data classification, against the foundation's REAL
+Postgres (never mocked). Covers: per-tenant/class policy, anonymization of
+ingest_events.payload, artifact purge (wse_artifacts, WS-E), dry-run mode,
+idempotency, and the guarantees that audit_log is NEVER a target.
 """
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def _audit_actions(tenant_id: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Política
+# Policy
 # ---------------------------------------------------------------------------
 def test_policy_set_get_remove_and_audit(tenant_id):
     assert get_retention_policies(tenant_id) == {}
@@ -109,10 +109,10 @@ def test_policy_rejects_malformed_days(tenant_id, bad_days):
 
 
 def test_malformed_stored_policy_fails_clean_not_partial(tenant_id):
-    """P6: JSONB corrompido => erro na borda, nunca um expurgo 'melhor esforço'.
-    E a varredura multi-tenant NÃO pode ser abortada por UM tenant quebrado
-    (achado real: a 1ª execução do job agendado no container morreu no
-    resíduo malformado deste próprio teste)."""
+    """P6: corrupted JSONB => error at the boundary, never a 'best effort' purge.
+    And the multi-tenant sweep must NOT be aborted by ONE broken tenant (real
+    finding: the scheduled job's 1st run in the container died on the malformed
+    leftover of this very test)."""
     from dse_platform import run_retention_all_tenants
 
     upsert_tenant_config(tenant_id)
@@ -128,11 +128,11 @@ def test_malformed_stored_policy_fails_clean_not_partial(tenant_id):
         with pytest.raises(RetentionPolicyError):
             run_retention(tenant_id)
 
-        # a sweep continua apesar do tenant quebrado, e a falha é auditada
+        # the sweep continues despite the broken tenant, and the failure is audited
         run_retention_all_tenants()
         assert "retention_failed" in _audit_actions(tenant_id)
     finally:
-        # limpa o resíduo malformado (não deixar lixo para o job agendado real)
+        # clean up the malformed leftover (do not leave junk for the real scheduled job)
         conn2 = _su()
         with conn2.cursor() as cur:
             cur.execute(
@@ -144,7 +144,7 @@ def test_malformed_stored_policy_fails_clean_not_partial(tenant_id):
 
 
 # ---------------------------------------------------------------------------
-# ingest_events — anonimização
+# ingest_events — anonymization
 # ---------------------------------------------------------------------------
 def test_no_policy_means_no_purge(tenant_id):
     conn = _su()
@@ -159,9 +159,9 @@ def test_no_policy_means_no_purge(tenant_id):
     report = run_retention(tenant_id)
 
     assert report.total_affected == 0
-    assert report.results == []  # nenhuma classe configurada => nenhum alvo
+    assert report.results == []  # no class configured => no target
     assert _event_payload(old_ev)["content_snapshot"] == "segredo antigo"
-    assert "retention_executed" in _audit_actions(tenant_id)  # execução auditada mesmo no-op
+    assert "retention_executed" in _audit_actions(tenant_id)  # run audited even when a no-op
 
 
 def test_anonymizes_only_processed_old_events_of_the_class(tenant_id):
@@ -211,7 +211,7 @@ def test_run_is_idempotent(tenant_id):
     second = run_retention(tenant_id)
 
     assert first.total_affected == 1
-    assert second.total_affected == 0  # tombstone não é re-expurgado
+    assert second.total_affected == 0  # a tombstone is not purged again
 
 
 def test_dry_run_counts_but_never_mutates(tenant_id):
@@ -236,7 +236,7 @@ def test_dry_run_counts_but_never_mutates(tenant_id):
 
 
 # ---------------------------------------------------------------------------
-# audit_log NUNCA é alvo
+# audit_log is NEVER a target
 # ---------------------------------------------------------------------------
 def test_audit_log_is_refused_as_target():
     with pytest.raises(RetentionPolicyError, match="append-only"):
@@ -252,15 +252,15 @@ def test_run_with_audit_log_as_artifact_table_is_refused(tenant_id):
 
 
 def test_audit_rows_survive_retention(tenant_id):
-    """Linhas de audit mais velhas que qualquer política permanecem intactas
-    (a retenção do ledger é compliance-grade própria — §12.2)."""
+    """Audit rows older than any policy stay intact (the ledger has its own
+    compliance-grade retention — §12.2)."""
     conn = _su()
     try:
         with conn.cursor() as cur:
             wid = _mk_work_item(cur, tenant_id, "internal")
             _mk_event(cur, wid, processed=True, received_at=OLD, content="x")
-            # linha de audit antiga do mesmo tenant (inserida como superuser
-            # com ts antigo — audit_log não tem default de imutabilidade de ts)
+            # old audit row for the same tenant (inserted as superuser with an old
+            # ts — audit_log has no ts-immutability default)
             cur.execute(
                 "INSERT INTO audit_log (ts, work_item_id, tenant_id, actor, action, details) "
                 "VALUES (%s, %s, %s, 'usr_x', 'admitted', '{}'::jsonb)",
@@ -275,12 +275,12 @@ def test_audit_rows_survive_retention(tenant_id):
     run_retention(tenant_id)
     after = _audit_actions(tenant_id)
 
-    assert "admitted" in after  # a linha antiga sobreviveu
-    assert len(after) == len(before) + 1  # só CRESCEU (a execução auditada)
+    assert "admitted" in after  # the old row survived
+    assert len(after) == len(before) + 1  # it only GREW (by the audited run)
 
 
 # ---------------------------------------------------------------------------
-# Artifacts (wse_artifacts, WS-E — shape real da 0017)
+# Artifacts (wse_artifacts, WS-E — real shape from 0017)
 # ---------------------------------------------------------------------------
 def _mk_artifact(cur, wid: str, tenant_id: str, *, created_at: dt.datetime, quarantined: bool = False) -> str:
     key = f"demo/{uuid.uuid4().hex[:10]}.mp4"
@@ -310,9 +310,9 @@ def _artifact_keys(tenant_id: str) -> set[str]:
 
 
 def test_artifact_purge_skipped_without_delete_grant(tenant_id):
-    """A role de app (dse_app) não tem DELETE em wse_artifacts (0017) — o
-    expurgo real reporta skipped com razão explícita, nunca aborta nem
-    silencia; a CONTAGEM de candidatos funciona (só exige SELECT)."""
+    """The app role (dse_app) has no DELETE on wse_artifacts (0017) — the real
+    purge reports skipped with an explicit reason, it never aborts nor goes
+    silent; COUNTING the candidates still works (it only needs SELECT)."""
     conn = _su()
     try:
         with conn.cursor() as cur:
@@ -323,19 +323,19 @@ def test_artifact_purge_skipped_without_delete_grant(tenant_id):
         conn.close()
 
     set_retention_policy(tenant_id, "internal", days=90, actor="usr_admin")
-    report = run_retention(tenant_id)  # conexão default = dse_app
+    report = run_retention(tenant_id)  # default connection = dse_app
 
     art = [r for r in report.results if r.target == "wse_artifacts"][0]
     assert art.action == "skipped"
     assert art.candidates == 1
     assert "GRANT DELETE" in art.reason
-    assert _artifact_keys(tenant_id)  # nada deletado
+    assert _artifact_keys(tenant_id)  # nothing deleted
 
 
 def test_artifact_purge_deletes_old_keeps_fresh_and_quarantined(tenant_id):
-    """Com uma conexão privilegiada (o grant pedido ao WS-E), o expurgo real:
-    deleta artifacts velhos da classe, preserva os recentes e NUNCA toca
-    artifacts quarentenados (evidência retida para investigação)."""
+    """With a privileged connection (the grant requested from WS-E), the real
+    purge deletes old artifacts of the class, preserves recent ones and NEVER
+    touches quarantined artifacts (evidence held for investigation)."""
     su_conn = _su()
     try:
         with su_conn.cursor() as cur:
@@ -361,8 +361,8 @@ def test_artifact_purge_deletes_old_keeps_fresh_and_quarantined(tenant_id):
     assert fresh_key in remaining
     assert quarantined_key in remaining
 
-    # o audit row carrega as chaves deletadas (cleanup compensatório no
-    # Garage pelo lifecycle do WS-E — nunca silencioso)
+    # the audit row carries the deleted keys (compensating cleanup in Garage by
+    # WS-E's lifecycle — never silent)
     conn = _su()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:

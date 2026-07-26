@@ -1,16 +1,16 @@
-"""Entrypoint do agent-runner isolado (plano 08 §G + plano 09 Fase 1).
+"""Entrypoint of the isolated agent-runner (plano 08 §G + plano 09 Fase 1).
 
-Roda UM turno de agente dentro do container/pod endurecido. Lê do stdin o
-envelope `{"stage": ..., "input": <AgentTurnRequest>}` (formato que os drivers
-enviam via `docker exec -i` / `kubectl exec -i`; o request cru sem envelope
-também é aceito), valida com o contrato REAL do dse_contracts (spec §5 — nada
-de dict solto), executa o substrato via `executor.run_agent_turn` e escreve um
-`AgentTurnResult` JSON no stdout.
+Runs ONE agent turn inside the hardened container/pod. Reads from stdin the
+envelope `{"stage": ..., "input": <AgentTurnRequest>}` (the format the drivers
+send via `docker exec -i` / `kubectl exec -i`; the bare request without the
+envelope is also accepted), validates it against the REAL dse_contracts
+contract (spec §5 — no loose dicts), runs the substrate through
+`executor.run_agent_turn` and writes an `AgentTurnResult` JSON to stdout.
 
-Disciplina de saída: se conseguimos produzir um resultado ESTRUTURADO (mesmo
-de erro — error_kind preenchido), exit 0 e o worker decide pelo payload.
-Exit != 0 fica reservado para falha catastrófica (payload indecodificável),
-que o driver traduz em falha limpa da Activity — nunca fallback local.
+Exit discipline: if we managed to produce a STRUCTURED result (even a failure
+one — error_kind filled in), exit 0 and let the worker decide from the payload.
+Exit != 0 is reserved for catastrophic failure (undecodable payload), which the
+driver turns into a clean Activity failure — never a local fallback.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        print(json.dumps({"error": "invalid_payload", "detail": "stdin não é JSON"}))
+        print(json.dumps({"error": "invalid_payload", "detail": "stdin is not JSON"}))
         return 2
 
     body = payload.get("input", payload) if isinstance(payload, dict) else payload
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
             request = WorkspaceBootstrapRequest.model_validate(body)
         except Exception as exc:  # noqa: BLE001
             print(WorkspaceBootstrapResult(
-                error=f"payload não obedece WorkspaceBootstrapRequest: {str(exc)[:500]}",
+                error=f"payload does not conform to WorkspaceBootstrapRequest: {str(exc)[:500]}",
                 error_kind="invalid_payload",
             ).model_dump_json())
             return 0
@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             request = PostTurnRequest.model_validate(body)
         except Exception as exc:  # noqa: BLE001
             print(PostTurnResult(
-                error=f"payload não obedece PostTurnRequest: {str(exc)[:500]}",
+                error=f"payload does not conform to PostTurnRequest: {str(exc)[:500]}",
                 error_kind="invalid_payload",
             ).model_dump_json())
             return 0
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             request = CheckpointOpRequest.model_validate(body)
         except Exception as exc:  # noqa: BLE001
             print(CheckpointOpResult(
-                error=f"payload não obedece CheckpointOpRequest: {str(exc)[:500]}",
+                error=f"payload does not conform to CheckpointOpRequest: {str(exc)[:500]}",
                 error_kind="invalid_payload",
             ).model_dump_json())
             return 0
@@ -88,12 +88,12 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         request = AgentTurnRequest.model_validate(body)
-    except Exception as exc:  # noqa: BLE001 — ValidationError vira resultado estruturado
+    except Exception as exc:  # noqa: BLE001 — ValidationError becomes a structured result
         from dse_contracts import AgentTurnResult
 
         result = AgentTurnResult(
             done=False,
-            error=f"payload não obedece AgentTurnRequest: {str(exc)[:500]}",
+            error=f"payload does not conform to AgentTurnRequest: {str(exc)[:500]}",
             error_kind="invalid_payload",
         )
         print(result.model_dump_json())

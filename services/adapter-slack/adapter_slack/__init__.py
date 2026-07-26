@@ -1,2 +1,2 @@
-"""WS-A adapter Slack: inbound (Events API + Interactivity) + outbound
-(status message única editada in-place)."""
+"""WS-A Slack adapter: inbound (Events API + Interactivity) + outbound
+(a single status message edited in-place)."""

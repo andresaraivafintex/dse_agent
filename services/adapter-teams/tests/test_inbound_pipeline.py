@@ -1,7 +1,7 @@
-"""Inbound `/teams/messages`: defesa #1 (assinatura HMAC do outgoing webhook)
-real + guard de ativação. Corpus de forgery deve ser 401 e não escrever nada;
-requisição assinada válida passa a defesa e (enquanto a fundação não expõe
-`Platform.teams`) retorna 501 `teams_not_activated` ANTES de qualquer escrita.
+"""Inbound `/teams/messages`: real defense #1 (outgoing webhook HMAC signature)
++ activation guard. The forgery corpus must be 401 and write nothing; a validly
+signed request passes the defense and (while the foundation does not expose
+`Platform.teams`) returns 501 `teams_not_activated` BEFORE any write.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_tampered_body_rejected(teams_secret_b64):
 
 
 def test_forgery_corpus_creates_no_work_item_and_audits_rejection():
-    client.post("/teams/messages", content=activity_body(), headers={})  # sem assinatura
+    client.post("/teams/messages", content=activity_body(), headers={})  # no signature
 
     conn = psycopg2.connect(DSN)
     try:
@@ -62,20 +62,20 @@ def test_forgery_corpus_creates_no_work_item_and_audits_rejection():
 
 
 def test_valid_signature_passes_defense_but_gated_on_activation(teams_secret_b64):
-    """Assinatura válida -> passa a defesa #1. Enquanto Teams não está ativado,
-    o endpoint retorna 501 teams_not_activated (falha limpa, P6) SEM criar
-    WorkItem, e deixa uma audit row `teams_inbound_not_activated` (P8)."""
+    """Valid signature -> passes defense #1. While Teams is not activated, the
+    endpoint returns 501 teams_not_activated (clean failure, P6) WITHOUT creating
+    a WorkItem, and leaves a `teams_inbound_not_activated` audit row (P8)."""
     body = activity_body(text="<at>DSE Bot</at> please fix the login bug")
     auth = teams_auth_header(teams_secret_b64, body)
     resp = client.post("/teams/messages", content=body, headers={"Authorization": auth})
 
     if is_activated():
-        # Pós-ativação: o pipeline completo roda (novo comportamento esperado).
+        # Post-activation: the full pipeline runs (the new expected behavior).
         assert resp.status_code == 200
         assert resp.json()["path"] in {"new_task", "signal", "unauthorized", "blocked_kill_switch"}
     else:
         assert resp.status_code == 501
-        assert "não ativado" in resp.json()["error"]
+        assert "not enabled" in resp.json()["error"]
         conn = psycopg2.connect(DSN)
         try:
             with conn.cursor() as cur:

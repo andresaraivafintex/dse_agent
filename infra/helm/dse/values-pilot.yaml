@@ -1,7 +1,7 @@
-# Perfil propositalmente NÃO instalável enquanto os placeholders e gates de
-# evidência abaixo não forem substituídos pelo pipeline de release. Exemplo:
+# A profile deliberately NOT installable until the placeholders and evidence
+# gates below are replaced by the release pipeline. For example:
 #   helm template dse-pilot . -f values-pilot.yaml
-# deve falhar; isso é o comportamento fail-closed esperado.
+# must fail; that is the expected fail-closed behaviour.
 deploymentProfile: pilot
 
 tenant:
@@ -18,8 +18,8 @@ runtime:
   sandboxRuntimeClassName: replace-with-gvisor-or-kata-runtimeclass
 
 pilotReadiness:
-  # O pipeline só promove estes gates depois dos testes de conformidade sobre
-  # os mesmos digests informados nas imagens. Não os marque manualmente.
+  # The pipeline only promotes these gates after the conformance tests run
+  # against the very digests declared in the images. Do not flip them by hand.
   sandboxIsolationVerified: false
   modelGatewayFailClosedVerified: false
   egressStrictPolicyVerified: false
@@ -74,8 +74,8 @@ orchestrator:
     enabled: true
     buildId: replace-with-image-git-sha
 
-# O Deployment `validation` atual não expõe um servidor HTTP standalone; as
-# activities são carregadas pelo worker. Não o fingimos como serviço Ready.
+# The current `validation` Deployment does not expose a standalone HTTP server;
+# the activities are loaded by the worker. We do not fake it as a Ready service.
 validation:
   enabled: false
 
@@ -92,6 +92,6 @@ networkPolicy:
         - 192.168.0.0/16
         - 224.0.0.0/4
 
-# Todos os componentes habilitados também exigem image.digest=sha256:<64 hex>.
-# Eles ficam vazios no values.yaml e, portanto, bloqueiam este overlay até o
-# pipeline injetar digests reais do registry aprovado.
+# Every enabled component also requires image.digest=sha256:<64 hex>. They are
+# empty in values.yaml and therefore block this overlay until the pipeline
+# injects real digests from the approved registry.

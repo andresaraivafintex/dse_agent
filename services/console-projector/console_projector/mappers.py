@@ -1,16 +1,17 @@
-"""Mapas de contrato fase1 -> console (Plano 06 §4.4/§4.5).
+"""Contract maps fase1 -> console (Plano 06 §4.4/§4.5).
 
-Estes mapas SÃO a interface entre os dois produtos — versionados e travados
-por teste de contrato (test_mappers.py): se um enum mudar de lado, o CI quebra
-aqui, não o painel em produção (lição da remediação).
+These maps ARE the interface between the two products — versioned and pinned by
+a contract test (test_mappers.py): if an enum changes on either side, CI breaks
+here instead of the dashboard breaking in production (lesson from the
+remediation).
 """
 from __future__ import annotations
 
 from typing import Any
 
-# fase1 WorkItemStatus (17) -> console DseTaskStatus (11) + phase legível.
-# Nunca inventa: todo status fase1 TEM entrada; um status novo sem entrada
-# derruba o teste de contrato (não silencia).
+# fase1 WorkItemStatus (17) -> console DseTaskStatus (11) + human-readable phase.
+# Never guesses: every fase1 status HAS an entry; a new status without one fails
+# the contract test (it is never silently swallowed).
 STATUS_MAP: dict[str, tuple[str, str | None]] = {
     "new": ("new", None),
     "needs_clarification": ("needs_clarification", "clarification"),
@@ -31,8 +32,8 @@ STATUS_MAP: dict[str, tuple[str, str | None]] = {
     "escalated": ("blocked", "escalated"),
 }
 
-# audit_log.action -> console TimelineEvent.type. Ações fora do mapa viram
-# `note` (nunca silenciar — princípio "nunca sem descrição de estado").
+# audit_log.action -> console TimelineEvent.type. Actions outside the map become
+# `note` (never silence — the "never without a state description" principle).
 AUDIT_EVENT_MAP: dict[str, str] = {
     "work_item_admitted": "created",
     "clarification_requested": "clarification_requested",
@@ -70,13 +71,14 @@ _DETAIL_KEYS = ("reason", "pr_number", "url", "cost_usd", "status", "risk_class"
 
 
 def map_status(fase1_status: str) -> tuple[str, str | None]:
-    """(status_console, current_phase). KeyError proposital para status novo
-    sem mapa — o projector loga e mantém a última projeção (fail-visible)."""
+    """(console_status, current_phase). The KeyError on an unmapped new status is
+    deliberate — the projector logs it and keeps the last projection
+    (fail-visible)."""
     return STATUS_MAP[fase1_status]
 
 
 def map_audit_event(action: str, details: dict[str, Any] | None) -> tuple[str, str]:
-    """(event_type, message legível). Determinístico; nada de LLM (P1)."""
+    """(event_type, human-readable message). Deterministic; no LLM involved (P1)."""
     ev_type = AUDIT_EVENT_MAP.get(action, "note")
     details = details or {}
     extras = ", ".join(f"{k}={details[k]}" for k in _DETAIL_KEYS if details.get(k) not in (None, ""))
@@ -87,7 +89,7 @@ def map_audit_event(action: str, details: dict[str, Any] | None) -> tuple[str, s
 
 
 def split_title(content: str, fallback: str) -> tuple[str, str]:
-    """Título = primeira linha não-vazia (≤120 chars); descrição = resto."""
+    """Title = first non-empty line (<=120 chars); description = the rest."""
     lines = [ln for ln in (content or "").strip().splitlines()]
     first = next((ln.strip() for ln in lines if ln.strip()), "")
     if not first:

@@ -1,44 +1,44 @@
 #!/usr/bin/env bash
-# Fundação K8s local da Fase 3 (adendo 02 §2.2) — cluster k3d + Argo CD.
+# Phase 3 local K8s foundation (addendum 02 §2.2) — k3d cluster + Argo CD.
 #
-# Por que existe: Argo CD ApplicationSet (previews por PR, WSE-E4-T10),
-# kube-janitor (TTL de namespaces) e External Secrets Operator (WSF-E2-T3b)
-# não rodam em docker-compose. Este script cria o análogo local do "cluster
-# K8s in-VPC" do plano (WSF-E0-T1) para desenvolvimento — produção usa os
-# Helm charts de infra/helm/dse contra o cluster real do cliente.
+# Why it exists: Argo CD ApplicationSet (per-PR previews, WSE-E4-T10),
+# kube-janitor (namespace TTL) and External Secrets Operator (WSF-E2-T3b) do
+# not run on docker-compose. This script creates the local analogue of the
+# plan's "in-VPC K8s cluster" (WSF-E0-T1) for development — production uses the
+# Helm charts in infra/helm/dse against the customer's real cluster.
 #
-# Idempotente: pode rodar de novo; pula o que já existe.
+# Idempotent: safe to re-run; it skips whatever already exists.
 set -euo pipefail
 
 CLUSTER_NAME="${DSE_K3D_CLUSTER:-dse-preview}"
-ARGOCD_VERSION="${DSE_ARGOCD_VERSION:-v2.13.3}"  # pinado (P7/NFR-09) — upgrade é ato explícito
+ARGOCD_VERSION="${DSE_ARGOCD_VERSION:-v2.13.3}"  # pinned (P7/NFR-09) — upgrading is an explicit act
 ARGOCD_NS="argocd"
 
 echo "==> 1/4 cluster k3d '${CLUSTER_NAME}'"
-# Plano 08 §D (D4) — registry local: o worker pusha a imagem do PR via
-# localhost:5510 (porta publicada); os nodes do cluster puxam via
-# k3d-dse-registry:5510 (mesmo storage, nome resolvível pelo k3d).
+# Plan 08 §D (D4) — local registry: the worker pushes the PR image via
+# localhost:5510 (published port); the cluster nodes pull via
+# k3d-dse-registry:5510 (same storage, a name k3d can resolve).
 REGISTRY_NAME="${DSE_K3D_REGISTRY:-dse-registry}"
 REGISTRY_PORT="${DSE_K3D_REGISTRY_PORT:-5510}"
 if k3d registry list | grep -q "k3d-${REGISTRY_NAME}\b"; then
-  echo "    registry k3d-${REGISTRY_NAME} já existe — pulando"
+  echo "    registry k3d-${REGISTRY_NAME} already exists — skipping"
 else
   k3d registry create "${REGISTRY_NAME}" --port "${REGISTRY_PORT}"
 fi
 
 if k3d cluster list | grep -q "^${CLUSTER_NAME}\b"; then
-  echo "    já existe — pulando"
+  echo "    already exists — skipping"
 else
-  # --network dse_net: o cluster enxerga os serviços do docker-compose da
-  # fundação (Vault, Garage, model-gateway) pelo nome do container.
+  # --network dse_net: the cluster can see the foundation's docker-compose
+  # services (Vault, Garage, model-gateway) by container name.
   #
-  # Plano 08 §D (D3): Traefik HABILITADO (era desabilitado na Fase 3, quando
-  # nenhum Ingress era necessário) + porta 80 do loadbalancer publicada em
-  # localhost:8081 — o browser do operador acessa
-  # http://<ns>.preview.localhost:8081 (Ingress por hostname; *.localhost
-  # resolve para 127.0.0.1 nos browsers modernos). O MESMO caminho serve o
-  # túnel Cloudflare/VPS depois: o túnel aponta para localhost:8081 e só o
-  # DSE_PREVIEW_EXTERNAL_HOST muda.
+  # Plan 08 §D (D3): Traefik ENABLED (it was disabled in Phase 3, when no
+  # Ingress was needed) + the loadbalancer's port 80 published on
+  # localhost:8081 — the operator's browser hits
+  # http://<ns>.preview.localhost:8081 (Ingress by hostname; *.localhost
+  # resolves to 127.0.0.1 in modern browsers). The SAME path serves the
+  # Cloudflare/VPS tunnel later: the tunnel points at localhost:8081 and only
+  # DSE_PREVIEW_EXTERNAL_HOST changes.
   k3d cluster create "${CLUSTER_NAME}" \
     --servers 1 --agents 1 \
     --network dse_net \
@@ -48,13 +48,14 @@ else
 fi
 
 echo "==> 2/4 kubecontext"
-# Reconcilia o kubeconfig SEMPRE (não só na criação): um restart do Docker
-# Desktop destrói os containers do k3d e/ou reatribui a porta do API server
-# do loadbalancer, deixando o context antigo apontando para uma porta morta
-# (ex.: https://0.0.0.0:50640 -> connection refused). Rodar este script de
-# novo re-mescla o kubeconfig com a porta atual. Achado da validação profunda
-# pré-Fase 4: o cluster é infra EFÊMERA de dev — recriável por este script,
-# nunca uma dependência persistente. (Produção usa o cluster real do cliente.)
+# Reconcile the kubeconfig ALWAYS (not only on creation): a Docker Desktop
+# restart destroys the k3d containers and/or reassigns the loadbalancer's API
+# server port, leaving the old context pointing at a dead port
+# (e.g. https://0.0.0.0:50640 -> connection refused). Re-running this script
+# merges the kubeconfig again with the current port. Finding from the deep
+# pre-Phase 4 validation: the cluster is EPHEMERAL dev infra — re-creatable by
+# this script, never a persistent dependency. (Production uses the customer's
+# real cluster.)
 k3d kubeconfig merge "${CLUSTER_NAME}" --kubeconfig-merge-default --kubeconfig-switch-context >/dev/null
 kubectl config use-context "k3d-${CLUSTER_NAME}" >/dev/null
 kubectl wait --for=condition=Ready node --all --timeout=120s
@@ -63,17 +64,17 @@ echo "==> 3/4 Argo CD ${ARGOCD_VERSION} (namespace ${ARGOCD_NS})"
 kubectl get ns "${ARGOCD_NS}" >/dev/null 2>&1 || kubectl create namespace "${ARGOCD_NS}"
 kubectl apply -n "${ARGOCD_NS}" \
   -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" >/dev/null
-echo "    aguardando os deployments do Argo CD ficarem Available..."
+echo "    waiting for the Argo CD deployments to become Available..."
 kubectl -n "${ARGOCD_NS}" wait --for=condition=Available deployment --all --timeout=420s
 
-echo "==> 4/4 smoke: ApplicationSet controller respondendo"
+echo "==> 4/4 smoke: ApplicationSet controller responding"
 kubectl -n "${ARGOCD_NS}" get statefulset,deployment -o name
 
 cat <<EOF
 
-OK. Cluster '${CLUSTER_NAME}' pronto com Argo CD ${ARGOCD_VERSION}.
-- UI (quando precisar):  kubectl -n ${ARGOCD_NS} port-forward svc/argocd-server 8091:443
-- senha admin inicial:   kubectl -n ${ARGOCD_NS} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
-- ESO (WS-F instala):    ./infra/k8s-local/setup-eso.sh  (versão pinada + SecretStore Vault + exemplo — WSF-E2-T3b)
-- destruir:              k3d cluster delete ${CLUSTER_NAME}
+OK. Cluster '${CLUSTER_NAME}' ready with Argo CD ${ARGOCD_VERSION}.
+- UI (when needed):      kubectl -n ${ARGOCD_NS} port-forward svc/argocd-server 8091:443
+- initial admin passwd:  kubectl -n ${ARGOCD_NS} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+- ESO (WS-F installs):   ./infra/k8s-local/setup-eso.sh  (pinned version + Vault SecretStore + example — WSF-E2-T3b)
+- destroy:               k3d cluster delete ${CLUSTER_NAME}
 EOF

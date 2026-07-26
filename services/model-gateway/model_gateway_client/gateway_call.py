@@ -1,12 +1,13 @@
-"""Único caminho de chamada de modelo do lado do cliente (WSD-E1-T4 /
-WSD-E3-T1). Todo agente (Coder, e futuramente Planner/Tester/Reviewer)
-chama `chat_completion` — nunca um SDK de provider (`anthropic`, `boto3`)
-diretamente. Isso é o que faz o `test_conformance_gateway_only.py` provar.
+"""The single client-side model call path (WSD-E1-T4 / WSD-E3-T1). Every agent
+(Coder, and later Planner/Tester/Reviewer) calls `chat_completion` — never a
+provider SDK (`anthropic`, `boto3`) directly. That is what
+`test_conformance_gateway_only.py` proves.
 
-Usa `dse_contracts.gateway_contract.GatewayCallHeaders` (contrato já
-publicado pela fundação) para os headers obrigatórios de policy/budget
-enforcement no call time — mas ESTE módulo não decide nem aplica policy
-(isso é WSD-E2, Fase 2). Ele só propaga os headers e trata a resposta.
+Uses `dse_contracts.gateway_contract.GatewayCallHeaders` (contract already
+published by the foundation) for the headers required by call-time
+policy/budget enforcement — but THIS module neither decides nor applies policy
+(that is WSD-E2, Phase 2). It only propagates the headers and handles the
+response.
 """
 from __future__ import annotations
 
@@ -20,8 +21,8 @@ from dse_contracts.gateway_contract import GatewayCallHeaders, GatewayErrorRespo
 from . import enforcement, failover, ledger, settings, telemetry
 from .errors import GatewayCallError
 
-# Header que o LiteLLM usa para reportar o custo real da chamada (calculado
-# por ele a partir do model + tokens — nunca recalculado por nós).
+# Header LiteLLM uses to report the real cost of the call (computed by it from
+# model + tokens — never recomputed by us).
 _COST_HEADER = "x-litellm-response-cost-original"
 
 
@@ -44,20 +45,20 @@ def chat_completion(
     timeout: float = 30.0,
     **extra_params: Any,
 ) -> ChatCompletionResult:
-    """Chama `POST {gateway_base_url}/v1/chat/completions`. Nunca chama
-    nenhum outro host — `settings.gateway_base_url()` é a única base URL
-    usada por este módulo (ver teste de conformidade).
+    """Calls `POST {gateway_base_url}/v1/chat/completions`. Never calls any
+    other host — `settings.gateway_base_url()` is the only base URL used by
+    this module (see the conformance test).
 
-    ANTES de qualquer HTTP, aplica o enforcement no call time (WSD-E2/E4-T2):
-    reassign de modelo, kill switch, política e budget. Uma recusa levanta
-    `GatewayCallError` com corpo `GatewayErrorResponse` (P6 decline-never-
-    truncate) e já emitiu a linha de audit (P8) — o workflow do WS-B converte
-    isso em Failed. DEPOIS de uma resposta 2xx, grava o custo real no ledger
-    durável (WSD-E3-T4).
+    BEFORE any HTTP, it applies call-time enforcement (WSD-E2/E4-T2): model
+    reassign, kill switch, policy and budget. A denial raises `GatewayCallError`
+    with a `GatewayErrorResponse` body (P6 decline-never-truncate) and has
+    already emitted the audit row (P8) — the WS-B workflow turns that into
+    Failed. AFTER a 2xx response, it records the real cost on the durable
+    ledger (WSD-E3-T4).
     """
-    # Fronteira de enforcement (pode levantar GatewayCallError + emitir audit).
+    # Enforcement boundary (may raise GatewayCallError + emit audit).
     enf = enforcement.enforce_call(headers, model)
-    model = enf.effective_model  # honra reassign de modelo em voo
+    model = enf.effective_model  # honors in-flight model reassign
 
     url = f"{settings.gateway_base_url()}/v1/chat/completions"
     http_headers = {
@@ -79,8 +80,8 @@ def chat_completion(
         except httpx.HTTPError as exc:
             span.record_exception(exc)
             span.set_status(trace_status_error())
-            # P8: falha de transporte (gateway inalcançável / timeout) também
-            # é evidência — mesmo action do erro upstream, status_code=0.
+            # P8: a transport failure (gateway unreachable / timeout) is
+            # evidence too — same action as the upstream error, status_code=0.
             with _best_effort():
                 _audit_emit(
                     actor="system:model-gateway",
@@ -100,15 +101,16 @@ def chat_completion(
         if resp.status_code >= 300:
             span.set_status(trace_status_error())
             error_body = _safe_json(resp)
-            # Fronteira P6: falha limpa, nunca "continuamos mesmo assim".
-            # Se o corpo casa com o contrato de erro publicado, valida contra
-            # ele (documenta o shape esperado; não muda o comportamento).
+            # P6 boundary: fail clean, never "carry on anyway". If the body
+            # matches the published error contract, validate against it
+            # (documents the expected shape; does not change behavior).
             with _best_effort():
                 GatewayErrorResponse.model_validate(error_body)
-            # WSD-E4-T3 (P8): falha vinda do upstream (outage total de
-            # provider, quota 429, auth) também vira evidência no ledger de
-            # audit — nunca só uma exceção que se perde no log. Guardada em
-            # best-effort: uma falha do audit não pode MASCARAR o erro real.
+            # WSD-E4-T3 (P8): a failure coming from upstream (full provider
+            # outage, 429 quota, auth) also becomes evidence on the audit
+            # ledger — never just an exception that gets lost in the log.
+            # Wrapped in best-effort: an audit failure must not MASK the real
+            # error.
             with _best_effort():
                 _audit_emit(
                     actor="system:model-gateway",
@@ -148,13 +150,13 @@ def chat_completion(
         if choices:
             content = choices[0].get("message", {}).get("content", "")
 
-        # WSD-E4-T1 (Fase 3): a resposta pode ter vindo de um FALLBACK
-        # intra-tier (router do LiteLLM). Nunca silencioso (P8): detecta pelos
-        # headers e emite o audit row de degradação. E fallback não burla
-        # política (mesma regra do reassign): se NENHUM dos fallbacks
-        # declarados do model group é permitido pela política do tenant/stage,
-        # a resposta degradada é recusada na fronteira (P6) — o custo real já
-        # incorrido ainda é gravado no ledger (accounting honesto).
+        # WSD-E4-T1 (Phase 3): the response may have come from an intra-tier
+        # FALLBACK (LiteLLM router). Never silent (P8): detect it from the
+        # headers and emit the degradation audit row. And a fallback does not
+        # bypass policy (same rule as reassign): if NONE of the model group's
+        # declared fallbacks is permitted by the tenant/stage policy, the
+        # degraded response is refused at the boundary (P6) — the real cost
+        # already incurred is still written to the ledger (honest accounting).
         degradation = failover.detect_degradation(model, resp.headers)
         if degradation is not None:
             permits = failover.audit_degradation(headers, degradation)
@@ -196,9 +198,9 @@ def chat_completion(
                 span.set_status(trace_status_error())
                 raise GatewayCallError(403, body)
 
-        # WSD-E3-T4: grava o custo REAL no ledger durável (sobrevive a restart;
-        # é a fonte do cost_export e do accounting de budget). Só chamadas
-        # bem-sucedidas entram no ledger.
+        # WSD-E3-T4: record the REAL cost on the durable ledger (survives a
+        # restart; it is the source for cost_export and budget accounting).
+        # Only successful calls go into the ledger.
         ledger.record_call(
             tenant_id=headers.tenant_id,
             work_item_id=headers.work_item_id,
@@ -231,8 +233,8 @@ def _extract_cost(resp: httpx.Response) -> float:
 
 
 def _truncate_for_audit(body: dict, limit: int = 2000) -> str:
-    """Corpo de erro upstream vira string LIMITADA nos details do audit —
-    evidência suficiente sem inflar o ledger com payloads arbitrários."""
+    """The upstream error body becomes a BOUNDED string in the audit details —
+    enough evidence without bloating the ledger with arbitrary payloads."""
     import json as _json
 
     raw = _json.dumps(body, default=str)
@@ -253,10 +255,10 @@ def trace_status_error():
 
 
 class _best_effort:
-    """Context manager que ignora silenciosamente falha de validação
-    opcional (o corpo de erro do LiteLLM pode não bater 100% com
-    GatewayErrorResponse — isso não deve derrubar o tratamento de erro real,
-    só documenta a expectativa do contrato)."""
+    """Context manager that silently swallows an optional validation failure
+    (LiteLLM's error body may not match GatewayErrorResponse 100% — that must
+    not break the handling of the real error, it only documents the contract
+    expectation)."""
 
     def __enter__(self):
         return self

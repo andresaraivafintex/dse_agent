@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Servidor HTTP "modelo eco" — WSD-E1-T2.
+""""Echo model" HTTP server — WSD-E1-T2.
 
-Um provider OpenAI-compatível minúsculo, determinístico e sem nenhuma
-dependência externa (só stdlib), registrado no LiteLLM como
-`eco/echo-model` (ver ../litellm_config.yaml). Existe para permitir testar o
-model-gateway fim-a-fim sem depender de nenhuma API paga/externa (Bedrock
-real não está disponível nesta sessão — ver README.md).
+A tiny, deterministic, dependency-free (stdlib only) OpenAI-compatible
+provider, registered in LiteLLM as `eco/echo-model` (see
+../litellm_config.yaml). It exists so the model-gateway can be tested
+end-to-end without depending on any paid/external API (real Bedrock is not
+available in this session — see README.md).
 
-Contrato: implementa o subconjunto de `POST /v1/chat/completions` que o
-LiteLLM espera de um provider `openai/*` custom (api_base apontando aqui).
-A resposta é 100% determinística em função do input: mesma entrada -> mesma
-saída sempre, sem estado, sem I/O de rede, sem chamada a nenhum LLM real.
-Isso é o que faz dela um bom "smoke test double" para o gateway (WSD-E1-T1
-"upgrade simulado": subir uma nova versão do LiteLLM e comparar respostas
-byte-a-byte contra este provider prova que o roteamento/serialização do
-proxy não regrediu, independente de qualquer variabilidade de um LLM real).
+Contract: it implements the subset of `POST /v1/chat/completions` that LiteLLM
+expects from a custom `openai/*` provider (with api_base pointing here). The
+response is 100% deterministic as a function of the input: same input -> same
+output, always, with no state, no network I/O, no call to any real LLM. That is
+what makes it a good "smoke test double" for the gateway (WSD-E1-T1 "simulated
+upgrade": bringing up a new LiteLLM version and comparing responses byte for
+byte against this provider proves the proxy's routing/serialization did not
+regress, independent of any real LLM's variability).
 
-Uso: `python3 server.py` (porta via env ECHO_PORT, default 9000).
+Usage: `python3 server.py` (port via env ECHO_PORT, default 9000).
 """
 from __future__ import annotations
 
@@ -26,23 +26,23 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("ECHO_PORT", "9000"))
-# Fase 3 (WSD-E4-T1): o nome do "modelo" servido é configurável para que a
-# segunda instância (fallback intra-tier, container dse_model_gateway_echo_b)
-# seja distinguível da primária em logs/respostas.
+# Phase 3 (WSD-E4-T1): the served "model" name is configurable so the second
+# instance (intra-tier fallback, container dse_model_gateway_echo_b) is
+# distinguishable from the primary in logs/responses.
 MODEL_NAME = os.environ.get("ECHO_MODEL_NAME", "echo-model")
 
-# Fase 3 (WSD-E4-T3, chaos "exaustão de quota"): se a última mensagem de user
-# contiver este marcador, o servidor responde 429 no shape de erro OpenAI —
-# simulação DETERMINÍSTICA (mesma entrada -> mesma saída, sem estado, sem
-# relógio) do throttling de quota de um provider real (ex.: Bedrock
-# ThrottlingException). Permite provar a fronteira limpa (P6) do gateway sob
-# quota exhaustion sem depender de uma quota real esgotável.
+# Phase 3 (WSD-E4-T3, "quota exhaustion" chaos): if the last user message
+# contains this marker, the server answers 429 in the OpenAI error shape — a
+# DETERMINISTIC simulation (same input -> same output, no state, no clock) of a
+# real provider's quota throttling (e.g. Bedrock ThrottlingException). It lets
+# us prove the gateway's clean boundary (P6) under quota exhaustion without
+# depending on a real, exhaustible quota.
 QUOTA_EXHAUSTED_MARKER = "[[SIMULATE_QUOTA_EXHAUSTED]]"
 
 
 def _deterministic_completion(messages: list[dict]) -> str:
-    """Transformação puramente determinística: sem RNG, sem relógio, sem
-    chamada externa. A mesma lista de mensagens sempre produz o mesmo texto.
+    """Purely deterministic transform: no RNG, no clock, no external call. The
+    same list of messages always produces the same text.
     """
     last_user = ""
     for m in reversed(messages or []):
@@ -53,9 +53,9 @@ def _deterministic_completion(messages: list[dict]) -> str:
 
 
 def _count_tokens(text: str) -> int:
-    """Contagem determinística e barata (whitespace split) — não é um
-    tokenizer real (bpe), documentado como aproximação apenas para fins de
-    teste de custo/observabilidade local (ver README)."""
+    """Cheap deterministic count (whitespace split) — not a real tokenizer
+    (bpe), documented as an approximation only for local cost/observability
+    testing (see README)."""
     return max(1, len(text.split()))
 
 
@@ -66,7 +66,7 @@ def _deterministic_id(payload: bytes) -> str:
 class EchoHandler(BaseHTTPRequestHandler):
     server_version = "DseEchoModel/1.0"
 
-    def log_message(self, fmt, *args):  # silencia stdout ruidoso em test runs
+    def log_message(self, fmt, *args):  # silences noisy stdout in test runs
         pass
 
     def _send_json(self, status: int, body: dict) -> None:
@@ -107,7 +107,7 @@ class EchoHandler(BaseHTTPRequestHandler):
 
         messages = payload.get("messages", [])
 
-        # Chaos hook determinístico (WSD-E4-T3): quota exhaustion simulada.
+        # Deterministic chaos hook (WSD-E4-T3): simulated quota exhaustion.
         last_user = ""
         for m in reversed(messages or []):
             if m.get("role") == "user":
@@ -136,7 +136,7 @@ class EchoHandler(BaseHTTPRequestHandler):
         response = {
             "id": _deterministic_id(raw_body),
             "object": "chat.completion",
-            "created": 0,  # determinístico de propósito (não usar time.time())
+            "created": 0,  # deterministic on purpose (do not use time.time())
             "model": payload.get("model", MODEL_NAME),
             "choices": [
                 {

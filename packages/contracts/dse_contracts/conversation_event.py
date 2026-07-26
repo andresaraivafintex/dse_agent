@@ -1,6 +1,6 @@
-"""Evento normalizado único (§10.2, FR-01). Todo adapter (Slack/GitHub/Jira)
-produz exclusivamente isto — nenhum código downstream do intake conhece o
-formato nativo de nenhuma plataforma.
+"""Single normalized event (§10.2, FR-01). Every adapter (Slack/GitHub/Jira)
+produces exclusively this — no code downstream of the intake knows the native
+format of any platform.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class EventKind(str, Enum):
 
 
 class Actor(BaseModel):
-    """Identidade de quem disparou o evento — bruta e (quando disponível) resolvida."""
+    """Identity of whoever triggered the event — raw and (when available) resolved."""
 
     platform_user_id: str
     resolved_principal: str | None = None
@@ -35,11 +35,11 @@ class Actor(BaseModel):
 
 
 class ConversationEvent(BaseModel):
-    """Contrato normalizado consumido pelo ingest-gateway e por todo o resto do sistema.
+    """Normalized contract consumed by the ingest-gateway and the whole system.
 
-    `event_id` é a chave de idempotência de nível de evento (não confundir com
-    `WorkItem.idempotency_key`, que é de nível de tarefa) — dois webhooks
-    retry do mesmo `platform+thread+message` devem colidir em `event_id`.
+    `event_id` is the event-level idempotency key (not to be confused with
+    `WorkItem.idempotency_key`, which is task-level) — two retried webhooks of
+    the same `platform+thread+message` must collide on `event_id`.
     """
 
     model_config = {"frozen": True, "extra": "forbid"}
@@ -49,7 +49,7 @@ class ConversationEvent(BaseModel):
     kind: EventKind
     source_ref: dict[str, Any]  # {thread_ts, channel} | {repo, issue_number} | {ticket_key}
     actor: Actor
-    content_snapshot: str  # conteúdo congelado no momento da menção (defesa TOCTOU, FR-03)
+    content_snapshot: str  # content frozen at mention time (TOCTOU defense, FR-03)
     received_at: datetime
     signature_verified: bool
 
@@ -79,8 +79,9 @@ class ConversationEvent(BaseModel):
         signature_verified: bool,
         received_at: datetime | None = None,
     ) -> "ConversationEvent":
-        """Constrói o evento derivando `event_id` deterministicamente — nunca
-        gere `event_id` à mão fora deste helper (garante a defesa de dedup)."""
+        """Builds the event deriving `event_id` deterministically — never
+        generate `event_id` by hand outside this helper (it is what guarantees
+        the dedup defense)."""
         return cls(
             event_id=cls.compute_event_id(platform.value, thread_key, message_id),
             platform=platform,

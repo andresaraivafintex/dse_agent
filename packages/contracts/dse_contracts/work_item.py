@@ -1,5 +1,6 @@
-"""WorkItem (control plane, §10.3) e a API pública WSA-E1-T4 (`DseTaskRequest`/
-`DseTaskStatus`) — projeção deliberadamente mais grossa do estado interno.
+"""WorkItem (control plane, §10.3) and the WSA-E1-T4 public API
+(`DseTaskRequest`/`DseTaskStatus`) — a deliberately coarser projection of the
+internal state.
 """
 from __future__ import annotations
 
@@ -11,23 +12,23 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class WorkItemStatus(str, Enum):
-    """Máquina de estados §9.3."""
+    """State machine §9.3."""
 
     new = "new"
     needs_clarification = "needs_clarification"
     ready = "ready"
     queued = "queued"
-    # Fase 2 (WSB-E3-T2): gate de aprovação de plano por risk class. Estado
-    # durável em que o WorkItem estaciona esperando um humano aprovar o plano
-    # de alto risco (o WS-A já roteava `SIGNAL_PLAN_APPROVAL` com base nele —
-    # a constante em constants.py referenciava este estado antes dele existir
-    # no enum; gap de fundação corrigido na integração da Fase 2).
+    # Phase 2 (WSB-E3-T2): plan approval gate by risk class. Durable state in
+    # which the WorkItem parks waiting for a human to approve the high-risk
+    # plan (WS-A was already routing `SIGNAL_PLAN_APPROVAL` based on it — the
+    # constant in constants.py referenced this state before it existed in the
+    # enum; foundation gap fixed during the Phase 2 integration).
     awaiting_plan_approval = "awaiting_plan_approval"
     implementing = "implementing"
     validating = "validating"
-    # Estados finos do caminho PR/CI/review. ``pr_ready`` permanece abaixo
-    # como alias historico no wire: histories antigos do Temporal e clientes
-    # que ja o persistiram continuam decodificando, mas execucoes novas usam
+    # Fine-grained states of the PR/CI/review path. ``pr_ready`` stays below as
+    # a historical wire alias: old Temporal histories and clients that already
+    # persisted it keep decoding, but new executions use
     # pr_open -> ci_pending -> review_ready -> merge_pending.
     pr_open = "pr_open"
     ci_pending = "ci_pending"
@@ -41,9 +42,9 @@ class WorkItemStatus(str, Enum):
     escalated = "escalated"
 
 
-# Mapa único do estado interno -> estado público grosseiro (WSA-E1-T4).
-# Adicionar um estado interno novo aqui é obrigatório (o teste de contrato falha
-# se algum WorkItemStatus não estiver no mapa) — nunca deixe implícito.
+# Single map from internal state -> coarse public state (WSA-E1-T4). Adding a
+# new internal state here is mandatory (the contract test fails if some
+# WorkItemStatus is missing from the map) — never leave it implicit.
 PublicStatus = Literal["running", "blocked", "done", "failed"]
 
 _PUBLIC_STATUS_MAP: dict[WorkItemStatus, PublicStatus] = {
@@ -52,7 +53,7 @@ _PUBLIC_STATUS_MAP: dict[WorkItemStatus, PublicStatus] = {
     WorkItemStatus.ready: "running",
     WorkItemStatus.queued: "running",
     # awaiting_plan_approval -> "blocked" (§10.3: "AwaitingPlanApproval /
-    # Escalated -> blocked com razão no detalhe do WorkItem").
+    # Escalated -> blocked with the reason in the WorkItem detail").
     WorkItemStatus.awaiting_plan_approval: "blocked",
     WorkItemStatus.implementing: "running",
     WorkItemStatus.validating: "running",
@@ -73,11 +74,11 @@ def to_public_status(status: WorkItemStatus) -> PublicStatus:
     try:
         return _PUBLIC_STATUS_MAP[status]
     except KeyError as e:  # pragma: no cover - defensive, covered by contract test
-        raise ValueError(f"WorkItemStatus {status} sem projeção pública definida") from e
+        raise ValueError(f"WorkItemStatus {status} has no public projection defined") from e
 
 
 class WorkItem(BaseModel):
-    id: str  # dobra como Temporal workflow_id
+    id: str  # doubles as the Temporal workflow_id
     tenant_id: str
     source: Literal["slack", "github", "jira"]
     source_ref: dict[str, Any]
@@ -85,7 +86,7 @@ class WorkItem(BaseModel):
     base_branch: str | None = None
     base_sha: str | None = None
     head_sha: str | None = None
-    requester: str  # principal resolvido
+    requester: str  # resolved principal
     data_class: str = "internal"
     status: WorkItemStatus = WorkItemStatus.new
     risk_class: str | None = None
@@ -104,7 +105,7 @@ class WorkItem(BaseModel):
 
 
 class DseTaskRequest(BaseModel):
-    """Tipo público de intake — o que um consumidor externo vê ao pedir uma tarefa."""
+    """Public intake type — what an external consumer sees when asking for a task."""
 
     tenant_id: str
     source: Literal["slack", "github", "jira"]
@@ -115,11 +116,11 @@ class DseTaskRequest(BaseModel):
 
 
 class DseTaskStatus(BaseModel):
-    """Tipo público de status — consumido por admin queue board (Fase 2) e adapters."""
+    """Public status type — consumed by the admin queue board (Phase 2) and adapters."""
 
     work_item_id: str
     status: PublicStatus
-    detail: str | None = None  # razão, presente quando status == blocked/failed
+    detail: str | None = None  # reason, present when status == blocked/failed
     pr_number: int | None = None
     updated_at: datetime | None = None
 
@@ -135,12 +136,12 @@ class DseTaskStatus(BaseModel):
 
 
 class MergedByHumanSignal(BaseModel):
-    """Envelope minimo aceito pelo workflow para concluir um merge.
+    """Minimal envelope the workflow accepts to conclude a merge.
 
-    O adapter ja valida assinatura e correlaciona tenant/repo/PR; o workflow
-    ainda exige identidade humana resolvida e o mesmo PR que ele acompanha.
-    Campos adicionais permitem uma verificacao mais forte sem quebrar o
-    payload atual nem histories antigos.
+    The adapter already validates the signature and correlates tenant/repo/PR;
+    the workflow still requires a resolved human identity and the same PR it is
+    tracking. The extra fields allow a stronger verification without breaking
+    the current payload or old histories.
     """
 
     merged_by: str
@@ -154,12 +155,12 @@ class MergedByHumanSignal(BaseModel):
     def _human_actor_required(cls, value: str) -> str:
         actor = value.strip()
         if not actor or actor.startswith("system:"):
-            raise ValueError("merged_by deve ser um principal humano resolvido")
+            raise ValueError("merged_by must be a resolved human principal")
         return actor
 
     @field_validator("pr_number")
     @classmethod
     def _positive_pr(cls, value: int) -> int:
         if value <= 0:
-            raise ValueError("pr_number deve ser positivo")
+            raise ValueError("pr_number must be positive")
         return value

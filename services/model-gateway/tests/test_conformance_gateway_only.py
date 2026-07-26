@@ -1,14 +1,14 @@
-"""WSD-E1-T4: prova que `model_gateway_client` nunca chama um provider
-diretamente (Bedrock/anthropic/OpenAI SDKs) — o único caminho é o
-model-gateway (LiteLLM), na URL única `settings.gateway_base_url()`.
+"""WSD-E1-T4: proves `model_gateway_client` never calls a provider directly
+(Bedrock/anthropic/OpenAI SDKs) — the only path is the model-gateway (LiteLLM),
+at the single URL `settings.gateway_base_url()`.
 
-Duas provas complementares:
-  1. Estática: nenhum módulo do pacote importa um SDK de provider.
-  2. Dinâmica: instrumentamos `httpx` para gravar toda URL chamada durante um
-     fluxo real (mint -> chat_completion -> revoke) e verificamos que 100%
-     delas batem no host:porta do gateway — nenhuma bate direto num
-     "provider" (aqui, o processo do modelo eco, que representa o papel que
-     o Bedrock/PrivateLink teria em produção).
+Two complementary proofs:
+  1. Static: no module in the package imports a provider SDK.
+  2. Dynamic: we instrument `httpx` to record every URL called during a real
+     flow (mint -> chat_completion -> revoke) and check that 100% of them hit
+     the gateway's host:port — none hits a "provider" directly (here, the echo
+     model process, which stands in for the role Bedrock/PrivateLink would play
+     in production).
 """
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ _FORBIDDEN_SDK_IMPORTS = {"boto3", "anthropic", "openai"}
 
 
 def test_no_provider_sdk_imported_anywhere_in_package():
-    """Análise estática (AST, não regex) de todo .py do pacote: nenhum
-    `import boto3` / `import anthropic` / `import openai` — o cliente só
-    fala HTTP com o gateway."""
+    """Static analysis (AST, not regex) of every .py in the package: no
+    `import boto3` / `import anthropic` / `import openai` — the client only
+    speaks HTTP to the gateway."""
     offending: list[str] = []
     for py_file in _PACKAGE_DIR.rglob("*.py"):
         tree = ast.parse(py_file.read_text(), filename=str(py_file))
@@ -46,12 +46,12 @@ def test_no_provider_sdk_imported_anywhere_in_package():
 
 
 def test_all_http_calls_go_through_the_gateway_base_url(unique_ids, monkeypatch):
-    """Prova dinâmica: intercepta TODA chamada httpx (a única lib HTTP usada
-    pelo cliente) durante um fluxo mint -> chat_completion -> revoke, e
-    verifica que cada uma foi para host:porta do gateway — nunca para
-    qualquer outro endereço (ex.: o modelo eco diretamente, que nem é
-    alcançável do host — não tem porta publicada no docker-compose.wsd.yml
-    — mas a prova aqui é sobre o que o CLIENTE tenta fazer, por construção)."""
+    """Dynamic proof: intercepts EVERY httpx call (the only HTTP lib the client
+    uses) during a mint -> chat_completion -> revoke flow, and checks each one
+    went to the gateway's host:port — never to any other address (e.g. the echo
+    model directly, which is not even reachable from the host — it publishes no
+    port in docker-compose.wsd.yml — but the proof here is about what the
+    CLIENT attempts, by construction)."""
     called_urls: list[str] = []
 
     real_post = httpx.post

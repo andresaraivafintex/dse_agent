@@ -1,7 +1,7 @@
--- Fintex DSE — remediacao sprint 1 — verdade operacional do WorkItem.
--- Migracao somente aditiva e idempotente. Os campos permitem que Postgres
--- projete o estado duravel do workflow sem inferir plano/risco/SHAs pelo
--- audit_log ou por nomes mutaveis de branch.
+-- Fintex DSE — remediation sprint 1 — operational truth of the WorkItem.
+-- Additive and idempotent migration. The fields let Postgres project the
+-- durable state of the workflow without inferring plan/risk/SHAs from the
+-- audit_log or from mutable branch names.
 
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS base_sha TEXT;
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS head_sha TEXT;
