@@ -181,9 +181,9 @@ consoleProjector:
 console:
   enabled: true
   ui:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.3" }
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.4" }
   api:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.3" }
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.4" }
   ingress:
     enabled: true
     className: "traefik"
