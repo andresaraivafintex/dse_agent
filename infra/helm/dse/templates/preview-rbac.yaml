@@ -1,0 +1,57 @@
+{{/*
+RBAC for per-PR preview environments.
+
+A preview lives in its own namespace (`preview-<work_item_id>`), created on
+demand, so the worker needs cluster-scoped permission — Kubernetes RBAC cannot
+scope a grant to a namespace NAME PATTERN, only to namespaces that already
+exist. That makes this the widest grant in the chart, so it is deliberately
+narrow in the other axis: exactly the four object kinds a preview is made of,
+and no secret/configmap/RBAC access at all. A compromised worker can create and
+delete preview namespaces; it cannot read a Secret anywhere in the cluster.
+
+Off by default. Turn it on only where previews actually run.
+*/}}
+{{- if .Values.runtime.previewRbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dse.fullname" . }}-preview-manager
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+rules:
+  # Namespace lifecycle: one per preview, deleted by the TTL reaper. Without
+  # `delete` the reaper cannot collect anything and previews leak forever —
+  # which matters more here than under GitOps, where Argo CD used to prune.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  # Read-only: `kubectl wait` watches the Deployment, and reading pod status is
+  # how a stuck preview gets diagnosed. No exec, no logs, no delete.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dse.fullname" . }}-preview-manager
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dse.fullname" . }}-orchestrator-worker
+    namespace: {{ .Values.global.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "dse.fullname" . }}-preview-manager
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

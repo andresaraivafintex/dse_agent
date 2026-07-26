@@ -1,23 +1,24 @@
-"""Plano 08 §D (D4) — imagem REAL do PR para o preview.
+"""Plan 08 §D (D4) — the REAL PR image for the preview.
 
-Quando `PreviewConfig.build_image` está ligado e o workspace da tarefa tem um
-`Dockerfile`, builda a imagem do HEAD do PR e a pusha para o registry local do
-cluster (k3d): o preview passa a servir o APP do PR, não o placeholder nginx —
-o revisor humano clica no link e decide sobre a mudança de verdade.
+When `PreviewConfig.build_image` is on and the task workspace has a
+`Dockerfile`, builds the image from the PR HEAD and pushes it to the cluster's
+local registry (k3d): the preview then serves the PR's APP, not the nginx
+placeholder — the human reviewer clicks the link and decides about the actual
+change.
 
-Resolução do workspace: o caminho canônico já existente
+Workspace resolution: the canonical path that already exists
 (`MergeBaseConfig.locations` → $DSE_SANDBOX_STATE_DIR/<wi>/workspace) — zero
-mudança de contrato. O `docker build/push` roda via o socket do host (o worker
-já o monta para os sandboxes — docker-outside-of-docker).
+contract change. The `docker build/push` runs through the host socket (the
+worker already mounts it for the sandboxes — docker-outside-of-docker).
 
-Fail-safe SEMPRE (failure mode 9 do preview): sem Dockerfile, sem workspace,
-build/push falhou, flag desligada → retorna None e o caller usa o placeholder,
-com o motivo auditado (P8). O build nunca bloqueia nem derruba o preview.
+ALWAYS fail-safe (preview failure mode 9): no Dockerfile, no workspace,
+build/push failed, flag off → returns None and the caller uses the placeholder,
+with the reason audited (P8). The build never blocks nor takes down the preview.
 
-Referências de registry (k3d):
-  push_ref = <registry_push>/dse-preview/<repo-slug>:<tag>   (daemon do host: localhost:5510)
-  pull_ref = <registry_pull>/dse-preview/<repo-slug>:<tag>   (nodes do cluster: k3d-dse-registry:5510)
-Mesmo storage, dois nomes — padrão do k3d registry.
+Registry references (k3d):
+  push_ref = <registry_push>/dse-preview/<repo-slug>:<tag>   (host daemon: localhost:5510)
+  pull_ref = <registry_pull>/dse-preview/<repo-slug>:<tag>   (cluster nodes: k3d-dse-registry:5510)
+Same storage, two names — the k3d registry pattern.
 """
 from __future__ import annotations
 
@@ -32,20 +33,22 @@ from dse_validation.merge_base import MergeBaseConfig
 
 logger = logging.getLogger("dse_validation.preview.pr_image")
 
-# Porta convencional de app Node quando não há Dockerfile. O app respeita
-# `process.env.PORT` (padrão Express/Node), então o Dockerfial sintetizado seta
-# ENV PORT e EXPOSE nesta porta — e o preview usa a mesma como targetPort.
+# Conventional Node app port when there is no Dockerfile. The app honours
+# `process.env.PORT` (the Express/Node standard), so the synthesized Dockerfile
+# sets ENV PORT and EXPOSE on this port — and the preview uses the same one as
+# targetPort.
 _DEFAULT_NODE_PORT = 3000
 
 
 def _synthesize_node_dockerfile(workspace: str, port: int) -> str | None:
-    """Gera um Dockerfile PADRÃO para um app Node sem Dockerfile próprio, num
-    arquivo TEMPORÁRIO fora do workspace (não polui o git da tarefa). Retorna o
-    caminho, ou None se não parecer um app Node (sem package.json com `start`).
+    """Generates a STANDARD Dockerfile for a Node app that has no Dockerfile of
+    its own, in a TEMPORARY file outside the workspace (does not pollute the
+    task's git). Returns the path, or None if it does not look like a Node app
+    (no package.json with `start`).
 
-    Decisão do operador (2026-07-22): o DSE containeriza apps Node por conta
-    própria — o preview mostra o app real sem exigir Dockerfile no repo do
-    usuário. Fail-safe: qualquer coisa fora do esperado → None → placeholder."""
+    Operator decision (2026-07-22): the DSE containerizes Node apps on its own —
+    the preview shows the real app without requiring a Dockerfile in the user's
+    repo. Fail-safe: anything outside the expected → None → placeholder."""
     pkg_path = os.path.join(workspace, "package.json")
     if not os.path.isfile(pkg_path):
         return None
@@ -60,8 +63,9 @@ def _synthesize_node_dockerfile(workspace: str, port: int) -> str | None:
     else:
         main = pkg.get("main") or "server.js"
         run_cmd = f'CMD ["node", "{main}"]'
-    # npm ci quando há lockfile (reprodutível); senão npm install. `--omit=dev`
-    # porque preview roda o app, não os testes. Zero-deps → passo trivial.
+    # npm ci when there is a lockfile (reproducible); otherwise npm install.
+    # `--omit=dev` because the preview runs the app, not the tests. Zero-deps →
+    # trivial step.
     has_lock = os.path.isfile(os.path.join(workspace, "package-lock.json"))
     install = "npm ci --omit=dev || npm install --omit=dev" if has_lock else "npm install --omit=dev || true"
     dockerfile = f"""FROM node:22-alpine
@@ -95,10 +99,11 @@ def build_pr_image(
     head_sha: str | None,
     cfg: PreviewConfig | None = None,
 ) -> tuple[str | None, str, int | None]:
-    """Retorna `(pull_ref, motivo, app_port)`. pull_ref=None => usar placeholder
-    (motivo diz por quê — vai para o audit/detail, nunca silencioso). app_port é
-    a porta detectada quando o DSE sintetiza o Dockerfile (app Node sem
-    Dockerfile próprio); None => o caller usa o default do cfg."""
+    """Returns `(pull_ref, reason, app_port)`. pull_ref=None => use the
+    placeholder (the reason says why — it goes to the audit/detail, never
+    silent). app_port is the port detected when the DSE synthesizes the
+    Dockerfile (Node app without its own Dockerfile); None => the caller uses
+    the cfg default."""
     cfg = cfg or PreviewConfig()
     if not cfg.build_image:
         return None, "build_disabled", None
@@ -107,11 +112,12 @@ def build_pr_image(
     if not os.path.isdir(workspace):
         return None, f"workspace_not_found:{workspace}", None
 
-    # Estratégia de containerização (decisão do operador 2026-07-22):
-    #   1) Dockerfile do repo → build direto (porta = default do cfg / EXPOSE).
-    #   2) Sem Dockerfile mas app Node → SINTETIZA um Dockerfile padrão (porta
-    #      detectada). O preview mostra o app real sem tocar no repo do usuário.
-    #   3) Nada reconhecível → None → placeholder nginx (motivo auditado).
+    # Containerization strategy (operator decision 2026-07-22):
+    #   1) Repo Dockerfile → direct build (port = cfg default / EXPOSE).
+    #   2) No Dockerfile but a Node app → SYNTHESIZES a standard Dockerfile
+    #      (detected port). The preview shows the real app without touching the
+    #      user's repo.
+    #   3) Nothing recognizable → None → nginx placeholder (reason audited).
     build_flags: list[str] = []
     app_port: int | None = None
     reason_ok = "pr_image_built"
@@ -142,7 +148,7 @@ def build_pr_image(
         return None, "build_timeout", None
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "")[-300:]
-        logger.warning("build da imagem do PR falhou (%s): %s", work_item_id, detail)
+        logger.warning("PR image build failed (%s): %s", work_item_id, detail)
         return None, f"build_failed:{detail[:120]}", None
     finally:
         if synth_path:

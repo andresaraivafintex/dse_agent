@@ -1,0 +1,126 @@
+{{/*
+TTL reaper for preview namespaces.
+
+Under the GitOps path Argo CD pruned previews on its own. Applying manifests
+directly (preview.apply=kubectl) removes Argo — and with it the garbage
+collection — so something has to delete expired namespaces or they accumulate
+until the node has no room left for real work. On a single-node POC that is a
+matter of hours, not weeks.
+
+It reads `dse.fintex/expires-at` off the namespace itself rather than the
+database on purpose: the annotation travels WITH the object, so the reaper stays
+correct even if a preview was created by a build that never reached Postgres,
+and it keeps working while the orchestrator is down. The database projection
+stays the reporting surface; the cluster stays self-healing.
+*/}}
+{{- if and .Values.preview.enabled (eq .Values.preview.apply "kubectl") .Values.runtime.previewRbac.create }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dse.fullname" . }}-preview-reaper
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.preview.reaperSchedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "dse.labels" . | nindent 12 }}
+            # Load-bearing: this pod runs in a namespace under default-deny
+            # egress, so without a label that a NetworkPolicy selects it cannot
+            # reach the API server at all and every run fails on the first
+            # kubectl call. The policy below is keyed on exactly this label.
+            app.kubernetes.io/component: preview-reaper
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "dse.fullname" . }}-orchestrator-worker
+          # The ServiceAccount defaults this to false (nothing gets a cluster
+          # token unless it says so). kubectl needs the projected token to
+          # detect in-cluster config at all — without it it silently falls back
+          # to localhost:8080 and every run fails looking like a network issue.
+          automountServiceAccountToken: true
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: reaper
+              image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag "digest" .Values.orchestrator.image.digest) }}
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              command: ["python3", "-c"]
+              args:
+                - |
+                  import json, subprocess, sys
+                  from datetime import datetime, timezone
+
+                  proc = subprocess.run(
+                      ["kubectl", "get", "ns", "-l",
+                       "app.kubernetes.io/managed-by=dse-preview", "-o", "json"],
+                      capture_output=True, text=True,
+                  )
+                  if proc.returncode != 0:
+                      # Surface WHY. A bare CalledProcessError hides whether this
+                      # was RBAC, DNS or a blocked route to the API server, and
+                      # those have completely different fixes.
+                      print("kubectl failed:", proc.stderr.strip(), file=sys.stderr)
+                      raise SystemExit(1)
+                  out = proc.stdout
+                  now = datetime.now(timezone.utc)
+                  reaped = []
+                  for ns in json.loads(out).get("items", []):
+                      name = ns["metadata"]["name"]
+                      raw = (ns["metadata"].get("annotations") or {}).get("dse.fintex/expires-at")
+                      if not raw:
+                          # No expiry recorded: leave it alone. Deleting a preview
+                          # whose lifetime we cannot prove has passed is worse
+                          # than leaking one.
+                          continue
+                      try:
+                          expires = datetime.fromisoformat(raw)
+                      except ValueError:
+                          continue
+                      if expires.tzinfo is None:
+                          expires = expires.replace(tzinfo=timezone.utc)
+                      if expires <= now:
+                          subprocess.run(["kubectl", "delete", "ns", name, "--wait=false"], check=False)
+                          reaped.append(name)
+                  print(json.dumps({"reaped": reaped, "checked_at": now.isoformat()}))
+              resources:
+                requests: { cpu: "20m", memory: "64Mi" }
+                limits: { cpu: "200m", memory: "192Mi" }
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+The reaper's only egress need is the Kubernetes API server. It talks to nothing
+else — no database, no Jira, no internet — so the policy is exactly that one
+route, and DNS comes from the cluster-wide allow-cluster-dns policy.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-preview-reaper-kube-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: preview-reaper
+  policyTypes: ["Egress"]
+  egress:
+    {{- range .Values.networkPolicy.kubeApiServer.cidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - { protocol: TCP, port: {{ $.Values.networkPolicy.kubeApiServer.port }} }
+    {{- end }}
+{{- end }}
+{{- end }}

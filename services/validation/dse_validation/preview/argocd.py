@@ -1,32 +1,35 @@
-"""WSE-E4-T10 — trigger_preview: preview environment por PR via Argo CD
-ApplicationSet contra o cluster k3d REAL (`k3d-dse-preview`, Argo CD v2.13.3).
+"""WSE-E4-T10 — trigger_preview: per-PR preview environment via Argo CD
+ApplicationSet against the REAL k3d cluster (`k3d-dse-preview`, Argo CD v2.13.3).
 
-Fluxo (implementa a Activity `trigger_preview` do contrato —
-`ACTIVITY_TRIGGER_PREVIEW`, input `TriggerPreviewInput`, retorno `PreviewRef`):
+Flow (implements the contract's `trigger_preview` Activity —
+`ACTIVITY_TRIGGER_PREVIEW`, input `TriggerPreviewInput`, returns `PreviewRef`):
 
-  1. Decisão UI-touching por paths-filter DETERMINÍSTICO (FR-20, P1) —
-     backend-only => `skipped_backend_only` (conta como sucesso, NUNCA bloqueia).
-  2. Cap de previews concorrentes por tenant (ADR-26, dia 1): no cap =>
-     `degraded` com detail explícito (não bloqueia o PR; P6 falha limpa).
-  3. GitOps: escreve `previews/preview-<work_item_id>/` (Namespace + Deployment
-     nginx pinado + Service) no repo de manifests (gitops.py) e garante o
-     ApplicationSet `dse-previews` (generator git `previews/*`,
-     requeueAfterSeconds baixo). O Argo CD materializa a Application e
-     sincroniza => namespace efêmero `preview-<work_item_id>` no cluster.
-  4. Espera o Deployment ficar Available (timeout). Falha/timeout =>
-     `degraded` (failure mode 9 — o PR nunca fica bloqueado para sempre).
-  5. TTL: label/annotation no Namespace + `expires_at` em `wse_previews`.
+  1. UI-touching decision through a DETERMINISTIC paths-filter (FR-20, P1) —
+     backend-only => `skipped_backend_only` (counts as success, NEVER blocks).
+  2. Cap on concurrent previews per tenant (ADR-26, day 1): at the cap =>
+     `degraded` with an explicit detail (does not block the PR; P6 clean
+     failure).
+  3. GitOps: writes `previews/preview-<work_item_id>/` (Namespace + pinned nginx
+     Deployment + Service) into the manifests repo (gitops.py) and ensures the
+     `dse-previews` ApplicationSet (git generator `previews/*`, low
+     requeueAfterSeconds). Argo CD materializes the Application and syncs =>
+     ephemeral namespace `preview-<work_item_id>` in the cluster.
+  4. Waits for the Deployment to become Available (timeout). Failure/timeout =>
+     `degraded` (failure mode 9 — the PR never stays blocked forever).
+  5. TTL: label/annotation on the Namespace + `expires_at` in `wse_previews`.
 
-TTL REAPER — decisão documentada (o adendo prefere kube-janitor, P7):
-  kube-janitor deletaria o NAMESPACE no cluster, mas com Argo CD em
-  `automated.selfHeal` a fonte da verdade é o GIT — o Argo CD recriaria o
-  namespace no próximo reconcile (os dois controllers brigariam). O reaper
-  correto em GitOps é remover o diretório do REPO: o ApplicationSet poda a
-  Application e o finalizer `resources-finalizer` cascateia a deleção do
-  namespace. Por isso `reap_expired_previews()` é um job Python determinístico
-  (real, testado contra o cluster) que opera no git — kube-janitor fica
-  documentado como upgrade path para recursos NÃO geridos por GitOps.
-  A annotation `janitor/ttl` já é gravada no Namespace para esse futuro.
+TTL REAPER — documented decision (the addendum prefers kube-janitor, P7):
+  kube-janitor would delete the NAMESPACE in the cluster, but with Argo CD on
+  `automated.selfHeal` the source of truth is GIT — Argo CD would recreate the
+  namespace on the next reconcile (the two controllers would fight). The correct
+  reaper under GitOps is to remove the directory from the REPO: the
+  ApplicationSet prunes the Application and the `resources-finalizer` finalizer
+  cascades the namespace deletion. That is why `reap_expired_previews()` is a
+  deterministic Python job (real, tested against the cluster) that operates on
+  git — kube-janitor stays documented as the upgrade path for resources NOT
+  managed by GitOps.
+  The `janitor/ttl` annotation is already written on the Namespace for that
+  future.
 """
 from __future__ import annotations
 
@@ -52,17 +55,21 @@ logger = logging.getLogger("dse_validation.preview.argocd")
 
 
 # ---------------------------------------------------------------------------
-# kubectl (subprocess, P7 — sem client library extra; kubecontext explícito)
+# kubectl (subprocess, P7 — no extra client library; explicit kubecontext)
 # ---------------------------------------------------------------------------
 def _kubectl(cfg: PreviewConfig, args: list[str], *, input_text: str | None = None,
              timeout: int = 60) -> subprocess.CompletedProcess:
+    # An empty context means "use the ambient credentials": in-cluster that is
+    # the pod's service account, where no named context exists and passing
+    # --context would fail outright.
+    context = ["--context", cfg.kube_context] if cfg.kube_context else []
     proc = subprocess.run(
-        ["kubectl", "--context", cfg.kube_context, *args],
+        ["kubectl", *context, *args],
         input=input_text, capture_output=True, text=True, timeout=timeout,
     )
     if proc.returncode != 0:
         raise RuntimeError(
-            f"kubectl {' '.join(args)} falhou (exit={proc.returncode}): {proc.stderr.strip()}"
+            f"kubectl {' '.join(args)} failed (exit={proc.returncode}): {proc.stderr.strip()}"
         )
     return proc
 
@@ -73,23 +80,98 @@ def namespace_for(work_item_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Manifests do preview mínimo (nginx pinado servindo a página default)
+# Manifests of the minimal preview (pinned nginx serving the default page)
 # ---------------------------------------------------------------------------
+def _source_deployment(namespace: str, labels: str, cfg: PreviewConfig, *,
+                       repo: str, branch: str) -> str:
+    """Deployment that runs the PR branch straight from source.
+
+    No image is built anywhere in this path, and that is the whole point: this
+    cluster has no Docker daemon and no registry, so every variant that starts
+    with `docker build` is unreachable here by construction. The container
+    clones the branch, installs dependencies and starts the app — enough for the
+    interpreted stacks where a preview earns its keep.
+
+    The clone is unauthenticated, so this covers PUBLIC repos only. A private
+    repo would need a token mounted into a pod that also runs arbitrary code
+    from the branch, which is a credential exposure the preview surface does not
+    justify — it stays out of scope until previews run somewhere isolated.
+
+    Readiness is deliberately patient: `npm install` on a cold container easily
+    outlasts a default probe, and an impatient probe would report a healthy
+    build as a failed one.
+    """
+    url = f"https://github.com/{repo}.git"
+    port = cfg.source_port
+    period = 5
+    failure_threshold = max(6, cfg.source_ready_timeout_s // period)
+    # Single-quoted in the shell and injected from values the DSE itself
+    # generated (repo slug, `dse/<work_item_id>` branch) — never from PR text.
+    script = (
+        "set -eu; "
+        "apk add --no-cache git >/dev/null 2>&1 || true; "
+        f"git clone --depth 1 --branch '{branch}' '{url}' /srv/app; "
+        "cd /srv/app; "
+        "npm install --no-audit --no-fund --loglevel=error; "
+        f"PORT={port} exec npm start"
+    )
+    return f"""apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: preview
+  namespace: {namespace}
+  labels:
+{labels}spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: preview
+  template:
+    metadata:
+      labels:
+        app: preview
+    spec:
+      containers:
+        - name: web
+          image: {cfg.source_image}
+          command: ["sh", "-c"]
+          args:
+            - {json.dumps(script)}
+          ports:
+            - containerPort: {port}
+          env:
+            - name: PORT
+              value: "{port}"
+            - name: NODE_ENV
+              value: "development"
+          resources:
+            requests: {{ cpu: "50m", memory: "192Mi" }}
+            limits: {{ cpu: "500m", memory: "768Mi" }}
+          readinessProbe:
+            httpGet: {{ path: /, port: {port} }}
+            periodSeconds: {period}
+            failureThreshold: {failure_threshold}
+"""
+
+
 def build_manifests(namespace: str, work_item_id: str, tenant_id: str,
                     expires_at: datetime, ttl_seconds: int, cfg: PreviewConfig,
-                    *, image: str | None = None, app_port: int | None = None) -> dict[str, str]:
-    """Plano 08 §D: `image` (D4 — imagem do PR; default placeholder do cfg) e
-    `app_port` (porta do app no container; Service/Ingress publicam 80 →
-    targetPort). Quando `cfg.external_host_template` está setado, gera também o
-    INGRESS (D3) com o hostname derivado do template — o link do PR passa a ser
-    clicável de fora (Traefik local / túnel / VPS, mesmo mecanismo)."""
+                    *, image: str | None = None, app_port: int | None = None,
+                    repo: str = "", branch: str = "") -> dict[str, str]:
+    """Plan 08 §D: `image` (D4 — the PR image; defaults to the cfg placeholder)
+    and `app_port` (the app's port inside the container; Service/Ingress publish
+    80 → targetPort). When `cfg.external_host_template` is set, also generates
+    the INGRESS (D3) with the hostname derived from the template — the PR link
+    becomes clickable from the outside (local Traefik / tunnel / VPS, same
+    mechanism)."""
     image = image or cfg.preview_image
     port = app_port or cfg.app_port
-    # Label VALUE do k8s tem teto de 63 chars (achado do disparo real: o
-    # work_item_id é `wi_`+64 hex = 67 chars → o namespace era REJEITADO pelo
-    # Argo, o sync falhava e o namespace nunca nascia → preview degradado sem
-    # URL). O id COMPLETO vai na annotation (sem limite de tamanho); a label
-    # carrega a versão truncada, que basta para seleção/rótulo.
+    # A k8s label VALUE is capped at 63 chars (finding from the real run: the
+    # work_item_id is `wi_`+64 hex = 67 chars → the namespace was REJECTED by
+    # Argo, the sync failed and the namespace never came to life → degraded
+    # preview with no URL). The FULL id goes into the annotation (no size
+    # limit); the label carries the truncated version, which is enough for
+    # selection/labelling.
     wi_label = work_item_id[:63]
     tenant_label = tenant_id[:63]
     labels = (
@@ -105,9 +187,13 @@ metadata:
 {labels}  annotations:
     dse.fintex/work-item-id: "{work_item_id}"
     dse.fintex/expires-at: "{expires_at.isoformat()}"
-    janitor/ttl: "{ttl_seconds}s"  # upgrade path kube-janitor (ver docstring)
+    janitor/ttl: "{ttl_seconds}s"  # kube-janitor upgrade path (see docstring)
 """
-    deploy = f"""apiVersion: apps/v1
+    if cfg.mode == "source":
+        deploy = _source_deployment(namespace, labels, cfg, repo=repo, branch=branch)
+        port = cfg.source_port
+    else:
+        deploy = f"""apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: preview
@@ -209,7 +295,7 @@ spec:
 
 
 def ensure_applicationset(cfg: PreviewConfig | None = None) -> None:
-    """Idempotente: aplica o ApplicationSet `dse-previews` (generator git)."""
+    """Idempotent: applies the `dse-previews` ApplicationSet (git generator)."""
     cfg = cfg or PreviewConfig()
     manifest = APPLICATIONSET_TEMPLATE.format(
         name=cfg.applicationset_name,
@@ -220,17 +306,18 @@ def ensure_applicationset(cfg: PreviewConfig | None = None) -> None:
 
 
 _PREVIEW_BODY_MARKER = "<!-- dse:preview -->"
-# Linha `- **Preview**: <url>` no corpo do PR, terminada pelo marcador (invisível
-# no markdown renderizado) que permite RE-escrever a linha em vez de duplicar.
+# The `- **Preview**: <url>` line in the PR body, terminated by the marker
+# (invisible in rendered markdown) that allows RE-writing the line instead of
+# duplicating it.
 _PREVIEW_LINE_RE = re.compile(r"^- \*\*Preview\*\*:.*" + re.escape(_PREVIEW_BODY_MARKER) + r"$", re.M)
-# ponto de inserção: logo após a bala de evidência L1 do template do PR.
+# insertion point: right after the L1 evidence bullet of the PR template.
 _EVIDENCE_BULLET_PREFIX = "- **Test evidence (L1)**:"
 
 
 def _preview_body_with_link(body: str, url: str) -> str:
-    """Corpo do PR com a linha `- **Preview**: <url>` inserida/atualizada
-    (idempotente via marcador). Insere após a bala de evidência L1; se o
-    template mudar, acrescenta ao final."""
+    """The PR body with the `- **Preview**: <url>` line inserted/updated
+    (idempotent via the marker). Inserts after the L1 evidence bullet; if the
+    template changes, appends at the end."""
     line = f"- **Preview**: {url} {_PREVIEW_BODY_MARKER}"
     if _PREVIEW_LINE_RE.search(body):
         return _PREVIEW_LINE_RE.sub(line, body)
@@ -250,10 +337,10 @@ def _preview_body_with_link(body: str, url: str) -> str:
 def _put_preview_link_in_pr_body(
     inp: TriggerPreviewInput, url: str | None, kind: str, *, actor: str
 ) -> None:
-    """Escreve o link do preview na DESCRIÇÃO do PR (não como comentário) —
-    `- **Preview**: <url>`. Idempotente: re-disparo (fix cycle) reescreve a
-    mesma linha. Best-effort — qualquer falha só vira warning; o preview já
-    está 'created'."""
+    """Writes the preview link into the PR DESCRIPTION (not as a comment) —
+    `- **Preview**: <url>`. Idempotent: a re-trigger (fix cycle) rewrites the
+    same line. Best-effort — any failure only becomes a warning; the preview is
+    already 'created'."""
     if not url or not inp.pr_number or not inp.repo:
         return
     try:
@@ -265,7 +352,7 @@ def _put_preview_link_in_pr_body(
             return
         new_body = _preview_body_with_link(pr.get("body") or "", url)
         if new_body == (pr.get("body") or ""):
-            return  # nada mudou (já estava com a mesma URL)
+            return  # nothing changed (it already carried the same URL)
         client.update_pull_request(inp.repo, int(inp.pr_number), body=new_body)
         if audit_emit is not None:
             audit_emit(
@@ -273,17 +360,37 @@ def _put_preview_link_in_pr_body(
                 work_item_id=inp.work_item_id,
                 details={"pr_number": inp.pr_number, "url": url},
             )
-    except Exception as exc:  # noqa: BLE001 — best-effort; o preview já está criado
-        logger.warning("escrever preview no corpo do PR falhou (%s): %.200s", inp.work_item_id, exc)
+    except Exception as exc:  # noqa: BLE001 — best-effort; the preview already exists
+        logger.warning("writing the preview into the PR body failed (%s): %.200s", inp.work_item_id, exc)
+
+
+def _apply_manifests(cfg: PreviewConfig, manifests: dict[str, str]) -> None:
+    """Apply the preview manifests straight to the cluster.
+
+    The alternative is the GitOps path, where Argo CD is what actually creates
+    the objects — and Argo also prunes them when the directory disappears.
+    Applying directly removes that dependency and everything it needs (an Argo
+    install, a reachable manifests repo), at the cost of that free garbage
+    collection: with this path the TTL reaper is the ONLY thing that deletes a
+    preview namespace, so it stops being optional.
+
+    Namespace goes first, on its own: every other object is namespaced and a
+    single combined apply would race against the namespace existing.
+    """
+    _kubectl(cfg, ["apply", "-f", "-"], input_text=manifests["namespace.yaml"])
+    rest = "\n---\n".join(
+        body for name, body in sorted(manifests.items()) if name != "namespace.yaml"
+    )
+    _kubectl(cfg, ["apply", "-f", "-"], input_text=rest)
 
 
 def _wait_deployment_available(cfg: PreviewConfig, namespace: str, timeout_s: int) -> None:
-    # o namespace só passa a existir depois do sync do Argo CD — espera em TRÊS
-    # etapas: namespace criado, deployment CRIADO, deployment Available.
-    # A etapa do meio é essencial (achado da prova D3/D4): `kubectl wait
-    # --for=condition=...` com um NOME específico falha NA HORA se o recurso
-    # ainda não existe — e o Argo aplica namespace→deployment com um gap de
-    # segundos no primeiro sync (flake de timing, não de lógica).
+    # the namespace only comes into existence after Argo CD's sync — wait in
+    # THREE stages: namespace created, deployment CREATED, deployment Available.
+    # The middle stage is essential (finding from the D3/D4 proof): `kubectl
+    # wait --for=condition=...` with a specific NAME fails IMMEDIATELY if the
+    # resource does not exist yet — and Argo applies namespace→deployment with a
+    # gap of seconds on the first sync (a timing flake, not a logic one).
     _kubectl(
         cfg,
         ["wait", "--for=create", f"namespace/{namespace}", f"--timeout={timeout_s}s"],
@@ -304,7 +411,7 @@ def _wait_deployment_available(cfg: PreviewConfig, namespace: str, timeout_s: in
 
 
 # ---------------------------------------------------------------------------
-# trigger_preview — core da Activity do contrato
+# trigger_preview — core of the contract's Activity
 # ---------------------------------------------------------------------------
 def trigger_preview_core(
     inp: TriggerPreviewInput,
@@ -316,14 +423,15 @@ def trigger_preview_core(
     cfg = cfg or PreviewConfig()
     ttl = ttl_seconds or cfg.default_ttl_seconds
 
-    # 0) Plano 08 §D — gate operator-set (repo_bindings.deploys_preview). Repo
-    # não marcado como "gera preview" pula LIMPO (nunca bloqueia). Distinto de
-    # backend-only: aqui o operador declarou que o repo não tem preview.
+    # 0) Plan 08 §D — operator-set gate (repo_bindings.deploys_preview). A repo
+    # not marked as "generates preview" skips CLEANLY (never blocks). Distinct
+    # from backend-only: here the operator declared that the repo has no
+    # preview.
     if not inp.preview_enabled:
         db.upsert_preview(
             work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
             pr_number=inp.pr_number, repo=inp.repo, status="skipped_disabled",
-            detail="repo não marcado deploys_preview (plano 08 §D)", ttl_seconds=ttl,
+            detail="repo not marked deploys_preview (plan 08 §D)", ttl_seconds=ttl,
         )
         if audit_emit is not None:
             audit_emit(
@@ -333,18 +441,19 @@ def trigger_preview_core(
             )
         return PreviewRef(
             work_item_id=inp.work_item_id, pr_number=inp.pr_number,
-            status="skipped_disabled", detail="repo sem preview (deploys_preview=false)",
+            status="skipped_disabled", detail="repo without preview (deploys_preview=false)",
         )
 
-    # 1) FR-20 + plano 08 §D — paths-filter determinístico (P1). Preview vale se
-    # a mudança toca UI (front) OU um serviço deployável (back). Só docs/teste
-    # → skipped_backend_only, que conta como SUCESSO e NUNCA bloqueia.
+    # 1) FR-20 + plan 08 §D — deterministic paths-filter (P1). A preview is
+    # worth it if the change touches UI (front end) OR a deployable service
+    # (back end). Only docs/tests → skipped_backend_only, which counts as
+    # SUCCESS and NEVER blocks.
     kind, matched = preview_decision(inp.files_changed, inp.ui_path_globs, inp.deployable_globs)
     if kind == "none":
         db.upsert_preview(
             work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
             pr_number=inp.pr_number, repo=inp.repo, status="skipped_backend_only",
-            detail="nenhum arquivo casa ui/deployable globs (FR-20 + §D)", ttl_seconds=ttl,
+            detail="no file matches ui/deployable globs (FR-20 + §D)", ttl_seconds=ttl,
         )
         if audit_emit is not None:
             audit_emit(
@@ -355,12 +464,12 @@ def trigger_preview_core(
             )
         return PreviewRef(
             work_item_id=inp.work_item_id, pr_number=inp.pr_number,
-            status="skipped_backend_only", detail="sem mudança previewável (docs/teste)",
+            status="skipped_backend_only", detail="no previewable change (docs/tests)",
         )
 
     ui_files = matched
 
-    # 2) ADR-26 — cap de previews concorrentes por tenant (dia 1).
+    # 2) ADR-26 — cap on concurrent previews per tenant (day 1).
     cap = db.get_preview_cap(inp.tenant_id)
     if cap is None:
         cap = cfg.default_max_concurrent
@@ -368,11 +477,12 @@ def trigger_preview_core(
     active = db.count_active_previews(inp.tenant_id)
     already_active = existing is not None and existing["status"] == "created" and existing["reaped_at"] is None
     if not already_active and active >= cap and cap > 0:
-        # Eviction LRU (decisão operador 2026-07-23): cap cheio => o preview
-        # mais ANTIGO cede o slot para o PR novo (recência vence; o cap segue
-        # sendo o teto duro de simultâneos). cap == 0 continua significando
-        # "tenant sem previews" — nada a evictar. Falha na remoção NÃO derruba
-        # o fluxo aqui: cai no degraded logo abaixo (failure mode 9).
+        # LRU eviction (operator decision 2026-07-23): cap full => the OLDEST
+        # preview yields its slot to the new PR (recency wins; the cap remains
+        # the hard ceiling on concurrency). cap == 0 still means "tenant without
+        # previews" — nothing to evict. A removal failure does NOT take down the
+        # flow here: it falls into the degraded path right below (failure
+        # mode 9).
         try:
             for row in db.list_oldest_active_previews(inp.tenant_id, limit=active - cap + 1):
                 old_ns = row["namespace"] or namespace_for(row["work_item_id"])
@@ -385,11 +495,11 @@ def trigger_preview_core(
                         details={"namespace": old_ns, "evicted_for": inp.work_item_id,
                                  "pr_number": inp.pr_number, "cap": cap},
                     )
-        except Exception as exc:  # noqa: BLE001 — eviction é best-effort; degraded decide abaixo
-            logger.warning("eviction LRU de preview falhou (%s: %s)", type(exc).__name__, exc)
+        except Exception as exc:  # noqa: BLE001 — eviction is best-effort; degraded decides below
+            logger.warning("LRU eviction of preview failed (%s: %s)", type(exc).__name__, exc)
         active = db.count_active_previews(inp.tenant_id)
     if not already_active and active >= cap:
-        detail = f"cap de previews concorrentes do tenant atingido ({active}/{cap}, ADR-26)"
+        detail = f"tenant concurrent preview cap reached ({active}/{cap}, ADR-26)"
         db.upsert_preview(
             work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
             pr_number=inp.pr_number, repo=inp.repo, status="degraded",
@@ -406,29 +516,43 @@ def trigger_preview_core(
             status="degraded", detail=detail,
         )
 
-    # 3-4) GitOps + Argo CD contra o cluster real. Qualquer falha => degraded
-    # (failure mode 9 — preview nunca bloqueia o PR para sempre).
+    # 3-4) GitOps + Argo CD against the real cluster. Any failure => degraded
+    # (failure mode 9 — a preview never blocks the PR forever).
     namespace = namespace_for(inp.work_item_id)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl)
 
-    # D4 — imagem REAL do PR quando habilitado (fail-safe: None => placeholder,
-    # motivo auditado; o build nunca degrada o preview).
+    # D4 — the REAL PR image when enabled (fail-safe: None => placeholder, with
+    # the reason audited; the build never degrades the preview).
     from dse_validation.preview.pr_image import build_pr_image
     pr_image, image_reason, detected_port = build_pr_image(
         work_item_id=inp.work_item_id, repo=inp.repo, head_sha=inp.head_sha, cfg=cfg,
     )
-    # Porta detectada na síntese (app Node) vence o default do cfg — senão o
-    # readiness/Service apontariam para a porta errada e o preview degradaria.
+    # The port detected during synthesis (Node app) beats the cfg default —
+    # otherwise readiness/Service would point at the wrong port and the preview
+    # would degrade.
     app_port = detected_port or cfg.app_port
+
+    # The branch the finalizer pushed for this work item. In `source` mode this
+    # is what the preview container clones, so it has to match the convention
+    # `finalize_pr` uses — the PR head branch, not the SHA.
+    branch = f"dse/{inp.work_item_id}"
+    ready_timeout = (
+        max(cfg.sync_timeout_s, cfg.source_ready_timeout_s)
+        if cfg.mode == "source" else cfg.sync_timeout_s
+    )
 
     try:
         manifests = build_manifests(namespace, inp.work_item_id, inp.tenant_id, expires_at, ttl, cfg,
-                                    image=pr_image, app_port=app_port)
-        gitops.write_preview_dir(cfg.repo_dir, namespace, manifests)
-        ensure_applicationset(cfg)
-        _wait_deployment_available(cfg, namespace, cfg.sync_timeout_s)
-    except Exception as exc:  # degraded, nunca bloqueia (failure mode 9)
-        detail = f"preview degradado: {type(exc).__name__}: {exc}"
+                                    image=pr_image, app_port=app_port,
+                                    repo=inp.repo, branch=branch)
+        if cfg.apply_mode == "kubectl":
+            _apply_manifests(cfg, manifests)
+        else:
+            gitops.write_preview_dir(cfg.repo_dir, namespace, manifests)
+            ensure_applicationset(cfg)
+        _wait_deployment_available(cfg, namespace, ready_timeout)
+    except Exception as exc:  # degraded, never blocks (failure mode 9)
+        detail = f"preview degraded: {type(exc).__name__}: {exc}"
         logger.warning("trigger_preview %s: %s", inp.work_item_id, detail)
         db.upsert_preview(
             work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
@@ -446,8 +570,9 @@ def trigger_preview_core(
             status="degraded", namespace=namespace, detail=detail[:900],
         )
 
-    # plano 08 §D (D3): URL externa (browser-reachable) quando configurada;
-    # senão o DNS interno do cluster (link aparece no PR mesmo assim — D1).
+    # plan 08 §D (D3): external URL (browser-reachable) when configured;
+    # otherwise the cluster-internal DNS (the link shows up on the PR either
+    # way — D1).
     url = cfg.preview_url_for(namespace)
     db.upsert_preview(
         work_item_id=inp.work_item_id, tenant_id=inp.tenant_id,
@@ -455,10 +580,10 @@ def trigger_preview_core(
         namespace=namespace, url=url, ttl_seconds=ttl, expires_at=expires_at,
         detail=f"{kind} files: {', '.join(ui_files[:10])} | image={image_reason}",
     )
-    # D1 (achado do disparo real: o link só ia para o comentário de status na
-    # ISSUE de origem; o revisor humano abre o PR e não o via). Escreve o link
-    # na DESCRIÇÃO do PR (`- **Preview**: <url>`). Best-effort: nunca derruba o
-    # preview (o audit/ledger é a verdade).
+    # D1 (finding from the real run: the link only went to the status comment on
+    # the originating ISSUE; the human reviewer opens the PR and did not see it).
+    # Writes the link into the PR DESCRIPTION (`- **Preview**: <url>`).
+    # Best-effort: never takes down the preview (the audit/ledger is the truth).
     _put_preview_link_in_pr_body(inp, url, kind, actor=actor)
     if audit_emit is not None:
         audit_emit(
@@ -476,14 +601,14 @@ def trigger_preview_core(
 
 
 # ---------------------------------------------------------------------------
-# TTL reaper (job Python determinístico — ver decisão na docstring do módulo)
+# TTL reaper (deterministic Python job — see the decision in the module docstring)
 # ---------------------------------------------------------------------------
 def reap_expired_previews(
     *, cfg: PreviewConfig | None = None, actor: str = "system:validation", now=None
 ) -> list[str]:
-    """Remove do GIT os previews expirados (`expires_at <= now`) — o
-    ApplicationSet poda a Application e o finalizer cascateia a deleção do
-    namespace. Marca `reaped` em wse_previews + audit. Idempotente."""
+    """Removes the expired previews (`expires_at <= now`) from GIT — the
+    ApplicationSet prunes the Application and the finalizer cascades the
+    namespace deletion. Marks `reaped` in wse_previews + audit. Idempotent."""
     cfg = cfg or PreviewConfig()
     reaped: list[str] = []
     for row in db.list_expired_previews(now):
@@ -500,7 +625,7 @@ def reap_expired_previews(
 
 
 def wait_namespace_gone(namespace: str, *, cfg: PreviewConfig | None = None, timeout_s: int = 180) -> None:
-    """Espera o cascade delete do Argo CD concluir (para testes/verificação)."""
+    """Waits for Argo CD's cascade delete to finish (for tests/verification)."""
     cfg = cfg or PreviewConfig()
     _kubectl(
         cfg,
@@ -510,8 +635,9 @@ def wait_namespace_gone(namespace: str, *, cfg: PreviewConfig | None = None, tim
 
 
 def get_preview_http_status(namespace: str, *, cfg: PreviewConfig | None = None, timeout_s: int = 30) -> int:
-    """Prova 'URL respondendo' de fora do cluster: `kubectl run curl` efêmero
-    dentro do namespace batendo no Service — retorna o status HTTP."""
+    """Proof of 'URL responding' from outside the cluster: an ephemeral
+    `kubectl run curl` inside the namespace hitting the Service — returns the
+    HTTP status."""
     cfg = cfg or PreviewConfig()
     proc = _kubectl(
         cfg,
