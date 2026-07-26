@@ -21,6 +21,8 @@ from typing import Protocol
 
 import requests
 
+from .ratelimit import request_with_backoff
+
 GITHUB_API_BASE = "https://api.github.com"
 
 
@@ -62,10 +64,17 @@ class GithubCommentBackend:
 class RealGithubClient:
     """Real HTTP client (no PyGithub — plain `requests` is enough and keeps the
     dependency surface minimal, P7 boring-first) authenticated with a GitHub App
-    installation access token."""
+    installation access token.
 
-    def __init__(self, installation_token: str):
+    `deadline` is the CALLER's (an absolute `time.time()` reading) and is shared
+    by every request this client makes, `list_issue_comments` pages included.
+    There is no default: a client that renewed its budget per request would let
+    one reconciler sweep sleep for as many minutes as it has threads and pages.
+    """
+
+    def __init__(self, installation_token: str, *, deadline: float):
         self._token = installation_token
+        self._deadline = deadline
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -74,22 +83,38 @@ class RealGithubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _request(self, method: str, url: str, *, what: str, **kwargs):
+        """Every outbound call goes through here so that GitHub's throttling is
+        handled in ONE place; `raise_for_status()` stays with the callers, which
+        keeps non-throttle failures on exactly the path they had before."""
+        return request_with_backoff(
+            lambda: requests.request(method, url, headers=self._headers(), timeout=10, **kwargs),
+            what=what,
+            deadline=self._deadline,
+        )
+
     def create_comment(self, repo: str, issue_number: int, body: str) -> int:
-        resp = requests.post(
+        # Safe to repeat: the only retried outcome is a 403/429 throttle, and a
+        # throttled POST never created a comment. A retry after a TIMEOUT could
+        # double-post the status comment, so timeouts are deliberately not
+        # retried (see `request_with_backoff`).
+        resp = self._request(
+            "POST",
             f"{GITHUB_API_BASE}/repos/{repo}/issues/{issue_number}/comments",
-            headers=self._headers(),
+            what="create_comment",
             json={"body": body},
-            timeout=10,
         )
         resp.raise_for_status()
         return resp.json()["id"]
 
     def update_comment(self, repo: str, comment_id: int, body: str) -> None:
-        resp = requests.patch(
+        # Idempotent by construction: PATCH sets the body to an absolute value,
+        # so repeating it converges on the same comment text.
+        resp = self._request(
+            "PATCH",
             f"{GITHUB_API_BASE}/repos/{repo}/issues/comments/{comment_id}",
-            headers=self._headers(),
+            what="update_comment",
             json={"body": body},
-            timeout=10,
         )
         resp.raise_for_status()
 
@@ -98,10 +123,9 @@ class RealGithubClient:
         returns it. The reconciler needs the whole object, not just the body:
         `pull_request` tells a PR apart from a plain issue, and `labels` feeds
         the same task classification the webhook payload provides."""
-        resp = requests.get(
-            f"{GITHUB_API_BASE}/repos/{repo}/issues/{number}",
-            headers=self._headers(),
-            timeout=10,
+        # Reads are trivially repeatable.
+        resp = self._request(
+            "GET", f"{GITHUB_API_BASE}/repos/{repo}/issues/{number}", what="get_issue"
         )
         resp.raise_for_status()
         return resp.json()
@@ -119,11 +143,11 @@ class RealGithubClient:
         collected: list[dict] = []
         per_page = 100
         for page in range(1, max_pages + 1):
-            resp = requests.get(
+            resp = self._request(
+                "GET",
                 f"{GITHUB_API_BASE}/repos/{repo}/issues/{number}/comments",
-                headers=self._headers(),
+                what="list_issue_comments",
                 params={"per_page": per_page, "page": page},
-                timeout=10,
             )
             resp.raise_for_status()
             batch = resp.json()
@@ -191,10 +215,15 @@ class FakeGithubClient:
         return list(self.issue_comments.get(self._thread_key(repo, number), []))
 
 
-def build_real_github_client() -> RealGithubClient:
+def build_real_github_client(*, deadline: float) -> RealGithubClient:
     """Builds the `RealGithubClient` authenticated via GitHub App (never a
     personal PAT). The import is done inside the function to keep the App-auth
-    network dependency out of the rest of the module."""
+    network dependency out of the rest of the module.
+
+    The token exchange and the client it authenticates share ONE `deadline`. They
+    used to hold a retry budget each, so a single `/internal/status-comment`
+    request could wait out two of them back to back — twice as long as the
+    orchestrator, which is the caller, is prepared to wait."""
     from . import config
     from .auth import get_installation_access_token
 
@@ -202,5 +231,6 @@ def build_real_github_client() -> RealGithubClient:
         app_id=config.get_app_id(),
         private_key_pem=config.get_app_private_key(),
         installation_id=config.get_installation_id(),
+        deadline=deadline,
     )
-    return RealGithubClient(token)
+    return RealGithubClient(token, deadline=deadline)

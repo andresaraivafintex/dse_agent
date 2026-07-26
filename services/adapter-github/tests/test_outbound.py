@@ -33,7 +33,7 @@ def _make_work_item(tenant_id: str) -> str:
 
 def test_first_status_update_creates_a_single_comment(tenant_id, monkeypatch):
     fake_client = FakeGithubClient()
-    monkeypatch.setattr(app_module, "build_real_github_client", lambda: fake_client)
+    monkeypatch.setattr(app_module, "build_real_github_client", lambda *, deadline: fake_client)
 
     work_item_id = _make_work_item(tenant_id)
     resp = client.post(
@@ -53,7 +53,7 @@ def test_first_status_update_creates_a_single_comment(tenant_id, monkeypatch):
 
 def test_subsequent_updates_edit_in_place_never_create_new_comment(tenant_id, monkeypatch):
     fake_client = FakeGithubClient()
-    monkeypatch.setattr(app_module, "build_real_github_client", lambda: fake_client)
+    monkeypatch.setattr(app_module, "build_real_github_client", lambda *, deadline: fake_client)
 
     work_item_id = _make_work_item(tenant_id)
     for body in ["Task started", "L1 validating", "PR opened"]:

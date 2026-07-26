@@ -53,6 +53,49 @@ recovered reply is never mistaken for a delivered one.
 uses `installation.id` via `tenant_platform_bindings` (documented fallback to
 `DSE_TENANT_ID`). See [`../ingest-gateway/README.md`](../ingest-gateway/README.md#phase-2--what-ws-a-added).
 
+## Rate limiting (`adapter_github/ratelimit.py`)
+
+Every outbound GitHub call (`RealGithubClient`, the installation-token exchange)
+goes through `request_with_backoff`. GitHub throttles in two shapes and neither
+is a plain 429: the **primary** limit answers `403`/`429` with
+`x-ratelimit-remaining: 0` plus `x-ratelimit-reset` (epoch seconds, used as the
+retry hint), the **secondary/abuse** limit answers `403`/`429` with
+`Retry-After`. Anything else — including a bare `403` with neither marker, which
+means a missing App permission — is handed back to the caller untouched and
+still fails through `raise_for_status()`.
+
+Without a usable server hint the wait is exponential backoff with jitter.
+
+**The wait budget belongs to the caller.** `build_real_github_client` requires a
+`deadline` and threads it through both the installation-token exchange and every
+request the client makes (`list_issue_comments` pages included), so one client per
+request means one budget per request — not one per request-with-retries, which
+bounded nothing: `/internal/reconcile` sweeps every pending thread inside a single
+HTTP request. Each endpoint sets its own, against what its own caller will wait
+for:
+
+| endpoint | budget | bounded by |
+| --- | --- | --- |
+| `POST /internal/reconcile` | `RECONCILE_BUDGET_S` = 45s | the reply-reconciler CronJob abandons the request at 120s, and the sweep starts no new thread past the deadline — 45s + the 6 × 10s worst case of the thread already in flight = 105s |
+| `POST /internal/status-comment` | `STATUS_COMMENT_BUDGET_S` = 3s | the orchestrator posts best-effort with an 8s timeout — a longer retry means it gives up before `save_ref`, and the next transition posts a SECOND comment |
+
+A server hint is honoured **verbatim or not at all**. `x-ratelimit-reset` 40
+minutes out used to be truncated to 30s and slept on, which re-requests into a
+quota that has not refilled — and on the secondary/abuse limit GitHub documents
+that requesting before `Retry-After` elapses can *extend* the block. A hint that
+does not fit in the remaining budget now raises `GithubRateLimited` immediately.
+The reconciler treats that exception as "this installation is throttling" and
+stops the sweep rather than walking the remaining threads into the same limit.
+
+The installation token is cached in `auth._TOKEN_CACHE` per
+`(app_id, installation_id)` until `_TOKEN_REFRESH_MARGIN_S` before GitHub's own
+`expires_at`, so a burst of status-comment requests pays for one exchange instead
+of one each. A response whose `expires_at` is missing or unparseable is used once
+and not cached — a token with a guessed lifetime is a 401 no retry can fix.
+
+Only throttle responses are retried — a timeout or a 5xx may have applied the
+write already, and repeating it would post the status comment twice.
+
 ## Tests
 
 ```bash

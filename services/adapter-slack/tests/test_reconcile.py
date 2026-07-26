@@ -23,9 +23,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import adapter_slack.app as app_module
-from adapter_slack.app import app
+from adapter_slack.app import RECONCILE_BUDGET_S, app
 from adapter_slack.backend import FakeSlackClient
 from adapter_slack.events import build_event_from_thread_message
+from adapter_slack.ratelimit import SlackRateLimited
+
+from .helpers import Clock
 
 client = TestClient(app)
 
@@ -104,7 +107,9 @@ class _Ingested:
 @pytest.fixture
 def fake_slack(monkeypatch) -> FakeSlackClient:
     fake = FakeSlackClient()
-    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token: fake)
+    # `deadline` is required in production (see `build_real_slack_client`); the
+    # fake never throttles, so it only has to accept it.
+    monkeypatch.setattr(app_module, "build_real_slack_client", lambda token, *, deadline: fake)
     return fake
 
 
@@ -278,6 +283,51 @@ def test_one_broken_work_item_does_not_abort_the_sweep(pending, fake_slack, inge
     monkeypatch.setattr(fake_slack, "conversations_replies", _explode)
 
     assert _reconcile() == {"ok": True, "checked": 2, "recovered": 1}
+
+
+def test_a_throttled_workspace_stops_the_sweep_instead_of_walking_into_it_again(
+    pending, fake_slack, ingested, audits, monkeypatch
+):
+    """BLOCKER: the sweep shares ONE wait budget, so `SlackRateLimited` means the
+    workspace is throttling `conversations.replies` — the very call every
+    remaining item is about to make. Continuing was the bug: the per-item
+    `except Exception` swallowed the throttle and marched on, so 50 items each
+    burned their own budget inside a request the CronJob abandons after 120s."""
+    pending.rows.extend([_work_item("wi_1"), _work_item("wi_2"), _work_item("wi_3")])
+    fake_slack.threads[f"{CHANNEL}:{THREAD_TS}"] = [_thread_root(), _human_reply()]
+
+    def _throttled(*, channel: str, ts: str) -> dict:
+        fake_slack.replies_calls.append({"channel": channel, "ts": ts})
+        raise SlackRateLimited("slack still rate limiting conversations.replies")
+
+    monkeypatch.setattr(fake_slack, "conversations_replies", _throttled)
+
+    assert _reconcile() == {"ok": True, "checked": 1, "recovered": 0}
+    assert len(fake_slack.replies_calls) == 1  # item 2 and 3 were never asked for
+
+
+def test_no_new_thread_is_started_once_the_sweep_is_out_of_budget(
+    pending, fake_slack, ingested, audits, monkeypatch
+):
+    """The other half of the bound. Once the deadline passes, the client will not
+    sleep any more — but it would still spend one Slack request per remaining
+    item, which is what has to fit inside the CronJob's 120s. Here reading the
+    first thread eats the whole budget, so the second item is never started."""
+    clock = Clock()
+    monkeypatch.setattr(app_module, "time", clock)
+    pending.rows.extend([_work_item("wi_1"), _work_item("wi_2")])
+    fake_slack.threads[f"{CHANNEL}:{THREAD_TS}"] = [_thread_root(), _human_reply()]
+
+    original = fake_slack.conversations_replies
+
+    def _slow(*, channel: str, ts: str) -> dict:
+        clock.t += RECONCILE_BUDGET_S + 1.0  # this one call outlasted the budget
+        return original(channel=channel, ts=ts)
+
+    monkeypatch.setattr(fake_slack, "conversations_replies", _slow)
+
+    assert _reconcile() == {"ok": True, "checked": 1, "recovered": 1}
+    assert len(fake_slack.replies_calls) == 1
 
 
 def test_work_item_without_a_thread_is_skipped_not_guessed(pending, fake_slack, ingested):

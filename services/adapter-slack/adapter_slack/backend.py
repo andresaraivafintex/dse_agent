@@ -17,6 +17,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from .ratelimit import RateLimitedSlackClient
+
 
 class _SlackClientLike(Protocol):
     def chat_postMessage(self, *, channel: str, text: str, blocks: list | None = ...) -> dict: ...
@@ -168,11 +170,32 @@ class FakeSlackClient:
         return {"ok": True, "messages": list(self.threads.get(f"{channel}:{ts}", []))}
 
 
-def build_real_slack_client(bot_token: str):
-    """Builds the real `slack_sdk.WebClient`. The import lives in here (not at
-    module top level) so that `FakeSlackClient`/the tests do not require
-    `slack_sdk` to be installed in environments that only run offline tests —
-    even though, in practice, `slack_sdk` is a declared dependency in pyproject."""
+#: Socket timeout handed to `WebClient` (slack_sdk's own default is 30s).
+#: `_notify_ephemeral` runs inside the `/slack/interactions` COROUTINE, so every
+#: second this call blocks is a second the uvicorn event loop answers nothing —
+#: not `/slack/events` (Slack gives up at 3s and redelivers), not `/health` (the
+#: liveness probe eventually restarts the pod). The retry sleeps are handled by
+#: the deadline below; this bounds the wait that no budget can see.
+HTTP_TIMEOUT_S = 10
+
+
+def build_real_slack_client(bot_token: str, *, deadline: float):
+    """Builds the real `slack_sdk.WebClient`, wrapped in
+    `RateLimitedSlackClient` so a 429 backs off instead of failing the caller.
+
+    `deadline` (an absolute `time.monotonic()` reading) is required: it is the
+    moment the CALLER stops waiting — the reconciler CronJob's request timeout,
+    the orchestrator's 8s status-comment timeout, or `now` for the ephemeral
+    notice that nobody is waiting on. Every call made through the returned client
+    shares it, which is what keeps a sweep of 50 threads from spending 50
+    separate retry budgets.
+
+    The import lives in here (not at module top level) so that
+    `FakeSlackClient`/the tests do not require `slack_sdk` to be installed in
+    environments that only run offline tests — even though, in practice,
+    `slack_sdk` is a declared dependency in pyproject."""
     from slack_sdk import WebClient
 
-    return WebClient(token=bot_token)
+    return RateLimitedSlackClient(
+        WebClient(token=bot_token, timeout=HTTP_TIMEOUT_S), deadline=deadline
+    )

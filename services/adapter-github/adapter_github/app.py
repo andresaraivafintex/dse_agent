@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from dse_audit import emit as audit_emit
 from dse_contracts import EventKind, mutable_comment
@@ -46,10 +47,34 @@ from .events import (
     build_event_from_pr_review,
     build_event_from_pr_review_comment,
 )
+from .ratelimit import GithubRateLimited
 
 logger = logging.getLogger("adapter_github")
 
 app = FastAPI(title="dse-adapter-github")
+
+# How long each endpoint may keep ITS OWN caller waiting on GitHub, counted from
+# the start of the request. These are the callers' limits, not GitHub's — the
+# whole point of `adapter_github.ratelimit` taking a deadline is that only the
+# call site knows them.
+#
+# `/internal/reconcile` is invoked by the reply-reconciler CronJob, which abandons
+# the request after 120s (infra/helm/dse/templates/reply-reconciler.yaml). The
+# deadline stops the sweep from STARTING another thread, not from finishing the one
+# it is in, and one thread is `get_issue` plus up to `max_pages` comment pages —
+# six requests at a 10s socket timeout each, 60s. 45s of budget therefore keeps the
+# pathological case (deadline passes one request into the last thread) at 45 + 60 =
+# 105s, inside the 120s, with the listing query already counted against the budget.
+RECONCILE_BUDGET_S = 45.0
+
+# `/internal/status-comment` is called by the orchestrator best-effort with an 8s
+# HTTP timeout (services/orchestrator .../local_activities.py). Waiting LONGER
+# than the caller will is how the "exactly 1 status comment per issue" invariant
+# broke: the orchestrator gave up at 8s, `MutableCommentWriter` never reached
+# `save_ref`, and the next transition found no ref and posted a SECOND comment.
+# The budget covers the installation-token exchange AND the comment call, which
+# is why it is one deadline built here and threaded through both.
+STATUS_COMMENT_BUDGET_S = 3.0
 
 
 @app.get("/health")
@@ -416,8 +441,13 @@ class StatusCommentRequest(BaseModel):
 def upsert_status_comment(req: StatusCommentRequest) -> dict:
     """WSA-E4-T2: exactly 1 status comment per issue/PR, edited in-place, under
     the GitHub App identity (`build_real_github_client` uses an installation
-    access token, never a personal PAT)."""
-    client = build_real_github_client()
+    access token, never a personal PAT).
+
+    One `STATUS_COMMENT_BUDGET_S` deadline covers the token exchange and the
+    comment call together, which is what keeps a throttled post from outliving
+    the orchestrator's 8s timeout and reappearing as a SECOND comment on the next
+    transition."""
+    client = build_real_github_client(deadline=time.time() + STATUS_COMMENT_BUDGET_S)
     backend = GithubCommentBackend(client)
     store = PgCommentStateStore()
     writer = mutable_comment.MutableCommentWriter(backend, store, SURFACE)
@@ -541,8 +571,17 @@ def reconcile_pending_replies() -> dict:
     items their recovery, so every item is isolated and the sweep carries on.
     Nothing here returns 5xx — a caller on a timer would only retry into the
     same failure, and `ok: False` says more than a stack trace at the other end.
-    """
+
+    ONE budget for the WHOLE sweep (`RECONCILE_BUDGET_S`), not one per request:
+    the client is built once with a single deadline — shared with the token
+    exchange and with every `list_issue_comments` page — and the loop below
+    refuses to start another thread once that deadline has passed. Without both
+    halves, a throttled installation turned this endpoint into tens of minutes of
+    sleeping inside a request the CronJob abandons after 120s. Stopping early
+    loses nothing: `pending_reply_work_items` rotates through the pending set, so
+    the next cycle continues from where this one gave up."""
     tenant_id = get_tenant_id()
+    deadline = time.time() + RECONCILE_BUDGET_S
 
     try:
         conn = get_connection()
@@ -559,17 +598,39 @@ def reconcile_pending_replies() -> dict:
         return {"ok": True, "checked": 0, "recovered": 0}
 
     try:
-        reader = build_real_github_client()
+        reader = build_real_github_client(deadline=deadline)
     except Exception:  # noqa: BLE001
         logger.exception("reconcile: could not authenticate as the GitHub App")
         return {"ok": False, "checked": 0, "recovered": 0}
 
     recovered = 0
+    checked = 0
     for row in pending:
+        if time.time() >= deadline:
+            # The client would no longer sleep on a throttle, but it would still
+            # spend requests per remaining thread. Starting no new thread past the
+            # deadline is what makes the sweep fit inside the CronJob's 120s.
+            logger.warning(
+                "reconcile: out of budget after %d/%d threads; the next cycle continues",
+                checked, len(pending),
+            )
+            break
+        checked += 1
         try:
             recovered += _recover_thread(reader, row, tenant_id=tenant_id)
+        except GithubRateLimited:
+            # GitHub throttles per INSTALLATION, so every remaining thread faces
+            # the same limit with the same token. Marching on would spend the rest
+            # of the request failing identically — and this used to be swallowed
+            # by the `except Exception` below, which is how the sweep kept going
+            # through one throttled thread after another.
+            logger.warning(
+                "reconcile: github is throttling this installation; stopping after %d/%d threads",
+                checked, len(pending),
+            )
+            break
         except Exception:  # noqa: BLE001 — one bad thread must not stall the rest
             logger.exception(
                 "reconcile: could not recover %s; continuing", row.get("work_item_id")
             )
-    return {"ok": True, "checked": len(pending), "recovered": recovered}
+    return {"ok": True, "checked": checked, "recovered": recovered}
