@@ -14,6 +14,7 @@ Transaction: each function opens its own connection and delegates the commit to
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from dse_audit import emit as audit_emit
@@ -24,6 +25,7 @@ from ingest_gateway import (
     classify_task_class,
     correlate,
     get_connection,
+    is_channel_killed,
     record_signal_event,
     resolve_repo,
     sanitize_content,
@@ -107,6 +109,293 @@ def ingest_task_trigger(
                 details={"previous_work_item_id": result.provenance_work_item_id},
             )
         return {"ok": True, "path": "new_task", "work_item_id": work_item_id}
+    finally:
+        conn.close()
+
+
+# Statuses a retry label acts on: the three TERMINAL ones that are not a success.
+# Nothing is running for any of them, so a fresh attempt cannot race a workflow.
+#   - `failed`: the attempt died on its own (retry cap, activity error).
+#   - `blocked`: stopped waiting on human intervention — the status comment says
+#     so in as many words ("no resolvable approver — adjust CODEOWNERS"). Once the
+#     human has done that, a fresh attempt is the only thing they can want, and
+#     the DSE offers them no other lever.
+#   - `escalated`: the escalation comment literally tells the human to "re-apply
+#     the `dse` label to try again" (orchestrator local_activities.py), which does
+#     nothing at all — that label converges on the `created:{issue id}` event_id
+#     of the attempt that escalated. This label is what makes the instruction true.
+# Deliberately excluded:
+#   - `done`: the work merged. A second attempt would re-implement and re-open a
+#     PR for a change that already shipped.
+#   - every in-flight status: two workflows would race for the same branch and PR.
+# The retry is not a bypass: the new work item goes through the whole pipeline,
+# clarification and plan-approval gates included.
+_RETRY_ELIGIBLE_STATUSES = ("failed", "blocked", "escalated")
+
+# Actor of everything below. The poller reads the issue's CURRENT state, not its
+# changelog, so it cannot know WHO added the label — naming the ticket reporter
+# would blame someone who may never have asked, in a table nothing can correct
+# (migrations/0028, append-only). Same convention as the poller's reconstructed
+# approvals; see poller.py's module docstring on attribution. The reporter is
+# still the work item's REQUESTER (BD-39: they must be able to answer its
+# clarifications), which `work_item_admitted` records.
+_RECONSTRUCTED_ACTOR = "system:adapter-jira-poller"
+
+_RETRY_DECLINED_ACTION = "jira_retry_declined"
+
+
+def _latest_work_item_for_ticket(conn, *, tenant_id: str, ticket_key: str) -> tuple[str, str, str | None, str | None] | None:
+    """`(work_item_id, status, repo, base_branch)` of the newest work item for
+    this ticket, or None if the DSE never took the ticket on.
+
+    Same lookup shape as `ingest_gateway.correlate` (match on `source_ref`,
+    newest first) — deliberately, so "which item does this ticket mean" has one
+    answer across the adapter. `correlate` cannot be reused here: it collapses
+    `done` and `failed` into one "terminal" verdict, and the retry has to tell
+    those apart.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, status, repo, base_branch FROM work_items
+            WHERE tenant_id = %s AND source_ref @> %s::jsonb
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (tenant_id, json.dumps({"ticket_key": ticket_key})),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return row[0], row[1], row[2], row[3]
+
+
+def _decline(
+    conn,
+    *,
+    tenant_id: str,
+    ticket_key: str,
+    reason: str,
+    work_item_id: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> bool:
+    """Answers the human ONCE for a retry label that will not be acted on.
+
+    Returns True when this call is the one that wrote the row — the poller uses
+    that to decide whether to touch Jira at all, so the answer and the label
+    removal happen on the same sweep and never again.
+
+    Idempotency comes from the ledger itself: one row per (ticket, reason, work
+    item), ever. That has to be checked BEFORE emitting, because the poller
+    re-evaluates a labelled ticket on every sweep and `audit_log` is append-only
+    (migrations/0028) — a timer writing "not eligible" once a minute is exactly
+    how one stuck item produced ~2,900 unremovable rows. The ceiling is a handful
+    of rows for the rest of the ticket's life: three reasons, and a ticket has at
+    most two work items (the original attempt and its one retry).
+
+    The query touches one partition only (`tenant_id` is the LIST partition key)
+    and rides `idx_audit_log_work_item` — hence the `work_item_id` predicate,
+    spelled out rather than folded into a NULL-safe comparison, which Postgres
+    cannot answer from that index. Without it this is a partition scan repeated
+    every sweep for as long as a label the DSE cannot remove sits on a ticket.
+    """
+    item_predicate = "work_item_id IS NULL" if work_item_id is None else "work_item_id = %s"
+    params: tuple = (tenant_id, _RETRY_DECLINED_ACTION, ticket_key, reason)
+    if work_item_id is not None:
+        params += (work_item_id,)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT 1 FROM audit_log
+            WHERE tenant_id = %s AND action = %s
+              AND details->>'ticket_key' = %s AND details->>'reason' = %s
+              AND {item_predicate}
+            LIMIT 1
+            """,
+            params,
+        )
+        if cur.fetchone() is not None:
+            return False
+
+    audit_emit(
+        actor=_RECONSTRUCTED_ACTOR,
+        action=_RETRY_DECLINED_ACTION,
+        tenant_id=tenant_id,
+        work_item_id=work_item_id,
+        details={"ticket_key": ticket_key, "reason": reason, **(extra or {})},
+        conn=conn,
+    )
+    conn.commit()
+    return True
+
+
+def ingest_retry_trigger(
+    issue: dict[str, Any],
+    *,
+    tenant_id: str,
+    actor_account_id: str,
+    resolved_principal: str,
+    display_name: str | None = None,
+) -> dict:
+    """Retry label -> a fresh attempt at a ticket whose work item ended badly.
+
+    Until this existed, a `failed` work item could only be retried by editing the
+    database by hand: the ticket already has a work item, so re-adding the
+    trigger label converges on the same `event_id` and does nothing.
+
+    ONE RETRY PER TICKET, EVER
+    --------------------------
+    The ceiling is enforced by `ingest_events.event_id` (UNIQUE, written inside
+    `admit_work_item`'s transaction — see `events.build_retry_event`), so it holds
+    without any cooperation from Jira: a label that cannot be removed, a restart,
+    a 429 on every write, none of them can buy a second attempt.
+
+    That ceiling is also the right answer on its own terms. If a human's retry
+    fails as well, a third automated attempt is not what the situation needs —
+    the ticket needs editing, or the failure needs a person. What the human must
+    not get is silence, so every path that will not retry writes ONE row saying
+    why (`_decline`).
+
+    Returns `path="retried"` only when a new attempt was actually admitted, and
+    `recorded=True` on the single sweep that wrote a decision — the poller keys
+    its Jira writes off both, so no branch here can turn into a per-minute
+    side effect.
+    """
+    conn = get_connection()
+    try:
+        ticket = events.ticket_key(issue)
+        channel = events.project_key(issue)
+        ev = events.build_retry_event(
+            issue,
+            actor_account_id=actor_account_id,
+            resolved_principal=resolved_principal,
+            display_name=display_name,
+        )
+
+        # THE guard, checked first because it is both the cheapest and the only
+        # one that cannot be undone by a failure outside Postgres.
+        already = recorded_work_item_id(conn, ev.event_id)
+        if already is not None:
+            return {
+                "ok": True,
+                "path": "already_retried",
+                "work_item_id": already,
+                "recorded": _decline(
+                    conn,
+                    tenant_id=tenant_id,
+                    ticket_key=ticket,
+                    reason="retry_already_used",
+                    work_item_id=already,
+                ),
+            }
+
+        latest = _latest_work_item_for_ticket(conn, tenant_id=tenant_id, ticket_key=ticket)
+        if latest is None:
+            return {
+                "ok": True,
+                "path": "no_work_item",
+                "recorded": _decline(
+                    conn, tenant_id=tenant_id, ticket_key=ticket, reason="no_work_item"
+                ),
+            }
+
+        prior_id, prior_status, prior_repo, prior_base_branch = latest
+        if prior_status not in _RETRY_ELIGIBLE_STATUSES:
+            return {
+                "ok": True,
+                "path": "not_retryable",
+                "work_item_id": prior_id,
+                "status": prior_status,
+                "recorded": _decline(
+                    conn,
+                    tenant_id=tenant_id,
+                    ticket_key=ticket,
+                    reason="status_not_retryable",
+                    work_item_id=prior_id,
+                    extra={"status": prior_status, "retryable_statuses": list(_RETRY_ELIGIBLE_STATUSES)},
+                ),
+            }
+
+        # Checked here rather than left to `admit_work_item`, which audits every
+        # blocked admission: on a paused channel that would be one row per sweep
+        # for as long as the label sits there. A pause is temporary and the label
+        # is not consumed — the retry simply happens once the operator resumes.
+        killed, _reason = is_channel_killed(conn, tenant_id, channel)
+        if killed:
+            return {"ok": True, "path": "blocked_kill_switch", "recorded": False}
+
+        sanitized = sanitize_content(ev.content_snapshot)
+        # Inherit the failed attempt's repo instead of re-resolving: on a ticket
+        # whose repo came from a human answering the clarification, the cascade
+        # alone would land back on "ambiguous" and ask the same question again.
+        repo, base_branch = prior_repo, prior_base_branch
+        if not repo:
+            repo, base_branch = resolve_repo(
+                conn, tenant_id=tenant_id, platform="jira",
+                signals={"text": sanitized,
+                         "component": events.first_component(issue),
+                         "project": channel},
+            )
+        try:
+            work_item_id = admit_work_item(
+                ev,
+                tenant_id=tenant_id,
+                source="jira",
+                channel=channel,
+                repo=repo,
+                base_branch=base_branch,
+                requester_principal=resolved_principal,
+                task_class=classify_task_class(
+                    labels=events.issue_labels(issue),
+                    issue_type=events.issue_type(issue),
+                ),
+                sanitized_content=sanitized,
+                conn=conn,
+            )
+        except AdmissionBlocked:
+            # Kill switch flipped between the check above and the insert. The
+            # gateway already audited it; nothing to add.
+            return {"ok": True, "path": "blocked_kill_switch", "recorded": False}
+
+        # One row for one human action. `previous_work_item_id` is the same key
+        # the `work_item_provenance_link` rows use, so the chain from the failed
+        # attempt to this one stays queryable by the established convention
+        # without emitting a second row for the same fact.
+        #
+        # `conn=conn` is not optional. Without it this opens a SECOND connection
+        # after `admit_work_item` has already committed, and a failure there
+        # (pool exhausted, connection reaped) leaves the retry running with no
+        # ledger entry naming it a retry at all. `admit_work_item` owns its own
+        # commit, so this row is a second transaction on the same connection —
+        # the narrowest boundary available without changing the gateway. If the
+        # process dies in that window the retry still cannot repeat (the
+        # `ingest_events` row is committed) and `work_item_admitted` still
+        # records the new item; only the "why" would be missing.
+        audit_emit(
+            actor=_RECONSTRUCTED_ACTOR,
+            action="jira_retry_admitted",
+            tenant_id=tenant_id,
+            work_item_id=work_item_id,
+            details={
+                "reason": "retry_label",
+                "previous_work_item_id": prior_id,
+                "previous_status": prior_status,
+                "ticket_key": ticket,
+                # The inherited requester (BD-39), NOT whoever added the label —
+                # the poller cannot know that from current state.
+                "requester": resolved_principal,
+            },
+            conn=conn,
+        )
+        conn.commit()
+        return {
+            "ok": True,
+            "path": "retried",
+            "recorded": True,
+            "work_item_id": work_item_id,
+            "previous_work_item_id": prior_id,
+        }
     finally:
         conn.close()
 

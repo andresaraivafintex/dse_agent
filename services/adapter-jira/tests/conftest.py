@@ -22,7 +22,15 @@ def tenant_id():
 @pytest.fixture(autouse=True)
 def _cleanup():
     yield
-    conn = psycopg2.connect(SUPERUSER_DSN)
+    try:
+        conn = psycopg2.connect(SUPERUSER_DSN)
+    except psycopg2.OperationalError:
+        # Part of this suite runs with no database at all (fakes for the Jira
+        # client AND for the connection). On a machine without Postgres those
+        # tests passed and then reported an ERROR in teardown, which reads
+        # exactly like a real failure — the cleanup was the only thing failing.
+        # Nothing was written, so there is nothing to delete.
+        return
     try:
         with conn.cursor() as cur:
             cur.execute(
