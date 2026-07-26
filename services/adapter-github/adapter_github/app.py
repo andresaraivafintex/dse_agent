@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from ingest_gateway import (
     AdmissionBlocked,
     admit_work_item,
-    already_ingested,
+    recorded_work_item_id,
     classify_task_class,
     correlate,
     get_connection,
@@ -100,8 +100,9 @@ def _handle_task_creating_event(conv_event, *, principal: str, tenant_id: str,
         # `event_id`, but only after correlating and auditing — on Jira that
         # turned one stuck ticket into thousands of `signal_duplicate_ignored`
         # rows. Nothing below can change an outcome already reached.
-        if already_ingested(conn, conv_event.event_id):
-            return {"ok": True, "path": "already_ingested"}
+        prior = recorded_work_item_id(conn, conv_event.event_id)
+        if prior is not None:
+            return {"ok": True, "path": "already_ingested", "work_item_id": prior}
 
         result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
 

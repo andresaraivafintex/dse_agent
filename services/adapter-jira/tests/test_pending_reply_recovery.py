@@ -142,7 +142,7 @@ def test_a_reply_already_seen_costs_one_select_and_nothing_else(monkeypatch):
 
     monkeypatch.setattr(ingest_mod, "_is_dse_authored", lambda *a, **k: False)
     monkeypatch.setattr(ingest_mod, "get_connection", lambda: _NullConn())
-    monkeypatch.setattr(ingest_mod, "already_ingested", lambda conn, event_id: True)
+    monkeypatch.setattr(ingest_mod, "recorded_work_item_id", lambda conn, event_id: "wi_prior")
 
     def _boom(*a, **k):
         raise AssertionError("a comment already ingested must not be correlated again")
@@ -155,7 +155,7 @@ def test_a_reply_already_seen_costs_one_select_and_nothing_else(monkeypatch):
         body="acceptance criteria: background must be yellow",
         actor_account_id="acc-1", resolved_principal="usr_1",
     )
-    assert out["path"] == "already_ingested"
+    assert out["path"] == "already_ingested" and out["work_item_id"] == "wi_prior"
 
 
 def test_a_reply_never_seen_still_goes_all_the_way_through(monkeypatch):
@@ -164,7 +164,7 @@ def test_a_reply_never_seen_still_goes_all_the_way_through(monkeypatch):
 
     monkeypatch.setattr(ingest_mod, "_is_dse_authored", lambda *a, **k: False)
     monkeypatch.setattr(ingest_mod, "get_connection", lambda: _NullConn())
-    monkeypatch.setattr(ingest_mod, "already_ingested", lambda conn, event_id: False)
+    monkeypatch.setattr(ingest_mod, "recorded_work_item_id", lambda conn, event_id: None)
 
     class _Result:
         kind = "signal"

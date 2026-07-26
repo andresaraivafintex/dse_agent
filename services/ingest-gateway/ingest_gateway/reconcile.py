@@ -41,8 +41,8 @@ RECOVERABLE_STATUSES = ("needs_clarification", "awaiting_repo_selection")
 NON_RECOVERABLE_STATUSES = ("awaiting_plan_approval",)
 
 
-def already_ingested(conn, event_id: str) -> bool:
-    """Whether this exact event was recorded before.
+def recorded_work_item_id(conn, event_id: str) -> str | None:
+    """The work item this exact event was already recorded against, or None.
 
     The recovery sweeps re-read whole threads, so on a task that legitimately
     sits waiting they see the same replies again on every cycle. Recording is
@@ -56,10 +56,17 @@ def already_ingested(conn, event_id: str) -> bool:
     timeline that becomes almost entirely noise.
 
     Checking first turns the steady state into one SELECT.
+
+    Returns the ID rather than a bool because a redelivery still has to answer
+    the caller with the work item it belongs to. A webhook redelivery is the
+    normal case here — the TOCTOU defense relies on the second delivery being
+    recognised and answered, not merely dropped — and a bool would have made
+    the reply indistinguishable from "no work item".
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM ingest_events WHERE event_id = %s", (event_id,))
-        return cur.fetchone() is not None
+        cur.execute("SELECT work_item_id FROM ingest_events WHERE event_id = %s", (event_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 def pending_reply_work_items(
