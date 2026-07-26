@@ -25,6 +25,7 @@ from fastapi import FastAPI, HTTPException, Request
 from ingest_gateway import (
     AdmissionBlocked,
     admit_work_item,
+    already_ingested,
     correlate,
     get_connection,
     is_authorized_to_steer,
@@ -116,6 +117,14 @@ def _handle_conversation_event(conv_event, *, principal: str, tenant_id: str,
 
     conn = get_connection()
     try:
+        # Recovery sweeps re-read whole threads, so a task that is genuinely
+        # waiting meets the same messages on every cycle. Recording dedupes on
+        # `event_id`, but only after correlating and auditing — on Jira that
+        # turned one stuck ticket into thousands of `signal_duplicate_ignored`
+        # rows. Nothing below can change an outcome already reached.
+        if already_ingested(conn, conv_event.event_id):
+            return {"ok": True, "path": "already_ingested"}
+
         result = correlate(conn, tenant_id=tenant_id, event=conv_event, requester_principal=principal)
 
         if result.kind == "unauthorized":

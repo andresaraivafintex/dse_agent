@@ -24,12 +24,14 @@ from .tenant_binding import resolve_tenant, default_tenant, ResolvedTenant
 from .repo_resolver import resolve_repo, parse_explicit_repo
 from .task_class import classify_task_class, TASK_CLASSES
 from .reconcile import (
+    already_ingested,
     pending_reply_work_items,
     RECOVERABLE_STATUSES,
     NON_RECOVERABLE_STATUSES,
 )
 
 __all__ = [
+    "already_ingested",
     "pending_reply_work_items",
     "RECOVERABLE_STATUSES",
     "NON_RECOVERABLE_STATUSES",

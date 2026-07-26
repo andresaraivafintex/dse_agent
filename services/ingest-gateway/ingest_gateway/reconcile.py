@@ -41,6 +41,27 @@ RECOVERABLE_STATUSES = ("needs_clarification", "awaiting_repo_selection")
 NON_RECOVERABLE_STATUSES = ("awaiting_plan_approval",)
 
 
+def already_ingested(conn, event_id: str) -> bool:
+    """Whether this exact event was recorded before.
+
+    The recovery sweeps re-read whole threads, so on a task that legitimately
+    sits waiting they see the same replies again on every cycle. Recording is
+    idempotent, so nothing incorrect happens — but the work leading up to it is
+    not free: the steering check runs, `record_signal_event` writes a
+    `signal_duplicate_ignored` row, and both land in the audit log.
+
+    Left alone that is not a rounding error. A single work item stuck in
+    `needs_clarification` produced ~2,900 audit rows in thirteen hours, the
+    audit log is append-only by design, and the console projects it into a
+    timeline that becomes almost entirely noise.
+
+    Checking first turns the steady state into one SELECT.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM ingest_events WHERE event_id = %s", (event_id,))
+        return cur.fetchone() is not None
+
+
 def pending_reply_work_items(
     conn, *, tenant_id: str, source: str, limit: int = 50
 ) -> list[dict[str, Any]]:

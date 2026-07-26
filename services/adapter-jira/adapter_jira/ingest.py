@@ -20,6 +20,7 @@ from dse_audit import emit as audit_emit
 from ingest_gateway import (
     AdmissionBlocked,
     admit_work_item,
+    already_ingested,
     classify_task_class,
     correlate,
     get_connection,
@@ -192,6 +193,15 @@ def ingest_comment(
     sanitized = sanitize_content(ev.content_snapshot)
     conn = get_connection()
     try:
+        # The pending-reply recovery re-reads whole threads on every sweep, so
+        # on a task that is genuinely waiting it meets the same comments over
+        # and over. Recording dedupes on `event_id`, but only after correlating
+        # and auditing — which is what turned one stuck ticket into thousands of
+        # `signal_duplicate_ignored` rows. Nothing below can change an outcome
+        # that was already reached, so stop here.
+        if already_ingested(conn, ev.event_id):
+            return {"ok": True, "path": "already_ingested"}
+
         result = correlate(conn, tenant_id=tenant_id, event=ev, requester_principal=resolved_principal)
 
         if result.kind == "unauthorized":

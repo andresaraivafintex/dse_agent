@@ -125,3 +125,58 @@ def test_database_failure_does_not_break_the_sweep(monkeypatch):
 class _NullConn:
     def close(self):
         pass
+
+
+def test_a_reply_already_seen_costs_one_select_and_nothing_else(monkeypatch):
+    """The steady state of this recovery is 'the same replies, again'.
+
+    A task waiting on a human stays selected for as long as it waits, so every
+    cycle re-reads the whole thread. Recording is idempotent, but the work
+    BEFORE recording was not: correlation ran, steering was resolved, and
+    `record_signal_event` wrote a `signal_duplicate_ignored` row. In production
+    one ticket stuck in `needs_clarification` wrote ~2,900 audit rows in
+    thirteen hours, into a log that is append-only and a console timeline that
+    renders it.
+    """
+    import adapter_jira.ingest as ingest_mod
+
+    monkeypatch.setattr(ingest_mod, "_is_dse_authored", lambda *a, **k: False)
+    monkeypatch.setattr(ingest_mod, "get_connection", lambda: _NullConn())
+    monkeypatch.setattr(ingest_mod, "already_ingested", lambda conn, event_id: True)
+
+    def _boom(*a, **k):
+        raise AssertionError("a comment already ingested must not be correlated again")
+
+    monkeypatch.setattr(ingest_mod, "correlate", _boom)
+    monkeypatch.setattr(ingest_mod, "record_signal_event", _boom)
+
+    out = ingest_mod.ingest_comment(
+        tenant_id="fintex-poc", key=STALE_TICKET, comment_id="44625",
+        body="acceptance criteria: background must be yellow",
+        actor_account_id="acc-1", resolved_principal="usr_1",
+    )
+    assert out["path"] == "already_ingested"
+
+
+def test_a_reply_never_seen_still_goes_all_the_way_through(monkeypatch):
+    """The guard above must not swallow the case this recovery exists for."""
+    import adapter_jira.ingest as ingest_mod
+
+    monkeypatch.setattr(ingest_mod, "_is_dse_authored", lambda *a, **k: False)
+    monkeypatch.setattr(ingest_mod, "get_connection", lambda: _NullConn())
+    monkeypatch.setattr(ingest_mod, "already_ingested", lambda conn, event_id: False)
+
+    class _Result:
+        kind = "signal"
+        work_item_id = "wi_x"
+
+    monkeypatch.setattr(ingest_mod, "correlate", lambda *a, **k: _Result())
+    recorded = []
+    monkeypatch.setattr(ingest_mod, "record_signal_event", lambda ev, **kw: recorded.append(kw["work_item_id"]))
+
+    out = ingest_mod.ingest_comment(
+        tenant_id="fintex-poc", key=STALE_TICKET, comment_id="44625",
+        body="acceptance criteria: background must be yellow",
+        actor_account_id="acc-1", resolved_principal="usr_1",
+    )
+    assert out["path"] == "signal" and recorded == ["wi_x"]
