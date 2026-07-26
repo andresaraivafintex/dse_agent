@@ -119,8 +119,18 @@ def test_malformed_stored_policy_fails_clean_not_partial(tenant_id):
     conn = _su()
     try:
         with conn.cursor() as cur:
+            # `retention_days` is WRONG ON PURPOSE — the validator requires the
+            # key `days` (retention.py: `"days" not in spec`), so this stands for
+            # a policy corrupted by schema drift or an operator typo.
+            #
+            # It used to say `dias`. A language sweep translated that to `days`,
+            # which made the policy VALID and silently turned this test into one
+            # that asserts nothing: the `pytest.raises` stopped being reached.
+            # Any key other than `days` restores the intent; a plausible-but-wrong
+            # one is used here so no future sweep reads it as a word to fix.
             cur.execute(
-                "UPDATE tenant_config SET retention = '{\"internal\": {\"days\": 90}}'::jsonb WHERE tenant_id = %s",
+                "UPDATE tenant_config SET retention = '{\"internal\": {\"retention_days\": 90}}'::jsonb "
+                "WHERE tenant_id = %s",
                 (tenant_id,),
             )
         conn.commit()
