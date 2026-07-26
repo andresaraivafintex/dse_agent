@@ -1,15 +1,15 @@
-"""Contrato de Activities entre WS-B (orquestrador, quem chama), WS-C (sandbox,
-quem implementa as Activities de execução) e WS-E (validação/PR, quem
-implementa as Activities de gate/finalize). Os tipos abaixo são o que
-atravessa a fronteira Activity — os `@activity.defn` de verdade (decorados
-com `temporalio.activity`) vivem no serviço dono, mas usam estes tipos como
-parâmetro/retorno para que WS-B possa escrever o workflow contra uma
-interface estável antes de qualquer implementação existir.
+"""Activity contract between WS-B (orchestrator, the caller), WS-C (sandbox,
+which implements the execution Activities) and WS-E (validation/PR, which
+implements the gate/finalize Activities). The types below are what crosses the
+Activity boundary — the real `@activity.defn`s (decorated with
+`temporalio.activity`) live in the owning service, but take/return these types
+so that WS-B can write the workflow against a stable interface before any
+implementation exists.
 
-Convenção: cada activity real é registrada no Worker único de
-`services/orchestrator/worker.py` (dono: WS-B), que importa o módulo de
-Activities de cada workstream. Import defensivo (try/except ImportError) é
-esperado enquanto os workstreams constroem em paralelo.
+Convention: every real activity is registered in the single Worker in
+`services/orchestrator/worker.py` (owner: WS-B), which imports each
+workstream's Activities module. A defensive import (try/except ImportError) is
+expected while the workstreams build in parallel.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from .plan_artifact import PlanArtifact
 
 
 # ---------------------------------------------------------------------------
-# Nomes de activity (usados em `@activity.defn(name=...)` e em
-# `workflow.execute_activity(name, ...)` — precisam bater nos dois lados).
+# Activity names (used in `@activity.defn(name=...)` and in
+# `workflow.execute_activity(name, ...)` — they must match on both sides).
 # ---------------------------------------------------------------------------
 ACTIVITY_PROVISION_SANDBOX = "provision_sandbox"
 ACTIVITY_RUN_CODER_TURN = "run_coder_turn"
@@ -37,53 +37,53 @@ ACTIVITY_POST_TRACKING_COMMENT = "post_tracking_comment"
 ACTIVITY_CONSUME_CI_STATUS = "consume_ci_status"
 ACTIVITY_EMIT_AUDIT = "emit_audit_event"
 
-# --- Fase 2 (split de sessões stage-scoped + L2, ADR-13/FR-08/FR-13) ---
-# Donos: WS-C implementa as sessões (planner/tester/reviewer L2 — a sessão L2
-# é construída no WS-C por decisão de de-duplicação do plano mestre §7; o
-# WS-E orquestra o loop de fix-retries em torno dela); WS-B chama por nome.
+# --- Phase 2 (stage-scoped session split + L2, ADR-13/FR-08/FR-13) ---
+# Owners: WS-C implements the sessions (planner/tester/reviewer L2 — the L2
+# session is built in WS-C by the de-duplication decision of plano mestre §7;
+# WS-E orchestrates the fix-retry loop around it); WS-B calls them by name.
 ACTIVITY_RUN_PLANNER_TURN = "run_planner_turn"
 ACTIVITY_RUN_TESTER_TURN = "run_tester_turn"
 ACTIVITY_RUN_L2_REVIEW = "run_l2_review"
 
-# --- Fase 3 (pipeline de evidência, ADR-26/ADR-27/§10.12-13) ---
-# Donos: WS-E implementa (evidência/preview/artifacts); WS-B chama por nome
-# depois do PR finalizado. Definidos ANTES da implementação (gate de entrada
-# da Fase 3, adendo 02 §2.3) — os models de input/output correspondentes
-# vivem NESTE arquivo desde o dia zero, para a classe de bug de boundary das
-# Fases 1-2 (14 ocorrências) não ter onde nascer.
+# --- Phase 3 (evidence pipeline, ADR-26/ADR-27/§10.12-13) ---
+# Owners: WS-E implements it (evidence/preview/artifacts); WS-B calls by name
+# after the PR is finalized. Defined BEFORE the implementation (Phase 3 entry
+# gate, adendo 02 §2.3) — the matching input/output models live in THIS file
+# from day zero, so the boundary bug class of Phases 1-2 (14 occurrences) has
+# nowhere to be born.
 ACTIVITY_RUN_DEMO_EVIDENCE = "run_demo_evidence"
 ACTIVITY_PUBLISH_ARTIFACT = "publish_artifact"
 ACTIVITY_TRIGGER_PREVIEW = "trigger_preview"
 ACTIVITY_RUN_VISUAL_DIFF = "run_visual_diff"
 
-# --- Fase 4 (loop hardening & learning) ---
-# Definidos ANTES da implementação (gate de entrada §4 do adendo 03, mesma
-# disciplina da Fase 3). Donos: merge-base = WS-E; promoção de skill = WS-C
-# (a esteira eval->approval->canary->rollback); WS-B chama por nome.
-ACTIVITY_UPDATE_BASE_BRANCH = "update_base_branch"   # merge-base, nunca rebase (WSE-E6-T16)
-ACTIVITY_EVAL_SKILL_CANDIDATE = "eval_skill_candidate"  # replay contra eval set (WSC-E4-T3)
-ACTIVITY_PROMOTE_SKILL = "promote_skill"             # transição de estado governada (WSC-E4-T3)
+# --- Phase 4 (loop hardening & learning) ---
+# Defined BEFORE the implementation (entry gate §4 of adendo 03, same
+# discipline as Phase 3). Owners: merge-base = WS-E; skill promotion = WS-C
+# (the eval->approval->canary->rollback pipeline); WS-B calls them by name.
+ACTIVITY_UPDATE_BASE_BRANCH = "update_base_branch"   # merge-base, never rebase (WSE-E6-T16)
+ACTIVITY_EVAL_SKILL_CANDIDATE = "eval_skill_candidate"  # replay against eval set (WSC-E4-T3)
+ACTIVITY_PROMOTE_SKILL = "promote_skill"             # governed state transition (WSC-E4-T3)
 
 
 # ---------------------------------------------------------------------------
-# Dono: WS-C (services/sandbox-runtime)
+# Owner: WS-C (services/sandbox-runtime)
 # ---------------------------------------------------------------------------
 class SandboxHandle(BaseModel):
     sandbox_id: str
     work_item_id: str
     tenant_id: str
     branch: str
-    container_id: str | None = None  # id do container Docker por trás do handle
-    # Aditivos: runtimes novos retornam os SHAs que delimitam a sessao. Os
-    # defaults preservam handles ja gravados em histories do Temporal.
+    container_id: str | None = None  # id of the Docker container behind the handle
+    # Additive: new runtimes return the SHAs that delimit the session. The
+    # defaults keep handles already recorded in Temporal histories decodable.
     base_sha: str | None = None
     head_sha: str | None = None
 
 
 class CheckpointRef(BaseModel):
     work_item_id: str
-    git_ref: str  # commit sha no branch da tarefa
-    phase: str  # nome da fronteira de fase em que o checkpoint foi tirado
+    git_ref: str  # commit sha on the task branch
+    phase: str  # name of the phase boundary at which the checkpoint was taken
     base_sha: str | None = None
 
 
@@ -99,11 +99,11 @@ class CoderTurnResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Inputs canonicos das fronteiras sandbox/validacao. Historicamente alguns
-# destes modelos viviam apenas no servico dono; isso permitia que os fakes do
-# workflow aceitassem dicts diferentes do wire real. Eles passam a morar no
-# pacote de contratos, com defaults aditivos para histories ja persistidos.
-# O servico dono pode resolver campos vazios server-side pelo work_item_id.
+# Canonical inputs of the sandbox/validation boundaries. Historically some of
+# these models lived only in the owning service; that let the workflow fakes
+# accept dicts that differed from the real wire. They now live in the contracts
+# package, with additive defaults for already-persisted histories. The owning
+# service may resolve empty fields server-side from the work_item_id.
 # ---------------------------------------------------------------------------
 class ProvisionSandboxInput(BaseModel):
     work_item_id: str
@@ -154,20 +154,21 @@ class RunCoderTurnInput(BaseModel):
     runtime_override: str | None = None
     base_sha: str | None = None
     head_sha: str | None = None
-    # Âncora do plano (achado do disparo real: o CLI cria arquivos espontâneos
-    # — BUG_FIX_REPORT.md). Advisory desde 2026-07-22 (ver plan_compliance do
-    # L1): NÃO é gate de igualdade do diff. Após o turn, o prune determinístico
-    # apaga só arquivos NOVOS DESCARTÁVEIS (relatório/log/scratch) — fonte nova
-    # legítima fora desta lista SOBREVIVE (P1; ver _prune_disposable_artifacts).
+    # Plan anchor (found on a real run: the CLI creates spontaneous files —
+    # BUG_FIX_REPORT.md). Advisory since 2026-07-22 (see the L1
+    # plan_compliance): it is NOT an equality gate on the diff. After the turn,
+    # the deterministic prune deletes only NEW DISPOSABLE files (report/log/
+    # scratch) — a legitimate new source file outside this list SURVIVES
+    # (P1; see _prune_disposable_artifacts).
     expected_files: list[str] = Field(default_factory=list)
 
 
 class RunL1PipelineInput(BaseModel):
-    """Input tolerante ao payload antigo.
+    """Input tolerant of the old payload.
 
-    ``sandbox``/``plan`` eram ausentes em histories antigos; o owner resolve
-    essas lacunas server-side usando ``work_item_id``. Novos callers sempre
-    enviam base/head SHA e o L1 calcula o diff pelo SHA imutavel.
+    ``sandbox``/``plan`` were absent in old histories; the owner resolves those
+    gaps server-side using ``work_item_id``. New callers always send base/head
+    SHA and L1 computes the diff from the immutable SHA.
     """
 
     work_item_id: str = ""
@@ -195,7 +196,7 @@ class RunL1PipelineInput(BaseModel):
 
 
 class FinalizePrInput(BaseModel):
-    """Finalize aditivo; vazios sao resolvidos pelo owner a partir do SoR."""
+    """Additive finalize; empty fields are resolved by the owner from the SoR."""
 
     work_item_id: str
     tenant_id: str = ""
@@ -216,7 +217,7 @@ class FinalizePrInput(BaseModel):
 
 
 class ConsumeCiStatusInput(BaseModel):
-    """Campos novos possuem default para auto-cura de payload historico."""
+    """New fields carry defaults so historical payloads self-heal."""
 
     work_item_id: str
     tenant_id: str = ""
@@ -229,11 +230,11 @@ class ConsumeCiStatusInput(BaseModel):
 
 
 class PersistWorkItemStateInput(BaseModel):
-    """Projecao idempotente do workflow no Postgres.
+    """Idempotent projection of the workflow into Postgres.
 
-    Somente ``work_item_id`` e obrigatorio para que payloads antigos da
-    Activity continuem decodificando. Campos ausentes sao preservados pelo
-    servidor; plano/hash/expected_files sao derivados server-side.
+    Only ``work_item_id`` is required, so that old Activity payloads keep
+    decoding. Absent fields are preserved by the server; plan/hash/
+    expected_files are derived server-side.
     """
 
     work_item_id: str
@@ -251,13 +252,13 @@ class PersistWorkItemStateInput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Dono: WS-E (services/validation)
+# Owner: WS-E (services/validation)
 # ---------------------------------------------------------------------------
 class GateStatus(str, Enum):
-    """Resultado estruturado comum a L1/L2/L3.
+    """Structured result shared by L1/L2/L3.
 
-    Apenas PASS autoriza avancar. ``passed`` continua existindo nos modelos
-    para compatibilidade com produtores/consumidores antigos.
+    Only PASS authorizes moving forward. ``passed`` still exists on the models
+    for compatibility with old producers/consumers.
     """
 
     PASS = "PASS"
@@ -278,7 +279,7 @@ class L1Finding(BaseModel):
         if self.status is None:
             self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
         elif self.passed != (self.status == GateStatus.PASS):
-            raise ValueError("passed deve ser true somente quando status=PASS")
+            raise ValueError("passed must be true only when status=PASS")
         return self
 
 
@@ -309,16 +310,16 @@ class L1Result(BaseModel):
                 else:
                     self.status = GateStatus.FAIL
         elif self.passed != (self.status == GateStatus.PASS):
-            raise ValueError("passed deve ser true somente quando status=PASS")
+            raise ValueError("passed must be true only when status=PASS")
         return self
 
 
 class PrRef(BaseModel):
-    # Fase 2 (adendo 01 §4, aprovado pelo arquiteto): `pr_number` opcional +
-    # `compare_url` para o modo estrito (WSE-E3-T8) em que o sistema só faz
-    # push do branch e posta um compare link — o PR é aberto por um humano.
-    # Mudança aditiva: todo caller da Fase 1 continua construindo com
-    # pr_number preenchido; exatamente um dos dois deve estar presente.
+    # Phase 2 (adendo 01 §4, approved by the architect): optional `pr_number` +
+    # `compare_url` for the strict mode (WSE-E3-T8) in which the system only
+    # pushes the branch and posts a compare link — the PR is opened by a human.
+    # Additive change: every Phase 1 caller keeps building with pr_number
+    # filled in; exactly one of the two must be present.
     work_item_id: str
     pr_number: int | None = None
     url: str
@@ -328,10 +329,10 @@ class PrRef(BaseModel):
 
 
 class VerifyMergeInput(BaseModel):
-    """Plano 08 §F (F1) — pede a verificação do estado REAL do PR na fonte
-    (GitHub) para confirmar um signal de merge contra a verdade, não só contra o
-    envelope (que um webhook forjado poderia falsificar — pr_number/repo/sha não
-    são segredos)."""
+    """Plano 08 §F (F1) — asks for the REAL state of the PR at the source
+    (GitHub) to confirm a merge signal against the truth, not only against the
+    envelope (which a forged webhook could fake — pr_number/repo/sha are not
+    secrets)."""
 
     work_item_id: str
     tenant_id: str
@@ -342,9 +343,10 @@ class VerifyMergeInput(BaseModel):
 
 
 class MergeVerification(BaseModel):
-    """Resultado da verificação na API. `verified` só é True quando o PR existe,
-    está de fato `merged`, e (se fornecido) o head_sha esperado bate. Fail-safe:
-    qualquer dúvida => verified=False (o workflow NÃO conclui como done)."""
+    """Result of the API check. `verified` is only True when the PR exists, is
+    in fact `merged`, and (when provided) the expected head_sha matches.
+    Fail-safe: any doubt => verified=False (the workflow does NOT conclude as
+    done)."""
 
     exists: bool = False
     merged: bool = False
@@ -356,14 +358,15 @@ class MergeVerification(BaseModel):
 
 
 class L2Verdict(BaseModel):
-    """Veredito estruturado da sessão Reviewer de contexto fresco (Fase 2,
-    WSC-E3-T5 constrói a sessão / WSE-E2 orquestra o loop). P3: a sessão L2
-    recebe APENAS plan artifact + diff final — nunca o histórico do Coder."""
+    """Structured verdict of the fresh-context Reviewer session (Phase 2,
+    WSC-E3-T5 builds the session / WSE-E2 orchestrates the loop). P3: the L2
+    session receives ONLY the plan artifact + final diff — never the Coder's
+    history."""
 
     work_item_id: str
     passed: bool = False
     status: GateStatus | None = None
-    objections: list[str] = []  # vazia quando passed; específicas (arquivo/linha) quando não
+    objections: list[str] = []  # empty when passed; specific (file/line) when not
     cost_usd: float = 0.0
     base_sha: str | None = None
     head_sha: str | None = None
@@ -373,7 +376,7 @@ class L2Verdict(BaseModel):
         if self.status is None:
             self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
         elif self.passed != (self.status == GateStatus.PASS):
-            raise ValueError("passed deve ser true somente quando status=PASS")
+            raise ValueError("passed must be true only when status=PASS")
         return self
 
 
@@ -385,19 +388,19 @@ class CiStatusResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Models de sessão promovidos à fundação (adendo 02 §2.3 — Fase 3, gate de
-# entrada). Nas Fases 1-2 estes models viviam em `sandbox_runtime.activities`
-# e o payload do chamador (WS-B) derivou dos campos declarados sem que nenhum
-# teste pegasse (fakes lenientes dos dois lados) — 14 bugs de boundary no
-# total. A partir daqui: UMA fonte da verdade, com testes de regressão de
-# boundary em packages/contracts/tests/test_activity_boundaries.py que
-# validam os payloads EXATOS que o workflow envia. `sandbox_runtime` importa
-# daqui e re-exporta para compatibilidade.
+# Session models promoted to the foundation (adendo 02 §2.3 — Phase 3, entry
+# gate). In Phases 1-2 these models lived in `sandbox_runtime.activities` and
+# the caller payload (WS-B) drifted away from the declared fields without any
+# test catching it (lenient fakes on both sides) — 14 boundary bugs in total.
+# From here on: ONE source of truth, with boundary regression tests in
+# packages/contracts/tests/test_activity_boundaries.py that validate the EXACT
+# payloads the workflow sends. `sandbox_runtime` imports from here and
+# re-exports for compatibility.
 # ---------------------------------------------------------------------------
 class RunPlannerTurnInput(BaseModel):
-    """Input da sessão Planner (WSC-E3-T3). Tolerante por design aos aliases
-    que o workflow do WS-B envia (`instructions` lista / `base_branch`) —
-    reconciliação da integração da Fase 2, agora parte do contrato."""
+    """Input of the Planner session (WSC-E3-T3). Tolerant by design of the
+    aliases the WS-B workflow sends (`instructions` list / `base_branch`) —
+    a Phase 2 integration reconciliation, now part of the contract."""
 
     model_config = {"populate_by_name": True}
 
@@ -413,7 +416,7 @@ class RunPlannerTurnInput(BaseModel):
     data_class: str = "internal"
     diff_budget_lines: int = 400
     related_tickets: list[str] = Field(default_factory=list)
-    model_override: str | None = None  # tolerado; a política de modelo vive no gateway
+    model_override: str | None = None  # tolerated; model policy lives in the gateway
 
     @model_validator(mode="after")
     def _reconcile(self) -> "RunPlannerTurnInput":
@@ -425,8 +428,8 @@ class RunPlannerTurnInput(BaseModel):
 
 
 class RunTesterTurnInput(BaseModel):
-    """Input da sessão Tester (WSC-E3-T4). Tolerante aos aliases do WS-B
-    (`plan` dict + `sandbox_id`); deriva `instruction` do test_plan."""
+    """Input of the Tester session (WSC-E3-T4). Tolerant of the WS-B aliases
+    (`plan` dict + `sandbox_id`); derives `instruction` from the test_plan."""
 
     model_config = {"populate_by_name": True}
 
@@ -453,9 +456,9 @@ class RunTesterTurnInput(BaseModel):
 
 
 class TesterTurnResult(BaseModel):
-    """Retorno da sessão Tester. Superset compatível com `CoderTurnResult`
-    (o workflow decodifica o retorno como CoderTurnResult — `files_changed`
-    espelha `test_files`)."""
+    """Return of the Tester session. Superset compatible with `CoderTurnResult`
+    (the workflow decodes the return as CoderTurnResult — `files_changed`
+    mirrors `test_files`)."""
 
     sandbox_id: str
     test_files: list[str]
@@ -486,12 +489,12 @@ class TesterTurnResult(BaseModel):
 
 
 class RunL2ReviewInput(BaseModel):
-    """Input da sessão Reviewer L2 (WSC-E3-T5). P3 ESTRUTURAL, endurecido na
-    promoção ao contrato: `extra="forbid"` — qualquer tentativa de passar um
-    campo além dos declarados (ex.: histórico/instruções do Coder) falha no
-    DECODE da Activity, não apenas em teste. Os campos são exatamente
-    {work_item_id, tenant_id, plan, diff, task_class, data_class}; quem se
-    adapta é sempre o CHAMADOR (o WS-B envia `diff`, nunca `diff_summary`)."""
+    """Input of the L2 Reviewer session (WSC-E3-T5). STRUCTURAL P3, hardened on
+    promotion to the contract: `extra="forbid"` — any attempt to pass a field
+    beyond the declared ones (e.g. Coder history/instructions) fails at the
+    Activity DECODE, not only in a test. The fields are exactly
+    {work_item_id, tenant_id, plan, diff, task_class, data_class}; the one who
+    adapts is always the CALLER (WS-B sends `diff`, never `diff_summary`)."""
 
     model_config = {"extra": "forbid"}
 
@@ -506,19 +509,20 @@ class RunL2ReviewInput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Fase 3 — pipeline de evidência (dono: WS-E; chamador: WS-B). Definidos no
-# contrato ANTES de qualquer implementação existir (gate de entrada).
+# Phase 3 — evidence pipeline (owner: WS-E; caller: WS-B). Defined in the
+# contract BEFORE any implementation exists (entry gate).
 # ---------------------------------------------------------------------------
 class RunDemoEvidenceInput(BaseModel):
-    """Executa o(s) teste(s) `@demo` da tarefa (convenção `demos/<work_item_id>/`,
-    ADR-27) com gravação de vídeo. O teste é autorado pelo Tester (WSC-E3-T4b);
-    a EXECUÇÃO aqui é determinística — Playwright real, sem LLM."""
+    """Runs the task's `@demo` test(s) (convention `demos/<work_item_id>/`,
+    ADR-27) with video recording. The test is authored by the Tester
+    (WSC-E3-T4b); the EXECUTION here is deterministic — real Playwright, no
+    LLM."""
 
     work_item_id: str
     tenant_id: str
     sandbox: SandboxHandle | None = None
-    demo_dir: str = ""  # default derivado: demos/<work_item_id>/
-    base_url: str | None = None  # URL do preview (TriggerPreview) quando houver; fixture local senão
+    demo_dir: str = ""  # derived default: demos/<work_item_id>/
+    base_url: str | None = None  # preview URL (TriggerPreview) when there is one; local fixture otherwise
     timeout_s: int = 120
     head_sha: str | None = None
 
@@ -527,7 +531,7 @@ class DemoEvidenceResult(BaseModel):
     work_item_id: str
     passed: bool
     status: GateStatus | None = None
-    video_artifact_key: str | None = None  # chave no artifact store (publicado via PublishArtifact)
+    video_artifact_key: str | None = None  # key in the artifact store (published via PublishArtifact)
     trace_artifact_key: str | None = None
     duration_s: float = 0.0
     detail: str = ""
@@ -538,7 +542,7 @@ class DemoEvidenceResult(BaseModel):
         if self.status is None:
             self.status = GateStatus.PASS if self.passed else GateStatus.FAIL
         elif self.passed != (self.status == GateStatus.PASS):
-            raise ValueError("passed deve ser true somente quando status=PASS")
+            raise ValueError("passed must be true only when status=PASS")
         return self
 
 
@@ -548,29 +552,29 @@ class PublishArtifactInput(BaseModel):
     kind: str  # "demo_video" | "playwright_trace" | "visual_diff" | "test_report"
     local_path: str
     content_type: str = "application/octet-stream"
-    ttl_seconds: int = 7 * 24 * 3600  # presigned URL de TTL curto por política
+    ttl_seconds: int = 7 * 24 * 3600  # short-TTL presigned URL by policy
 
 
 class ArtifactRef(BaseModel):
     work_item_id: str
     tenant_id: str
     kind: str
-    store_key: str  # chave S3 no Garage, prefixada por tenant (NFR-03)
+    store_key: str  # S3 key in Garage, tenant-prefixed (NFR-03)
     presigned_url: str
-    expires_at: str  # ISO-8601 — links de evidência EXPIRAM por política (exit da Fase 3)
+    expires_at: str  # ISO-8601 — evidence links EXPIRE by policy (Phase 3 exit)
 
 
 class TriggerPreviewInput(BaseModel):
-    """Dispara (ou pula) o preview environment por PR. A decisão é DETERMINÍSTICA
-    por paths-filter (FR-20) — nunca por modelo:
+    """Triggers (or skips) the per-PR preview environment. The decision is
+    DETERMINISTIC by paths-filter (FR-20) — never by model:
 
-    - `preview_enabled` (plano 08 §D) — gate operator-set (`repo_bindings.
-      deploys_preview`): repo não marcado como "gera preview" pula com
-      `skipped_disabled`. Default True mantém o comportamento anterior para
-      callers que não passam o gate (single-repo/sem config).
-    - `ui_path_globs` + `deployable_globs` — o preview vale se a mudança toca UI
-      (front) OU um serviço deployável (back). Mudança só de docs/teste →
-      `skipped_backend_only` (conta como sucesso, NUNCA bloqueia)."""
+    - `preview_enabled` (plano 08 §D) — operator-set gate (`repo_bindings.
+      deploys_preview`): a repo not marked as "generates preview" skips with
+      `skipped_disabled`. Default True keeps the previous behavior for callers
+      that do not pass the gate (single-repo/no config).
+    - `ui_path_globs` + `deployable_globs` — the preview is warranted if the
+      change touches UI (front) OR a deployable service (back). Docs/test-only
+      change → `skipped_backend_only` (counts as success, NEVER blocks)."""
 
     work_item_id: str
     tenant_id: str
@@ -579,9 +583,13 @@ class TriggerPreviewInput(BaseModel):
     files_changed: list[str] = Field(default_factory=list)
     head_sha: str | None = None
     preview_enabled: bool = True
-    ui_path_globs: list[str] = Field(default_factory=lambda: ["ui/**", "frontend/**", "**/*.css", "**/*.tsx", "**/*.jsx"])
-    # plano 08 §D — serviço deployável (back): fonte/manifest/container que
-    # alteram o artefato servido no preview. Docs/teste-só não casam e pulam.
+    # `**/*.html` is load-bearing: a plain static page is the most common shape
+    # of a UI change, and without it a PR that only edits index.html was
+    # classified backend-only and silently skipped the preview.
+    ui_path_globs: list[str] = Field(default_factory=lambda: ["ui/**", "frontend/**", "**/*.html", "**/*.css", "**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte"])
+    # plano 08 §D — deployable service (back): source/manifest/container that
+    # change the artifact served in the preview. Docs/test-only do not match
+    # and skip.
     deployable_globs: list[str] = Field(default_factory=lambda: [
         "**/Dockerfile", "Dockerfile", "**/*.py", "**/*.go", "**/*.rb",
         "**/*.java", "**/*.ts", "**/*.js", "k8s/**", "deploy/**", "charts/**",
@@ -596,15 +604,16 @@ class PreviewRef(BaseModel):
     namespace: str | None = None
     url: str | None = None
     detail: str = ""
-    # plano 08 §D — "ui" | "deployable" | "" — qual filtro disparou o preview
-    # (evidência no PR/console de por que este PR ganhou ou não um preview).
+    # plano 08 §D — "ui" | "deployable" | "" — which filter triggered the
+    # preview (evidence in the PR/console for why this PR did or did not get
+    # a preview).
     kind: str = ""
 
 
 class RunVisualDiffInput(BaseModel):
     work_item_id: str
     tenant_id: str
-    base_screenshot_key: str | None = None  # artifact store; None = primeiro run (baseline)
+    base_screenshot_key: str | None = None  # artifact store; None = first run (baseline)
     candidate_screenshot_path: str = ""
     threshold_pct: float = 0.1
 
@@ -615,47 +624,48 @@ class VisualDiffResult(BaseModel):
     changed_pct: float = 0.0
     diff_artifact_key: str | None = None
     baseline_created: bool = False
-    # Aditivo (pedido do WS-E na integração da Fase 3): a chave da baseline no
-    # artifact store, para o chamador persistir e reenviar como
-    # `base_screenshot_key` nos runs seguintes — antes disso a chave voltava
-    # sobrecarregada em `diff_artifact_key` quando baseline_created=True.
+    # Additive (requested by WS-E during the Phase 3 integration): the baseline
+    # key in the artifact store, for the caller to persist and resend as
+    # `base_screenshot_key` on the following runs — before this the key came
+    # back overloaded in `diff_artifact_key` when baseline_created=True.
     baseline_artifact_key: str | None = None
 
 
 # ---------------------------------------------------------------------------
-# Fase 4 — merge-base / base-drift (dono WS-E, WSE-E6-T16) e promoção de skill
-# (dono WS-C, WSC-E4-T3). Contratos definidos no gate de entrada, antes do
-# build. NOTA DE VALIDAÇÃO (adendo 03): merge-base é construção NOVA — a Fase 1
-# nunca implementou o tratamento de drift, apesar do texto do plano.
+# Phase 4 — merge-base / base-drift (owner WS-E, WSE-E6-T16) and skill
+# promotion (owner WS-C, WSC-E4-T3). Contracts defined at the entry gate,
+# before the build. VALIDATION NOTE (adendo 03): merge-base is NEW
+# construction — Phase 1 never implemented drift handling, despite what the
+# plan text says.
 # ---------------------------------------------------------------------------
 class UpdateBaseBranchInput(BaseModel):
-    """Atualiza o branch da tarefa com o drift da base SEM reescrever história.
-    P1: a estratégia é determinística (código, não modelo). `first_human_review`
-    distingue o único momento em que rebase é permitido (antes do 1º review):
-    depois dele, SÓ merge-base-into-branch — rebase+force-push órfã as threads
-    de review ancoradas em commits reescritos (comportamento verificado do
-    GitHub, failure mode 11)."""
+    """Updates the task branch with the base drift WITHOUT rewriting history.
+    P1: the strategy is deterministic (code, not model). `first_human_review`
+    marks the only moment when rebase is allowed (before the 1st review): after
+    it, ONLY merge-base-into-branch — rebase+force-push orphans the review
+    threads anchored on the rewritten commits (verified GitHub behavior,
+    failure mode 11)."""
 
     work_item_id: str
     tenant_id: str
     repo: str
     branch: str
     base_branch: str
-    first_human_review_done: bool = True  # default seguro: assume que já houve review → nunca rebase
+    first_human_review_done: bool = True  # safe default: assume a review already happened → never rebase
 
 
 class UpdateBaseBranchResult(BaseModel):
     work_item_id: str
     strategy: str          # "merge_base" | "rebase_prefirst_review" | "noop_no_drift"
-    conflict: bool = False  # conflito não-resolvível → workflow escala a humano (nunca resolve à força)
-    orphaned_threads: int = 0  # asserção de exit da Fase 4: DEVE ser 0
+    conflict: bool = False  # unresolvable conflict → workflow escalates to a human (never force-resolves)
+    orphaned_threads: int = 0  # Phase 4 exit assertion: MUST be 0
     detail: str = ""
 
 
 class EvalSkillCandidateInput(BaseModel):
-    """Replay de um skill candidate contra o eval set histórico (positivos e
-    negativos) — WSC-E4-T3. Determinístico; produz um score, não uma decisão
-    (a aprovação é humana)."""
+    """Replay of a skill candidate against the historical eval set (positives
+    and negatives) — WSC-E4-T3. Deterministic; produces a score, not a decision
+    (approval is human)."""
 
     tenant_id: str
     skill_key: str
@@ -668,23 +678,23 @@ class EvalSkillCandidateResult(BaseModel):
     passed: bool
     score: float = 0.0
     positive_hits: int = 0
-    negative_regressions: int = 0  # >0 bloqueia promoção por construção
+    negative_regressions: int = 0  # >0 blocks promotion by construction
     detail: str = ""
 
 
 class PromoteSkillInput(BaseModel):
-    """Transição de estado GOVERNADA da esteira de promoção (WSC-E4-T3):
-    candidate → (eval) → approved → canary → active, e o rollback active/canary
-    → rolled_back. P1/P3: nenhuma transição para `approved`/`active` sem
-    `approver` humano resolvido — promoção sem aprovação é impossível por
-    construção (a Activity recusa `to_status in {approved,active}` com
-    approver vazio)."""
+    """GOVERNED state transition of the promotion pipeline (WSC-E4-T3):
+    candidate → (eval) → approved → canary → active, and the rollback
+    active/canary → rolled_back. P1/P3: no transition to `approved`/`active`
+    without a resolved human `approver` — promotion without approval is
+    impossible by construction (the Activity refuses `to_status in
+    {approved,active}` with an empty approver)."""
 
     tenant_id: str
     skill_key: str
     version: int
     to_status: str      # 'approved' | 'canary' | 'active' | 'rolled_back'
-    approver: str | None = None  # principal resolvido; obrigatório p/ approved/active
+    approver: str | None = None  # resolved principal; required for approved/active
     reason: str = ""
 
 

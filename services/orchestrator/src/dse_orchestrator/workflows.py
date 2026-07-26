@@ -1,17 +1,16 @@
-"""WSB-E2/E3/E5 — `WorkItemLifecycleWorkflow`: a maquina de estados do
-WorkItem (§9.3 da proposta), Fase 1 (sem Planner/Tester/Reviewer separados,
-sem gate de aprovacao de plano por risk class, sem fairness/budget — isso e
-Fase 2 / WSB-E4).
+"""WSB-E2/E3/E5 — `WorkItemLifecycleWorkflow`: the WorkItem state machine
+(proposal §9.3), Phase 1 (no separate Planner/Tester/Reviewer, no plan approval
+gate by risk class, no fairness/budget — that is Phase 2 / WSB-E4).
 
-Fluxo: new -> needs_clarification (rounds capados) -> ready -> queued ->
-implementing <-> validating (loop de fix capado) -> pr_ready <-> review_feedback
-(loop humano, sem merge automatico em NENHUM path) -> done. blocked/failed/
-escalated sao terminais e nunca "adivinham" o proximo passo.
+Flow: new -> needs_clarification (capped rounds) -> ready -> queued ->
+implementing <-> validating (capped fix loop) -> pr_ready <-> review_feedback
+(human loop, no automatic merge on ANY path) -> done. blocked/failed/escalated
+are terminal and never "guess" the next step.
 
-Disciplina de determinismo (P1): todo I/O (Postgres, audit, Coder, L1, PR,
-CI) vive em Activity. O corpo do `@workflow.run` so faz: aritmetica de
-contagem, comparacao de strings/enums, `workflow.wait_condition`, e chamadas
-a `workflow.execute_activity`/`workflow.continue_as_new`.
+Determinism discipline (P1): all I/O (Postgres, audit, Coder, L1, PR, CI) lives
+in an Activity. The `@workflow.run` body only does: counter arithmetic,
+string/enum comparison, `workflow.wait_condition`, and calls to
+`workflow.execute_activity`/`workflow.continue_as_new`.
 """
 from __future__ import annotations
 
@@ -93,22 +92,24 @@ logger = logging.getLogger("dse_orchestrator.workflow")
 _SYSTEM_ACTOR = "system:orchestrator"
 _MAX_OPERATOR_EVENTS = 25
 
-# Fase 2 — status interno novo do gate de aprovacao de plano (WSB-E3-T2). NAO
-# esta no enum `dse_contracts.work_item.WorkItemStatus` (fundacao — nao editavel
-# por este workstream), mas a coluna `work_items.status` e TEXT sem CHECK, e a
-# propria `constants.py` da fundacao ja referencia esta string como o valor de
-# status que o dispatcher do WS-A consulta para rotear SIGNAL_PLAN_APPROVAL.
-# Gap documentado no README ("Estado awaiting_plan_approval"): o enum da
-# fundacao deveria ganhar este membro (+ mapa publico -> "blocked").
+# Phase 2 — new internal status of the plan approval gate (WSB-E3-T2). It is NOT
+# in the `dse_contracts.work_item.WorkItemStatus` enum (foundation — not
+# editable by this workstream), but the `work_items.status` column is TEXT
+# without a CHECK, and the foundation's own `constants.py` already references
+# this string as the status value the WS-A dispatcher queries to route
+# SIGNAL_PLAN_APPROVAL. Gap documented in the README ("Estado
+# awaiting_plan_approval"): the foundation enum should gain this member
+# (+ public map -> "blocked").
 STATUS_AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
 
-# Fase 2 (plano 09): a classificação PRIMÁRIA é estruturada — o raiser declara
-# a classe no `type` do ApplicationError (vocabulário dse.failure.* + legados;
-# ver dse_contracts.failure e _failure_class_from). Esta lista de substrings é
-# SÓ o fallback para histórias/raisers anteriores ao vocabulário — aposentar
-# junto com o patch marker "structured-failure-codes-v1" na release seguinte.
+# Phase 2 (plano 09): the PRIMARY classification is structured — the raiser
+# declares the class in the ApplicationError `type` (dse.failure.* vocabulary +
+# legacy; see dse_contracts.failure and _failure_class_from). This substring
+# list is ONLY the fallback for histories/raisers predating the vocabulary —
+# retire it together with the "structured-failure-codes-v1" patch marker in the
+# next release.
 _FAIL_CLOSED_MARKERS = (
-    "egress",            # egress-proxy indisponivel -> zero egress (fail-closed)
+    "egress",            # egress-proxy unavailable -> zero egress (fail-closed)
     "fail_closed",
     "fail-closed",
     "policy_denied",
@@ -116,19 +117,19 @@ _FAIL_CLOSED_MARKERS = (
     "virtual_key_expired",
     "key_expired",
     "kill_switch",
-    # achado do disparo real (2026-07-22): créditos do provider esgotados NÃO é
-    # falha transitória — o CLI mascarava como "error result: success" e a
-    # activity retentava para sempre. Classificada non-retryable na origem
-    # (sandbox_runtime) e reconhecida aqui -> falha limpa comentada na issue.
+    # finding from a real run (2026-07-22): exhausted provider credits are NOT a
+    # transient failure — the CLI masked it as "error result: success" and the
+    # activity retried forever. Classified non-retryable at the source
+    # (sandbox_runtime) and recognized here -> clean failure commented on the issue.
     "provider_billing",
     "credit balance",
 )
 
 
 def _failure_class_from(exc: Exception) -> "FailureClass | None":
-    """Anda a cadeia de causas do erro da Activity lendo o `type` do
-    ApplicationError (canônico dse.failure.* ou legado) — determinístico e
-    sem I/O (seguro no sandbox do workflow). Profundidade capada."""
+    """Walks the Activity error's cause chain reading the ApplicationError
+    `type` (canonical dse.failure.* or legacy) — deterministic and I/O-free
+    (safe inside the workflow sandbox). Depth is capped."""
     cause: Exception | None = exc
     for _ in range(6):
         if cause is None:
@@ -155,22 +156,22 @@ class _EscalateNow(Exception):
 
 
 class _FailClosed(Exception):
-    """Recusa de politica do caminho de modelo/egress (WSB-E5-T3b) — falha
-    limpa e auditada, sem output truncado (P6)."""
+    """Policy refusal on the model/egress path (WSB-E5-T3b) — clean, audited
+    failure, with no truncated output (P6)."""
 
     def __init__(self, reason: str):
         self.reason = reason
 
 
 class _BudgetExhausted(Exception):
-    """WSB-E4-T1 — teto de budget atingido numa FRONTEIRA (nunca mid-Activity)."""
+    """WSB-E4-T1 — budget ceiling reached at a BOUNDARY (never mid-Activity)."""
 
     def __init__(self, reason: str):
         self.reason = reason
 
 
 class _PlanRejected(Exception):
-    """WSB-E3-T3 — plano recusado; `route` in {re_plan, re_clarify, cancel}."""
+    """WSB-E3-T3 — plan rejected; `route` in {re_plan, re_clarify, cancel}."""
 
     def __init__(self, route: str, actor: str, justification: str):
         self.route = route
@@ -179,15 +180,15 @@ class _PlanRejected(Exception):
 
 
 class _BlockNow(Exception):
-    """WSB-E3-T2 — cascata de aprovadores VAZIA: Blocked + escalacao, jamais
-    auto-aprova por ausencia (P1/P3)."""
+    """WSB-E3-T2 — EMPTY approver cascade: Blocked + escalation, it never
+    auto-approves on absence (P1/P3)."""
 
     def __init__(self, reason: str):
         self.reason = reason
 
 
 class _ActivityRetriesExhausted(Exception):
-    """Activity de negocio esgotou o cap; o workflow projeta falha terminal."""
+    """A business Activity exhausted its cap; the workflow projects a terminal failure."""
 
     def __init__(self, activity_name: str, reason: str):
         self.activity_name = activity_name
@@ -199,7 +200,7 @@ class WorkItemLifecycleWorkflow:
     def __init__(self) -> None:
         self._input: Optional[WorkItemLifecycleInput] = None
 
-        # --- controles de operador (WSB-E5-T2) ---
+        # --- operator controls (WSB-E5-T2) ---
         self._paused = False
         self._cancelled = False
         self._cancel_reason: str | None = None
@@ -212,37 +213,37 @@ class WorkItemLifecycleWorkflow:
         self._runtime_override: str | None = None
         self._operator_log: list[OperatorEvent] = []
 
-        # --- sinais de negocio (WSB-E2-T4 / E3-T1 / E3-T4) ---
+        # --- business signals (WSB-E2-T4 / E3-T1 / E3-T4) ---
         self._clarification_received = False
         self._clarification_payload: dict[str, Any] | None = None
         self._review_received = False
         self._review_payload: dict[str, Any] | None = None
-        # Fase 3 (WSB-E4-T2/ADR-26): comentarios de review ACUMULAM numa lista
-        # (em vez de payload unico) para o loop de review consumir em LOTE —
-        # N comentarios numa janela de debounce viram UM ciclo de fix + UM
-        # refresh de evidencia, nunca N.
+        # Phase 3 (WSB-E4-T2/ADR-26): review comments ACCUMULATE in a list
+        # (instead of a single payload) so the review loop consumes them in a
+        # BATCH — N comments within a debounce window become ONE fix cycle +
+        # ONE evidence refresh, never N.
         self._review_comments: list[dict[str, Any]] = []
         self._merged = False
         self._merge_payload: dict[str, Any] | None = None
-        # Fase 3 (ADR-26): pedido humano EXPLICITO de refresh de evidencia —
-        # o unico gatilho de refresh alem de um fix cycle (commit novo).
+        # Phase 3 (ADR-26): EXPLICIT human request for an evidence refresh —
+        # the only refresh trigger besides a fix cycle (new commit).
         self._refresh_evidence_requested = False
 
-        # --- Fase 2: gate de aprovacao de plano (WSB-E3-T2/T3) ---
+        # --- Phase 2: plan approval gate (WSB-E3-T2/T3) ---
         self._plan_approval_received = False
         self._plan_approval_payload: dict[str, Any] | None = None
-        # --- Fase 2: retry de budget por operador (WSB-E4-T1) ---
+        # --- Phase 2: operator-driven budget retry (WSB-E4-T1) ---
         self._budget_raise_requested = False
         self._budget_new_max: float | None = None
 
-        # --- Fase 4: deteccao de lacuna de clarificacao RECORRENTE (source do
-        # insumo de skill-learning, WSC-E4-T2). Uniao dos campos que ja
-        # faltaram em rounds anteriores DESTE run de intake — se um campo
-        # reaparece faltando depois de ja termos pedido clarificacao, e uma
-        # recorrencia e vira um skill_episode. Estado de instancia
-        # (replay-safe: reconstruido deterministicamente pelos resultados das
-        # Activities de completude no replay); nao precisa cruzar
-        # continue_as_new porque o loop de intake completa dentro de um run.
+        # --- Phase 4: detection of a RECURRING clarification gap (source of the
+        # skill-learning input, WSC-E4-T2). Union of the fields that were
+        # already missing in previous rounds of THIS intake run — if a field
+        # shows up missing again after we already asked for clarification, that
+        # is a recurrence and becomes a skill_episode. Instance state
+        # (replay-safe: deterministically rebuilt from the completeness
+        # Activities' results during replay); it does not need to cross
+        # continue_as_new because the intake loop completes within one run.
         self._clarification_missing_union: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -255,19 +256,19 @@ class WorkItemLifecycleWorkflow:
 
     @workflow.signal
     def review_comment(self, payload: dict[str, Any]) -> None:
-        # Fase 3: acumula (nao sobrescreve) — o loop de review consome o LOTE
-        # inteiro de uma vez (debounce ADR-26). `_review_payload` continua
-        # guardando o ultimo, por compatibilidade de observabilidade/queries.
+        # Phase 3: accumulate (do not overwrite) — the review loop consumes the
+        # whole BATCH at once (ADR-26 debounce). `_review_payload` still keeps
+        # the last one, for observability/query compatibility.
         self._review_comments.append(payload)
         self._review_payload = payload
         self._review_received = True
 
     @workflow.signal
     def refresh_evidence(self, payload: dict[str, Any] | None = None) -> None:
-        """Fase 3 (ADR-26) — pedido humano EXPLICITO de re-geracao de evidencia
-        (preview/demo/visual diff) sem commit novo. Junto com "fix cycle
-        executado", e o UNICO gatilho de refresh — comentarios de review por si
-        so NUNCA re-geram evidencia (decisao 100%% deterministica, P1)."""
+        """Phase 3 (ADR-26) — EXPLICIT human request to regenerate evidence
+        (preview/demo/visual diff) without a new commit. Together with "a fix
+        cycle ran", it is the ONLY refresh trigger — review comments on their
+        own NEVER regenerate evidence (100%% deterministic decision, P1)."""
         self._refresh_evidence_requested = True
 
     @workflow.signal
@@ -277,23 +278,23 @@ class WorkItemLifecycleWorkflow:
 
     @workflow.signal(name="plan_approval")
     def plan_approval(self, payload: dict[str, Any]) -> None:
-        """WSB-E3-T2/T3 — veredito do gate de aprovacao de plano. Nome bate com
+        """WSB-E3-T2/T3 — plan approval gate verdict. The name matches
         `dse_contracts.SIGNAL_PLAN_APPROVAL`. Payload: {"verdict":
         "approved"|"rejected", "route": "re_plan"|"re_clarify"|"cancel"
-        (obrigatorio quando rejected), "comment"/"justification": str,
-        "actor": principal resolvido}. O dispatcher do WS-A so roteia
-        `kind=approval` para ca quando work_items.status ==
-        'awaiting_plan_approval'. Nao resetamos a flag no handler (mesma
-        disciplina anti-clobber dos outros sinais)."""
+        (required when rejected), "comment"/"justification": str,
+        "actor": resolved principal}. The WS-A dispatcher only routes
+        `kind=approval` here when work_items.status ==
+        'awaiting_plan_approval'. We do not reset the flag in the handler (same
+        anti-clobber discipline as the other signals)."""
         self._plan_approval_payload = payload
         self._plan_approval_received = True
 
     @workflow.signal
     def raise_budget(self, new_max_usd: float) -> None:
-        """WSB-E4-T1 — operador eleva o teto de budget. Aplicado na PROXIMA
-        fronteira de checagem (nunca interrompe uma Activity em andamento, P6).
-        Permite retomar um WorkItem que bateu (ou esta prestes a bater) o teto
-        sem recomeçar do zero."""
+        """WSB-E4-T1 — the operator raises the budget ceiling. Applied at the
+        NEXT check boundary (it never interrupts a running Activity, P6). Lets a
+        WorkItem that hit (or is about to hit) the ceiling resume without
+        starting over."""
         self._budget_raise_requested = True
         self._budget_new_max = float(new_max_usd)
         self._log_operator("raise_budget", str(new_max_usd))
@@ -347,7 +348,7 @@ class WorkItemLifecycleWorkflow:
             self._operator_log.pop(0)
 
     # ------------------------------------------------------------------
-    # Queries — observabilidade/operador
+    # Queries — observability/operator
     # ------------------------------------------------------------------
     @workflow.query
     def get_status(self) -> str:
@@ -381,7 +382,7 @@ class WorkItemLifecycleWorkflow:
             elif input.phase == PHASE_REVIEW:
                 return await self._run_review_phase()
             else:
-                # fase terminal ja resolvida (defensivo — nao deveria acontecer)
+                # terminal phase already resolved (defensive — should not happen)
                 return WorkItemLifecycleResult(
                     work_item_id=input.work_item_id,
                     status=input.status,
@@ -393,8 +394,8 @@ class WorkItemLifecycleWorkflow:
         except _EscalateNow as exc:
             return await self._finish_escalated(exc.reason)
         except _FailClosed as exc:
-            # WSB-E5-T3b — recusa de politica do caminho de modelo/egress:
-            # falha limpa e auditada, sem output truncado (P6).
+            # WSB-E5-T3b — policy refusal on the model/egress path: clean,
+            # audited failure, with no truncated output (P6).
             return await self._finish_failed(f"fail_closed:{exc.reason}",
                                              audit_action="model_path_fail_closed")
         except _BudgetExhausted as exc:
@@ -419,17 +420,17 @@ class WorkItemLifecycleWorkflow:
             return await self._continue_as_new(input)
 
     # ------------------------------------------------------------------
-    # Helpers genericos
+    # Generic helpers
     # ------------------------------------------------------------------
     async def _coerce_input(self, raw_input: Any) -> WorkItemLifecycleInput:
-        """Robustez de integracao (achado real ao testar contra o worker de
-        WS-A): quem inicia o workflow pode chamar `StartWorkflow` so com o
-        `work_item_id` (string) em vez do `WorkItemLifecycleInput` completo
-        — por exemplo `client.start_workflow(WORKFLOW_TYPE, work_item_id,
-        id=work_item_id, task_queue=...)`. Continue_as_new interno SEMPRE
-        passa a dataclass completa, entao esse ramo so roda no PRIMEIRO
-        `run()` de uma execucao vinda de fora. Ver README, secao "Contrato de
-        start_workflow assumido"."""
+        """Integration robustness (real finding while testing against the WS-A
+        worker): whoever starts the workflow may call `StartWorkflow` with just
+        the `work_item_id` (string) instead of the full
+        `WorkItemLifecycleInput` — e.g. `client.start_workflow(WORKFLOW_TYPE,
+        work_item_id, id=work_item_id, task_queue=...)`. The internal
+        continue_as_new ALWAYS passes the full dataclass, so this branch only
+        runs on the FIRST `run()` of an externally started execution. See the
+        README, section "Assumed start_workflow contract"."""
         if isinstance(raw_input, WorkItemLifecycleInput):
             return raw_input
         if isinstance(raw_input, dict):
@@ -464,16 +465,16 @@ class WorkItemLifecycleWorkflow:
                 budget_max_usd=float(max_usd) if max_usd is not None else None,
             )
         raise ApplicationError(
-            f"WorkItemLifecycleWorkflow.run recebeu um tipo de input nao suportado: {type(raw_input)!r}"
+            f"WorkItemLifecycleWorkflow.run got an unsupported input type: {type(raw_input)!r}"
         )
 
     def _agent_instruction(self, *, include_objections: bool = False) -> str:
-        """S1 (Fase 5): monta a instrucao REAL que o Planner/Coder recebem —
-        a descricao da tarefa (titulo+corpo da issue), mais criterio de aceite
-        e respostas de clarificacao, mais (para o Coder no fix loop) as
-        objecoes do L2. Determinístico (P1): so concatena strings ja
-        capturadas, nenhum LLM decide o conteudo. Antes do S1 os agentes
-        recebiam so `clarification_notes` (vazio) e nao sabiam a tarefa."""
+        """S1 (Phase 5): builds the REAL instruction the Planner/Coder receive —
+        the task description (issue title+body), plus acceptance criteria and
+        clarification answers, plus (for the Coder in the fix loop) the L2
+        objections. Deterministic (P1): it only concatenates already-captured
+        strings, no LLM decides the content. Before S1 the agents only got
+        `clarification_notes` (empty) and did not know the task."""
         input = self._input
         parts: list[str] = []
         if (input.task_content or "").strip():
@@ -487,12 +488,12 @@ class WorkItemLifecycleWorkflow:
             for obj in getattr(input, "l2_objections", []) or []:
                 if obj and str(obj).strip():
                     parts.append(f"Review objection to fix: {str(obj).strip()}")
-        return "\n\n".join(parts) or "Implementar a tarefa solicitada."
+        return "\n\n".join(parts) or "Implement the requested task."
 
     def _pr_summary(self) -> str:
-        """S7 (Fase 5): corpo do PR (campo `summary` do FinalizePrInput).
-        Determinístico (P1): usa o `summary` do plano se houver, senão a 1a
-        linha do conteúdo da tarefa. Nenhum LLM decide aqui."""
+        """S7 (Phase 5): PR body (the `summary` field of FinalizePrInput).
+        Deterministic (P1): uses the plan's `summary` when present, otherwise
+        the 1st line of the task content. No LLM decides here."""
         input = self._input
         plan_summary = None
         if isinstance(input.plan_json, dict):
@@ -504,20 +505,20 @@ class WorkItemLifecycleWorkflow:
 
     @staticmethod
     def _l1_evidence(l1_result) -> str:
-        """S7 follow-up: evidência de teste no corpo do PR (P8 — evidência
-        sobre asserção). Neste ponto a evidência real que EXISTE é o resultado
-        do L1 (o pipeline de vídeo/preview roda DEPOIS do PR); resume os checks
-        que passaram, deterministicamente. Sem isto o PR saía com
-        "(sem link de evidência)"."""
+        """S7 follow-up: test evidence in the PR body (P8 — evidence over
+        assertion). At this point the real evidence that EXISTS is the L1 result
+        (the video/preview pipeline runs AFTER the PR); it deterministically
+        summarizes the checks that passed. Without this the PR went out with
+        "(no evidence link)"."""
         if l1_result is None or not getattr(l1_result, "findings", None):
             return ""
         checks = ", ".join(f"{f.check} ✓" for f in l1_result.findings if f.passed)
         return f"L1 green ({checks})" if checks else ""
 
     async def _boundary_gate(self) -> None:
-        """Checado antes de CADA Activity de negocio (nao antes de bookkeeping
-        local). Pausa nunca interrompe uma Activity em andamento — so atrasa
-        a proxima chamada (WSB-E5-T2)."""
+        """Checked before EVERY business Activity (not before local
+        bookkeeping). A pause never interrupts a running Activity — it only
+        delays the next call (WSB-E5-T2)."""
         await workflow.wait_condition(lambda: (not self._paused) or self._cancelled)
         if self._cancelled:
             raise _CancelledByOperator()
@@ -542,9 +543,9 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _persist_status(self, *, clear_ci_status: bool = False) -> None:
-        # Patch marker preserva replay de histories cujo payload antigo tinha
-        # somente work_item_id/status/pr_number. Novas execucoes projetam toda
-        # a verdade operacional; o servidor deriva plan_hash/expected_files.
+        # The patch marker preserves replay of histories whose old payload had
+        # only work_item_id/status/pr_number. New executions project the whole
+        # operational truth; the server derives plan_hash/expected_files.
         if workflow.patched("operational-state-payload-v1"):
             payload = {
                 "work_item_id": self._input.work_item_id,
@@ -565,7 +566,7 @@ class WorkItemLifecycleWorkflow:
                     "ci_pending": self._input.ci_pending_polls,
                 },
             }
-        else:  # replay de payload historico
+        else:  # replay of the historical payload
             payload = {
                 "work_item_id": self._input.work_item_id,
                 "status": self._input.status,
@@ -593,10 +594,10 @@ class WorkItemLifecycleWorkflow:
 
     async def _set_raw_status(self, status: str, *, audit_action: str | None = None,
                               details: dict[str, Any] | None = None) -> None:
-        """Como `_set_status`, mas para um valor de status que nao esta no enum
-        `WorkItemStatus` da fundacao (ex.: `awaiting_plan_approval` — ver
-        STATUS_AWAITING_PLAN_APPROVAL e o README). A coluna e TEXT, aceita a
-        string; o gap do enum esta documentado no README."""
+        """Like `_set_status`, but for a status value that is not in the
+        foundation's `WorkItemStatus` enum (e.g. `awaiting_plan_approval` — see
+        STATUS_AWAITING_PLAN_APPROVAL and the README). The column is TEXT and
+        accepts the string; the enum gap is documented in the README."""
         self._input.status = status
         await self._persist_status()
         if audit_action:
@@ -614,9 +615,10 @@ class WorkItemLifecycleWorkflow:
             try:
                 await workflow.execute_activity(
                     ACTIVITY_TEARDOWN_SANDBOX,
-                    # Boundary fix (auditoria pós-S7): TeardownSandboxInput exige
-                    # tenant_id — sem ele o decode falhava e NENHUM teardown rodava
-                    # (sandboxes órfãos). `reason` vira `stage` (campo real do modelo).
+                    # Boundary fix (post-S7 audit): TeardownSandboxInput requires
+                    # tenant_id — without it the decode failed and NO teardown ran
+                    # (orphaned sandboxes). `reason` becomes `stage` (the model's
+                    # real field).
                     {
                         "work_item_id": self._input.work_item_id,
                         "tenant_id": self._input.tenant_id,
@@ -626,7 +628,7 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except ActivityError:
-                logger.warning("teardown falhou durante cancelamento; seguindo mesmo assim")
+                logger.warning("teardown failed during cancellation; continuing anyway")
         detail = f"cancelled_by_operator: {self._cancel_reason or 'no reason given'}"
         self._input.terminal_detail = detail
         await self._set_status(
@@ -643,16 +645,17 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _post_status_comment(self, status: str, *, detail: str = "") -> None:
-        """Oversight barato (nunca deixar uma superfície sem o estado atual): toda
-        transição consequencial reflete o status no comentário único da superfície
-        de origem. BEST-EFFORT — jamais bloqueia a transição (o audit ledger e a
-        fonte de verdade; o comentario e conveniencia). A Activity resolve
-        repo/issue e e no-op auditado para origens nao-github (Slack/Jira terao
-        seu proprio caminho de saida com o MESMO vocabulario de status)."""
-        # Guard de replay (spec §5): a superficie de status foi adicionada
-        # depois — histories antigas NAO tem esta Activity e devem replayar sem
-        # ela. UM marker cobre TODAS as transicoes (terminais + implementing);
-        # execucoes novas postam, replays antigos pulam deterministicamente.
+        """Cheap oversight (never leave a surface without the current state):
+        every consequential transition reflects the status on the originating
+        surface's single comment. BEST-EFFORT — it never blocks the transition
+        (the audit ledger is the source of truth; the comment is convenience).
+        The Activity resolves repo/issue and is an audited no-op for non-github
+        sources (Slack/Jira will get their own outbound path with the SAME
+        status vocabulary)."""
+        # Replay guard (spec §5): the status surface was added later — old
+        # histories do NOT have this Activity and must replay without it. ONE
+        # marker covers ALL transitions (terminal + implementing); new
+        # executions post, old replays skip deterministically.
         if not workflow.patched("status-comment-surfacing-v1"):
             return
         try:
@@ -664,10 +667,10 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=5),
             )
         except ActivityError:
-            logger.warning("post_status_comment best-effort falhou (status=%s)", status)
-        # Fase B: reflete tambem no BOARD (transição de coluna do Jira). No-op
-        # para github/slack. Guard novo (patch proprio) para replay-safety —
-        # histories entre a superficie de status e o board pulam so esta parte.
+            logger.warning("best-effort post_status_comment failed (status=%s)", status)
+        # Phase B: also reflect on the BOARD (Jira column transition). No-op for
+        # github/slack. New guard (its own patch) for replay safety — histories
+        # in between the status surface and the board skip only this part.
         if workflow.patched("status-transition-board-v1"):
             try:
                 await workflow.execute_activity(
@@ -678,15 +681,16 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=5),
                 )
             except ActivityError:
-                logger.warning("post_status_transition best-effort falhou (status=%s)", status)
+                logger.warning("best-effort post_status_transition failed (status=%s)", status)
 
     async def _post_board_transition(self, status: str) -> None:
-        """Move o card do Jira para a coluna mapeada, SEM re-postar o comentario
-        de status. Existe porque `_post_status_comment` so era chamado em
-        `implementing` e nos estados de erro — o card ia para In Progress mas
-        NUNCA para In Review (PR aberto) nem Done (merge). Achado BD-39
-        (2026-07-23). Best-effort, no-op para github/slack (a Activity resolve
-        origem), guard de patch proprio para replay-safety de workflows em voo."""
+        """Moves the Jira card to the mapped column, WITHOUT re-posting the
+        status comment. It exists because `_post_status_comment` was only called
+        on `implementing` and on error states — the card moved to In Progress
+        but NEVER to In Review (PR open) or Done (merge). Finding BD-39
+        (2026-07-23). Best-effort, no-op for github/slack (the Activity resolves
+        the source), with its own patch guard for replay safety of in-flight
+        workflows."""
         if not workflow.patched("board-transition-pr-and-done-v1"):
             return
         try:
@@ -698,7 +702,7 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=5),
             )
         except ActivityError:
-            logger.warning("post_board_transition best-effort falhou (status=%s)", status)
+            logger.warning("best-effort post_board_transition failed (status=%s)", status)
 
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
         detail = f"escalated: {reason}"
@@ -709,10 +713,10 @@ class WorkItemLifecycleWorkflow:
             details={"reason": reason},
         )
         await self._post_status_comment("escalated", detail=reason)
-        # Fase 4 — se ja havia um PR finalizado, esta escalacao e uma fronteira
-        # terminal do PR: emite a metrica de qualidade (pilot gate) para nao
-        # perder dados de PRs que nao mergeiam. Escalacoes pre-PR (ex.:
-        # clarificacao) nao tem PR e sao puladas.
+        # Phase 4 — if a PR had already been finalized, this escalation is a
+        # terminal PR boundary: emit the quality metric (pilot gate) so we do
+        # not lose data on PRs that never merge. Pre-PR escalations (e.g.
+        # clarification) have no PR and are skipped.
         if self._input.pr_finalized_at_epoch is not None:
             await self._emit_pr_quality_metric("escalated")
         return WorkItemLifecycleResult(
@@ -723,8 +727,8 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _finish_failed(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
-        """Falha terminal LIMPA (P6): status Failed + audit, sem output
-        truncado. Faz teardown do sandbox se existir (best-effort)."""
+        """CLEAN terminal failure (P6): Failed status + audit, with no truncated
+        output. Tears down the sandbox if one exists (best-effort)."""
         if self._input.sandbox_id:
             try:
                 await workflow.execute_activity(
@@ -735,7 +739,7 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except ActivityError:
-                logger.warning("teardown falhou durante falha terminal; seguindo mesmo assim")
+                logger.warning("teardown failed during a terminal failure; continuing anyway")
         detail = reason
         self._input.terminal_detail = detail
         await self._set_status(
@@ -750,9 +754,9 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _finish_blocked(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
-        """Estado terminal Blocked (WSB-E3-T2: cascata de aprovadores vazia).
-        Distinto de Failed — o WorkItem esta esperando intervencao humana
-        (nomear um aprovador), nao morto. Escala junto (audit)."""
+        """Blocked terminal state (WSB-E3-T2: empty approver cascade). Distinct
+        from Failed — the WorkItem is waiting for human intervention (naming an
+        approver), not dead. It escalates alongside (audit)."""
         detail = reason
         self._input.terminal_detail = detail
         await self._set_status(
@@ -768,8 +772,8 @@ class WorkItemLifecycleWorkflow:
         )
 
     # ------------------------------------------------------------------
-    # Budgets (WSB-E4-T1) — deterministico, puro (aritmetica/comparacao),
-    # seguro no corpo do workflow. Checado na admissao e em CADA fronteira.
+    # Budgets (WSB-E4-T1) — deterministic and pure (arithmetic/comparison),
+    # safe in the workflow body. Checked at admission and at EVERY boundary.
     # ------------------------------------------------------------------
     def _apply_pending_budget_raise(self) -> None:
         if self._budget_raise_requested and self._budget_new_max is not None:
@@ -778,13 +782,14 @@ class WorkItemLifecycleWorkflow:
             self._budget_new_max = None
 
     async def _budget_boundary(self, boundary: str) -> None:
-        """Checa o teto de budget numa FRONTEIRA. Se ja aplicou um raise
-        pendente, usa o novo teto. Estourou -> `_BudgetExhausted` (nunca corta
-        no meio de uma Activity — so aqui, entre elas). Toda checagem audita."""
+        """Checks the budget ceiling at a BOUNDARY. If a pending raise was
+        applied, it uses the new ceiling. Exceeded -> `_BudgetExhausted` (it
+        never cuts mid-Activity — only here, between them). Every check is
+        audited."""
         self._apply_pending_budget_raise()
         cap = self._input.budget_max_usd
         if cap is None:
-            return  # sem teto configurado: nada a impor
+            return  # no ceiling configured: nothing to enforce
         if self._input.spent_usd >= cap:
             await self._audit(
                 "budget_boundary_denied",
@@ -800,8 +805,8 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _consume_cost(self, cost_usd: float, *, source: str) -> None:
-        """Agrega o custo reportado pelo gateway (WS-D) via o resultado da
-        Activity. Todo consumo audita (P8)."""
+        """Aggregates the cost reported by the gateway (WS-D) through the
+        Activity result. Every consumption is audited (P8)."""
         if not cost_usd:
             return
         self._input.spent_usd += float(cost_usd)
@@ -812,24 +817,25 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _run_model_activity(self, name: str, payload: dict[str, Any], result_type):
-        """Wrapper das Activities do caminho de MODELO/SANDBOX (planner/coder/
-        tester/l2/provision/l1). Converte uma recusa de politica fail-closed
-        (egress-proxy down, virtual key expirada, kill switch) em `_FailClosed`
-        — falha limpa e auditada, sem output truncado (P6). Erros
-        retryable/transientes continuam sendo retentados pelo proprio Temporal
-        (nao caem aqui: so ActivityError final chega)."""
+        """Wrapper for the MODEL/SANDBOX path Activities (planner/coder/tester/
+        l2/provision/l1). Converts a fail-closed policy refusal (egress-proxy
+        down, expired virtual key, kill switch) into `_FailClosed` — a clean,
+        audited failure with no truncated output (P6). Retryable/transient
+        errors keep being retried by Temporal itself (they do not reach here:
+        only the final ActivityError does)."""
         try:
             options = self._activity_timeouts()
             if workflow.patched("model-activity-infra-retry-v2"):
-                # spec §6: DISTINGUIR falha de infra retryable de permanente.
-                # Falhas permanentes (fail-closed do egress/gateway, virtual key
-                # expirada, kill switch, decode de contrato) sao lancadas
-                # `non_retryable` na origem e NAO retentam — falham rapido.
-                # As retryable (oscilacao transiente do gateway) retentam sob o
-                # teto de WALL-CLOCK (schedule_to_close, ~2h) + o budget por fase
-                # (custo) — nunca sob um cap de CONTAGEM que confunde um blip de
-                # infra com uma falha permanente e mata a durabilidade (P6/P8:
-                # 3 quedas transientes nao podem falhar uma tarefa cara).
+                # spec §6: DISTINGUISH retryable infra failures from permanent
+                # ones. Permanent failures (egress/gateway fail-closed, expired
+                # virtual key, kill switch, contract decode) are raised
+                # `non_retryable` at the source and do NOT retry — they fail
+                # fast. The retryable ones (transient gateway flapping) retry
+                # under the WALL-CLOCK ceiling (schedule_to_close, ~2h) + the
+                # per-phase budget (cost) — never under a COUNT cap that
+                # confuses an infra blip with a permanent failure and kills
+                # durability (P6/P8: 3 transient outages must not fail an
+                # expensive task).
                 options["retry_policy"] = RetryPolicy(maximum_attempts=0)
             elif workflow.patched("bounded-business-activity-retries-v1"):
                 options["retry_policy"] = RetryPolicy(
@@ -842,12 +848,12 @@ class WorkItemLifecycleWorkflow:
             blob = f"{type(exc.cause).__name__}:{exc.cause}".lower() if exc.cause else str(exc).lower()
             fail_class = None
             if workflow.patched("structured-failure-codes-v1"):
-                # Fase 2 (plano 09): a decisão vem do `type` estruturado do
-                # ApplicationError — a MENSAGEM não decide mais nada.
+                # Phase 2 (plano 09): the decision comes from the structured
+                # ApplicationError `type` — the MESSAGE no longer decides anything.
                 fail_class = _failure_class_from(exc)
             if fail_class is None and any(marker in blob for marker in _FAIL_CLOSED_MARKERS):
-                # fallback (histórias/raisers pré-vocabulário) — aposentar na
-                # release seguinte junto com _FAIL_CLOSED_MARKERS.
+                # fallback (pre-vocabulary histories/raisers) — retire it in the
+                # next release together with _FAIL_CLOSED_MARKERS.
                 fail_class = FailureClass.policy_fail_closed
             if fail_class is not None and fail_class in FAIL_CLOSED_CLASSES:
                 await self._audit(
@@ -858,11 +864,11 @@ class WorkItemLifecycleWorkflow:
             raise _ActivityRetriesExhausted(name, blob[:300])
 
     async def _capture_base_sha(self) -> None:
-        """Captura o tip imutavel anterior ao primeiro turno do Coder.
+        """Captures the immutable tip prior to the Coder's first turn.
 
-        Reusa o checkpoint deterministico existente: logo apos o provision o
-        task branch ainda aponta exatamente para a base. O SHA retornado vira
-        base_sha e head_sha inicial, persistidos antes de qualquer escrita.
+        Reuses the existing deterministic checkpoint: right after provisioning,
+        the task branch still points exactly at the base. The returned SHA
+        becomes base_sha and the initial head_sha, persisted before any write.
         """
         input = self._input
         try:
@@ -895,17 +901,17 @@ class WorkItemLifecycleWorkflow:
         await self._audit("base_sha_captured", {"base_sha": input.base_sha})
 
     async def _checkpoint_or_rebuild(self, phase_name: str) -> None:
-        """WSB-E5-T1: checkpoint ao fim de cada fase, com retries limitados;
-        esgotado, tenta rebuild; esgotado tambem, escala (nunca segue
-        adivinhando com um sandbox potencialmente corrompido)."""
+        """WSB-E5-T1: checkpoint at the end of each phase, with bounded retries;
+        once exhausted, try a rebuild; if that is exhausted too, escalate (it
+        never keeps guessing with a possibly corrupted sandbox)."""
         if not self._input.sandbox_id:
             return
         for _ in range(self._input.checkpoint_retry_cap):
             try:
-                # S7 (Fase 5): CheckpointSandboxInput exige `tenant_id` (o call
-                # site antigo nao o enviava — boundary bug latente escondido
-                # pelos fakes; mesma classe dos outros). Capturamos o
-                # CheckpointRef retornado para o rebuild poder reconstruir dele.
+                # S7 (Phase 5): CheckpointSandboxInput requires `tenant_id` (the
+                # old call site did not send it — a latent boundary bug hidden
+                # by the fakes; same class as the others). We capture the
+                # returned CheckpointRef so the rebuild can restore from it.
                 ref: CheckpointRef = await workflow.execute_activity(
                     ACTIVITY_CHECKPOINT_SANDBOX,
                     {
@@ -926,7 +932,7 @@ class WorkItemLifecycleWorkflow:
             except ActivityError:
                 continue
         await self._audit("checkpoint_exhausted_attempting_rebuild", {"phase": phase_name})
-        # rebuild so e possivel se ha um checkpoint anterior de onde reconstruir.
+        # a rebuild is only possible if there is a prior checkpoint to restore from.
         if not self._input.last_checkpoint_ref:
             raise _EscalateNow(f"checkpoint_failed_no_prior_ref:{phase_name}")
         for _ in range(self._input.rebuild_retry_cap):
@@ -952,18 +958,18 @@ class WorkItemLifecycleWorkflow:
         raise _EscalateNow(f"checkpoint_and_rebuild_exhausted:{phase_name}")
 
     async def _continue_as_new(self, input: WorkItemLifecycleInput):
-        """Todo `continue_as_new` passa por aqui: incrementa a contagem de
-        Continue-As-New (parte da metrica de history — ALERTING-RULES.md §3)
-        e emite a metrica uma ultima vez antes de fechar o run atual."""
+        """Every `continue_as_new` goes through here: it bumps the
+        Continue-As-New count (part of the history metric — ALERTING-RULES.md
+        §3) and emits the metric one last time before closing the current run."""
         input.continue_as_new_count += 1
         await self._emit_history_metric("continue_as_new")
         return workflow.continue_as_new(input)
 
     async def _emit_history_metric(self, checkpoint: str) -> None:
-        """Fase 3 — ativacao do alerta de history (WS-F ativa a regra §3).
-        Leitura DETERMINISTICA no workflow (get_current_history_length/size
-        sao replay-safe no SDK); emissao OTel na Activity local. Best-effort:
-        falha de metrica jamais afeta o fluxo."""
+        """Phase 3 — feeds the history alert (WS-F enables rule §3).
+        DETERMINISTIC read in the workflow (get_current_history_length/size are
+        replay-safe in the SDK); OTel emission in the local Activity.
+        Best-effort: a metric failure never affects the flow."""
         info = workflow.info()
         payload = {
             "work_item_id": self._input.work_item_id,
@@ -982,17 +988,17 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except ActivityError:
-            logger.warning("emit_history_metric falhou; metrica e best-effort, fluxo segue")
+            logger.warning("emit_history_metric failed; the metric is best-effort, the flow continues")
 
     async def _maybe_retry_from_checkpoint(self) -> None:
         if not self._retry_from_checkpoint_requested:
             return
         self._retry_from_checkpoint_requested = False
         await self._audit("retry_from_checkpoint_applied", {})
-        # Boundary fix (auditoria pós-S7): RebuildSandboxInput exige tenant_id +
-        # checkpoint_ref — o payload antigo {work_item_id, sandbox_id} falhava no
-        # decode. Sem checkpoint anterior nesta fase, escala limpo (P6) em vez de
-        # reconstruir de lugar nenhum.
+        # Boundary fix (post-S7 audit): RebuildSandboxInput requires tenant_id +
+        # checkpoint_ref — the old {work_item_id, sandbox_id} payload failed to
+        # decode. With no prior checkpoint in this phase, escalate cleanly (P6)
+        # instead of rebuilding from nowhere.
         if not self._input.last_checkpoint_ref:
             raise _EscalateNow("retry_from_checkpoint_no_prior_ref")
         try:
@@ -1009,7 +1015,7 @@ class WorkItemLifecycleWorkflow:
             raise _EscalateNow("retry_from_checkpoint_failed")
 
     # ------------------------------------------------------------------
-    # Fase 1 — intake / gate de clarificacao (WSB-E3-T1)
+    # Phase 1 — intake / clarification gate (WSB-E3-T1)
     # ------------------------------------------------------------------
     async def _run_intake_phase(self) -> WorkItemLifecycleResult:
         input = self._input
@@ -1026,9 +1032,9 @@ class WorkItemLifecycleWorkflow:
                     "repo": input.repo,
                     "base_branch": input.base_branch,
                     "acceptance_criteria": input.acceptance_criteria,
-                    # S2 (Fase 5): o conteudo da tarefa entra no checklist —
-                    # uma issue bem descrita satisfaz o "o que fazer" sem exigir
-                    # um campo acceptance_criteria separado.
+                    # S2 (Phase 5): the task content joins the checklist — a
+                    # well-described issue satisfies the "what to do" without
+                    # requiring a separate acceptance_criteria field.
                     "task_content": input.task_content,
                 },
                 start_to_close_timeout=timedelta(seconds=30),
@@ -1045,11 +1051,12 @@ class WorkItemLifecycleWorkflow:
                     f"clarification_round_cap_exhausted (missing={completeness['missing']})"
                 )
 
-            # Fase 4 (WSC-E4-T2, source=clarification) — deteccao de lacuna
-            # RECORRENTE: um campo que continua faltando DEPOIS de ja termos
-            # pedido clarificacao ao menos uma vez neste intake. Puro set-arith
-            # (deterministico, P1); a escrita do insumo vive numa Activity.
-            # NENHUMA skill e criada aqui — so o episodio, que o WS-C consome.
+            # Phase 4 (WSC-E4-T2, source=clarification) — RECURRING gap
+            # detection: a field that is still missing AFTER we already asked
+            # for clarification at least once in this intake. Pure set
+            # arithmetic (deterministic, P1); writing the input lives in an
+            # Activity. NO skill is created here — only the episode, which WS-C
+            # consumes.
             missing = list(completeness["missing"])
             recurring = sorted(set(missing) & self._clarification_missing_union)
             if recurring:
@@ -1062,22 +1069,24 @@ class WorkItemLifecycleWorkflow:
                 details={"missing": completeness["missing"], "round": input.clarification_rounds},
             )
 
-            # S3 (Fase 5): posta a PERGUNTA de volta na superfície de origem
-            # (issue do GitHub), enumerando os campos faltantes — antes disto o
-            # humano nunca via o que era pedido. Best-effort (nunca derruba o
-            # workflow); a Activity auto-resolve repo/issue_number pelo work_item.
+            # S3 (Phase 5): posts the QUESTION back on the originating surface
+            # (GitHub issue), enumerating the missing fields — before this the
+            # human never saw what was being asked. Best-effort (never brings
+            # the workflow down); the Activity auto-resolves repo/issue_number
+            # from the work_item.
             _field_labels = {"acceptance_criteria": "acceptance criteria / expected behavior",
                              "repo": "repository", "base_branch": "base branch"}
             question = "I need the following information before I can start: " + ", ".join(
                 _field_labels.get(m, m) for m in completeness["missing"]
             ) + ". Reply in this thread and I will resume automatically."
-            # Repo-select dropdown (Slack): quando os ÚNICOS campos faltantes são
-            # resolvíveis escolhendo o repo (repo e/ou base_branch — o binding do
-            # repo traz os dois), sinaliza ao adapter (via o status do comentário)
-            # que ele pode renderizar um static_select. work_items.status continua
-            # needs_clarification (o dispatcher roteia clarification_answer sem olhar
-            # o status). Guardado por patch marker (replay-safe: histories em voo que
-            # já postaram com 'needs_clarification' re-executam idênticas).
+            # Repo-select dropdown (Slack): when the ONLY missing fields are
+            # resolvable by picking the repo (repo and/or base_branch — the repo
+            # binding carries both), signal to the adapter (via the comment
+            # status) that it may render a static_select. work_items.status
+            # stays needs_clarification (the dispatcher routes
+            # clarification_answer without looking at the status). Guarded by a
+            # patch marker (replay-safe: in-flight histories that already posted
+            # with 'needs_clarification' re-execute identically).
             comment_status = "needs_clarification"
             if workflow.patched("repo-select-dropdown-v1") and (
                 "repo" in completeness["missing"]
@@ -1093,14 +1102,14 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
             except ActivityError:
-                logger.warning("post_tracking_comment (clarificacao) falhou; workflow segue esperando resposta")
+                logger.warning("post_tracking_comment (clarification) failed; the workflow keeps waiting for an answer")
 
-            # IMPORTANTE: nao reset `_clarification_received` aqui — um
-            # `clarification_answer` pode ja ter chegado durante os awaits
-            # acima (activity de completude/status/audit); resetar aqui
-            # apagaria uma resposta legitima (mesmo bug de "clobber" do loop
-            # de review — ver `_run_review_phase`). So consumimos e
-            # resetamos DEPOIS de ler o payload, abaixo.
+            # IMPORTANT: do not reset `_clarification_received` here — a
+            # `clarification_answer` may have already arrived during the awaits
+            # above (completeness/status/audit activity); resetting here would
+            # erase a legitimate answer (the same "clobber" bug as the review
+            # loop — see `_run_review_phase`). We only consume and reset AFTER
+            # reading the payload, below.
             reminder_delta = timedelta(hours=self._input.clarification_reminder_hours)
             escalation_delta = timedelta(days=self._input.clarification_escalation_days)
             remaining_after_reminder = escalation_delta - reminder_delta
@@ -1119,13 +1128,13 @@ class WorkItemLifecycleWorkflow:
             if self._operator_escalate_requested:
                 raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
             if self._force_clarification_requested:
-                self._force_clarification_requested = False  # ja estamos no intake
+                self._force_clarification_requested = False  # we are already in intake
 
             if not got_answer:
                 raise _EscalateNow("clarification_no_response_after_reminder_and_escalation_window")
 
             payload = self._clarification_payload or {}
-            self._clarification_received = False  # consumido — proxima volta espera sinal NOVO
+            self._clarification_received = False  # consumed — next round waits for a NEW signal
             if payload.get("repo"):
                 input.repo = payload["repo"]
             if payload.get("base_branch"):
@@ -1137,7 +1146,7 @@ class WorkItemLifecycleWorkflow:
 
             input.clarification_rounds += 1
             await self._audit("clarification_answer_received", {"round": input.clarification_rounds})
-            # volta ao topo do loop para re-checar completude (sem LLM: puro checklist)
+            # back to the top of the loop to re-check completeness (no LLM: pure checklist)
 
     async def _wait_with_reminder(
         self,
@@ -1147,9 +1156,9 @@ class WorkItemLifecycleWorkflow:
         remaining_delta: timedelta,
         reminder_action: str,
     ) -> bool:
-        """`True` se `condition()` ficou verdadeira dentro da janela total
-        (reminder + escalation); `False` se estourou o prazo total sem
-        resposta (o caller decide o que fazer — nunca segue adivinhando)."""
+        """`True` if `condition()` became true within the total window
+        (reminder + escalation); `False` if the whole deadline elapsed without
+        an answer (the caller decides what to do — it never keeps guessing)."""
         try:
             await workflow.wait_condition(condition, timeout=reminder_delta)
             return True
@@ -1168,12 +1177,12 @@ class WorkItemLifecycleWorkflow:
             return False
 
     async def _emit_clarification_episode(self, recurring: list[str], missing: list[str]) -> None:
-        """Fase 4 (WSC-E4-T2) — grava UM skill_episode (source=clarification)
-        quando a mesma lacuna de clarificacao recorre. Proveniencia completa
-        (repo/campos/round/requester) para a esteira de promocao do WS-C
-        governar. NENHUMA skill e criada aqui (fronteira testada em
-        packages/contracts) — so o insumo. `pattern_key` agrupa ocorrencias do
-        MESMO conjunto de campos recorrentes por tenant."""
+        """Phase 4 (WSC-E4-T2) — writes ONE skill_episode (source=clarification)
+        when the same clarification gap recurs. Full provenance
+        (repo/fields/round/requester) for WS-C's promotion pipeline to govern.
+        NO skill is created here (boundary tested in packages/contracts) — only
+        the input. `pattern_key` groups occurrences of the SAME set of recurring
+        fields per tenant."""
         input = self._input
         pattern_key = "clarification_missing:" + "+".join(recurring)
         result = await workflow.execute_activity(
@@ -1202,23 +1211,24 @@ class WorkItemLifecycleWorkflow:
         )
 
     # ------------------------------------------------------------------
-    # Fase 2 — implementacao (WSB-E2-T3 estendida, WSB-E3-T2/T3, WSB-E4, WSB-E5-T1)
-    # Sequencia: [budget admission] -> Planner (read-only) -> [gate de
-    # aprovacao de plano] -> provision -> (Coder -> Tester -> L1)* -> L2 -> PR.
+    # Phase 2 — implementation (extended WSB-E2-T3, WSB-E3-T2/T3, WSB-E4, WSB-E5-T1)
+    # Sequence: [budget admission] -> Planner (read-only) -> [plan approval
+    # gate] -> provision -> (Coder -> Tester -> L1)* -> L2 -> PR.
     # ------------------------------------------------------------------
     async def _run_implementation_phase(self) -> WorkItemLifecycleResult:
         input = self._input
 
-        # WSB-E4-T1 — budget na admissao (nunca corta mid-Activity, so aqui).
+        # WSB-E4-T1 — budget at admission (never cuts mid-Activity, only here).
         await self._audit(
             "budget_admitted",
             {"max_usd": input.budget_max_usd, "spent_usd": round(input.spent_usd, 6)},
         )
         await self._budget_boundary("admission")
 
-        # WSB-E2-T3 estendida + WSB-E3-T2 — Planner read-only ANTES do gate, e o
-        # gate de aprovacao. So roda enquanto nao ha sandbox (uma vez por
-        # implementacao; re_plan reentra com sandbox_id None e plan_json vazio).
+        # Extended WSB-E2-T3 + WSB-E3-T2 — read-only Planner BEFORE the gate,
+        # and the approval gate. Runs only while there is no sandbox (once per
+        # implementation; re_plan re-enters with sandbox_id None and an empty
+        # plan_json).
         if not input.sandbox_id:
             await self._run_planner_and_gate()
 
@@ -1236,18 +1246,18 @@ class WorkItemLifecycleWorkflow:
             )
             input.sandbox_id = handle.sandbox_id
             input.branch = handle.branch
-            # S7: retem o handle COMPLETO (L1/finalize precisam dele, nao so do id).
+            # S7: retain the COMPLETE handle (L1/finalize need it, not just the id).
             input.sandbox_handle = handle.model_dump()
             await self._set_status(WorkItemStatus.implementing, audit_action="sandbox_provisioned",
                                     details={"sandbox_id": handle.sandbox_id})
-            # Estado visível durante a fase MAIS LONGA (coding): sem isto, uma
-            # tarefa low-risk auto-aprovada some da superfície entre a admissão
-            # e o pr_ready. O comentário único é editado in-place (sem spam).
-            # (guard de replay vive dentro de _post_status_comment.)
+            # Visible state during the LONGEST phase (coding): without this, an
+            # auto-approved low-risk task disappears from the surface between
+            # admission and pr_ready. The single comment is edited in-place (no
+            # spam). (the replay guard lives inside _post_status_comment.)
             await self._post_status_comment("implementing")
-            # Nova Activity protegida por patch marker: histories antigos
-            # replayam sem o comando; execucoes novas persistem a base antes
-            # do primeiro turno do Coder.
+            # New Activity protected by a patch marker: old histories replay
+            # without the command; new executions persist the base before the
+            # Coder's first turn.
             if workflow.patched("capture-base-sha-before-coder-v1"):
                 await self._capture_base_sha()
 
@@ -1262,16 +1272,17 @@ class WorkItemLifecycleWorkflow:
                     "sandbox_id": input.sandbox_id,
                     "work_item_id": input.work_item_id,
                     "tenant_id": input.tenant_id,
-                    # S1: RunCoderTurnInput exige `instruction` (singular). Antes
-                    # o workflow mandava `instructions`/`objections` (campos que
-                    # o model nao tem — descartados no decode); agora a tarefa
-                    # real + objecoes do L2 vao dobradas na instrucao.
+                    # S1: RunCoderTurnInput requires `instruction` (singular).
+                    # The workflow used to send `instructions`/`objections`
+                    # (fields the model does not have — dropped at decode); now
+                    # the real task + L2 objections are folded into the
+                    # instruction.
                     "instruction": self._agent_instruction(include_objections=True),
                     "branch": input.branch,
                     "model_override": self._model_override,
                     "runtime_override": self._runtime_override,
-                    # âncora do plano: arquivos novos fora dela são podados
-                    # pós-turn (o CLI cria relatórios espontâneos — achado real)
+                    # plan anchor: new files outside it are pruned post-turn
+                    # (the CLI creates spontaneous reports — real finding)
                     "expected_files": list((input.plan_json or {}).get("expected_files", [])),
                 },
                 CoderTurnResult,
@@ -1282,7 +1293,7 @@ class WorkItemLifecycleWorkflow:
                 {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
             )
 
-            # WSB-E2-T3 — Tester session (escreve/ajusta testes ANTES do L1).
+            # WSB-E2-T3 — Tester session (writes/adjusts tests BEFORE L1).
             await self._boundary_gate()
             await self._budget_boundary("tester_turn")
             tester_result: TesterTurnResult = await self._run_model_activity(
@@ -1362,10 +1373,10 @@ class WorkItemLifecycleWorkflow:
                 else l1_result.passed
             )
             if not l1_passed:
-                # Achado do disparo real (queimou ~$8 em fix cycles inúteis):
-                # manifesto L1 ausente/erro é problema de CONFIG DO REPO —
-                # nenhum turno de Coder conserta isso. Escala com instrução
-                # clara em vez de re-rodar o Coder (P6, custo).
+                # Finding from a real run (burned ~$8 in useless fix cycles): a
+                # missing/broken L1 manifest is a REPO CONFIG problem — no Coder
+                # turn fixes that. Escalate with a clear instruction instead of
+                # re-running the Coder (P6, cost).
                 if workflow.patched("l1-manifest-escalates-v1"):
                     manifest_bad = next(
                         (f for f in l1_result.findings
@@ -1392,7 +1403,7 @@ class WorkItemLifecycleWorkflow:
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
                     except ActivityError:
-                        logger.warning("teardown falhou apos exaustao de retries; seguindo mesmo assim")
+                        logger.warning("teardown failed after retries were exhausted; continuing anyway")
                     return WorkItemLifecycleResult(
                         work_item_id=input.work_item_id,
                         status=WorkItemStatus.failed.value,
@@ -1401,11 +1412,11 @@ class WorkItemLifecycleWorkflow:
                     )
                 await self._set_status(WorkItemStatus.implementing, audit_action="l1_failed_retrying",
                                         details={"attempt": input.coder_retry_count})
-                continue  # novo turno do Coder no mesmo sandbox/branch
+                continue  # new Coder turn on the same sandbox/branch
 
-            # L1 passou -> Reviewer L2 de contexto fresco (WSC-E3-T5/WSE-E2).
-            # P3: a sessao L2 recebe SO plan artifact + diff final — NUNCA o
-            # historico/instrucoes do Coder (construido em `_run_l2_review`).
+            # L1 passed -> fresh-context Reviewer L2 (WSC-E3-T5/WSE-E2).
+            # P3: the L2 session gets ONLY the plan artifact + final diff —
+            # NEVER the Coder's history/instructions (built in `_run_l2_review`).
             await self._boundary_gate()
             await self._budget_boundary("l2")
             l2: L2Verdict = await self._run_l2_review(coder_result)
@@ -1429,9 +1440,9 @@ class WorkItemLifecycleWorkflow:
                     )
                 await self._set_status(WorkItemStatus.implementing,
                                         audit_action="l2_changes_requested")
-                continue  # volta ao Coder com as objecoes do L2
+                continue  # back to the Coder with the L2 objections
 
-            input.l2_objections = []  # limpo — L2 aprovou
+            input.l2_objections = []  # cleared — L2 approved
             break
 
         await self._boundary_gate()
@@ -1469,8 +1480,8 @@ class WorkItemLifecycleWorkflow:
         input.pr_number = pr_ref.pr_number
         input.pr_url = pr_ref.url
         input.head_sha = pr_ref.head_sha or input.head_sha
-        # Fase 4 — marca o instante de PR finalizado (leitura deterministica/
-        # replay-safe de workflow.now()) para o "tempo ate merge" do pilot gate.
+        # Phase 4 — mark the instant the PR was finalized (deterministic/
+        # replay-safe workflow.now() read) for the pilot gate's "time to merge".
         if input.pr_finalized_at_epoch is None:
             input.pr_finalized_at_epoch = workflow.now().timestamp()
 
@@ -1495,39 +1506,39 @@ class WorkItemLifecycleWorkflow:
         )
         await self._set_status(pr_open_status, audit_action="pr_finalized",
                                 details={"pr_number": pr_ref.pr_number, "url": pr_ref.url})
-        # PR aberto -> coluna de review no board (In Review). Sem isto o card
-        # ficava preso em In Progress mesmo com o PR pronto (achado BD-39).
+        # PR open -> review column on the board (In Review). Without this the
+        # card stayed stuck in In Progress even with the PR ready (finding BD-39).
         await self._post_board_transition(pr_open_status.value)
 
-        # Fase 3 — pipeline de evidencia INICIAL (depois de finalize_pr):
-        # trigger_preview (paths-filter deterministico com o files_changed do
-        # CoderTurnResult, FR-20) -> se created, run_demo_evidence (base_url do
-        # preview; o publish acontece DENTRO dela, WS-E) -> run_visual_diff.
-        # Falha/degradacao NUNCA bloqueia o PR (failure mode 9) — evidencia
-        # degradada e registrada e o fluxo segue para review humano.
+        # Phase 3 — INITIAL evidence pipeline (after finalize_pr):
+        # trigger_preview (deterministic paths-filter using CoderTurnResult's
+        # files_changed, FR-20) -> if created, run_demo_evidence (preview
+        # base_url; the publish happens INSIDE it, WS-E) -> run_visual_diff.
+        # Failure/degradation NEVER blocks the PR (failure mode 9) — degraded
+        # evidence is recorded and the flow moves on to human review.
         input.last_files_changed = list(coder_result.files_changed)
         await self._run_evidence_pipeline(coder_result.files_changed, reason="initial")
         await self._emit_history_metric("pr_finalized")
 
-        # NAO fazemos `continue_as_new` aqui (deliberado — ver README.md,
-        # secao "continue_as_new e a corrida de sinais"): um humano/CI pode
-        # reagir ao status `pr_ready` (que acabou de ficar visivel via query)
-        # tao rapido que o sinal chegaria exatamente durante a janela em que
-        # o run antigo esta fechando via continue_as_new — e um sinal
-        # endereçado a um run que esta fechando pode ser perdido (nao
-        # entregue ao novo run). Continuar na MESMA execucao elimina essa
-        # corrida por construcao: nao ha run "fechando" para perder o sinal.
+        # We do NOT `continue_as_new` here (deliberate — see README.md, section
+        # "continue_as_new e a corrida de sinais"): a human/CI can react to the
+        # `pr_ready` status (which just became visible via query) so fast that
+        # the signal would arrive exactly during the window in which the old run
+        # is closing via continue_as_new — and a signal addressed to a closing
+        # run can be lost (not delivered to the new run). Continuing in the SAME
+        # execution eliminates that race by construction: there is no "closing"
+        # run to lose the signal.
         input.phase = PHASE_REVIEW
         return await self._run_review_phase()
 
     # ------------------------------------------------------------------
-    # WSB-E3-T2 — Planner read-only + gate de aprovacao de plano por risk class
+    # WSB-E3-T2 — read-only Planner + plan approval gate by risk class
     # ------------------------------------------------------------------
     async def _run_planner_and_gate(self) -> None:
-        """Roda o Planner (read-only) e aplica o gate. Ao retornar, o plano
-        esta aprovado (auto por politica OU por humano nomeado) e o workflow
-        pode provisionar/implementar. Levanta `_PlanRejected`/`_BlockNow`/
-        `_EscalateNow`/`_CancelledByOperator` nos caminhos que nao seguem."""
+        """Runs the Planner (read-only) and applies the gate. On return, the
+        plan is approved (automatically by policy OR by a named human) and the
+        workflow may provision/implement. Raises `_PlanRejected`/`_BlockNow`/
+        `_EscalateNow`/`_CancelledByOperator` on the paths that do not proceed."""
         input = self._input
 
         await self._boundary_gate()
@@ -1539,7 +1550,7 @@ class WorkItemLifecycleWorkflow:
                 "tenant_id": input.tenant_id,
                 "repo": input.repo,
                 "base_branch": input.base_branch,
-                # S1: instrucao real (conteudo da issue + aceite + esclarecimentos).
+                # S1: real instruction (issue content + acceptance + clarifications).
                 "instruction": self._agent_instruction(),
                 "model_override": self._model_override,
             },
@@ -1553,8 +1564,8 @@ class WorkItemLifecycleWorkflow:
              "round": input.plan_rounds},
         )
 
-        # P1: classificacao de risco EFETIVA por POLITICA deterministica (fora
-        # do modelo) — um Planner que sub-classifica NAO rebaixa o gate.
+        # P1: EFFECTIVE risk classification by deterministic POLICY (outside the
+        # model) — a Planner that under-classifies does NOT weaken the gate.
         effective_risk = policy.classify_risk(plan.expected_files, plan.risk_class)
         input.risk_class = effective_risk
 
@@ -1566,20 +1577,20 @@ class WorkItemLifecycleWorkflow:
                 )
                 raise _EscalateNow("planner_expected_files_empty_without_no_code_change")
 
-        # Postgres recebe plano/risco antes do Coder. O hash e a lista de
-        # expected_files sao derivados pela Activity server-side.
+        # Postgres receives plan/risk before the Coder. The hash and the
+        # expected_files list are derived by the Activity server-side.
         if workflow.patched("persist-plan-before-coder-v1"):
             await self._persist_status()
 
         if not policy.requires_plan_approval(effective_risk, input.require_approval_risk_classes):
-            # Risco baixo -> auto-aprova POR POLITICA (nunca por ausencia de
-            # aprovador). Projeta e audita.
+            # Low risk -> auto-approve BY POLICY (never because an approver is
+            # missing). Project and audit.
             await self._record_gate(status="approved", auto_approved=True,
                                     approvers=[], decided_by=None)
             await self._audit("plan_auto_approved", {"risk_class": effective_risk})
             return
 
-        # Risco alto -> resolve aprovador pela cascata CODEOWNERS -> access bundle.
+        # High risk -> resolve the approver via the CODEOWNERS -> access bundle cascade.
         resolved = await workflow.execute_activity(
             LOCAL_ACTIVITY_RESOLVE_APPROVER,
             {"tenant_id": input.tenant_id, "repo": input.repo,
@@ -1591,7 +1602,7 @@ class WorkItemLifecycleWorkflow:
         input.approvers = approvers
 
         if not approvers:
-            # CASCATA VAZIA -> Blocked + escalacao, JAMAIS auto-aprova (P1/P3).
+            # EMPTY CASCADE -> Blocked + escalation, NEVER auto-approve (P1/P3).
             await self._record_gate(status="blocked", auto_approved=False,
                                     approvers=[], decided_by=None)
             await self._audit("plan_gate_no_approver_blocked", {"risk_class": effective_risk})
@@ -1599,15 +1610,15 @@ class WorkItemLifecycleWorkflow:
                 f"plan_approval_cascade_empty:no CODEOWNERS/designated approver for tenant={input.tenant_id}"
             )
 
-        # Estaciona em espera DURAVEL (novo estado awaiting_plan_approval).
-        # ORDEM (corrigida na integração da Fase 3): grava a projeção do gate
-        # ANTES de flipar o status para awaiting_plan_approval. Invariante: o
-        # gate durável (consumido pelo queue board e pelo roteamento de signal
-        # do WS-A, que dispara SIGNAL_PLAN_APPROVAL com base no status) tem que
-        # existir no instante em que o estado se torna observável — senão um
-        # observador que vê o status pode ler o gate ainda ausente (corrida
-        # real reproduzida por teste; a edição da Fase 3 do review loop mudou
-        # o timing e expôs a inversão).
+        # Park on a DURABLE wait (new awaiting_plan_approval state).
+        # ORDER (fixed during the Phase 3 integration): write the gate
+        # projection BEFORE flipping the status to awaiting_plan_approval.
+        # Invariant: the durable gate (consumed by the queue board and by WS-A's
+        # signal routing, which fires SIGNAL_PLAN_APPROVAL based on the status)
+        # must exist at the instant the state becomes observable — otherwise an
+        # observer that sees the status may read a still-absent gate (a real
+        # race reproduced by a test; the Phase 3 edit to the review loop changed
+        # the timing and exposed the inversion).
         await self._record_gate(status="pending", auto_approved=False,
                                 approvers=approvers, decided_by=None)
         await self._set_raw_status(
@@ -1616,8 +1627,8 @@ class WorkItemLifecycleWorkflow:
             details={"risk_class": effective_risk, "approvers": approvers,
                      "source": resolved.get("source")},
         )
-        # Renderiza o pedido de aprovacao via adapters (WS-A edita a mensagem
-        # de status unica in-place; aqui so pedimos que ela reflita o gate).
+        # Render the approval request via the adapters (WS-A edits the single
+        # status message in-place; here we only ask it to reflect the gate).
         try:
             await workflow.execute_activity(
                 ACTIVITY_POST_TRACKING_COMMENT,
@@ -1627,11 +1638,11 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=5),
             )
         except ActivityError:
-            logger.warning("post_tracking_comment do gate falhou; gate segue durável mesmo assim")
+            logger.warning("the gate's post_tracking_comment failed; the gate stays durable anyway")
 
-        # Espera durável pelo SIGNAL_PLAN_APPROVAL (roteado pelo WS-A quando
-        # status==awaiting_plan_approval). Anti-clobber: nao resetamos a flag
-        # antes de ler o payload.
+        # Durable wait for SIGNAL_PLAN_APPROVAL (routed by WS-A when
+        # status==awaiting_plan_approval). Anti-clobber: we do not reset the
+        # flag before reading the payload.
         await workflow.wait_condition(
             lambda: self._plan_approval_received or self._cancelled
             or self._operator_escalate_requested
@@ -1642,7 +1653,7 @@ class WorkItemLifecycleWorkflow:
             raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
 
         payload = self._plan_approval_payload or {}
-        self._plan_approval_received = False  # consumido
+        self._plan_approval_received = False  # consumed
         verdict = payload.get("verdict")
         actor = payload.get("actor") or payload.get("decided_by") or "unknown"
 
@@ -1657,7 +1668,7 @@ class WorkItemLifecycleWorkflow:
         if verdict == "rejected":
             route = payload.get("route")
             justification = payload.get("justification") or payload.get("comment") or ""
-            # Rejeicao SEMPRE auditada com identidade + justificativa (WSB-E3-T3).
+            # A rejection is ALWAYS audited with identity + justification (WSB-E3-T3).
             await self._record_gate(status="rejected", auto_approved=False, approvers=approvers,
                                     decided_by=actor, route=route, justification=justification)
             await self._audit(
@@ -1674,9 +1685,9 @@ class WorkItemLifecycleWorkflow:
     async def _record_gate(self, *, status: str, auto_approved: bool, approvers: list[str],
                            decided_by: str | None, route: str | None = None,
                            justification: str | None = None) -> None:
-        """Projecao duravel do gate (migracao 0009) — consultavel pelo queue
-        board/operadores. NAO substitui o audit ledger (o proprio metodo caller
-        tambem chama `_audit`)."""
+        """Durable projection of the gate (migration 0009) — queryable by the
+        queue board/operators. Does NOT replace the audit ledger (the calling
+        method also calls `_audit`)."""
         await workflow.execute_activity(
             LOCAL_ACTIVITY_RECORD_GATE,
             {
@@ -1696,10 +1707,11 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _run_l2_review(self, coder_result: CoderTurnResult) -> "L2Verdict":
-        """WSC-E3-T5/WSE-E2 — sessao Reviewer L2 de contexto fresco. P3
-        (NAO-NEGOCIAVEL): o payload contem SO o plan artifact + o diff final;
-        NADA do historico/instrucoes do Coder (nenhum `instructions`,
-        `clarification_notes`, `objections` — deliberadamente ausentes)."""
+        """WSC-E3-T5/WSE-E2 — fresh-context Reviewer L2 session. P3
+        (NON-NEGOTIABLE): the payload contains ONLY the plan artifact + the
+        final diff; NOTHING from the Coder's history/instructions (no
+        `instructions`, `clarification_notes`, `objections` — deliberately
+        absent)."""
         input = self._input
         payload = {
             "work_item_id": input.work_item_id,
@@ -1721,8 +1733,8 @@ class WorkItemLifecycleWorkflow:
         return l2
 
     # ------------------------------------------------------------------
-    # WSB-E3-T3 — rejection path: 3 rotas deterministicas. Nenhuma dispara
-    # implementacao sem passar de novo pelo gate correspondente.
+    # WSB-E3-T3 — rejection path: 3 deterministic routes. None of them starts
+    # implementation without going through the corresponding gate again.
     # ------------------------------------------------------------------
     async def _handle_plan_rejection(self, exc: "_PlanRejected") -> WorkItemLifecycleResult:
         input = self._input
@@ -1739,13 +1751,13 @@ class WorkItemLifecycleWorkflow:
             )
 
         if exc.route == "re_clarify":
-            # Volta ao gate de CLARIFICACAO (nao a implementacao): reentra o
-            # intake do zero — implementacao so recomeca apos clarificacao +
-            # planner + gate de novo. Reabrir a clarificacao significa exigir
-            # que o requester re-forneca os criterios de aceite (o aprovador
-            # rejeitou justamente por ambiguidade do escopo): limpamos
-            # `acceptance_criteria` para o checklist deterministico reabrir a
-            # rodada (nunca "adivinha" — P1/P6).
+            # Back to the CLARIFICATION gate (not to implementation): re-enters
+            # intake from scratch — implementation only restarts after
+            # clarification + planner + gate again. Reopening clarification
+            # means requiring the requester to re-supply the acceptance criteria
+            # (the approver rejected precisely because the scope was ambiguous):
+            # we clear `acceptance_criteria` so the deterministic checklist
+            # reopens the round (it never "guesses" — P1/P6).
             input.phase = PHASE_INTAKE
             input.status = WorkItemStatus.needs_clarification.value
             input.clarification_rounds = 0
@@ -1758,8 +1770,9 @@ class WorkItemLifecycleWorkflow:
             return await self._continue_as_new(input)
 
         if exc.route == "re_plan":
-            # Re-planeja: limpa o plano e reentra a fase de implementacao, que
-            # comeca pelo Planner + gate de novo (nunca pula o gate). Capado.
+            # Re-plan: clears the plan and re-enters the implementation phase,
+            # which starts from the Planner + gate again (it never skips the
+            # gate). Capped.
             if input.plan_rounds >= input.plan_round_cap:
                 return await self._finish_escalated(
                     f"plan_round_cap_exhausted:{input.plan_rounds}"
@@ -1775,24 +1788,24 @@ class WorkItemLifecycleWorkflow:
         return await self._finish_escalated(f"plan_rejected_unknown_route:{exc.route}")
 
     # ------------------------------------------------------------------
-    # Fase 3 — review humano (WSB-E3-T4). NENHUM path chama merge da API do
-    # GitHub aqui — so espera `merged_by_human` (P3: nenhuma sessao de agente
-    # aprova/mergeia o proprio trabalho).
+    # Phase 3 — human review (WSB-E3-T4). NO path calls the GitHub API's merge
+    # here — it only waits for `merged_by_human` (P3: no agent session
+    # approves/merges its own work).
     # ------------------------------------------------------------------
     def _drain_review_comments(self) -> list[dict[str, Any]]:
-        """Consome o LOTE inteiro de comentarios pendentes. Anti-clobber: so e
-        chamado DEPOIS de `_review_received` ficar True; o handler do sinal
-        apenas acrescenta a lista, entao nada se perde entre o drain e a
-        proxima espera."""
+        """Consumes the ENTIRE batch of pending comments. Anti-clobber: it is
+        only called AFTER `_review_received` becomes True; the signal handler
+        merely appends to the list, so nothing is lost between the drain and the
+        next wait."""
         comments = list(self._review_comments)
         self._review_comments.clear()
         self._review_received = False
         return comments
 
     def _bump_review_round(self) -> None:
-        """WSB-E4-T2 — cap explicito de rounds de review (o loop de review e o
-        unico `while` do workflow que ainda nao tinha cap proprio). Esgotado ->
-        escalated (nunca um loop infinito por construcao)."""
+        """WSB-E4-T2 — explicit cap on review rounds (the review loop was the
+        only `while` in the workflow that still lacked its own cap). Exhausted
+        -> escalated (never an infinite loop, by construction)."""
         self._input.review_round += 1
         if self._input.review_round > self._input.review_round_cap:
             raise _EscalateNow(
@@ -1800,20 +1813,21 @@ class WorkItemLifecycleWorkflow:
             )
 
     async def _update_base_branch_before_review_fix(self) -> None:
-        """Fase 4 (WSE-E6-T16, wiring WS-B) — no caminho changes_requested,
-        ANTES de re-rodar o Coder: atualiza o branch da tarefa com o drift da
-        base SEM reescrever historia.
+        """Phase 4 (WSE-E6-T16, WS-B wiring) — on the changes_requested path,
+        BEFORE re-running the Coder: updates the task branch with the base drift
+        WITHOUT rewriting history.
 
-        `first_human_review_done=True` aqui e nao-negociavel: chegamos a este
-        ponto justamente PORQUE um humano ja revisou o PR e pediu mudancas —
-        depois do 1o review a estrategia so pode ser merge-base-into-branch. Um
-        rebase+force-push orfanaria as threads de review ancoradas nos commits
-        reescritos (comportamento verificado do GitHub, failure mode 11). A
-        estrategia e deterministica (P1: codigo no WS-E, nao modelo). Conflito
-        nao-resolvivel -> escala a humano (NUNCA resolve a forca)."""
+        `first_human_review_done=True` here is non-negotiable: we reach this
+        point precisely BECAUSE a human already reviewed the PR and requested
+        changes — after the 1st review the only allowed strategy is
+        merge-base-into-branch. A rebase+force-push would orphan the review
+        threads anchored to the rewritten commits (verified GitHub behavior,
+        failure mode 11). The strategy is deterministic (P1: code in WS-E, not a
+        model). An unresolvable conflict -> escalate to a human (NEVER force a
+        resolution)."""
         input = self._input
         if not (input.repo and input.branch and input.base_branch):
-            # Modo estrito/sem branch conhecido: nada a mesclar. Declina limpo.
+            # Strict mode / no known branch: nothing to merge. Decline cleanly.
             await self._audit("base_branch_update_skipped_no_branch", {})
             return
         await self._boundary_gate()
@@ -1836,26 +1850,27 @@ class WorkItemLifecycleWorkflow:
              "orphaned_threads": result.orphaned_threads, "detail": result.detail},
         )
         if result.conflict:
-            # P6: nunca resolve a forca; escala com a identidade do drift.
+            # P6: never force a resolution; escalate with the drift's identity.
             raise _EscalateNow(
                 f"base_branch_merge_conflict:repo={input.repo} branch={input.branch} "
                 f"base={input.base_branch} ({result.detail})"
             )
         if result.orphaned_threads:
-            # Invariante de exit da Fase 4: merge-base NUNCA orfana threads
-            # (rebase pos-review e proibido por construcao). Se o dono (WS-E)
-            # reportou >0, algo violou a garantia — nao seguimos adivinhando (P6).
+            # Phase 4 exit invariant: merge-base NEVER orphans threads
+            # (post-review rebase is forbidden by construction). If the owner
+            # (WS-E) reported >0, something violated the guarantee — we do not
+            # keep guessing (P6).
             raise _EscalateNow(
                 f"base_branch_orphaned_threads:{result.orphaned_threads} "
                 f"(strategy={result.strategy}) — violates the zero-orphaned-threads invariant"
             )
 
     async def _emit_pr_quality_metric(self, outcome: str) -> None:
-        """Fase 4 — emite as metricas de qualidade de PR (pilot gate "PR quality
-        thresholds"). Leitura deterministica no workflow (contadores + tempo via
-        workflow.now); emissao OTel na Activity local. Best-effort: falha de
-        metrica jamais afeta o fluxo. Chamada nas fronteiras terminais do PR
-        (merge/escalacao)."""
+        """Phase 4 — emits the PR quality metrics (pilot gate "PR quality
+        thresholds"). Deterministic read in the workflow (counters + time via
+        workflow.now); OTel emission in the local Activity. Best-effort: a
+        metric failure never affects the flow. Called at the PR's terminal
+        boundaries (merge/escalation)."""
         input = self._input
         time_to_merge = None
         if outcome == "merged" and input.pr_finalized_at_epoch is not None:
@@ -1877,18 +1892,18 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         except ActivityError:
-            logger.warning("emit_pr_quality_metric falhou; metrica e best-effort, fluxo segue")
+            logger.warning("emit_pr_quality_metric failed; the metric is best-effort, the flow continues")
 
     def _validate_merge_signal(self) -> tuple[bool, str, MergedByHumanSignal | None]:
-        """Valida o envelope ja autenticado/correlacionado pelo adapter.
+        """Validates the envelope already authenticated/correlated by the adapter.
 
-        A verificacao remota do estado do PR continua pertencendo ao adapter/
-        finalizador; aqui impedimos que um signal vazio, de outro PR/repo/SHA
-        ou sem identidade humana conclua o workflow.
+        Remotely verifying the PR state still belongs to the adapter/finalizer;
+        here we prevent an empty signal, one from another PR/repo/SHA, or one
+        without a human identity, from completing the workflow.
         """
         try:
             merge = MergedByHumanSignal(**(self._merge_payload or {}))
-        except Exception as exc:  # payload de signal e dado nao confiavel
+        except Exception as exc:  # a signal payload is untrusted data
             return False, f"invalid_payload:{type(exc).__name__}", None
         if self._input.pr_number is None or merge.pr_number != self._input.pr_number:
             return False, "pr_number_mismatch", merge
@@ -1899,17 +1914,18 @@ class WorkItemLifecycleWorkflow:
         return True, "ok", merge
 
     async def _verify_merge_via_github_api(self, merge) -> tuple[bool, str]:
-        """Plano 08 §F (F1) — confirma o merge contra a API do GitHub (verdade),
-        não só o envelope. Retorna (ok_para_concluir, motivo).
+        """Plano 08 §F (F1) — confirms the merge against the GitHub API (the
+        truth), not just the envelope. Returns (ok_to_complete, reason).
 
-        Política:
-          - PR de fato merged (e head_sha bate) → (True, "api_verified").
-          - refutação DEFINITIVA (PR não existe / não está merged / sha diverge)
-            → (False, motivo): forte sinal de forja; NÃO conclui (P1).
-          - API indisponível (erro de rede/credencial) → (True, "api_unavailable"):
-            degrada para o envelope, que já passou por assinatura HMAC do webhook
-            + correlação (defesa em profundidade; não trava merge por outage).
-        Guard de replay: histories antigas não chamavam esta Activity."""
+        Policy:
+          - PR actually merged (and head_sha matches) → (True, "api_verified").
+          - DEFINITIVE refutation (PR does not exist / is not merged / sha
+            diverges) → (False, reason): strong forgery signal; do NOT complete (P1).
+          - API unavailable (network/credential error) → (True, "api_unavailable"):
+            degrade to the envelope, which already passed the webhook's HMAC
+            signature + correlation (defense in depth; do not stall a merge on
+            an outage).
+        Replay guard: old histories did not call this Activity."""
         if not workflow.patched("merge-verify-github-api-v1"):
             return True, "unpatched"
         if not self._input.pr_number or not self._input.repo:
@@ -1925,33 +1941,33 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except ActivityError as exc:
-            # Activity caiu inteira após retries: degrada para o envelope
-            # autenticado (não trava merge legítimo por indisponibilidade).
-            logger.warning("verify_merge_state indisponível; degradando p/ envelope: %s", exc)
+            # The whole Activity failed after retries: degrade to the
+            # authenticated envelope (do not stall a legitimate merge on an outage).
+            logger.warning("verify_merge_state unavailable; degrading to the envelope: %s", exc)
             return True, "api_unavailable_activity_error"
         if v.verified:
             return True, f"api_verified(merged_by={v.merged_by})"
-        # refutação definitiva vs indisponibilidade (fail-safe distinto)
+        # definitive refutation vs unavailability (distinct fail-safe)
         if v.reason.startswith(("not_merged", "pr_not_found", "head_sha_mismatch")):
             return False, v.reason
         return True, f"api_unavailable:{v.reason}"
 
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
-        """Loop `while True` (NAO `continue_as_new` por iteracao — ver
-        comentario em `_run_implementation_phase` sobre a corrida de sinais):
-        cada volta reconsulta CI, espera veredito humano, e se for
-        `changes_requested` (ou CI red) aplica o ciclo de fix no MESMO
-        branch/PR e volta ao topo, tudo na MESMA execucao de workflow.
-        Fase 3 (WSB-E4-T2): rounds capados por `review_round_cap`; comentarios
-        consumidos em LOTE com janela de debounce (ADR-26) — N comentarios numa
-        janela viram UM ciclo de fix + UM refresh de evidencia."""
+        """`while True` loop (NOT `continue_as_new` per iteration — see the
+        comment in `_run_implementation_phase` about the signal race): each pass
+        re-queries CI, waits for the human verdict, and if it is
+        `changes_requested` (or CI red) applies the fix cycle on the SAME
+        branch/PR and goes back to the top, all in the SAME workflow execution.
+        Phase 3 (WSB-E4-T2): rounds capped by `review_round_cap`; comments
+        consumed in a BATCH with a debounce window (ADR-26) — N comments in one
+        window become ONE fix cycle + ONE evidence refresh."""
         input = self._input
 
         while True:
             await self._boundary_gate()
-            # Ativacao do alerta de history: o loop de review e onde o history
-            # cresce sem Continue-As-New (limitacao documentada) — emite a
-            # metrica a cada volta para o collector/WS-F.
+            # Feeds the history alert: the review loop is where the history
+            # grows without Continue-As-New (documented limitation) — emit the
+            # metric on every pass to the collector/WS-F.
             await self._emit_history_metric("review_loop")
             fine_states = workflow.patched("ci-pending-blocks-review-v1")
             if fine_states:
@@ -1999,8 +2015,8 @@ class WorkItemLifecycleWorkflow:
                 continue
 
             if ci.status == "red":
-                # CI vermelho antes de acordar um humano: volta ao Coder no
-                # MESMO branch/PR (mesma disciplina de retry cap).
+                # CI red before waking a human: back to the Coder on the SAME
+                # branch/PR (same retry-cap discipline).
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     raise _EscalateNow("ci_red_after_retry_cap_exhausted")
@@ -2008,7 +2024,7 @@ class WorkItemLifecycleWorkflow:
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="ci_red_retrying")
                 fix_result = await self._apply_coder_fix_cycle(["ci red: corrigir o pipeline"])
                 input.ci_pending_polls = 0
-                # ADR-26: fix cycle = commit novo que muda comportamento -> 1 refresh
+                # ADR-26: fix cycle = new commit that changes behavior -> 1 refresh
                 input.last_files_changed = list(fix_result.files_changed)
                 await self._run_evidence_pipeline(fix_result.files_changed,
                                                   reason="fix_cycle_ci_red")
@@ -2017,13 +2033,13 @@ class WorkItemLifecycleWorkflow:
             if fine_states and ci.status != "green":
                 raise _EscalateNow(f"unknown_ci_status:{ci.status!r}")
 
-            # IMPORTANTE: nao resetamos `_review_received` aqui antes de
-            # esperar — um `review_comment` pode ja ter chegado (via signal
-            # callback, que roda assim que o event loop do workflow cede o
-            # controle) enquanto ainda estavamos na Activity de CI acima.
-            # Resetar aqui apagaria essa resposta legitima e o workflow
-            # ficaria esperando para sempre por um sinal que ja veio. So
-            # consumimos e resetamos DEPOIS de drenar o lote, abaixo.
+            # IMPORTANT: we do not reset `_review_received` here before
+            # waiting — a `review_comment` may already have arrived (via the
+            # signal callback, which runs as soon as the workflow event loop
+            # yields) while we were still in the CI Activity above. Resetting
+            # here would erase that legitimate answer and the workflow would
+            # wait forever for a signal that already came. We only consume and
+            # reset AFTER draining the batch, below.
             ready_status = WorkItemStatus.review_ready if fine_states else WorkItemStatus.pr_ready
             await self._set_status(ready_status, audit_action="awaiting_human_review",
                                    details={"ci_status": ci.status, "head_sha": input.head_sha})
@@ -2037,12 +2053,12 @@ class WorkItemLifecycleWorkflow:
                 raise _EscalateNow(self._operator_escalate_reason or "operator_escalate")
 
             if self._refresh_evidence_requested and not self._review_received:
-                # ADR-26 — pedido humano explicito: o UNICO gatilho de refresh
-                # sem commit novo. Sem files novos, reusa o ultimo conjunto
-                # conhecido para o paths-filter deterministico (FR-20).
-                # Consome o pedido AQUI (nao so dentro do pipeline): um refresh
-                # DECLINADO pelo cap tambem conta como atendido — senao a flag
-                # pendente viraria um hot-loop nesta espera.
+                # ADR-26 — explicit human request: the ONLY refresh trigger
+                # without a new commit. With no new files, reuse the last known
+                # set for the deterministic paths-filter (FR-20). The request is
+                # consumed HERE (not only inside the pipeline): a refresh
+                # DECLINED by the cap also counts as served — otherwise the
+                # pending flag would turn this wait into a hot loop.
                 self._refresh_evidence_requested = False
                 await self._audit("evidence_refresh_requested_by_human", {})
                 await self._run_evidence_pipeline(list(input.last_files_changed),
@@ -2051,11 +2067,11 @@ class WorkItemLifecycleWorkflow:
 
             comments = self._drain_review_comments()
 
-            # ADR-26 — debounce: se o lote pede mudancas e ha janela
-            # configurada, espera a janela para agrupar comentarios que ainda
-            # estao chegando — 6 comentarios numa janela = 1 fix + 1 refresh.
-            # Decisao 100% deterministica: contagem/comparacao + timer durauel
-            # do Temporal; nenhum LLM decide nada aqui (P1).
+            # ADR-26 — debounce: if the batch requests changes and a window is
+            # configured, wait out the window to group comments that are still
+            # arriving — 6 comments in one window = 1 fix + 1 refresh. 100%
+            # deterministic decision: counting/comparison + Temporal's durable
+            # timer; no LLM decides anything here (P1).
             if (input.evidence_debounce_seconds > 0
                     and any(c.get("verdict") == "changes_requested" for c in comments)):
                 try:
@@ -2085,15 +2101,15 @@ class WorkItemLifecycleWorkflow:
                          if c.get("verdict") == "changes_requested"]
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="changes_requested",
                                         details={"comments": texts, "batched": len(comments)})
-                # Fase 4 (WSE-E6-T16) — merge-base ANTES de re-rodar o Coder:
-                # o humano ja revisou (first_human_review_done=True), entao o
-                # drift da base entra por merge-base-into-branch, nunca rebase
-                # (preserva as threads de review). Conflito -> escala.
+                # Phase 4 (WSE-E6-T16) — merge-base BEFORE re-running the Coder:
+                # the human already reviewed (first_human_review_done=True), so
+                # the base drift comes in via merge-base-into-branch, never a
+                # rebase (preserves the review threads). Conflict -> escalate.
                 await self._update_base_branch_before_review_fix()
                 fix_result = await self._apply_coder_fix_cycle(texts)
-                # ADR-26: 1 lote de comentarios -> 1 fix cycle -> no maximo 1
-                # refresh de evidencia (o refresh e disparado pelo COMMIT do
-                # fix, nunca pelos comentarios em si).
+                # ADR-26: 1 batch of comments -> 1 fix cycle -> at most 1
+                # evidence refresh (the refresh is triggered by the fix COMMIT,
+                # never by the comments themselves).
                 input.last_files_changed = list(fix_result.files_changed)
                 await self._run_evidence_pipeline(fix_result.files_changed, reason="fix_cycle")
                 continue
@@ -2103,8 +2119,9 @@ class WorkItemLifecycleWorkflow:
                     WorkItemStatus.merge_pending if fine_states else WorkItemStatus.pr_ready
                 )
                 await self._set_status(merge_status, audit_action="approved_awaiting_merge")
-                # (sem reset de `_merged` aqui pela mesma razao acima — comeca
-                # False no __init__ e so este ramo o consome, uma vez por run)
+                # (no reset of `_merged` here for the same reason as above — it
+                # starts False in __init__ and only this branch consumes it,
+                # once per run)
                 require_verified_signal = workflow.patched("validate-merge-signal-v1")
                 while True:
                     await workflow.wait_condition(lambda: self._merged or self._cancelled)
@@ -2114,10 +2131,10 @@ class WorkItemLifecycleWorkflow:
                         break
                     valid, reason, merge = self._validate_merge_signal()
                     if valid:
-                        # Plano 08 §F (F1): o envelope (pr_number/repo/sha) não é
-                        # segredo — um webhook forjado com os campos certos
-                        # passaria o check acima. Confirma na API do GitHub que o
-                        # PR está REALMENTE merged antes de concluir (P1/P8).
+                        # Plano 08 §F (F1): the envelope (pr_number/repo/sha) is
+                        # not a secret — a forged webhook with the right fields
+                        # would pass the check above. Confirm on the GitHub API
+                        # that the PR is REALLY merged before completing (P1/P8).
                         api_ok, api_reason = await self._verify_merge_via_github_api(merge)
                         if api_ok:
                             await self._audit(
@@ -2147,31 +2164,38 @@ class WorkItemLifecycleWorkflow:
                             retry_policy=RetryPolicy(maximum_attempts=3),
                         )
                     except ActivityError:
-                        logger.warning("teardown falhou apos merge; seguindo mesmo assim (nao bloqueia Done)")
+                        logger.warning("teardown failed after merge; continuing anyway (it does not block Done)")
                 await self._set_status(
                     WorkItemStatus.done,
                     audit_action="merged_by_human",
                     details={"merged_by": (self._merge_payload or {}).get("merged_by"),
                              "pr_number": input.pr_number},
                 )
-                # Merge humano -> coluna Done no board (fecha o ciclo do card).
+                # Human merge -> Done column on the board (closes the card's cycle).
                 await self._post_board_transition(WorkItemStatus.done.value)
-                # Fase 4 — metrica de qualidade de PR na fronteira de merge
-                # (pilot gate). Best-effort, apos o Done ja estar persistido.
+                # The merge is the one transition every requester actually waits
+                # for, and it was the only consequential one that never wrote
+                # back: the "done" copy existed in _STATUS_BODIES but no call
+                # site ever emitted it, so the status comment froze on the last
+                # pre-merge state and the task looked unfinished forever.
+                if workflow.patched("post-done-comment-v1"):
+                    await self._post_status_comment(WorkItemStatus.done.value)
+                # Phase 4 — PR quality metric at the merge boundary (pilot
+                # gate). Best-effort, after Done is already persisted.
                 await self._emit_pr_quality_metric("merged")
                 return WorkItemLifecycleResult(
                     work_item_id=input.work_item_id, status=WorkItemStatus.done.value,
                     pr_number=input.pr_number,
                 )
 
-            # veredito desconhecido: nunca adivinha (P6) — escala.
+            # unknown verdict: never guess (P6) — escalate.
             raise _EscalateNow(f"unknown_review_verdict:{verdicts!r}")
 
     async def _apply_coder_fix_cycle(self, comments: list[str]) -> CoderTurnResult:
-        """`changes_requested` (humano, possivelmente um LOTE debounced) ou CI
-        red: volta ao Coder no MESMO branch/PR, re-valida L1, re-finaliza o
-        MESMO PR (idempotente). Retorna o resultado do Coder — o caller usa
-        `files_changed` para o refresh de evidencia (paths-filter FR-20)."""
+        """`changes_requested` (human, possibly a debounced BATCH) or CI red:
+        back to the Coder on the SAME branch/PR, re-validate L1, re-finalize the
+        SAME PR (idempotent). Returns the Coder result — the caller uses
+        `files_changed` for the evidence refresh (paths-filter FR-20)."""
         input = self._input
         await self._boundary_gate()
         await self._budget_boundary("review_fix_coder")
@@ -2180,12 +2204,12 @@ class WorkItemLifecycleWorkflow:
         review_notes = "\n".join(f"- {c.strip()}" for c in comments if c and c.strip())
         fix_instruction = self._agent_instruction(include_objections=True)
         if review_notes:
-            fix_instruction += "\n\nComentários de review a resolver:\n" + review_notes
+            fix_instruction += "\n\nReview comments to resolve:\n" + review_notes
         coder_result: CoderTurnResult = await self._run_model_activity(
             ACTIVITY_RUN_CODER_TURN,
             {
-                # S7: RunCoderTurnInput usa `instruction` (str) + `branch` — o
-                # call site antigo mandava `instructions` (lista, campo inexistente).
+                # S7: RunCoderTurnInput uses `instruction` (str) + `branch` — the
+                # old call site sent `instructions` (a list, a nonexistent field).
                 "sandbox_id": input.sandbox_id,
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
@@ -2229,7 +2253,7 @@ class WorkItemLifecycleWorkflow:
             input.coder_retry_count += 1
             if input.coder_retry_count > self._input.coder_retry_cap:
                 raise _EscalateNow("l1_revalidation_failed_after_retry_cap")
-            # tenta mais uma vez recursivamente ate o cap (mantem no mesmo branch/PR)
+            # try again recursively up to the cap (stays on the same branch/PR)
             return await self._apply_coder_fix_cycle(comments)
 
         await self._boundary_gate()
@@ -2292,25 +2316,25 @@ class WorkItemLifecycleWorkflow:
         return coder_result
 
     # ------------------------------------------------------------------
-    # Fase 3 — pipeline de evidencia (WS-E implementa as Activities; aqui so
-    # a orquestracao deterministica, pelos NOMES/models de dse_contracts).
+    # Phase 3 — evidence pipeline (WS-E implements the Activities; here only the
+    # deterministic orchestration, via the NAMES/models from dse_contracts).
     # trigger_preview -> (created) run_demo_evidence -> run_visual_diff.
-    # O publish do video/trace acontece DENTRO de run_demo_evidence (WS-E).
-    # Failure mode 9: preview/demo degradado NUNCA bloqueia o PR — evidencia
-    # degradada e registrada (audit + projecao 0014) e o fluxo segue para
-    # review humano.
+    # Publishing the video/trace happens INSIDE run_demo_evidence (WS-E).
+    # Failure mode 9: a degraded preview/demo NEVER blocks the PR — degraded
+    # evidence is recorded (audit + projection 0014) and the flow moves on to
+    # human review.
     # ------------------------------------------------------------------
     async def _run_evidence_pipeline(self, files_changed: list[str], *, reason: str) -> None:
         input = self._input
         if input.pr_number is None:
-            # Modo estrito (compare_url sem PR): sem pr_number nao ha preview
-            # por PR — declina limpo e auditado (P6), nunca bloqueia.
+            # Strict mode (compare_url without a PR): without a pr_number there
+            # is no per-PR preview — decline cleanly and audited (P6), never block.
             await self._audit("evidence_skipped_no_pr", {"reason": reason})
             return
         if reason != "initial":
             if input.evidence_refreshes >= input.evidence_refresh_cap:
-                # ADR-26: cap de refreshes — declina LIMPO (auditado); a
-                # evidencia fica stale, o PR nao e bloqueado (P6).
+                # ADR-26: refresh cap — decline CLEANLY (audited); the evidence
+                # goes stale, the PR is not blocked (P6).
                 await self._audit(
                     "evidence_refresh_declined_cap",
                     {"reason": reason, "refreshes": input.evidence_refreshes,
@@ -2318,13 +2342,13 @@ class WorkItemLifecycleWorkflow:
                 )
                 return
             input.evidence_refreshes += 1
-        # Qualquer pedido humano pendente e atendido por ESTE refresh (nunca
-        # empilha um segundo refresh para o mesmo estado do branch).
+        # Any pending human request is served by THIS refresh (it never queues a
+        # second refresh for the same branch state).
         self._refresh_evidence_requested = False
 
-        # Plano 08 §D — gate deploys_preview (operator-set no painel Repos & ROI).
-        # Guard de replay: histories antigas nao chamavam esta local activity e
-        # devem replayar com preview_enabled=True (comportamento anterior).
+        # Plano 08 §D — deploys_preview gate (operator-set in the Repos & ROI panel).
+        # Replay guard: old histories did not call this local activity and must
+        # replay with preview_enabled=True (previous behavior).
         preview_enabled = True
         if workflow.patched("preview-gate-deploys-v1"):
             try:
@@ -2336,7 +2360,7 @@ class WorkItemLifecycleWorkflow:
                 )
                 preview_enabled = bool(gate.get("enabled", True))
             except ActivityError:
-                logger.warning("preview_enabled_for_repo falhou; fail-open (preview nunca bloqueia)")
+                logger.warning("preview_enabled_for_repo failed; fail-open (preview never blocks)")
 
         try:
             preview: PreviewRef = await workflow.execute_activity(
@@ -2372,8 +2396,8 @@ class WorkItemLifecycleWorkflow:
         )
 
         if preview.status in ("skipped_backend_only", "skipped_disabled"):
-            # Decisao deterministica de nao-preview (paths-filter FR-20 ou gate
-            # deploys_preview §D) — conta como SUCESSO, nunca bloqueia.
+            # Deterministic no-preview decision (paths-filter FR-20 or the
+            # deploys_preview gate §D) — counts as SUCCESS, never blocks.
             await self._audit(
                 "evidence_skipped_backend_only",
                 {"reason": reason, "preview_status": preview.status},
@@ -2381,8 +2405,8 @@ class WorkItemLifecycleWorkflow:
             await self._record_evidence(reason=reason, detail=preview.status)
             return
         if preview.status != "created":
-            # "degraded" ou qualquer status desconhecido: degrada limpo (P6),
-            # nunca bloqueia nem adivinha.
+            # "degraded" or any unknown status: degrade cleanly (P6), never
+            # block and never guess.
             await self._audit(
                 "evidence_degraded",
                 {"stage": "trigger_preview", "reason": reason,
@@ -2391,10 +2415,10 @@ class WorkItemLifecycleWorkflow:
             await self._record_evidence(reason=reason, detail=(preview.detail or "")[:300])
             return
 
-        # Plano 08 §D (D1) — o objetivo do usuario: o LINK do preview aparece no
-        # PR para o humano acessar e decidir. Postado assim que o preview existe
-        # (independe de demo/visual, que degradam sem bloquear). Best-effort e
-        # guardado por patch (histories antigas nao postavam) — nunca bloqueia.
+        # Plano 08 §D (D1) — the user's goal: the preview LINK shows up on the
+        # PR for the human to open and decide. Posted as soon as the preview
+        # exists (independent of demo/visual, which degrade without blocking).
+        # Best-effort and patch-guarded (old histories did not post) — never blocks.
         if preview.url and workflow.patched("preview-link-in-pr-v1"):
             await self._post_preview_link(preview.url, preview.kind)
 
@@ -2429,10 +2453,11 @@ class WorkItemLifecycleWorkflow:
              "duration_s": demo.duration_s, "reason": reason},
         )
 
-        # Visual diff quando ha screenshot. Gap de contrato documentado no
-        # README: DemoEvidenceResult nao carrega uma chave de screenshot, entao
-        # o gatilho deterministico e "a demo produziu midia" (video/trace) e o
-        # candidato segue a convencao demos/<work_item_id>/ (ADR-27, WSC-E3-T4b).
+        # Visual diff when there is a screenshot. Contract gap documented in the
+        # README: DemoEvidenceResult does not carry a screenshot key, so the
+        # deterministic trigger is "the demo produced media" (video/trace) and
+        # the candidate follows the demos/<work_item_id>/ convention (ADR-27,
+        # WSC-E3-T4b).
         if demo.video_artifact_key or demo.trace_artifact_key:
             try:
                 vd: VisualDiffResult = await workflow.execute_activity(
@@ -2448,8 +2473,9 @@ class WorkItemLifecycleWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 if vd.baseline_created and vd.diff_artifact_key:
-                    # 1o run: WS-E publica o candidato como baseline e retorna a
-                    # chave em diff_artifact_key (assuncao documentada no README).
+                    # 1st run: WS-E publishes the candidate as the baseline and
+                    # returns the key in diff_artifact_key (assumption
+                    # documented in the README).
                     input.visual_baseline_key = vd.diff_artifact_key
                 await self._audit(
                     "visual_diff_completed",
@@ -2465,10 +2491,10 @@ class WorkItemLifecycleWorkflow:
         await self._record_evidence(reason=reason, detail="ok")
 
     async def _post_preview_link(self, url: str, kind: str) -> None:
-        """Plano 08 §D (D1) — posta/edita o comentário de tracking da superfície
-        de origem com o LINK clicável do preview. Reusa a MutableCommentWriter
-        (C3) via post_tracking_comment (body custom). Best-effort — jamais
-        bloqueia (o audit ledger é a verdade; o comentário é conveniência)."""
+        """Plano 08 §D (D1) — posts/edits the originating surface's tracking
+        comment with the clickable preview LINK. Reuses the MutableCommentWriter
+        (C3) via post_tracking_comment (custom body). Best-effort — it never
+        blocks (the audit ledger is the truth; the comment is convenience)."""
         input = self._input
         label = "frontend (UI)" if kind == "ui" else "service" if kind == "deployable" else "app"
         body = (
@@ -2486,11 +2512,12 @@ class WorkItemLifecycleWorkflow:
             )
             await self._audit("preview_link_posted", {"url": url, "kind": kind})
         except ActivityError:
-            logger.warning("post_preview_link best-effort falhou (url=%s)", url)
+            logger.warning("best-effort post_preview_link failed (url=%s)", url)
 
     async def _record_evidence(self, *, reason: str, detail: str) -> None:
-        """Projecao duravel do estado de evidencia (migracao 0014) — best-effort:
-        a projecao nunca bloqueia o fluxo (o audit ledger e a fonte imutavel)."""
+        """Durable projection of the evidence state (migration 0014) —
+        best-effort: the projection never blocks the flow (the audit ledger is
+        the immutable source)."""
         input = self._input
         try:
             await workflow.execute_activity(
@@ -2512,4 +2539,4 @@ class WorkItemLifecycleWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
         except ActivityError:
-            logger.warning("record_evidence_state falhou; projecao e best-effort, fluxo segue")
+            logger.warning("record_evidence_state failed; the projection is best-effort, the flow continues")

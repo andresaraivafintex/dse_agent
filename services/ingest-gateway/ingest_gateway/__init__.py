@@ -1,11 +1,11 @@
-"""WS-A ingest-gateway: gateway transacional (outbox), dispatcher Temporal,
-defesas de intake (assinatura, TOCTOU snapshot, sanitização), correlação
-Path A/B e steering allowlist.
+"""WS-A ingest-gateway: transactional gateway (outbox), Temporal dispatcher,
+intake defenses (signature, TOCTOU snapshot, sanitization), Path A/B
+correlation and steering allowlist.
 
-Reutilizado como biblioteca pelos adapters (services/adapter-slack,
-services/adapter-github) — eles chamam `admit_work_item`/`correlate`
-diretamente contra o mesmo Postgres, o que mantém os adapters 100%
-stateless (nenhum estado vive no processo do adapter).
+Reused as a library by the adapters (services/adapter-slack,
+services/adapter-github) — they call `admit_work_item`/`correlate` directly
+against the same Postgres, which keeps the adapters 100% stateless (no state
+lives in the adapter process).
 """
 from .db import get_connection
 from .kill_switch import is_channel_killed
@@ -23,8 +23,16 @@ from .sanitize import sanitize_content
 from .tenant_binding import resolve_tenant, default_tenant, ResolvedTenant
 from .repo_resolver import resolve_repo, parse_explicit_repo
 from .task_class import classify_task_class, TASK_CLASSES
+from .reconcile import (
+    pending_reply_work_items,
+    RECOVERABLE_STATUSES,
+    NON_RECOVERABLE_STATUSES,
+)
 
 __all__ = [
+    "pending_reply_work_items",
+    "RECOVERABLE_STATUSES",
+    "NON_RECOVERABLE_STATUSES",
     "get_connection",
     "is_channel_killed",
     "admit_work_item",
