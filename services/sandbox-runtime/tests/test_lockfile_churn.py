@@ -42,7 +42,7 @@ def repo(tmp_path):
     return ws
 
 
-def test_lockfile_churn_sem_manifesto_e_restaurado(repo):
+def test_lockfile_churn_without_a_manifest_is_restored(repo):
     with open(os.path.join(repo, "package-lock.json"), "a") as fh:
         fh.write('/* churn do npm */\n')
     restored = _restore_lockfile_churn(repo)
@@ -50,7 +50,7 @@ def test_lockfile_churn_sem_manifesto_e_restaurado(repo):
     assert _git(repo, "status", "--porcelain").strip() == ""
 
 
-def test_lockfile_com_manifesto_mudado_fica(repo):
+def test_lockfile_with_a_changed_manifest_stays(repo):
     # the declared dependency changed alongside it: the lockfile+manifest pair is legitimate
     with open(os.path.join(repo, "package.json"), "w") as fh:
         fh.write('{"name": "app", "dependencies": {"left-pad": "^1.0.0"}}\n')
@@ -61,15 +61,15 @@ def test_lockfile_com_manifesto_mudado_fica(repo):
     assert "package-lock.json" in porcelain and "package.json" in porcelain
 
 
-def test_lockfile_novo_untracked_sem_manifesto_e_removido(repo):
+def test_new_untracked_lockfile_without_a_manifest_is_removed(repo):
     # e.g. a repo with no yarn.lock; running yarn creates one out of nowhere
     with open(os.path.join(repo, "yarn.lock"), "w") as fh:
-        fh.write("# gerado\n")
+        fh.write("# generated\n")
     assert _restore_lockfile_churn(repo) == ["yarn.lock"]
     assert not os.path.exists(os.path.join(repo, "yarn.lock"))
 
 
-def test_arquivo_normal_modificado_nunca_e_tocado(repo):
+def test_a_normal_modified_file_is_never_touched(repo):
     src = os.path.join(repo, "app.js")
     with open(src, "w") as fh:
         fh.write("// fix\n")
@@ -77,10 +77,10 @@ def test_arquivo_normal_modificado_nunca_e_tocado(repo):
     assert os.path.exists(src)
 
 
-def test_tester_reusa_testes_de_commits_anteriores(repo):
+def test_tester_reuses_tests_from_earlier_commits(repo):
     os.makedirs(os.path.join(repo, "test"))
     with open(os.path.join(repo, "test", "delete.test.js"), "w") as fh:
-        fh.write("// teste autorado\n")
+        fh.write("// authored test\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "tester(wi_x): covers removal by id")
     # a coder commit in between does not count
@@ -91,17 +91,17 @@ def test_tester_reusa_testes_de_commits_anteriores(repo):
     assert _tester_authored_files_in_history(repo) == ["test/delete.test.js"]
 
 
-def test_tester_sem_commits_anteriores_autora_normalmente(repo):
+def test_tester_with_no_earlier_commits_authors_normally(repo):
     assert _tester_authored_files_in_history(repo) == []
 
 
-def test_tester_ignora_arquivo_autorado_que_sumiu(repo):
+def test_tester_ignores_an_authored_file_that_vanished(repo):
     os.makedirs(os.path.join(repo, "test"))
     p = os.path.join(repo, "test", "old.test.js")
     with open(p, "w") as fh:
-        fh.write("// velho\n")
+        fh.write("// old\n")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "tester(wi_x): velho")
+    _git(repo, "commit", "-q", "-m", "tester(wi_x): old")
     _git(repo, "rm", "-q", "test/old.test.js")
-    _git(repo, "commit", "-q", "-m", "coder(wi_x): remove teste obsoleto")
+    _git(repo, "commit", "-q", "-m", "coder(wi_x): remove an obsolete test")
     assert _tester_authored_files_in_history(repo) == []

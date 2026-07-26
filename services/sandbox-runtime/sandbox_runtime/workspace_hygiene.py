@@ -1,6 +1,6 @@
 """Deterministic post-turn workspace hygiene (P1) — VENDORABLE module.
 
-Extracted from `activities.py` (Fase 1, plano 09) so it can run in TWO places
+Extracted from `activities.py` (Phase 1, plan 09) so it can run in TWO places
 from a single source of truth: in the worker (Docker runtime, git over the bind
 mount) and inside the agent-runner (K8s runtime, git in-pod via
 `--op post_turn`). That is why the dependencies are stdlib + `dse_contracts`

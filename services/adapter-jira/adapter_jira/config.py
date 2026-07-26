@@ -69,13 +69,13 @@ def get_retry_label() -> str:
 
 def get_plan_approved_status() -> str:
     """Name of the column/status whose TRANSITION is read as a plan approval
-    (UC5, WSA-E5-T1). E.g.: 'Plano aprovado'."""
+    (UC5, WSA-E5-T1). E.g.: 'Plan approved'."""
     return os.environ.get("JIRA_PLAN_APPROVED_STATUS", "Plan approved")
 
 
 def get_plan_rejected_status() -> str:
     """Name of the column/status whose transition is read as a plan REJECTION
-    (optional). E.g.: 'Plano rejeitado'."""
+    (optional). E.g.: 'Plan rejected'."""
     return os.environ.get("JIRA_PLAN_REJECTED_STATUS", "Plan rejected")
 
 

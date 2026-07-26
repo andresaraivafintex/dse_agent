@@ -109,7 +109,7 @@ def test_reassign_changes_effective_model_and_audits(unique_ids):
     headers = GatewayCallHeaders(tenant_id=t, work_item_id=wi, stage=Stage.coder)
     try:
         # operator reassigns the work_item from haiku (unavailable/AWS) to echo
-        reassign_model(wi, ECHO, reason="fallback para modelo local", actor="system:operator", tenant_id=t)
+        reassign_model(wi, ECHO, reason="fallback to a local model", actor="system:operator", tenant_id=t)
         assert controls.resolve_reassignment(wi) == ECHO
         # the caller asks for haiku, but the reassign forces echo -> echo's response
         r = chat_completion(

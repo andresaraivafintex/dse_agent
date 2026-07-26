@@ -25,7 +25,7 @@ Note (empirical finding from this session, LiteLLM 1.93.0): the router's
 fallback happens EVEN with a virtual key scoped only to the primary model — the
 key's model-scoping does not restrict the fallback target. That is why the
 policy check on the served model is done in the client (gateway_call) and why
-the declarative mirror exists; see README §Fase 3.
+the declarative mirror exists; see README §Phase 3.
 """
 from __future__ import annotations
 

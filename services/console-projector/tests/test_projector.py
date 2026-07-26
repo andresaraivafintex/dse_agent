@@ -1,4 +1,4 @@
-"""Projector (Plano 06 F0) — map contract + real projection against Postgres.
+"""Projector (Plan 06 F0) — map contract + real projection against Postgres.
 
 Runs against the infra Postgres (like the other suites): seeds a synthetic
 WorkItem + outbox + audit + ledger, runs `run_once` and validates the read model.
@@ -213,7 +213,7 @@ def test_status_transition_reprojects():
 
 
 def test_cost_rollup_reconciles_with_ledger():
-    """Plano 08 §E: the cost rollup matches the ledger EXACTLY (the cost truth,
+    """Plan 08 §E: the cost rollup matches the ledger EXACTLY (the cost truth,
     P8) for the tenant. Reconciliation — if they diverge, CI breaks HERE."""
     conn = psycopg2.connect(DSN)
     wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
@@ -271,7 +271,7 @@ def test_task_class_projected_into_view():
 
 
 def test_projects_evidence_preview_into_view():
-    """Plano 08 §D (D5): preview_status/url from work_item_evidence reaches
+    """Plan 08 §D (D5): preview_status/url from work_item_evidence reaches
     work_items_view (the dashboard shows the preview link next to the PR)."""
     conn = psycopg2.connect(DSN)
     wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"

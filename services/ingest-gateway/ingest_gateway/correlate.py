@@ -43,7 +43,7 @@ _TERMINAL_STATUSES = {WorkItemStatus.done.value, WorkItemStatus.failed.value}
 # Kinds that represent "someone injecting new direction" into an active task —
 # they go through the steering allowlist gate (deny-by-default; see steering.py).
 #
-# Plano 08 §F (F4): `clarification_answer` is ALSO gated. On a public GitHub
+# Plan 08 §F (F4): `clarification_answer` is ALSO gated. On a public GitHub
 # issue (or channel/ticket) ANYONE can comment; an unauthorized third party
 # answering the clarification would inject direction into the task without
 # going through authorization. The legitimate requester is on the allowlist
@@ -101,7 +101,7 @@ def correlate(
         return CorrelationResult("new_task", None, provenance_work_item_id=matched_id)
 
     if event.kind in _STEERING_GATED_KINDS:
-        # Plano 08 §F (F4, audit adjustment): the task's REQUESTER answering the
+        # Plan 08 §F (F4, audit adjustment): the task's REQUESTER answering the
         # clarification of their OWN task is the expected flow (the question was
         # asked to them) — authorized by construction, a deterministic
         # comparison against the requester column (P1). Applies only to

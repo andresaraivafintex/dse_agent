@@ -11,17 +11,17 @@
   </style>
 </head>
 <body>
-  <h1>Fintex DSE — página fixture determinística (@demo)</h1>
+  <h1>Fintex DSE — deterministic fixture page (@demo)</h1>
   <div id="counter">0</div>
-  <button id="inc">Incrementar</button>
-  <p id="status">aguardando</p>
+  <button id="inc">Increment</button>
+  <p id="status">waiting</p>
   <script>
     const counter = document.getElementById('counter');
     const status = document.getElementById('status');
     document.getElementById('inc').addEventListener('click', () => {
       counter.textContent = String(Number(counter.textContent) + 1);
       if (Number(counter.textContent) >= 3) {
-        status.textContent = 'concluído';
+        status.textContent = 'done';
         status.className = 'done';
       }
     });

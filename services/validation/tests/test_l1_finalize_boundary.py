@@ -66,7 +66,7 @@ def test_finalize_input_accepts_exact_workflow_payload():
 def test_finalize_input_tolerates_absent_issue_and_evidence():
     # work item with no originating issue (e.g. Slack/Jira origin with no number) —
     # the workflow sends issue_ref=None and empty evidence; the finalizer uses the
-    # "(sem ...)" fallbacks in the body.
+    # "(no ...)" fallbacks in the body.
     inp = FinalizePrInput(
         work_item_id="wi-1", tenant_id="tnt-1", sandbox=_handle_payload(),
         repo="a/b", base_branch="main", branch="dse/wi-1", summary="s",

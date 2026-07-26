@@ -1,7 +1,7 @@
 """WSC-E3-T4b (b)+(c): the `demos/<work_item_id>/` convention in the
 TesterToolset and authoring of the `@demo` fixture by the scripted Tester.
 
-Proves (against real sandbox/git, same harness as the Fase 2 suite):
+Proves (against real sandbox/git, same harness as the Phase 2 suite):
   - the Tester WRITES under `demos/<work_item_id>/` (an additional allowed
     path);
   - it stays BLOCKED elsewhere: production code, ANOTHER work item's `demos/`,
@@ -64,7 +64,7 @@ def _check(toolset: TesterToolset, path: str) -> None:
 
 def test_toolset_allows_demo_dir_and_blocks_everything_else():
     ts = TesterToolset(work_item_id=WI)
-    # allowed: test paths (Fase 2) + demos/<this work item>/ (Fase 3)
+    # allowed: test paths (Phase 2) + demos/<this work item>/ (Phase 3)
     _check(ts, "tests/test_x.py")
     _check(ts, f"demos/{WI}/demo.spec.js")
     # blocked: production, another work item's demos, traversal
@@ -77,13 +77,13 @@ def test_toolset_allows_demo_dir_and_blocks_everything_else():
 
 
 def test_toolset_without_work_item_blocks_all_demo_writes():
-    """Constructor without arguments (Fase 2 call sites): test paths keep
+    """Constructor without arguments (Phase 2 call sites): test paths keep
     working, and NO write under `demos/` is allowed — not even one that looks
     like a test path (`*.spec.js`): the evidence namespace is scoped per work
     item, and a session without a work item has no scope there at all."""
     ts = TesterToolset()
     _check(ts, "tests/test_x.py")
-    _check(ts, "src/app.spec.js")  # generic Fase 2 rule, outside demos/
+    _check(ts, "src/app.spec.js")  # generic Phase 2 rule, outside demos/
     with pytest.raises(ToolPermissionError):
         _check(ts, f"demos/{WI}/demo.spec.js")
 
@@ -97,7 +97,7 @@ def test_tester_authors_demo_fixture_and_commits(work_item_id, state_dir):
     try:
         result = asyncio.run(
             _run_tester_turn_impl(
-                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="autora o @demo"),
+                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="author the @demo"),
                 authoring_script=demo_authoring_script(work_item_id),
             )
         )
@@ -141,7 +141,7 @@ def test_tester_still_blocked_outside_demo_and_test_paths(work_item_id, state_di
                     ],
                 )
             )
-        # production — still blocked (Fase 2 regression).
+        # production — still blocked (Phase 2 regression).
         with pytest.raises(ToolPermissionError):
             asyncio.run(
                 _run_tester_turn_impl(

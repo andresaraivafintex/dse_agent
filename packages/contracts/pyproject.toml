@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-contracts"
 version = "0.1.0"
-description = "Contratos compartilhados do Fintex DSE (ConversationEvent, WorkItem, PlanArtifact, gateway, mutable comment)"
+description = "Shared Fintex DSE contracts (ConversationEvent, WorkItem, PlanArtifact, gateway, mutable comment)"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.6"]
 

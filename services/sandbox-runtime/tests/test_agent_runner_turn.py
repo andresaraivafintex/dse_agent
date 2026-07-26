@@ -29,7 +29,7 @@ def _req(tmp_path, **overrides):
         "tenant_id": "tenant-a",
         "stage": "coder",
         "substrate": "fake",
-        "instruction": "implemente",
+        "instruction": "implement it",
         "workspace_dir": str(tmp_path),
         "gateway": {"base_url": "http://model-gateway:4000", "virtual_key": "vk-eph"},
     }
@@ -42,13 +42,13 @@ def test_fake_substrate_writes_files_inside_workspace(tmp_path):
         tmp_path,
         fake_script=[
             {"write_files": {"src/handler.py": "def handler():\n    return 'ok'\n"},
-             "thought": "implementa handler", "done": True},
+             "thought": "implement handler", "done": True},
         ],
     )
     result = run_agent_turn(req)
     assert result.done and not result.failed
     assert (tmp_path / "src" / "handler.py").read_text().startswith("def handler")
-    assert result.thoughts == ["implementa handler"]
+    assert result.thoughts == ["implement handler"]
 
 
 def test_openhands_missing_sdk_is_structured_error_not_fallback(tmp_path, monkeypatch):

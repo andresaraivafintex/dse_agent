@@ -116,18 +116,18 @@ def _make_instruments() -> None:
     _hist_length = _meter.create_histogram(
         METRIC_HISTORY_LENGTH,
         unit="{event}",
-        description="Eventos no history do run ATUAL do WorkItemLifecycleWorkflow "
-        "(get_current_history_length) — regra §3 de ALERTING-RULES.md",
+        description="Events in the CURRENT WorkItemLifecycleWorkflow run's history "
+        "(get_current_history_length) — rule §3 of ALERTING-RULES.md",
     )
     _hist_size = _meter.create_histogram(
         METRIC_HISTORY_SIZE_BYTES,
         unit="By",
-        description="Bytes do history do run atual (get_current_history_size)",
+        description="Bytes of the current run's history (get_current_history_size)",
     )
     _can_count = _meter.create_histogram(
         METRIC_CONTINUE_AS_NEW,
         unit="{run}",
-        description="Quantos Continue-As-New esta cadeia de execucoes ja fez",
+        description="How many Continue-As-New this chain of executions has already done",
     )
     global _pr_review_rounds, _pr_changes_requested, _pr_time_to_merge, _pr_evidence_refreshes
     _pr_review_rounds = _meter.create_histogram(
@@ -136,7 +136,7 @@ def _make_instruments() -> None:
     )
     _pr_changes_requested = _meter.create_histogram(
         METRIC_PR_CHANGES_REQUESTED, unit="{batch}",
-        description="Quantos lotes de changes_requested um PR acumulou (pilot gate)",
+        description="How many changes_requested batches a PR has accumulated (pilot gate)",
     )
     _pr_time_to_merge = _meter.create_histogram(
         METRIC_PR_TIME_TO_MERGE, unit="s",
@@ -145,7 +145,7 @@ def _make_instruments() -> None:
     _pr_evidence_refreshes = _meter.create_histogram(
         METRIC_PR_EVIDENCE_REFRESHES, unit="{refresh}",
         description="PR evidence refreshes (evidence-consumption proxy; "
-        "o acesso real e logado pelo WS-E). Pilot gate.",
+        "the real access is logged by WS-E). Pilot gate.",
     )
 
 

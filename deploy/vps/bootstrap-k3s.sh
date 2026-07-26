@@ -15,7 +15,7 @@ log() { printf '\n== %s\n' "$*"; }
 
 # --- swap (peak buffer on the small VPS; plan 09 §Fase 5) --------------------
 if ! swapon --show | grep -q '/swapfile'; then
-  log "criando swap de ${SWAP_GB}G"
+  log "creating a ${SWAP_GB}G swap file"
   fallocate -l "${SWAP_GB}G" /swapfile
   chmod 600 /swapfile
   mkswap /swapfile
@@ -27,7 +27,7 @@ fi
 
 # --- k3s single-node (traefik on — it is the pilot's ingress) ----------------
 if ! command -v k3s >/dev/null 2>&1; then
-  log "instalando k3s ${K3S_VERSION}"
+  log "installing k3s ${K3S_VERSION}"
   curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${K3S_VERSION}" sh -s - \
     --write-kubeconfig-mode 644
 else
@@ -36,7 +36,7 @@ fi
 
 # --- gVisor (runsc) + RuntimeClass — the isolation that authorizes the pilot -
 if ! command -v runsc >/dev/null 2>&1; then
-  log "instalando gVisor (runsc)"
+  log "installing gVisor (runsc)"
   (
     cd /tmp
     curl -sfLO "${GVISOR_URL}/runsc" -O "${GVISOR_URL}/runsc.sha512" \
@@ -55,7 +55,7 @@ fi
 # handler (the Pod stays ContainerCreating with "no runtime for runsc is configured").
 K3S_CONTAINERD_TMPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
 if ! grep -q 'runtimes.runsc' "$K3S_CONTAINERD_TMPL" 2>/dev/null; then
-  log "registrando handler runsc no containerd do k3s"
+  log "registering the runsc handler in k3s containerd"
   mkdir -p "$(dirname "$K3S_CONTAINERD_TMPL")"
   cat > "$K3S_CONTAINERD_TMPL" <<'EOF'
 {{ template "base" . }}
@@ -69,16 +69,16 @@ else
   log "runsc handler already registered"
 fi
 
-log "aplicando RuntimeClass gvisor + namespace de sandboxes (PSA restricted)"
+log "applying the gvisor RuntimeClass + the sandbox namespace (PSA restricted)"
 k3s kubectl apply -f "$(dirname "$0")/../k8s/sandbox-isolation.yaml"
 
 # --- helm + sops + age --------------------------------------------------------
-command -v helm >/dev/null 2>&1 || { log "instalando helm"; curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash; }
+command -v helm >/dev/null 2>&1 || { log "installing helm"; curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash; }
 # sops: the release asset carries the version in its name — "latest/download"
 # with an unversioned name returns 404 (found during the real VPS bootstrap,
 # 2026-07-23).
 SOPS_VERSION="${SOPS_VERSION:-v3.11.0}"
-command -v sops >/dev/null 2>&1 || { log "instalando sops ${SOPS_VERSION}"; curl -sfLo /usr/local/bin/sops "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 )"; chmod +x /usr/local/bin/sops; }
-command -v age >/dev/null 2>&1 || { log "instalando age"; apt-get update -qq && apt-get install -y -qq age; }
+command -v sops >/dev/null 2>&1 || { log "installing sops ${SOPS_VERSION}"; curl -sfLo /usr/local/bin/sops "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.$( [ "$(uname -m)" = aarch64 ] && echo arm64 || echo amd64 )"; chmod +x /usr/local/bin/sops; }
+command -v age >/dev/null 2>&1 || { log "installing age"; apt-get update -qq && apt-get install -y -qq age; }
 
 log "bootstrap complete. Next steps: deploy/vps/README.md"

@@ -1,6 +1,6 @@
-# Modelo eco — só stdlib, imagem mínima, sem pip install (determinístico e
-# rápido de buildar/subir; ver server.py para o porquê disso importar para o
-# "upgrade simulado" do LiteLLM).
+# Echo model — stdlib only, minimal image, no pip install (deterministic and
+# fast to build/boot; see server.py for why that matters to LiteLLM's
+# "simulated upgrade").
 FROM python:3.12-slim
 WORKDIR /app
 COPY server.py /app/server.py

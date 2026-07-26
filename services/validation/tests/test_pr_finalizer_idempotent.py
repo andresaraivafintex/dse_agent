@@ -1,7 +1,7 @@
 """WSE-E3-T6 — idempotent PR finalizer. The `wse_pr_tracking` table is REAL
 Postgres (we never mock the idempotency guarantee — it is the whole point of the
 test). The GitHub side is a `FakeGitHubClient` because no real GitHub App is
-registered in this session — see README §Credenciais for what is missing in
+registered in this session — see README §"Fixture / local mode vs. what is missing for production" for what is missing in
 production. `push_branch` is tested separately against a real LOCAL bare git repo
 (real git, no network)."""
 from __future__ import annotations
@@ -24,7 +24,7 @@ def test_finalize_pr_creates_exactly_one_pr(sandbox, work_item_id, tenant_id):
         repo="acme/repo",
         branch="dse/task-1",
         base_branch="main",
-        summary="corrige bug de arredondamento",
+        summary="fix a rounding bug",
         risk_class="low",
         evidence_url="http://ci.local/run/1",
         issue_ref={"issue_number": 42},

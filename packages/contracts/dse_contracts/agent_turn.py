@@ -1,4 +1,4 @@
-"""Typed contract for isolated agent-turn execution (plano 09, Phase 1).
+"""Typed contract for isolated agent-turn execution (plan 09, Phase 1).
 
 Invariant 2 of the REMEDIATION-CANONICAL-SPEC: "Agent SDK code and untrusted
 tools execute only in a stage-scoped sandbox. The Temporal worker dispatches a

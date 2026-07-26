@@ -22,7 +22,7 @@ from sandbox_runtime.skill_registry import Skill
 
 
 def _skill(key: str, body: str = "guidance") -> Skill:
-    return Skill(tenant_id="dev", skill_key=key, title=f"Título {key}", body=body, category="general")
+    return Skill(tenant_id="dev", skill_key=key, title=f"Title {key}", body=body, category="general")
 
 
 def _git_ws(tmp_path):
@@ -34,9 +34,9 @@ def test_non_git_workspace_is_noop(tmp_path):
     """Workspace without `.git` (pre-provision) => NOTHING is created — the
     provision_sandbox clone depends on the directory not existing/staying
     untouched."""
-    written = materialize_skills(str(tmp_path / "inexistente"), [_skill("x")])
+    written = materialize_skills(str(tmp_path / "nonexistent"), [_skill("x")])
     assert written == []
-    assert not (tmp_path / "inexistente").exists()
+    assert not (tmp_path / "nonexistent").exists()
 
     (tmp_path / "empty").mkdir()
     assert materialize_skills(str(tmp_path / "empty"), [_skill("x")]) == []
@@ -50,7 +50,7 @@ def test_materialize_writes_skill_md(tmp_path):
     md = ws / ".claude" / "skills" / "handling-money" / "SKILL.md"
     content = md.read_text()
     assert content.startswith("---\nname: handling-money\n")
-    assert "description: Título handling-money" in content
+    assert "description: Title handling-money" in content
     assert content.endswith("guidance")
 
 
@@ -58,11 +58,11 @@ def test_repo_committed_skill_wins(tmp_path):
     ws = _git_ws(tmp_path)
     committed = ws / ".claude" / "skills" / "repo-own" / "SKILL.md"
     committed.parent.mkdir(parents=True)
-    committed.write_text("do repo — soberana")
+    committed.write_text("from the repo — sovereign")
 
-    written = materialize_skills(str(ws), [_skill("repo-own", body="do registry")])
+    written = materialize_skills(str(ws), [_skill("repo-own", body="from the registry")])
     assert written == []
-    assert committed.read_text() == "do repo — soberana"
+    assert committed.read_text() == "from the repo — sovereign"
 
 
 def test_rematerialization_updates_our_files(tmp_path):

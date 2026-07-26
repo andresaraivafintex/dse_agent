@@ -232,7 +232,7 @@ egressProxy:
       purpose: "clone the target repository inside the sandbox (git through the proxy)"
     - host: "slack.com"
       port: 443
-      purpose: "Slack Web API (mensagem de status)"
+      purpose: "Slack Web API (status message)"
     - host: "*.amazonaws.com"
       port: 443
       purpose: "Bedrock PrivateLink (model-gateway tier 1)"
@@ -432,6 +432,24 @@ adapters:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "256Mi" }
+    # The outbox dispatcher — a SECOND process on the same image
+    # (`python -m ingest_gateway.dispatcher_main`, templates/dispatcher.yaml).
+    # ON by default, in the same group as postgres/temporal/orchestrator rather
+    # than the optional integrations (jira, console, preview): it is the only
+    # caller of start_workflow, so with it off the install accepts webhooks and
+    # runs nothing. It shares the image above on purpose — one process writes
+    # `ingest_events`, the other drains it.
+    dispatcher:
+      enabled: true
+      # 1 is enough, not a correctness limit: the drain uses FOR UPDATE SKIP
+      # LOCKED and Temporal rejects a duplicate workflow id, so N replicas
+      # neither lose nor double-start work (see templates/dispatcher.yaml).
+      replicas: 1
+      # A 1s poll loop that is idle most of the time; sized like the Jira
+      # workers, well below the HTTP receiver above.
+      resources:
+        requests: { cpu: "40m", memory: "128Mi" }
+        limits: { cpu: "300m", memory: "256Mi" }
 
 validation:
   enabled: true

@@ -1,4 +1,4 @@
-"""Plano 08 §F (F6): the .dse-task-branch marker must NOT leak into the commit
+"""Plan 08 §F (F6): the .dse-task-branch marker must NOT leak into the commit
 (hence it never shows up in the customer's PR). Hermetic — local git only, no
 docker."""
 from __future__ import annotations

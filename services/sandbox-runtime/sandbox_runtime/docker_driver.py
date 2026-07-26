@@ -32,7 +32,7 @@ LABEL_TENANT = "dse.tenant_id"
 LABEL_COMPONENT = "dse.component"
 LABEL_ROLE = "dse.role"  # "sandbox" | "egress_proxy" | "checkpoint_helper"
 
-# S7-c (Fase 5): the sandbox image must carry the tools that run INSIDE it via
+# S7-c (Phase 5): the sandbox image must carry the tools that run INSIDE it via
 # `docker exec` — git (finalize_pr push) and the repo's toolchain (e.g. node for
 # L1's `node --check` on a JS repo). `dse-sandbox-base` (WSC-E3-T4b) ships
 # git+node+Playwright. Configurable by env so it is not pinned here.
@@ -55,7 +55,7 @@ class ResourceCaps:
     cpu_limit: float
     memory_mb: int
     pids_limit: int
-    # Fase 3 (WSC-E3-T4b): size of the /tmp tmpfs. The Fase 1 default of 64MB
+    # Phase 3 (WSC-E3-T4b): size of the /tmp tmpfs. The Phase 1 default of 64MB
     # stays; the @demo evidence run (headless chromium writes scratch/crashpad
     # to /tmp) uses `budget={"tmp_mb": 256}`. Additive — it changes no existing
     # behavior.

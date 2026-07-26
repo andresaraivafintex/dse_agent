@@ -1,4 +1,4 @@
-"""LIVE proof of the isolated turn in dev (Fase 1, plano 09 — partial F1.6).
+"""LIVE proof of the isolated turn in dev (Phase 1, plan 09 — partial F1.6).
 
 Runs the real agent-runner inside the hardened sandbox container (`docker exec
 -i`, image `dse/agent-runner:local` — `make agent-runner-image`) and proves the
@@ -38,7 +38,7 @@ def _image_available() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _image_available(),
-    reason=f"imagem {RUNNER_IMAGE} ausente — rode `make agent-runner-image`",
+    reason=f"image {RUNNER_IMAGE} is missing — run `make agent-runner-image`",
 )
 
 
@@ -71,7 +71,7 @@ def _turn_request(work_item_id: str, fake_script: list[dict]) -> dict:
         tenant_id="tenant-live",
         stage="coder",
         substrate="fake",
-        instruction="prova viva",
+        instruction="living proof",
         fake_script=fake_script,
     # gateway points at the internal network; the fake turn makes no network call
         gateway={"base_url": "http://model-gateway:4000", "virtual_key": "vk-live"},
@@ -89,7 +89,7 @@ def test_turn_executes_inside_sandbox_and_edit_arrives_via_bind_mount(live_sandb
             input_payload=_turn_request(
                 work_item_id,
                 [{"write_files": {"src/inside.py": "WRITTEN_INSIDE = True\n"},
-                  "thought": "editado dentro do sandbox", "done": True}],
+                  "thought": "edited inside the sandbox", "done": True}],
             ),
             timeout_seconds=120,
         )

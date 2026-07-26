@@ -86,7 +86,7 @@ async def test_burst_one_tenant_saturating_does_not_starve_another():
     async with controller.acquire("tenant-B"):
         waited = time.monotonic() - started
         # B got a slot of its own: it did not wait for A's queue to drain
-        assert waited < SLO_SECONDS, f"tenant B esperou {waited:.3f}s (> SLO {SLO_SECONDS}s)"
+        assert waited < SLO_SECONDS, f"tenant B waited {waited:.3f}s (> SLO {SLO_SECONDS}s)"
     # and A's wait got large (proof that A really WAS saturated)
     await asyncio.gather(*a_tasks)
     assert controller.max_wait_seconds.get("tenant-A", 0) > SLO_SECONDS
@@ -134,4 +134,4 @@ async def test_fairness_interceptor_gates_activity_per_tenant_on_real_worker(tim
         )
 
     assert sorted(results) == [0, 1, 2, 3, 4, 5]
-    assert _PEAK["n"] <= 2, f"pico de concorrencia {_PEAK['n']} excedeu o cap 2"
+    assert _PEAK["n"] <= 2, f"concurrency peak {_PEAK['n']} exceeded the cap of 2"

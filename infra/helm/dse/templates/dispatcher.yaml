@@ -1,0 +1,118 @@
+{{/*
+Outbox dispatcher (WSA-E1-T3) — `python -m ingest_gateway.dispatcher_main`.
+
+This is the workload that turns an `ingest_events` row into a Temporal
+workflow, and it was missing from the chart. The adapters and the
+ingest-gateway HTTP app only call `admit_work_item`, which COMMITS A ROW and
+returns 200; `start_workflow` for `kind=task_request` exists nowhere else but
+`ingest_gateway.dispatcher`. So a `helm install` without this Deployment yields
+a system that accepts every webhook, records every work item, and never runs
+one — which is the state a fresh install was in until now (the live VPS only
+worked because a dispatcher had been created there by hand with kubectl, off
+the chart).
+
+Same image as the ingest-gateway, deliberately not a value of its own: the two
+processes write and drain the SAME `ingest_events` rows, so a separate
+image/tag knob would let the writer and the drainer sit on different schema
+expectations, and the release pipeline publishes a single `ingest-gateway`
+digest (deploy/vps/values-digests-*.yaml) — there is no dispatcher image to
+pin.
+
+No port, no Service, no probes: it is a poll loop over Postgres plus a Temporal
+client, and nothing addresses it. Its liveness shows up as `ingest_events`
+rows flipping to `processed=true` and as `dispatch_*` audit actions, which is a
+truer signal than an HTTP 200 from a process whose drain loop has stalled.
+*/}}
+{{- if .Values.adapters.ingestGateway.dispatcher.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-dispatcher
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "dispatcher" "Release" .Release) | nindent 4 }}
+spec:
+  # More than one replica is SAFE here, unlike the console-projector: the drain
+  # runs `SELECT ... FOR UPDATE OF ie SKIP LOCKED`, so two dispatchers never see
+  # the same row, and a `task_request` that does slip through twice hits
+  # Temporal's duplicate-workflow-id rejection, which the code treats as an
+  # idempotent success (WorkflowAlreadyStartedError -> deduped_already_started).
+  # It stays at 1 because the queue is far from being the bottleneck, not
+  # because a second one would double-start workflows — which is also why the
+  # default RollingUpdate strategy is fine: a brief overlap during a rollout
+  # costs nothing and avoids a gap in draining.
+  replicas: {{ .Values.adapters.ingestGateway.dispatcher.replicas }}
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "dispatcher" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "dispatcher" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      containers:
+        - name: dispatcher
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.ingestGateway.image.repository "tag" .Values.adapters.ingestGateway.image.tag "digest" .Values.adapters.ingestGateway.image.digest) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
+          command: ["python", "-m", "ingest_gateway.dispatcher_main"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            # DSE_DATABASE_URL — read by both `ingest_gateway.db` and
+            # `dse_audit` (the drain and its audit rows share one transaction).
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+          env:
+            # `dispatcher_main` reads TEMPORAL_ADDRESS, NOT the ConfigMap's
+            # DSE_TEMPORAL_ADDRESS. Without this the process falls back to its
+            # `localhost:7233` default and crash-loops on Client.connect, so
+            # envFrom alone is not enough. Same literal as temporal-ui uses.
+            - name: TEMPORAL_ADDRESS
+              value: "{{ include "dse.fullname" . }}-temporal:7233"
+          # No HTTP(S)_PROXY here, unlike the adapters: this process talks only
+          # to Postgres and to Temporal, both in-cluster. Exporting a proxy for
+          # a workload with no outbound host would be a claim the code does not
+          # make, and it risks the Temporal gRPC client picking the proxy up.
+          resources:
+            {{- toYaml .Values.adapters.ingestGateway.dispatcher.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+{{- if .Values.networkPolicy.enabled }}
+---
+# The namespace is default-deny egress, and `dispatcher` is its own component
+# name, so without this policy the pod reaches neither Postgres nor Temporal and
+# the whole intake silently stops at "row recorded". Only these two: the drain
+# opens a Postgres transaction and calls start_workflow/signal — it never leaves
+# the cluster, hence no egress-proxy rule (contrast the adapters).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-dispatcher-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dispatcher
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: temporal
+      ports:
+        - { protocol: TCP, port: 7233 }
+{{- end }}
+{{- end }}

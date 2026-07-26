@@ -1,4 +1,4 @@
-# WS-A — adapter-teams (porta 8808), PROVISÃO. Build a partir da RAIZ do monorepo:
+# WS-A — adapter-teams (port 8808), PROVISIONAL. Build from the monorepo ROOT:
 #   docker build -f services/adapter-teams/Dockerfile -t dse/adapter-teams .
 FROM python:3.11-slim
 

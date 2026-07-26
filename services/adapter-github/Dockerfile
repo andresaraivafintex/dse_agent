@@ -1,4 +1,4 @@
-# WS-A — adapter-github (porta 8802). Build a partir da RAIZ do monorepo:
+# WS-A — adapter-github (port 8802). Build from the monorepo ROOT:
 #   docker build -f services/adapter-github/Dockerfile -t dse/adapter-github .
 FROM python:3.11-slim
 

@@ -234,7 +234,7 @@ class OpenHandsSubstrate:
             tokens_out = int(getattr(stats, "total_tokens_out", 0) or 0)
         return CoderTurnResult(
             sandbox_id=self.sandbox_id,
-            diff_summary=f"{len(self._turns)} turno(s) executado(s) via OpenHandsSubstrate",
+            diff_summary=f"{len(self._turns)} turn(s) executed via OpenHandsSubstrate",
             files_changed=[],
             cost_usd=cost_usd,
             tokens_in=tokens_in,
@@ -391,7 +391,7 @@ class ClaudeAgentSubstrate:
     def collect_artifacts(self) -> CoderTurnResult:
         return CoderTurnResult(
             sandbox_id=self.sandbox_id,
-            diff_summary=f"{len(self._turns)} turno(s) executado(s) via ClaudeAgentSubstrate",
+            diff_summary=f"{len(self._turns)} turn(s) executed via ClaudeAgentSubstrate",
             files_changed=[],
             cost_usd=round(self._cost_usd, 6),
             tokens_in=self._tokens_in,

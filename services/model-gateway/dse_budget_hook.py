@@ -1,4 +1,4 @@
-"""Plano 08 §F (F2) + plano 09 Fase 3 — LiteLLM proxy pre-call hook:
+"""Plan 08 §F (F2) + plan 09 Phase 3 — LiteLLM proxy pre-call hook:
 SERVER-SIDE (non-bypassable) budget + kill-switch enforcement, FAIL-CLOSED with
 bounded degradation.
 

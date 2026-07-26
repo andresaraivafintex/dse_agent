@@ -41,7 +41,7 @@ def _bind(tenant, platform, btype, value, repo, branch="main"):
 
 
 def test_parse_explicit_repo():
-    assert parse_explicit_repo("faz X no repo=org/x branch=dev") == ("org/x", "dev")
+    assert parse_explicit_repo("do X in repo=org/x branch=dev") == ("org/x", "dev")
     assert parse_explicit_repo("nothing here") == (None, None)
 
 
@@ -51,7 +51,7 @@ def test_rung1_explicit_override_beats_binding(tenant):
     try:
         repo, branch = resolve_repo(
             conn, tenant_id=tenant, platform="slack",
-            signals={"text": "usa repo=org/explicit", "channel": "C1"},
+            signals={"text": "use repo=org/explicit", "channel": "C1"},
         )
     finally:
         conn.close()
@@ -64,7 +64,7 @@ def test_rung2_channel_binding(tenant):
     try:
         repo, branch = resolve_repo(
             conn, tenant_id=tenant, platform="slack",
-            signals={"text": "conserta o saldo", "channel": "C_PAY"},
+            signals={"text": "fix the balance", "channel": "C_PAY"},
         )
     finally:
         conn.close()
@@ -92,7 +92,7 @@ def test_rung4_single_repo_default(tenant):
     try:
         repo, _ = resolve_repo(
             conn, tenant_id=tenant, platform="slack",
-            signals={"text": "algo", "channel": "C_DESCONHECIDO"},
+            signals={"text": "something", "channel": "C_UNKNOWN"},
         )
     finally:
         conn.close()
@@ -107,7 +107,7 @@ def test_ambiguous_returns_none_for_clarification(tenant):
     try:
         repo, branch = resolve_repo(
             conn, tenant_id=tenant, platform="slack",
-            signals={"text": "algo", "channel": "C_X"},
+            signals={"text": "something", "channel": "C_X"},
         )
     finally:
         conn.close()

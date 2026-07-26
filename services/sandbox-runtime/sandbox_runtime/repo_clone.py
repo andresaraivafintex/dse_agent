@@ -1,4 +1,4 @@
-"""S4 (Fase 5): clone of the REAL target repository into the sandbox workspace.
+"""S4 (Phase 5): clone of the REAL target repository into the sandbox workspace.
 
 Architecture decision (risk #3 of the integration plan): the clone happens in
 the CONTROL PLANE (the `provision_sandbox` Activity runs in the orchestrator,
@@ -10,7 +10,7 @@ token only lives in control-plane memory during the clone and is never
 persisted.
 
 The production path (egress-proxy injecting the credential at the edge so the
-sandbox itself clones) has a known gap in CONNECT-tunnel (Fase 3); this
+sandbox itself clones) has a known gap in CONNECT-tunnel (Phase 3); this
 clone-in-the-control-plane is the honest, explicitly stated PoC path.
 """
 from __future__ import annotations

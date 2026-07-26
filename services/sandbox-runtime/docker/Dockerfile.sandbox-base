@@ -1,53 +1,54 @@
-# Imagem base do sandbox efêmero (WSC-E1-T1 + WSC-E3-T4b).
+# Base image for the ephemeral sandbox (WSC-E1-T1 + WSC-E3-T4b).
 #
-# Fase 1: `python:3.11-slim` não traz `git` — precisamos dele tanto para o
-# Coder quanto para o hook pre-receive do checkpoint (invocado no lado que
-# recebe o `git push`, que roda dentro deste mesmo container quando o
-# "origin" é um bare repo bind-mounted).
+# Phase 1: `python:3.11-slim` ships no `git` -- it is needed both by the Coder
+# and by the checkpoint pre-receive hook (invoked on the side that RECEIVES the
+# `git push`, which runs inside this same container whenever "origin" is a
+# bind-mounted bare repo).
 #
-# Fase 3 (WSC-E3-T4b, adendo 02): toolchain Playwright REAL para a evidência
-# `@demo` — node + @playwright/test pinado (P7 boring-first) + browser
-# chromium headless com dependências de sistema (`--with-deps`). O pipeline
-# de evidência do WS-E executa `npx playwright test --grep @demo` DENTRO de
-# um container desta imagem e o vídeo produzido é real.
+# Phase 3 (WSC-E3-T4b, addendum 02): a REAL Playwright toolchain for the `@demo`
+# evidence -- node + a pinned @playwright/test (P7 boring-first) + headless
+# chromium with its system dependencies (`--with-deps`). The WS-E evidence
+# pipeline runs `npx playwright test --grep @demo` INSIDE a container of this
+# image, and the video it produces is real.
 #
-# Decisões desta imagem (todas para funcionar sob as restrições do
-# docker_driver.py: `--user <uid aleatório não-root>`, `--read-only`,
-# `--cap-drop ALL`, `--tmpfs /tmp`, rede interna sem internet):
-#   - Browsers em PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers (fora de $HOME —
-#     o uid de runtime não existe em /etc/passwd e o rootfs é read-only);
-#     `chmod a+rX` para qualquer uid poder executar.
-#   - @playwright/test instalado em /opt/dse-playwright (node_modules
-#     world-readable); NODE_PATH + PATH apontam para lá, então `npx
-#     playwright` resolve sem instalar nada em runtime (não há rede no
-#     sandbox de qualquer forma — download em runtime nem seria possível).
-#   - HOME=/tmp: chromium/crashpad precisam de um diretório gravável; /tmp é
-#     o tmpfs efêmero do sandbox.
-#   - O sandbox do próprio chromium (user namespaces) não funciona com
-#     `--cap-drop ALL`; o playwright.config do fixture usa
-#     `chromiumSandbox: false` — a contenção é do container (rootless,
-#     read-only, sem rede), não do browser.
+# Decisions behind this image (all of them so it works under the restrictions
+# docker_driver.py imposes: `--user <random non-root uid>`, `--read-only`,
+# `--cap-drop ALL`, `--tmpfs /tmp`, internal network with no internet):
+#   - Browsers under PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers (outside $HOME --
+#     the runtime uid does not exist in /etc/passwd and the rootfs is read-only);
+#     `chmod a+rX` so any uid can execute them.
+#   - @playwright/test installed under /opt/dse-playwright (world-readable
+#     node_modules); NODE_PATH + PATH point there, so `npx playwright` resolves
+#     without installing anything at runtime (there is no network in the sandbox
+#     anyway -- a runtime download would not even be possible).
+#   - HOME=/tmp: chromium/crashpad need a writable directory; /tmp is the
+#     sandbox's ephemeral tmpfs.
+#   - chromium's own sandbox (user namespaces) does not work under
+#     `--cap-drop ALL`; the fixture's playwright.config sets
+#     `chromiumSandbox: false` -- containment comes from the container
+#     (rootless, read-only, no network), not from the browser.
 #
-# Não cria usuário fixo na imagem: o uid/gid não-root é aplicado em runtime
-# via `docker run --user <uid>:<gid>` (docker_driver.py), então qualquer uid
-# numérico funciona sem precisar existir em /etc/passwd (git usa apenas
-# config local do repo, nunca lookup de passwd, para name/email — ver
+# Creates no fixed user in the image: the non-root uid/gid is applied at runtime
+# via `docker run --user <uid>:<gid>` (docker_driver.py), so any numeric uid
+# works without having to exist in /etc/passwd (git reads name/email from the
+# repo-local config only, never from a passwd lookup -- see
 # scoped_git.ScopedGitSession.ensure_identity).
 #
-# Build + tag (documentado no README; os testes de aceitação buildam se a
-# tag não existir):
+# Build + tag (documented in the README; the acceptance tests build it if the
+# tag is missing):
 #   docker build -f services/sandbox-runtime/docker/Dockerfile.sandbox-base \
 #     -t dse-sandbox-base:wsc3 services/sandbox-runtime/docker
 #
-# Pin da base em -bookworm (P7): a tag `python:3.11-slim` migrou para Debian
-# trixie, que o `playwright install --with-deps` não reconhece (o fallback
-# ubuntu20.04 falha em pacotes de fonte renomeados — falha real observada no
-# build desta sessão). Bookworm (Debian 12) é suportado pelo Playwright.
+# Base pinned to -bookworm (P7): the `python:3.11-slim` tag moved to Debian
+# trixie, which `playwright install --with-deps` does not recognise (the
+# ubuntu20.04 fallback then fails on renamed font packages -- a real failure
+# observed while building this image). Bookworm (Debian 12) is supported by
+# Playwright.
 FROM python:3.11-slim-bookworm
 
-# Pin do toolchain (P7): node/npm vêm do apt do Debian bookworm (nodejs 18.x,
-# suficiente para Playwright >= 1.49); a versão do Playwright é pinada
-# exatamente abaixo e tem que bater com a dos browsers instalados.
+# Toolchain pin (P7): node/npm come from Debian bookworm's apt (nodejs 18.x,
+# enough for Playwright >= 1.49); the Playwright version is pinned exactly below
+# and has to match the one the installed browsers were built for.
 ARG PLAYWRIGHT_VERSION=1.49.1
 
 RUN apt-get update \
@@ -64,13 +65,13 @@ RUN npm init -y >/dev/null \
     && npm install --no-audit --no-fund "@playwright/test@${PLAYWRIGHT_VERSION}" "playwright@${PLAYWRIGHT_VERSION}" \
     && npx playwright install --with-deps chromium \
     && chmod -R a+rX /opt/dse-playwright /opt/pw-browsers \
-    # `npx <pkg>` (npm >= 9) NÃO consulta o $PATH — resolve pelo "local
-    # prefix" (walk-up de node_modules a partir do cwd) e, não achando,
-    # tenta INSTALAR do registry (impossível e indesejado no sandbox sem
-    # internet — falha real observada nesta sessão). O symlink na raiz faz
-    # qualquer cwd do container (ex.: /workspace/demos/<wi>) resolver a
-    # toolchain pinada da imagem: `npx playwright test --grep @demo`
-    # funciona offline, que é o aceite do T4b.
+    # `npx <pkg>` (npm >= 9) does NOT consult $PATH -- it resolves through the
+    # "local prefix" (walking node_modules up from the cwd) and, finding
+    # nothing, tries to INSTALL from the registry (impossible and unwanted in a
+    # sandbox with no internet -- a real failure observed here). The symlink at
+    # the root makes any container cwd (e.g. /workspace/demos/<wi>) resolve the
+    # image's pinned toolchain, so `npx playwright test --grep @demo` works
+    # offline, which is the T4b acceptance criterion.
     && ln -s /opt/dse-playwright/node_modules /node_modules
 
 WORKDIR /workspace

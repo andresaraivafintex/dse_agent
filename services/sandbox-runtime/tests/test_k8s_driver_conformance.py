@@ -1,4 +1,4 @@
-"""Plano 08 §G — security CONFORMANCE suite for the KubernetesSandboxDriver.
+"""Plan 08 §G — security CONFORMANCE suite for the KubernetesSandboxDriver.
 
 Validates that the generated Pod spec is hardened — WITHOUT needing a cluster
 (the `build_pod_manifest` core is pure). The LIVE proof (a Pod running under

@@ -1,4 +1,4 @@
-"""Deterministic task_class classification (Plano 08 §A).
+"""Deterministic task_class classification (Plan 08 §A).
 
 The task class feeds the ROI (human hours per class) and the Analytics
 "by category" charts. Decided at INTAKE from the label (GitHub) / issue-type

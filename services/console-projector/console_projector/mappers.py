@@ -1,4 +1,4 @@
-"""Contract maps fase1 -> console (Plano 06 §4.4/§4.5).
+"""Contract maps fase1 -> console (Plan 06 §4.4/§4.5).
 
 These maps ARE the interface between the two products — versioned and pinned by
 a contract test (test_mappers.py): if an enum changes on either side, CI breaks

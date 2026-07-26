@@ -1,4 +1,4 @@
-"""Phase 2 (plano 09) — STRUCTURED classification of fail-closed failures.
+"""Phase 2 (plan 09) — STRUCTURED classification of fail-closed failures.
 
 The workflow used to decide by message substring (_FAIL_CLOSED_MARKERS); it now
 decides by the ApplicationError `type` (dse.failure.* + legacy). These tests

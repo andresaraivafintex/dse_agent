@@ -54,7 +54,7 @@ def test_tester_writes_test_path_runs_pytest_and_commits(work_item_id, state_dir
         )
         assert result.test_files == ["tests/test_generated.py"]
         assert result.tests_ran is True
-        assert result.tests_passed is True, "o teste escrito deveria rodar e passar de verdade"
+        assert result.tests_passed is True, "the test that was written should really run and really pass"
         assert result.returncode == 0
 
         # real commit in the bare repo on the task branch
@@ -92,7 +92,7 @@ def test_tester_reports_real_failure_when_written_test_fails(work_item_id, state
     try:
         result = asyncio.run(
             _run_tester_turn_impl(
-                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="teste que falha"),
+                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="a test that fails"),
                 authoring_script=[
                     {"tool": "write_file", "path": "tests/test_fail.py", "content": _FAILING_TEST},
                     {"tool": "run_tests", "paths": ["tests/test_fail.py"]},

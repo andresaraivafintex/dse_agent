@@ -1,4 +1,4 @@
-"""RemoteSubstrate — the Coder turn running INSIDE the sandbox (Fase 1).
+"""RemoteSubstrate — the Coder turn running INSIDE the sandbox (Phase 1).
 
 Implements the SAME `AgentSubstrate` interface as the in-process substrates, but
 `run_turn` never touches the agent SDK: it serializes an `AgentTurnRequest`
@@ -197,7 +197,7 @@ class RemoteSubstrate:
     def collect_artifacts(self) -> CoderTurnResult:
         return CoderTurnResult(
             sandbox_id=self.sandbox_id,
-            diff_summary=f"{len(self._turns)} turno(s) executado(s) via RemoteSubstrate ({self._name})",
+            diff_summary=f"{len(self._turns)} turn(s) executed via RemoteSubstrate ({self._name})",
             files_changed=[],  # ScopedGitSession is what computes this (deterministic)
             cost_usd=self._cost_usd,
             tokens_in=self._tokens_in,

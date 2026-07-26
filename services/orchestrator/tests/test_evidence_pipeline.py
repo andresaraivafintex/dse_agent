@@ -140,7 +140,7 @@ async def test_docs_only_pr_skips_preview_deterministically(time_skipping_env):
 
 @pytest.mark.asyncio
 async def test_backend_service_pr_now_previews_and_posts_link(time_skipping_env):
-    """Plano 08 §D (D1+D2): a backend service PR (.py) is NO LONGER skipped — it
+    """Plan 08 §D (D1+D2): a backend service PR (.py) is NO LONGER skipped — it
     gets a preview (kind=deployable) and the LINK is posted
     (preview_link_posted in the ledger). With no binding on the tenant, the
     deploys_preview gate is fail-open."""

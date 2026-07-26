@@ -1,7 +1,7 @@
 {
   "name": "dse-validation-playwright-runner",
   "private": true,
-  "description": "WSE-E5-T11 - runner Playwright para evidencia @demo (video + trace). Versao PINADA (P7).",
+  "description": "WSE-E5-T11 - Playwright runner for the @demo evidence (video + trace). PINNED version (P7).",
   "devDependencies": {
     "@playwright/test": "1.55.1"
   }

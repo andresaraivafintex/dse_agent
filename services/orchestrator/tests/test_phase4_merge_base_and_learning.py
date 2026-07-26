@@ -90,7 +90,7 @@ async def test_changes_requested_runs_merge_base_before_coder(time_skipping_env)
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
 
-        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
+        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "tweak X"})
         await _wait_until(lambda: state.update_base_calls >= 1,
                           msg="merge-base never ran on changes_requested")
         await wait_for_status(handle, {"review_ready"})
@@ -129,7 +129,7 @@ async def test_merge_base_conflict_escalates_and_does_not_rerun_coder(time_skipp
             WorkItemLifecycleWorkflow.run, _wf_input(work_item_id),
             id=work_item_id, task_queue=task_queue)
         await wait_for_status(handle, {"review_ready"})
-        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "rebaseia"})
+        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "rebase"})
         result = await handle.result()
 
     assert result.status == WorkItemStatus.escalated.value

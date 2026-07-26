@@ -1,5 +1,5 @@
-# Runtime do agente DENTRO do sandbox. Pinar em produção (release por digest).
-# claude-agent-sdk: substrato primário (o wheel embute o CLI — sem node global).
+# Agent runtime INSIDE the sandbox. Pin these in production (release by digest).
+# claude-agent-sdk: primary substrate (the wheel embeds the CLI — no global node).
 claude-agent-sdk>=0.2
 pydantic>=2
 httpx>=0.27

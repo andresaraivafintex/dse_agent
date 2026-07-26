@@ -49,7 +49,7 @@ async def _amain() -> None:
 
     proxy = EgressProxy(_build_allowlist_from_env(), tenant_id=tenant_id, work_item_id=work_item_id)
     server = await proxy.start(host="0.0.0.0", port=port)
-    logging.getLogger("egress_proxy").info("egress-proxy escutando em 0.0.0.0:%s", port)
+    logging.getLogger("egress_proxy").info("egress-proxy listening on 0.0.0.0:%s", port)
     async with server:
         await server.serve_forever()
 

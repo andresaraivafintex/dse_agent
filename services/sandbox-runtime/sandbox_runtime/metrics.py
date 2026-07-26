@@ -74,7 +74,7 @@ def _histogram():
         _runtime_histogram = get_meter().create_histogram(
             name="dse.sandbox.runtime_minutes",
             unit="min",
-            description="Minutos de runtime de um sandbox por resource class",
+            description="Sandbox runtime minutes per resource class",
         )
     return _runtime_histogram
 

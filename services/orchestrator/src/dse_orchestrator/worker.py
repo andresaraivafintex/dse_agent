@@ -49,7 +49,8 @@ def _load_cross_workstream_activities() -> list[Any]:
     once they exist, they are loaded and registered automatically.
 
     Module/function expected from each workstream (see README.md, section
-    "Integracao com WS-C e WS-E" for the full assumed contract):
+    "Assumed Activity contract for the WS-C/WS-E boundaries" for the full
+    assumed contract):
       - WS-C: `sandbox_runtime.activities` — must expose an `ACTIVITIES` list
         (or individual functions) implementing `provision_sandbox`,
         `run_coder_turn`, `checkpoint_sandbox`, `rebuild_sandbox`,
@@ -64,7 +65,7 @@ def _load_cross_workstream_activities() -> list[Any]:
         except ImportError as exc:
             logger.warning(
                 "cross-workstream Activities of '%s' are not available yet (%s); "
-                "worker sobe sem elas — workflows que as chamarem ficarao "
+                "the worker still starts without them — workflows that call them will stay "
                 "pending in the Activity until the worker is restarted with the module present.",
                 module_name, exc,
             )
@@ -72,7 +73,7 @@ def _load_cross_workstream_activities() -> list[Any]:
         activities = getattr(mod, "ACTIVITIES", None)
         if activities:
             found.extend(activities)
-            logger.info("Registradas %d activities de '%s'", len(activities), module_name)
+            logger.info("Registered %d activities from '%s'", len(activities), module_name)
         else:
             logger.warning(
                 "'%s' imported but does not expose `ACTIVITIES` (a list); nothing registered.",
@@ -186,7 +187,7 @@ def build_deployment_config(deployment_name: str, build_id: str) -> WorkerDeploy
 
 async def run_worker(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    logger.info("Conectando ao Temporal em %s (build_id=%s, task_queue=%s)",
+    logger.info("Connecting to Temporal at %s (build_id=%s, task_queue=%s)",
                 args.temporal_address, args.build_id, TASK_QUEUE)
 
     tracing_interceptor = setup_tracing()
@@ -202,7 +203,7 @@ async def run_worker(argv: list[str] | None = None) -> None:
     fairness_interceptor = _build_fairness_interceptor(args.fairness_mode)
     if fairness_interceptor is not None:
         interceptors.append(fairness_interceptor)
-        logger.info("Fairness worker-side ativa (modo=%s)", args.fairness_mode)
+        logger.info("Worker-side fairness active (mode=%s)", args.fairness_mode)
 
     worker_kwargs: dict[str, Any] = dict(
         client=client,
@@ -218,7 +219,7 @@ async def run_worker(argv: list[str] | None = None) -> None:
             args.deployment_name, args.build_id
         )
         logger.info(
-            "Worker Deployment Versioning ATIVO: deployment=%s version=%s (PINNED). "
+            "Worker Deployment Versioning ACTIVE: deployment=%s version=%s (PINNED). "
             "Cutover is an operations step (temporal worker-deployment set-current-version).",
             args.deployment_name, args.build_id,
         )
@@ -230,7 +231,7 @@ async def run_worker(argv: list[str] | None = None) -> None:
 
     _start_health_server(args.health_port, args.build_id)
 
-    logger.info("Worker no ar. %d activities registradas.", len(activities))
+    logger.info("Worker is up. %d activities registered.", len(activities))
 
     stop_event = asyncio.Event()
 

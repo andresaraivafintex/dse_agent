@@ -1,4 +1,4 @@
-"""WSC-E4-T3 — governed promotion pipeline (Fase 4 EXIT).
+"""WSC-E4-T3 — governed promotion pipeline (Phase 4 EXIT).
 
 Against real Postgres. Covers:
   - the COMPLETE exit path: candidate → eval(pass) → approved (with an
@@ -94,7 +94,7 @@ def test_full_pipeline_then_rollback_restores_previous(pg_conn, tenant):
     _make_candidate(pg_conn, tenant, key, 2, body="guidance v2")
     _pass_eval(pg_conn, tenant, key, 2)
     out = sp.promote(tenant, key, 2, "approved", approver=HUMAN, conn=pg_conn)
-    assert out.superseded_version == 1, "v1 rebaixada ao servir a v2"
+    assert out.superseded_version == 1, "v1 demoted when v2 started being served"
     sp.promote(tenant, key, 2, "canary", conn=pg_conn)
     sp.promote(tenant, key, 2, "active", approver=HUMAN, conn=pg_conn)
 

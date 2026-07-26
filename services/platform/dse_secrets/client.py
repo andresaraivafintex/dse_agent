@@ -97,7 +97,7 @@ class SecretsClient:
                 )
                 return resp["data"]["data"]
             except Exception as exc:  # hvac.exceptions.* or a network error
-                raise VaultUnavailableError(f"falha ao ler secret '{path}': {exc}") from exc
+                raise VaultUnavailableError(f"failed to read secret '{path}': {exc}") from exc
 
         return self._get_secret_raw(path)
 
@@ -124,7 +124,7 @@ class SecretsClient:
                 )
                 return
             except Exception as exc:
-                raise VaultUnavailableError(f"falha ao deletar secret '{path}': {exc}") from exc
+                raise VaultUnavailableError(f"failed to delete secret '{path}': {exc}") from exc
 
         url = f"{self.vault_addr}/v1/{self.mount_point}/data/{path}"
         resp = requests.delete(url, headers=self._headers(), timeout=self.timeout)

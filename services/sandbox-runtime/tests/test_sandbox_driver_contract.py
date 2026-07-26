@@ -56,12 +56,12 @@ def test_docker_adapter_preserves_existing_provision_api(monkeypatch):
 
 
 def test_execute_stage_is_isolated_and_fails_closed_when_unavailable():
-    """Fase 1 (plano 09): execute_stage runs the agent-runner via docker exec.
+    """Phase 1 (plan 09): execute_stage runs the agent-runner via docker exec.
     Unavailability (no docker, nonexistent container, runner missing from the
     image) is a CLEAN failure — it never degrades into running on the worker."""
     driver = DockerSandboxDriver()
     request = StageExecutionRequest(
-        sandbox_id="dse-sandbox-inexistente-xyz",
+        sandbox_id="dse-sandbox-nonexistent-xyz",
         work_item_id="wi-driver",
         tenant_id="tenant-driver",
         stage=Stage.coder,

@@ -18,8 +18,8 @@ def test_first_upsert_creates_comment(work_item_id):
     )
     surface_ref = {"repo": "acme/repo", "issue_number": 1}
 
-    ref = writer.upsert(work_item_id, surface_ref, "status: implementando")
-    assert github._comments[ref] == "status: implementando"
+    ref = writer.upsert(work_item_id, surface_ref, "status: implementing")
+    assert github._comments[ref] == "status: implementing"
 
 
 def test_second_upsert_edits_in_place_not_a_new_comment(work_item_id):
@@ -29,12 +29,12 @@ def test_second_upsert_edits_in_place_not_a_new_comment(work_item_id):
     )
     surface_ref = {"repo": "acme/repo", "issue_number": 2}
 
-    ref1 = writer.upsert(work_item_id, surface_ref, "status: implementando")
-    ref2 = writer.upsert(work_item_id, surface_ref, "status: L1 verde")
+    ref1 = writer.upsert(work_item_id, surface_ref, "status: implementing")
+    ref2 = writer.upsert(work_item_id, surface_ref, "status: L1 green")
 
     assert ref1 == ref2, "must edit the same comment, never create a second one"
     assert len(github._comments) == 1
-    assert github._comments[ref1] == "status: L1 verde"
+    assert github._comments[ref1] == "status: L1 green"
 
 
 def test_upsert_persists_ref_across_writer_instances(work_item_id):

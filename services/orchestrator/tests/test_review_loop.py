@@ -45,7 +45,7 @@ async def test_changes_requested_cycles_back_to_coder_same_pr(time_skipping_env)
         await wait_for_status(handle, {"review_ready"})
         first_pr_number = (await handle.query(WorkItemLifecycleWorkflow.get_state))["pr_number"]
 
-        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "ajusta X"})
+        await handle.signal("review_comment", {"verdict": "changes_requested", "comment": "tweak X"})
         await asyncio.sleep(0.2)  # let the fix cycle run
         await wait_for_status(handle, {"review_ready"})
 

@@ -1,4 +1,4 @@
-"""Plano 08 §F (F3) — append-only ledger: the app role NEVER mutates audit_log
+"""Plan 08 §F (F3) — append-only ledger: the app role NEVER mutates audit_log
 or model_call_ledger; not via UPDATE/DELETE (REVOKE + trigger) nor via TRUNCATE
 (REVOKE). Proof of defense in depth: even WITH the grant, the trigger aborts.
 Superuser keeps break-glass access (DR/retention/cleanup)."""

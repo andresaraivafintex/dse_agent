@@ -2,7 +2,7 @@
 
 The same tests running against `OpenHandsSubstrate` AND `ClaudeAgentSubstrate`
 (parametrize) — the insurance against upstream volatility the plan requires
-(risco 5, §18). What conformance proves, per adapter, with BOTH REAL SDKs
+(risk 5, §18). What conformance proves, per adapter, with BOTH REAL SDKs
 installed in this venv (`openhands-sdk` v1.21.0, `claude-agent-sdk` v0.2.124 —
 both really `pip install`ed in this session):
 
@@ -22,7 +22,7 @@ both really `pip install`ed in this session):
 
 What conformance does NOT cover (documented, not hidden): a full turn with real
 inference — that requires the model-gateway serving a valid virtual key against
-a real provider; the same limitation declared in Fase 1/2 for OpenHands (see the
+a real provider; the same limitation declared in Phase 1/2 for OpenHands (see the
 README, "What is missing for production").
 """
 from __future__ import annotations
@@ -153,7 +153,7 @@ def test_substrate_surface_has_no_git_or_pr_capability(name):
     sub = _build(name)
     # Structural: the adapter exposes no git/PR method/tool — commit and push
     # are ALWAYS the Activity's (ScopedGitSession), reinforced by the
-    # pre-receive hook and the credential scope (Fase 1 suite).
+    # pre-receive hook and the credential scope (Phase 1 suite).
     for forbidden_attr in ("push", "force_push", "commit", "create_pull_request", "merge"):
         assert not hasattr(sub, forbidden_attr)
     if isinstance(sub, ClaudeAgentSubstrate):
@@ -191,7 +191,7 @@ def test_substrate_selection_is_deployment_config(monkeypatch):
 
 
 def test_unknown_substrate_name_fails_cleanly_never_falls_back(monkeypatch):
-    monkeypatch.setenv(SUBSTRATE_ENV_VAR, "algum-substrato-inexistente")
+    monkeypatch.setenv(SUBSTRATE_ENV_VAR, "some-nonexistent-substrate")
     with pytest.raises(ValueError):
         substrate_from_env()
 

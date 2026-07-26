@@ -127,7 +127,7 @@ def test_awaiting_plan_approval_posts_block_kit_buttons(tenant_id, monkeypatch):
         json={
             "work_item_id": work_item_id,
             "channel": "C_APPROVE",
-            "body": "Plano pronto — aprovar?",
+            "body": "Plan ready — approve?",
             "actor": "system:orchestrator",
             "status": "awaiting_plan_approval",
         },
@@ -148,7 +148,7 @@ def test_non_approval_status_stays_plain_text(tenant_id, monkeypatch):
     work_item_id = _make_work_item(tenant_id)
     client.post(
         "/internal/status-comment",
-        json={"work_item_id": work_item_id, "channel": "C1", "body": "⚙️ implementando",
+        json={"work_item_id": work_item_id, "channel": "C1", "body": "⚙️ implementing",
               "actor": "system:orchestrator", "status": "implementing"},
     )
     assert fake_client.post_calls[0]["blocks"] is None  # no buttons outside approval

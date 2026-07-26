@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-audit"
 version = "0.1.0"
-description = "Cliente do audit ledger append-only do Fintex DSE (WSF-E1)"
+description = "Client for the Fintex DSE append-only audit ledger (WSF-E1)"
 requires-python = ">=3.11"
 dependencies = ["psycopg2-binary>=2.9"]
 

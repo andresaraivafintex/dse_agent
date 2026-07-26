@@ -133,7 +133,7 @@ class SandboxDriver(Protocol):
 class DockerSandboxDriver:
     """Compatible adapter over the current Docker lifecycle.
 
-    ``execute_stage`` (Fase 1, plano 09) runs the agent-runner INSIDE the
+    ``execute_stage`` (Phase 1, plan 09) runs the agent-runner INSIDE the
     sandbox container via ``docker exec -i`` — symmetric to the K8s driver's
     ``kubectl exec -i``. It requires the sandbox image to have the
     ``agent_runner`` module installed (``make agent-runner-image``); any
@@ -250,7 +250,7 @@ class DockerSandboxDriver:
 
 
 def select_sandbox_driver() -> SandboxDriver:
-    """plano 08 §G — picks the driver by profile (`DSE_SANDBOX_DRIVER`):
+    """plan 08 §G — picks the driver by profile (`DSE_SANDBOX_DRIVER`):
     'docker' (default, local dev) or 'k8s' (pilot — isolated Pod under a
     RuntimeClass). The K8s driver is imported lazily to avoid an import cycle.
     On the pilot profile, combine it with `DSE_SANDBOX_INPROCESS=0` (the

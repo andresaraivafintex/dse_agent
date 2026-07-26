@@ -3,8 +3,8 @@
 # Version pinning: see docker-compose.wsd.yml at the repo root — the image is
 # pinned by DIGEST (not by a "main-latest" tag), so that an "upgrade" is an
 # explicit act (swap the digest + run scripts/smoke_test.py before bringing it
-# up in any shared environment). See README.md §"Version pinning e upgrade
-# simulado" for the full procedure.
+# up in any shared environment). See README.md §"Version pinning and simulated
+# upgrade" for the full procedure.
 #
 # Two model tiers registered:
 #   1. `bedrock/*`  — production tier via AWS Bedrock over VPC PrivateLink.

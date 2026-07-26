@@ -2,7 +2,7 @@
 
 These tests run against REAL infra (Postgres on localhost:5432, dev Vault on
 localhost:8200, and the LiteLLM proxy + echo model brought up via
-`docker-compose.wsd.yml`, see README "Como rodar os testes"). Nothing here is
+`docker-compose.wsd.yml`, see README "How to run the tests"). Nothing here is
 mocked — the guarantee we are proving (a virtual key actually issued, actually
 revoked, an audit row actually written) is the whole point of the system (P8).
 """

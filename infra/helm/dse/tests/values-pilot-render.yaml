@@ -1,4 +1,4 @@
-# TEST FIXTURE ONLY. Digests sintaticamente válidos para provar a renderização;
+# TEST FIXTURE ONLY. Syntactically valid digests, to prove the render works;
 # do not correspond to published images and must never be used in a deploy.
 tenant:
   id: pilot-test

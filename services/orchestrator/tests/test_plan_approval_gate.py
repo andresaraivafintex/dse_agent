@@ -284,7 +284,7 @@ async def test_rejection_re_clarify_returns_to_clarification_gate(time_skipping_
         await wait_for_status(handle, {"awaiting_plan_approval"})
         await handle.signal("plan_approval", {
             "verdict": "rejected", "route": "re_clarify", "actor": "usr_alice",
-            "justification": "criterios de aceite ambiguos",
+            "justification": "ambiguous acceptance criteria",
         })
         # back to the clarification gate (needs_clarification) — NOT to
         # implementation. re_clarify reopens the clarification round (clears
@@ -300,6 +300,6 @@ async def test_rejection_re_clarify_returns_to_clarification_gate(time_skipping_
         assert state.planner_calls == 2  # re-planned after re-clarifying
         assert state.coder_turn_calls == 0  # still has not implemented (went through the gate)
         # close cleanly via an operator cancel (not the focus of this test)
-        await handle.signal("cancel", "fim do teste")
+        await handle.signal("cancel", "end of test")
         result = await handle.result()
     assert result.status in (WorkItemStatus.failed.value, WorkItemStatus.escalated.value)

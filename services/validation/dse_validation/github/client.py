@@ -108,7 +108,7 @@ class RealGitHubClient:
         return {"number": pr["number"], "html_url": pr["html_url"], "state": pr["state"]}
 
     def get_pull_request(self, repo: str, pr_number: int) -> dict | None:
-        """plano 08 §F (F1) — the PR's REAL state at the source (GitHub), so a
+        """plan 08 §F (F1) — the PR's REAL state at the source (GitHub), so a
         merge signal is verified against the truth and not just against the
         envelope. Returns merged/merged_by/merge_commit_sha/head_sha; None if the
         PR does not exist."""

@@ -28,7 +28,7 @@ def _input(work_item_id: str, **overrides) -> WorkItemLifecycleInput:
         requester="usr_test",
         repo="acme/repo",
         base_branch="main",
-        acceptance_criteria="criterio verificavel",
+        acceptance_criteria="verifiable criterion",
         ci_poll_interval_seconds=0.01,
         ci_pending_poll_cap=10,
         activity_retry_cap=2,
@@ -165,7 +165,7 @@ async def test_unverified_merge_signal_is_rejected_and_wait_continues(time_skipp
 
 @pytest.mark.asyncio
 async def test_forged_merge_signal_refuted_by_github_api(time_skipping_env):
-    """Plano 08 §F (F1): a signal that PASSES the envelope (correct pr_number)
+    """Plan 08 §F (F1): a signal that PASSES the envelope (correct pr_number)
     but whose PR is NOT merged according to the GitHub API is rejected (forged
     webhook) and the workflow keeps waiting; once the API confirms the merge, it
     completes."""

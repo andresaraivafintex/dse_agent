@@ -17,7 +17,7 @@ from dse_validation.l2.session import FakeL2ReviewSession, L2ReviewInput
 
 
 def _plan(work_item_id: str) -> PlanArtifact:
-    return PlanArtifact(work_item_id=work_item_id, steps=["mudar X"], expected_files=["app.py"])
+    return PlanArtifact(work_item_id=work_item_id, steps=["change X"], expected_files=["app.py"])
 
 
 def test_l2_input_carries_only_plan_and_diff_p3(work_item_id, tenant_id):

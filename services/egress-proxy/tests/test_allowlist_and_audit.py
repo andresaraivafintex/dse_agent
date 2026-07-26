@@ -62,7 +62,7 @@ def test_disallowed_host_denial_is_audited_in_real_postgres(running_proxy_factor
     finally:
         conn.close()
 
-    assert row is not None, "esperava uma linha real em audit_log para o egress negado"
+    assert row is not None, "expected a real row in audit_log for the denied egress"
     actor, details = row
     assert actor == "system:egress-proxy"
     assert details["host"] == "audited-denial.example"

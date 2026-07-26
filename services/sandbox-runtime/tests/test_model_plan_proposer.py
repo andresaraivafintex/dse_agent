@@ -100,7 +100,7 @@ def test_fixture_still_yields_empty_files():
     assert p["expected_files"] == []  # and the WS-B gate escalates — deliberate
 
 
-def test_instruction_da_issue_entra_no_prompt(monkeypatch):
+def test_the_issue_instruction_reaches_the_prompt(monkeypatch):
     """3rd real run: the PlannerContext does not carry the instruction (render()
     only has AGENTS.md/skills/repo map — all empty for the tenant) and the model,
     never having seen the issue, planned a generic wallet FEATURE instead of the
@@ -120,16 +120,16 @@ def test_instruction_da_issue_entra_no_prompt(monkeypatch):
     monkeypatch.setattr(acts, "_repo_tree_for_planner", lambda repo, br: [])
 
     inp = _inp()
-    inp.instruction = "Excluir uma transação apaga outra transação — DELETE /api/transactions/:id"
+    inp.instruction = "Deleting one transaction deletes another transaction — DELETE /api/transactions/:id"
     p = _model_plan_proposer(_Ctx(), inp, headers=None, virtual_key="vk")
     assert p is not None
     prompt = captured["prompt"]
-    assert "Excluir uma transação apaga outra transação" in prompt
+    assert "Deleting one transaction deletes another transaction" in prompt
     # the task comes BEFORE the additional context (it is the target, not a footnote)
-    assert prompt.index("Excluir uma transação") < prompt.index("Additional context")
+    assert prompt.index("Deleting one transaction") < prompt.index("Additional context")
 
 
-def test_instrucao_ausente_vira_marcador_explicito(monkeypatch):
+def test_a_missing_instruction_becomes_an_explicit_marker(monkeypatch):
     captured = {}
 
     def fake_chat_completion(**kwargs):

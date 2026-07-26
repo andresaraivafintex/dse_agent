@@ -83,7 +83,7 @@ def test_playwright_demo_inside_sandbox_produces_real_video(
                 work_item_id=work_item_id,
                 tenant_id=tenant,
                 image=sandbox_image,
-                # chromium needs more memory/pids/tmp than Fase 1's `small`
+                # chromium needs more memory/pids/tmp than Phase 1's `small`
                 # default — the caps stay FINITE and derived from the budget
                 # (never unlimited).
                 budget={"resource_class": "large", "tmp_mb": 512},
@@ -94,7 +94,7 @@ def test_playwright_demo_inside_sandbox_produces_real_video(
         # 1) The real Tester authors the @demo fixture under the demos/<wi>/ convention.
         asyncio.run(
             _run_tester_turn_impl(
-                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="autora @demo"),
+                RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="author @demo"),
                 authoring_script=demo_authoring_script(work_item_id),
             )
         )
@@ -118,7 +118,7 @@ def test_playwright_demo_inside_sandbox_produces_real_video(
         assert videos, f"no .webm video in {results_dir}"
         assert videos[0].stat().st_size > 10_000, "video suspiciously empty"
         # the trace zip too (becomes playwright_trace in WS-E's artifact store)
-        assert list(results_dir.rglob("trace.zip")), "trace.zip ausente"
+        assert list(results_dir.rglob("trace.zip")), "trace.zip is missing"
 
         # 4) The sandbox is still the production one: rootless and with no internet.
         rc_uid, uid_out = _exec(docker_client, handle.container_id, ["id", "-u"], workdir="/workspace")

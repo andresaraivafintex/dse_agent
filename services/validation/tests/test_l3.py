@@ -174,7 +174,7 @@ def test_repeated_pattern_increments_occurrence_tenant_scoped(work_item_id, tena
         failure_signature=sig, fix_commit_sha="sha-1", provenance={"repo": REPO},
     )
     second = db.record_ci_repair_episode(
-        tenant_id=tenant_id, work_item_id=f"{work_item_id}-outro", check_name="tests",
+        tenant_id=tenant_id, work_item_id=f"{work_item_id}-other", check_name="tests",
         failure_signature=sig, fix_commit_sha="sha-2", provenance={"repo": REPO},
     )
     other_tenant = db.record_ci_repair_episode(
@@ -187,8 +187,8 @@ def test_repeated_pattern_increments_occurrence_tenant_scoped(work_item_id, tena
 
 
 def test_failure_signature_deterministic():
-    a = failure_signature("tests", "failure", "FAILED tests/test_x.py::test_a\nmais linhas")
-    b = failure_signature("tests", "failure", "failed tests/test_x.py::test_a\noutras linhas")
+    a = failure_signature("tests", "failure", "FAILED tests/test_x.py::test_a\nmore lines")
+    b = failure_signature("tests", "failure", "failed tests/test_x.py::test_a\nother lines")
     c = failure_signature("tests", "failure", "FAILED tests/test_y.py::test_b")
     assert a == b  # 1st line normalized (case) — identical failures group together
     assert a != c

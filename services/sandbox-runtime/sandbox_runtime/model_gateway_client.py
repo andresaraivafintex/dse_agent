@@ -74,7 +74,7 @@ def mint_virtual_key(
                 json={
                     "models": [_CODER_MODEL],
                     "duration": "1h",
-                    # plano 08 §F (F2): HARD per-key backstop in the proxy. The
+                    # plan 08 §F (F2): HARD per-key backstop in the proxy. The
                     # fine-grained/dynamic enforcement is the pre-call hook (it
                     # reads the live control-plane budget); this cap is
                     # LiteLLM's static safety net, applied when the caller

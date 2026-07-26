@@ -71,7 +71,7 @@ async def test_six_review_comments_in_window_trigger_at_most_one_refresh(time_sk
         await wait_for_status(handle, {"implementing", "validating", "review_ready"})
         for i in range(6):
             await handle.signal("review_comment",
-                                {"verdict": "changes_requested", "comment": f"ajuste {i}"})
+                                {"verdict": "changes_requested", "comment": f"tweak {i}"})
 
         # 1 batch -> 1 fix cycle -> 1 re-finalize of the SAME PR. The debounce
         # window is a DURABLE timer of 60 virtual seconds: we advance the

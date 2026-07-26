@@ -52,7 +52,7 @@ def test_teardown_emits_runtime_minutes_metric_with_dse_attrs(work_item_id, stat
                     for dp in m.data.data_points:
                         found.append(dict(dp.attributes))
 
-    assert found, "esperava ao menos 1 data point de dse.sandbox.runtime_minutes"
+    assert found, "expected at least 1 data point for dse.sandbox.runtime_minutes"
     attrs = found[0]
     assert attrs[OTEL_ATTR_TENANT] == "tenant-a"
     assert attrs[OTEL_ATTR_WORK_ITEM] == work_item_id

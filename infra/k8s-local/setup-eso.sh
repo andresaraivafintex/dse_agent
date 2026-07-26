@@ -76,7 +76,7 @@ kubectl -n dse-preview-example wait --for=condition=Ready externalsecret/preview
 
 cat <<EOF
 
-OK. ESO ${ESO_CHART_VERSION} instalado e sincronizando.
+OK. ESO ${ESO_CHART_VERSION} installed and syncing.
 - ClusterSecretStore: dse-vault (Vault do compose, token escopado a secret/dse/preview/*)
 - Exemplo vivo:       kubectl -n dse-preview-example get secret preview-app-secrets -o yaml
 - Rotacionar o token: $0 --rotate

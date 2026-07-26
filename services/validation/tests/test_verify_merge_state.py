@@ -1,4 +1,4 @@
-"""plano 08 §F (F1) — merge verification against the GitHub API.
+"""plan 08 §F (F1) — merge verification against the GitHub API.
 
 Pure `_verify_merge_state` logic with a fake GitHub client (no network): a forged
 webhook (PR not merged / nonexistent / diverging sha) is NOT verified; an

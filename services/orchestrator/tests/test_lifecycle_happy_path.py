@@ -104,7 +104,7 @@ async def test_l1_failure_triggers_fix_loop_then_passes(time_skipping_env):
             requester="usr_test",
             repo="acme/repo",
             base_branch="main",
-            acceptance_criteria="criterio presente",
+            acceptance_criteria="criterion present",
             coder_retry_cap=3,
         )
         handle = await time_skipping_env.client.start_workflow(
@@ -145,7 +145,7 @@ async def test_l1_failure_exhausts_retry_cap_and_fails(time_skipping_env):
             requester="usr_test",
             repo="acme/repo",
             base_branch="main",
-            acceptance_criteria="criterio presente",
+            acceptance_criteria="criterion present",
             coder_retry_cap=2,
         )
         handle = await time_skipping_env.client.start_workflow(

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-orchestrator"
 version = "0.1.0"
-description = "WS-B: worker Temporal + WorkItemLifecycleWorkflow (maquina de estados do WorkItem) do Fintex DSE"
+description = "WS-B: Fintex DSE Temporal worker + WorkItemLifecycleWorkflow (the WorkItem state machine)"
 requires-python = ">=3.11"
 dependencies = [
     "temporalio>=1.7,<2",

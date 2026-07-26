@@ -48,7 +48,7 @@ global:
 
 # --- DSE release images (GHCR, by rc tag). Stock ones (postgres/temporal/redis/
 #     vault/otel) stay in the public repositories, with no prefix. ---
-_ghcrTag: &ghcrTag "v0.1.0-rc.2"
+_ghcrTag: &ghcrTag "v0.1.0-rc.3"
 
 # --- CPU requests right-sized against MEASURED usage (2026-07-25) ------------
 # The node sat at 97% CPU *reserved* while using 9%: 1843m of the 2000m was
@@ -135,6 +135,17 @@ adapters:
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
+    # The process that actually starts the workflow. It ran on this VPS as a
+    # hand-made Deployment, outside the chart — the reason a `helm upgrade`
+    # could not rebuild this node's engine from the repository alone. Sized like
+    # the Jira workers: an idle 1s poll over `ingest_events`, no request
+    # handling. Same image as the receiver above (it reuses that value).
+    dispatcher:
+      enabled: true
+      replicas: 1
+      resources:
+        requests: { cpu: "40m", memory: "128Mi" }
+        limits: { cpu: "300m", memory: "256Mi" }
 
 # Recovery of lost replies. Both adapters expose /internal/reconcile; the Jira
 # poller already sweeps on its own loop.

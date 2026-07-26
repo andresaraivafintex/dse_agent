@@ -1,6 +1,6 @@
-"""Entrypoint do processo dispatcher (`python -m ingest_gateway.dispatcher_main`).
-Processo separado do FastAPI app — roda `Dispatcher.run_forever()` contra o
-Temporal real (`TEMPORAL_ADDRESS`, default `localhost:7233`)."""
+"""Entrypoint of the dispatcher process (`python -m ingest_gateway.dispatcher_main`).
+A process separate from the FastAPI app — runs `Dispatcher.run_forever()` against
+the real Temporal (`TEMPORAL_ADDRESS`, default `localhost:7233`)."""
 from __future__ import annotations
 
 import asyncio

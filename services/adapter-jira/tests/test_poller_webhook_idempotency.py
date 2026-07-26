@@ -67,8 +67,8 @@ def _poller(client_fake):
         tenant_id=TENANT_ID,
         projects=["DSE"],
         trigger_label="dse",
-        approved_status="Plano aprovado",
-        rejected_status="Plano rejeitado",
+        approved_status="Plan approved",
+        rejected_status="Plan rejected",
         grace_seconds=0,
         reconcile_comments=False,
     )

@@ -1,4 +1,4 @@
-"""Phase 3 (plano 09) — FAIL-CLOSED budget hook with bounded degradation.
+"""Phase 3 (plan 09) — FAIL-CLOSED budget hook with bounded degradation.
 
 The four cells of the matrix (DB up/down × cache fresh/stale) + the real
 connection chaos. Before: a Postgres blip = silent fail-open (kill-switch and
@@ -23,7 +23,7 @@ from dse_budget_hook import evaluate_gate  # noqa: E402
 
 
 def _down():
-    raise psycopg2.OperationalError("connection refused (simulado)")
+    raise psycopg2.OperationalError("connection refused (simulated)")
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def test_db_down_with_cached_block_stays_blocked(ids):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO gateway_kill_switches (scope_type, scope_id, enabled, reason, actor) "
-            "VALUES ('work_item', %s, true, 'freio', 'test')",
+            "VALUES ('work_item', %s, true, 'brake', 'test')",
             (wid,),
         )
     conn.commit()

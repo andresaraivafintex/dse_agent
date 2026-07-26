@@ -58,7 +58,7 @@ LOCAL_ACTIVITY_EMIT_HISTORY_METRIC = "emit_history_metric"
 # (pilot gate "PR quality thresholds").
 LOCAL_ACTIVITY_RECORD_SKILL_EPISODE = "record_skill_episode"
 LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
-# Plano 08 §D — resolves the repo's deploys_preview gate (repo_bindings) to
+# Plan 08 §D — resolves the repo's deploys_preview gate (repo_bindings) to
 # decide whether the preview environment applies (P1, deterministic, fail-safe).
 LOCAL_ACTIVITY_PREVIEW_ENABLED = "preview_enabled_for_repo"
 
@@ -298,7 +298,7 @@ async def resolve_plan_approver(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         conn = _get_connection()
     except Exception as exc:  # pragma: no cover - no Postgres
-        logger.warning("resolve_plan_approver: sem Postgres (%s)", exc)
+        logger.warning("resolve_plan_approver: no Postgres (%s)", exc)
         return {"approvers": [], "source": "none"}
     try:
         approvers: list[str] = []
@@ -451,7 +451,7 @@ async def record_evidence_state(payload: dict[str, Any]) -> dict[str, Any]:
 
 @activity.defn(name=LOCAL_ACTIVITY_PREVIEW_ENABLED)
 async def preview_enabled_for_repo(payload: dict[str, Any]) -> dict[str, Any]:
-    """Plano 08 §D — does the target repo "produce a preview"? Deterministic gate
+    """Plan 08 §D — does the target repo "produce a preview"? Deterministic gate
     (P1), operator-set via `repo_bindings.deploys_preview` (Repos & ROI panel, §C).
 
     Semantics (fail-safe, backward compatible):
@@ -524,7 +524,7 @@ async def record_skill_episode(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         conn = _get_connection()
     except Exception as exc:  # pragma: no cover - no Postgres
-        logger.warning("record_skill_episode: sem Postgres (%s); pulando insumo", exc)
+        logger.warning("record_skill_episode: no Postgres (%s); skipping the learning input", exc)
         return {"persisted": False}
     try:
         import json

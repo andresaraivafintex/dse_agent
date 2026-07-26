@@ -1,4 +1,4 @@
-"""Entrypoint of the isolated agent-runner (plano 08 §G + plano 09 Fase 1).
+"""Entrypoint of the isolated agent-runner (plan 08 §G + plan 09 Phase 1).
 
 Runs ONE agent turn inside the hardened container/pod. Reads from stdin the
 envelope `{"stage": ..., "input": <AgentTurnRequest>}` (the format the drivers

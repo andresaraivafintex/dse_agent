@@ -285,7 +285,7 @@ def check_mode_allowed(
 ) -> bool:
     """True iff `mode` is enabled in the effective bundle. deny-by-default + audit."""
     if mode not in VALID_MODES:
-        raise ValueError(f"mode desconhecido: {mode!r}")
+        raise ValueError(f"unknown mode: {mode!r}")
     bundle = get_effective_bundle(tenant_id, channel=channel)
     if bundle is not None and mode in bundle.modes:
         return True

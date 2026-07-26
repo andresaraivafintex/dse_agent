@@ -1,4 +1,4 @@
-"""Plano 08 §F (F2) — server-side pre-call hook: the evaluate_gate core.
+"""Plan 08 §F (F2) — server-side pre-call hook: the evaluate_gate core.
 
 Against real Postgres (like the other suites): kill-switch and exhausted budget
 block; with no DSE context, or within budget, the call passes. This is the
@@ -41,7 +41,7 @@ def test_kill_switch_blocks(ids):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO gateway_kill_switches (scope_type, scope_id, enabled, reason, actor) "
-            "VALUES ('work_item', %s, true, 'freio de teste', 'test')",
+            "VALUES ('work_item', %s, true, 'test brake', 'test')",
             (wid,),
         )
     conn.commit()
