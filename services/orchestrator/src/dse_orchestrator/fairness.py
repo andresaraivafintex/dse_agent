@@ -1,8 +1,8 @@
 """WSB-E1-T3 — per-tenant fairness, worker-side.
 
 Temporal's native Priority & Fairness (fairness_key on tasks) only exists on
-server 1.31+; the foundation's infra is on 1.29 (see CONVENTIONS.md, "Nota de
-infra"). Until the server supports it, we implement fairness on the worker: a
+server 1.31+; the foundation's infra is on 1.29 (see CONVENTIONS.md, "Infra
+note"). Until the server supports it, we implement fairness on the worker: a
 PER-TENANT Activity CONCURRENCY cap. A tenant that saturates its own cap does
 NOT consume another tenant's slots — so it does not push the others' dispatch
 beyond the SLO.

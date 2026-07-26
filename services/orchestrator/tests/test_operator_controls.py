@@ -51,7 +51,7 @@ async def test_pause_blocks_next_activity_but_not_current(time_skipping_env):
             await asyncio.sleep(0.05)
         assert state.coder_turn_calls == 1
 
-        await handle.signal("pause", "operador quer investigar")
+        await handle.signal("pause", "operator wants to investigate")
 
         # the running Activity is not cancelled by pause — release it now.
         hang_event.set()

@@ -114,7 +114,7 @@ def is_authorized_to_steer(tenant_id: str, principal_id: str) -> bool:
             )
         except Exception:  # noqa: BLE001 — best-effort audit on the grant path
             logger.warning(
-                "falha ao emitir audit steering_authorized (tenant=%s principal=%s method=%s)",
+                "failed to emit the steering_authorized audit row (tenant=%s principal=%s method=%s)",
                 tenant_id, principal_id, method, exc_info=True,
             )
         return True

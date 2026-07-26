@@ -33,7 +33,7 @@ def _maybe_fail_closed(state: "FakeControlPlane", name: str) -> None:
         return
     spec["times"] = times - 1
     marker = spec.get("marker", "egress_proxy_unreachable_fail_closed")
-    # Phase 2 (plano 09): the default is the canonical TYPE from the contract's
+    # Phase 2 (plan 09): the default is the canonical TYPE from the contract's
     # vocabulary (the message no longer decides); "type" in the spec allows
     # simulating legacy raisers ("EgressFailClosed") for the fallback compat test.
     from dse_contracts.failure import FailureClass, failure_type
@@ -154,7 +154,7 @@ class FakeControlPlane:
     coder_cost_usd: float = 0.01
     # L2: fails N times (objections) before approving
     l2_fail_times: int = 0
-    l2_objections: list[str] = field(default_factory=lambda: ["app.py:12 sem teste"])
+    l2_objections: list[str] = field(default_factory=lambda: ["app.py:12 has no test"])
     # captures the LAST payload the L2 fake received (proof of P3 isolation)
     last_l2_payload: dict | None = None
     # simulates a fail-closed refusal on the model path (WSB-E5-T3b): activity
@@ -209,7 +209,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         RunPlannerTurnInput(**payload)  # REAL contract decode
         return PlanArtifact(
             work_item_id=payload["work_item_id"],
-            steps=["passo 1", "passo 2"],
+            steps=["step 1", "step 2"],
             expected_files=list(state.plan_expected_files),
             test_plan="covers the happy path",
             risk_class=state.plan_risk_class,
@@ -374,7 +374,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
     # contract, the test breaks HERE (not on the wire) — lesson from addendum 02.
     # ------------------------------------------------------------------
     def _preview_kind(files: list[str]) -> str:
-        # mirror of WS-E's deterministic paths-filter (FR-20 + plano 08 §D) for
+        # mirror of WS-E's deterministic paths-filter (FR-20 + plan 08 §D) for
         # the fake — ui (front) takes precedence; otherwise a deployable service
         # (back: source/Dockerfile/manifest); otherwise none (docs/config).
         for f in files:
@@ -395,11 +395,11 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         if state.preview_mode == "raise":
             raise ApplicationError("argocd unreachable (fake)",
                                    type="PreviewProvisionError", non_retryable=True)
-        # Plano 08 §D — deploys_preview gate (operator-set). A disabled repo
+        # Plan 08 §D — deploys_preview gate (operator-set). A disabled repo
         # skips CLEANLY (before any provisioning).
         if not inp.preview_enabled:
             return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
-                              status="skipped_disabled", detail="repo sem preview (fake)")
+                              status="skipped_disabled", detail="repo with no preview (fake)")
         if state.preview_mode == "degraded":
             return PreviewRef(work_item_id=inp.work_item_id, pr_number=inp.pr_number,
                               status="degraded", detail="argocd sync failed (fake)")
@@ -424,7 +424,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             work_item_id=inp.work_item_id, passed=state.demo_passed,
             video_artifact_key=state.demo_video_key,
             trace_artifact_key=state.demo_trace_key,
-            duration_s=1.2, detail="fake demo (publish interno ao WS-E)",
+            duration_s=1.2, detail="fake demo (publish internal to WS-E)",
         )
 
     async def run_visual_diff(payload: dict) -> VisualDiffResult:

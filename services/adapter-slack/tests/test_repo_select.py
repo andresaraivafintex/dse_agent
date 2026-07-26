@@ -86,13 +86,13 @@ def test_selected_repo_never_pairs_the_choice_of_another_work_item():
     payload = {
         "state": {
             "values": {
-                "dse_repo_select:wi_outra": {"dse_repo_select": {"selected_option": {"value": REPO_B}}},
-                "dse_repo_select:wi_minha": {"dse_repo_select": {"selected_option": {"value": REPO_A}}},
+                "dse_repo_select:wi_other": {"dse_repo_select": {"selected_option": {"value": REPO_B}}},
+                "dse_repo_select:wi_mine": {"dse_repo_select": {"selected_option": {"value": REPO_A}}},
             }
         }
     }
-    assert app_module._selected_repo_from_state(payload, "", "wi_minha") == REPO_A
-    assert app_module._selected_repo_from_state(payload, "", "wi_desconhecida") is None
+    assert app_module._selected_repo_from_state(payload, "", "wi_mine") == REPO_A
+    assert app_module._selected_repo_from_state(payload, "", "wi_unknown") is None
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +264,7 @@ def test_confirm_refuses_a_repo_the_tenant_never_offered(tenant_id, fake_slack):
 
     data = _post_interaction(
         _interaction(work_item_id, action_id="dse_repo_confirm",
-                     selected={"value": "forasteiro/repo-fantasma"})
+                     selected={"value": "outsider/ghost-repo"})
     )
 
     assert data["path"] == "unknown_repo"
@@ -276,11 +276,11 @@ def test_confirm_requires_steering_authorization(tenant_id, fake_slack):
     """Parity with correlate's clarification_answer gate: without this, anyone in
     the channel could pick the repo for someone else's task."""
     _seed_repos(tenant_id)
-    work_item_id = _make_work_item(tenant_id)  # U_FORASTEIRO never enters the allowlist
+    work_item_id = _make_work_item(tenant_id)  # U_OUTSIDER never enters the allowlist
 
     data = _post_interaction(
         _interaction(work_item_id, action_id="dse_repo_confirm",
-                     user="U_FORASTEIRO", selected={"value": REPO_A})
+                     user="U_OUTSIDER", selected={"value": REPO_A})
     )
 
     assert data["path"] == "unauthorized"

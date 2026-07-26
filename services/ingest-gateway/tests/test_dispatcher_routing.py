@@ -84,13 +84,13 @@ def test_merge_marker_routes_to_merged_by_human_regardless_of_status():
 
 
 def test_clarification_answer_preserved_from_phase1():
-    route = _route_signal("needs_clarification", "clarification_answer", _payload("resposta"))
+    route = _route_signal("needs_clarification", "clarification_answer", _payload("answer"))
     assert route.signal_name == SIGNAL_CLARIFICATION_ANSWER
-    assert route.payload["acceptance_criteria"] == "resposta"
+    assert route.payload["acceptance_criteria"] == "answer"
 
 
 def test_review_comment_with_verdict_preserved():
-    p = _payload("muda isso", source_ref={"review_state": "changes_requested"})
+    p = _payload("change this", source_ref={"review_state": "changes_requested"})
     route = _route_signal("pr_ready", "review_comment", p)
     assert route.signal_name == SIGNAL_REVIEW_COMMENT
     assert route.payload["verdict"] == "changes_requested"
@@ -152,7 +152,7 @@ def test_approval_dispatch_signals_plan_approval_when_awaiting(tenant_id, tempor
             event_id="evt_x",
             kind="approval",
             status="awaiting_plan_approval",
-            payload={"content_snapshot": "aprovado", "actor": {"resolved_principal": "usr_alice"}},
+            payload={"content_snapshot": "approved", "actor": {"resolved_principal": "usr_alice"}},
         )
     )
     assert outcome == DispatchOutcome.SIGNALED
@@ -184,7 +184,7 @@ def test_approval_unexpected_status_is_declined_never_guesses(tenant_id, tempora
             event_id="evt_z",
             kind="approval",
             status="implementing",
-            payload={"content_snapshot": "aprovado?", "actor": {"resolved_principal": "usr_alice"}},
+            payload={"content_snapshot": "approved?", "actor": {"resolved_principal": "usr_alice"}},
         )
     )
     assert outcome == DispatchOutcome.DECLINED_UNEXPECTED_STATUS

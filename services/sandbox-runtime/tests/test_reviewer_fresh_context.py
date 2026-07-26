@@ -27,7 +27,7 @@ from sandbox_runtime.sessions import FreshReviewerSession, ReviewerContext
 
 _PLAN = PlanArtifact(
     work_item_id="wi-rev",
-    steps=["implementar handler"],
+    steps=["implement handler"],
     expected_files=["src/handler.py"],
     diff_budget_lines=100,
     test_plan="testar handler",

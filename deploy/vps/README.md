@@ -106,6 +106,18 @@ Order (each step is idempotent):
    ```
    Migrations run as a hook Job. Wait for the pods to be `Ready`.
 
+   **One-off, only on the cluster that predates the dispatcher template:** the
+   outbox dispatcher used to exist here as a hand-made object created with
+   `kubectl`, and Helm refuses to take over a resource it does not own
+   (`invalid ownership metadata`). Delete the two hand-made objects once, before
+   this upgrade; the chart recreates them (`templates/dispatcher.yaml`):
+   ```bash
+   kubectl delete deployment dse-dse-dispatcher -n dse --ignore-not-found
+   kubectl delete networkpolicy dse-dse-dispatcher-egress -n dse --ignore-not-found
+   ```
+   Nothing is lost in the gap: unprocessed rows stay in `ingest_events` with
+   `processed=false` and the new pod drains them on its first poll.
+
 5. **Wiring verification** (from the adversarial review):
    ```bash
    kubectl exec deploy/dse-dse-orchestrator -n dse -- kubectl get pods -n dse-sandboxes   # <1s (no timeout)

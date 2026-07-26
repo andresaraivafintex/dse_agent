@@ -1,4 +1,4 @@
-"""Projector fase1 -> console_rm (Plano 06 §5).
+"""Projector fase1 -> console_rm (Plan 06 §5).
 
 One pass (`run_once`) processes each source from its cursor and writes both
 output + cursor IN THE SAME TRANSACTION (effectively exactly-once; upserts are
@@ -102,7 +102,7 @@ def _upsert_work_item(cur, wi) -> None:
     except KeyError:
         # new status with no map entry: fail-visible (log it; never make one up,
         # never crash).
-        logger.error("status fase1 sem mapa no console: %r (wi=%s)", wi["status"], wi["id"])
+        logger.error("fase1 status has no console mapping: %r (wi=%s)", wi["status"], wi["id"])
         return
 
     source_ref = wi["source_ref"] or {}
@@ -149,7 +149,7 @@ def _upsert_work_item(cur, wi) -> None:
 
 
 # ---------------------------------------------------------------------------
-# work_item_evidence -> work_items_view (preview_status/url) — plano 08 §D (D5)
+# work_item_evidence -> work_items_view (preview_status/url) — plan 08 §D (D5)
 # ---------------------------------------------------------------------------
 
 def _project_evidence(cur) -> int:
@@ -312,7 +312,7 @@ def _project_ledger(cur) -> int:
 # ---------------------------------------------------------------------------
 
 def _refresh_cost_rollup(cur) -> int:
-    """Plano 08 §E — recomputes the cost rollup from the SoR (model_call_ledger,
+    """Plan 08 §E — recomputes the cost rollup from the SoR (model_call_ledger,
     the P8 cost truth), aggregating by day x repo x model x task_class. Full
     recompute (DELETE+INSERT) -> idempotent by construction (the reconciliation
     test guarantees rollup == ledger). Called only when the ledger advanced in
@@ -378,14 +378,14 @@ def main() -> None:  # pragma: no cover - production loop
     logging.basicConfig(level=logging.INFO)
     interval = float(os.environ.get("DSE_PROJECTOR_INTERVAL_SECONDS", "2"))
     conn = get_connection()
-    logger.info("console-projector no ar (intervalo %.1fs)", interval)
+    logger.info("console-projector is up (interval %.1fs)", interval)
     while True:
         try:
             counts = run_once(conn)
             if any(counts.values()):
-                logger.info("projetado: %s", counts)
+                logger.info("projected: %s", counts)
         except psycopg2.Error:
-            logger.exception("erro de banco; reconectando")
+            logger.exception("database error; reconnecting")
             try:
                 conn.close()
             except Exception:

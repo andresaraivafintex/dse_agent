@@ -59,7 +59,7 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://localhost:4000")
     parser.add_argument("--master-key", default="sk-dse-local-dev-master-key")
     parser.add_argument(
-        "--record", action="store_true", help="grava a resposta atual como nova baseline"
+        "--record", action="store_true", help="record the current response as the new baseline"
     )
     args = parser.parse_args()
 
@@ -80,9 +80,9 @@ def main() -> int:
     current_stable = {k: v for k, v in current.items() if k != "chat_id"}
 
     if current_stable != baseline_stable:
-        print("[smoke_test] REGRESSÃO DETECTADA — resposta divergiu da baseline", file=sys.stderr)
+        print("[smoke_test] REGRESSION DETECTED — the response diverged from the baseline", file=sys.stderr)
         print(f"baseline: {json.dumps(baseline_stable, indent=2, sort_keys=True)}", file=sys.stderr)
-        print(f"atual:    {json.dumps(current_stable, indent=2, sort_keys=True)}", file=sys.stderr)
+        print(f"current:  {json.dumps(current_stable, indent=2, sort_keys=True)}", file=sys.stderr)
         return 1
 
     print("[smoke_test] OK — response identical to the baseline")

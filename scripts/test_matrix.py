@@ -62,11 +62,11 @@ SUITE_COVERAGE_TARGETS: dict[str, str] = {
     "services/validation": "services/validation/dse_validation",
 }
 
-# Coverage ratchet (plano 09 F4): the floor NEVER goes down — when a suite's
+# Coverage ratchet (plan 09 F4): the floor NEVER goes down — when a suite's
 # coverage goes up, raise its floor in the SAME PR. Suites with no entry are
 # report-only until the first CI measurement seeds their floor (local
 # measurements 2026-07-23: contracts 94%, tooling 23%).
-# Per-test ceiling (plano 09 F4). Generous: integration tests with Temporal
+# Per-test ceiling (plan 09 F4). Generous: integration tests with Temporal
 # time-skipping + chaos are the slowest, but no healthy test should exceed ~2min.
 # A hang becomes a NAMED failure instead of a dead job with no diagnosis.
 DEFAULT_TEST_TIMEOUT_S = 180
@@ -182,7 +182,7 @@ def main() -> int:
             "-q",
             suite,
             f"--junitxml={report}",
-            # Per-test ceiling (plano 09 F4): a stuck test becomes a NAMED
+            # Per-test ceiling (plan 09 F4): a stuck test becomes a NAMED
             # failure with a traceback at the hang point, instead of killing the
             # whole job via the 45min timeout with no diagnosis. 'thread' works
             # even with asyncio/subprocess. Per-suite override via SUITE_TIMEOUTS.

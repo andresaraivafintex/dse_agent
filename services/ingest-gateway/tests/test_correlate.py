@@ -145,7 +145,7 @@ def test_review_comment_is_steering_gated_too(tenant_id):
 
 
 def test_clarification_answer_by_unauthorized_is_rejected(tenant_id):
-    """Plano 08 §F (F4): clarification_answer is NOW steering-gated. On a public
+    """Plan 08 §F (F4): clarification_answer is NOW steering-gated. On a public
     issue anyone can comment; an unauthorized third party must not direct the
     task. It becomes `unauthorized` + audit, never a signal."""
     ref = {"channel": "C1", "thread_ts": "333.333"}

@@ -1,4 +1,4 @@
-# WS-A — ingest-gateway (porta 8803). Build a partir da RAIZ do monorepo:
+# WS-A — ingest-gateway (port 8803). Build from the monorepo ROOT:
 #   docker build -f services/ingest-gateway/Dockerfile -t dse/ingest-gateway .
 FROM python:3.11-slim
 
@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir \
 WORKDIR /app/services/ingest-gateway
 EXPOSE 8803
 
-# Duas formas de rodar a imagem (ver docker-compose.wsa.yml):
+# Two ways to run the image (see docker-compose.wsa.yml):
 #   - FastAPI app (health + admin kill switch):  uvicorn ingest_gateway.app:app
-#   - Dispatcher (drena ingest_events -> Temporal): python -m ingest_gateway.dispatcher_main
+#   - Dispatcher (drains ingest_events -> Temporal): python -m ingest_gateway.dispatcher_main
 CMD ["uvicorn", "ingest_gateway.app:app", "--host", "0.0.0.0", "--port", "8803"]

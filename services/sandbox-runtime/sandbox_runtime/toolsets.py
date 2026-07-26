@@ -1,6 +1,6 @@
 """Stage-scoped toolsets (WSC-E3-T3/T4/T5).
 
-Every Fase 2 agent session gets a toolset that is the ONLY tool surface
+Every Phase 2 agent session gets a toolset that is the ONLY tool surface
 available to the substrate. Enforcement is by explicit allowlist + path guard —
 not by the prompt's "good will":
 
@@ -10,7 +10,7 @@ not by the prompt's "good will":
 - **TesterToolset**: reads + `run_tests` + `write_file` ONLY under test paths;
   writing outside a test path FAILS (WSC-E3-T4). No git (the test commit is done
   by deterministic code in the Activity, scoped to test paths).
-  Fase 3 (WSC-E3-T4b, adendo 02): `demos/<work_item_id>/` is an additional
+  Phase 3 (WSC-E3-T4b, addendum 02): `demos/<work_item_id>/` is an additional
   ALLOWED write path — it is where the Tester authors the Playwright `@demo`
   test that WS-E's evidence pipeline runs. The permission is scoped to the
   session's work_item: `demos/<other-id>/` stays BLOCKED (per-task isolation).
@@ -92,11 +92,11 @@ class PlannerToolset(Toolset):
 
 
 class TesterToolset(Toolset):
-    """Fase 2: writes only under test paths. Fase 3 (WSC-E3-T4b): when built with
+    """Phase 2: writes only under test paths. Phase 3 (WSC-E3-T4b): when built with
     a `work_item_id`, `demos/<work_item_id>/` becomes an ADDITIONAL allowed write
     path (the Playwright `@demo` test convention, ADR-27) — scoped to the
     session's work item; another work item's `demos/` stays blocked. The
-    no-argument constructor preserves the Fase 2 behavior (no writes under
+    no-argument constructor preserves the Phase 2 behavior (no writes under
     `demos/`)."""
 
     name = "tester"
@@ -115,7 +115,7 @@ class TesterToolset(Toolset):
             path = inv.args.get("path", "")
             p = path.replace("\\", "/").lstrip("/")
             if p.startswith("demos/") or p == "demos":
-                # EVIDENCE namespace (Fase 3): scoped per work item. The generic
+                # EVIDENCE namespace (Phase 3): scoped per work item. The generic
                 # test-path rule (e.g. `*.spec.js` anywhere) does NOT apply in
                 # here — otherwise one task's Tester could write into another
                 # task's demo just by naming the file `*.spec.js`.

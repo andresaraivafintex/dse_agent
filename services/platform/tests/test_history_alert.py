@@ -118,7 +118,7 @@ def test_above_threshold_fires_alert(collector, metric_name, value, expected_sev
         if found:
             break
         time.sleep(1)
-    assert found, f"datapoint {value} de {metric_name} NÃO apareceu no canal de alerta ({since})"
+    assert found, f"datapoint {value} of {metric_name} did NOT show up on the alert channel ({since})"
 
     # the severity stamped by the transform is in the same block as the datapoint
     window = _alert_channel_lines("60s")

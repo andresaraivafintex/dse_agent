@@ -145,7 +145,7 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
         if is_new_checkpoint_repo:
             git_checkpoint.provision_checkpoint_repo(bare_repo_path, branch)
         if not Path(workspace_dir).exists():
-            # S4 (Fase 5): if the task has a target repo (e.g. github.com/andre2654/
+            # S4 (Phase 5): if the task has a target repo (e.g. github.com/andre2654/
             # fintex-wallet), CLONE the real code (with a token minted in the control
             # plane and scrubbed from the config) — the Coder works on the real repo.
             # With no repo/token (tests), fall back to the original empty-workspace
@@ -445,14 +445,14 @@ from dse_contracts.activities import RunCoderTurnInput  # noqa: E402
 
 
 def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder") -> AgentSubstrate:
-    """Substrate factory. Fase 3 (WSC-E3-T6): the choice is PER-DEPLOYMENT
+    """Substrate factory. Phase 3 (WSC-E3-T6): the choice is PER-DEPLOYMENT
     CONFIG — `DSE_CODER_SUBSTRATE` in {fake|openhands|claude-agent}, default
     `fake` (no gateway/SDK dependency has to be up for the tests). Swapping
     substrates never changes workflow code: WS-B keeps calling `run_coder_turn`
     by name, and this factory resolves the adapter behind the same
     `AgentSubstrate` interface.
 
-    Fase 1 (plano 09): with `DSE_SANDBOX_INPROCESS=0` (and ALWAYS in production)
+    Phase 1 (plan 09): with `DSE_SANDBOX_INPROCESS=0` (and ALWAYS in production)
     the substrate becomes `RemoteSubstrate` — same substrate name, but the SDK
     executes INSIDE the sandbox via `SandboxDriver.execute_stage`; the worker
     only dispatches the typed contract (invariant 2 of the spec)."""
@@ -466,7 +466,7 @@ def _build_substrate(script: list[dict[str, Any]] | None, *, stage: str = "coder
     )
 
 
-# Post-turn hygiene extracted to workspace_hygiene.py (Fase 1, plano 09): the
+# Post-turn hygiene extracted to workspace_hygiene.py (Phase 1, plan 09): the
 # same logic runs in the worker (Docker) and INSIDE the runner (K8s, --op
 # post_turn) — single source of truth; the aliases preserve call sites/tests.
 _prune_disposable_artifacts = workspace_hygiene.prune_disposable_artifacts
@@ -485,7 +485,7 @@ async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
         # Legacy in-process path: forbidden in production (fail-closed).
         reject_local_agent_execution("coder")
     else:
-        # Isolated path (Fase 1): the SDK runs in the agent-runner inside the
+        # Isolated path (Phase 1): the SDK runs in the agent-runner inside the
         # sandbox; here we only validate real substrate/gateway per profile.
         validate_runtime_profile(require_real_substrate=True, require_real_gateway=True)
     return await _run_coder_turn_impl(inp)
@@ -696,13 +696,13 @@ async def _run_coder_turn_impl(
 
 
 # ===========================================================================
-# Fase 2 — stage-scoped sessions (WSC-E3-T3/T4/T5)
+# Phase 2 — stage-scoped sessions (WSC-E3-T3/T4/T5)
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
 # run_planner_turn (WSC-E3-T3) — read-only session, emits a PlanArtifact
 # ---------------------------------------------------------------------------
-# PROMOTED to the contract (adendo 02 §2.3, the Fase 3 entry gate): the
+# PROMOTED to the contract (addendum 02 §2.3, the Phase 3 entry gate): the
 # canonical definition lives in `dse_contracts.activities` with boundary
 # regression tests (packages/contracts/tests/test_activity_boundaries.py)
 # validating WS-B's exact payloads. Re-imported for compatibility — every local
@@ -826,7 +826,7 @@ def _model_plan_proposer(
         steps = [str(s) for s in proposal.get("steps", []) if str(s).strip()]
         files = [str(f) for f in proposal.get("expected_files", []) if str(f).strip()]
         if not steps or not files:
-            raise ValueError("steps/expected_files vazios")
+            raise ValueError("steps/expected_files are empty")
         return {
             "steps": steps[:10],
             "expected_files": files[:30],
@@ -976,7 +976,7 @@ async def _run_planner_turn_impl(
 # ---------------------------------------------------------------------------
 # run_tester_turn (WSC-E3-T4) — test runners + test authoring (test paths only)
 # ---------------------------------------------------------------------------
-# PROMOTED to the contract (adendo 02 §2.3) — canonical definition in
+# PROMOTED to the contract (addendum 02 §2.3) — canonical definition in
 # `dse_contracts.activities`, boundary tests in the foundation. Re-imported for
 # the local consumers' compatibility.
 from dse_contracts import RunTesterTurnInput, TesterTurnResult  # noqa: E402
@@ -1001,7 +1001,7 @@ def _raise_if_permanent_provider_error(exc: Exception) -> None:
         from dse_contracts.failure import FailureClass, failure_type
         from temporalio.exceptions import ApplicationError
 
-        # Fase 2 (plano 09): the class travels in the TYPE (the contract's closed
+        # Phase 2 (plan 09): the class travels in the TYPE (the contract's closed
         # vocabulary) — the workflow no longer depends on a message substring.
         # (The legacy "ProviderBillingError" is still recognized on parse for
         # replay.)
@@ -1152,14 +1152,14 @@ def _model_authored_test_script(
     for f in files[:3]:
         path, content = str(f.get("path") or ""), str(f.get("content") or "")
         if not (path and content and is_test_path(path)):
-            logger.warning("path de teste recusado (fora de test paths): %r", path)
+            logger.warning("test path refused (outside the allowed test paths): %r", path)
             continue
         if path in existing_tests:
             # Instead of discarding it (which left the script empty whenever the
             # model insisted on the existing test), RENAME deterministically to a
             # new file in the SAME directory — relative imports stay intact.
             renamed = _dedupe_test_path(path, existing_tests, workspace_dir)
-            logger.warning("path de teste JÁ EXISTE — renomeado %r → %r", path, renamed)
+            logger.warning("test path ALREADY EXISTS — renamed %r → %r", path, renamed)
             path = renamed
         script.append({"tool": "write_file", "path": path, "content": content})
     if not script:
@@ -1372,7 +1372,7 @@ def _tester_pod_sync(
                 test_files.append(path)
                 authored_new = True
             else:
-                logger.warning("tester k8s: falha escrevendo %s no Pod: %.200s", path, (w.stderr or "")[:200])
+                logger.warning("tester k8s: failed writing %s into the Pod: %.200s", path, (w.stderr or "")[:200])
 
     # run the suite IN THE POD (deterministic detection: package.json with a
     # "test" script → npm test; otherwise pytest). node/npm/pytest come from the
@@ -1538,7 +1538,7 @@ async def _run_tester_turn_impl(
                     + [{"tool": "run_tests"}]
                 )
                 break
-            logger.warning("teste autorado com erro de INFRA (tentativa %d): %.200s", attempt, infra_err)
+            logger.warning("authored test hit an INFRA error (attempt %d): %.200s", attempt, infra_err)
             for p in new_paths:  # remove the junk before re-authoring/giving up
                 try:
                     os.remove(os.path.join(workspace_dir, p))
@@ -1555,7 +1555,7 @@ async def _run_tester_turn_impl(
                 details={"infra_error": error_feedback[:500]},
             )
 
-    # Fase 3 (WSC-E3-T4b): the toolset is scoped to the work item — besides test
+    # Phase 3 (WSC-E3-T4b): the toolset is scoped to the work item — besides test
     # paths, `demos/<work_item_id>/` is an allowed write (the `@demo` test
     # convention); ANOTHER work item's `demos/` stays blocked.
     session = ScriptedAgentSession(
@@ -1634,7 +1634,7 @@ async def _run_tester_turn_impl(
 # ---------------------------------------------------------------------------
 # run_l2_review (WSC-E3-T5) — fresh-context Reviewer session, returns L2Verdict
 # ---------------------------------------------------------------------------
-# PROMOTED to the contract (adendo 02 §2.3) and HARDENED there: the canonical
+# PROMOTED to the contract (addendum 02 §2.3) and HARDENED there: the canonical
 # definition in `dse_contracts.activities` now has `extra="forbid"` — trying to
 # pass any field beyond {work_item_id, tenant_id, plan, diff, task_class,
 # data_class} (e.g. the Coder's history) fails at the Activity's DECODE, not
@@ -1720,9 +1720,9 @@ async def _run_l2_review_impl(inp: RunL2ReviewInput, *, verdict_fn=None) -> L2Ve
 
 
 # ===========================================================================
-# Fase 4 — skill promotion pipeline (WSC-E4-T3). Activities registered as
+# Phase 4 — skill promotion pipeline (WSC-E4-T3). Activities registered as
 # `@activity.defn` with the names/types from `dse_contracts.activities` (defined
-# at the Fase 4 entry gate, before the build). The deterministic logic lives in
+# at the Phase 4 entry gate, before the build). The deterministic logic lives in
 # `skill_promotion` (P1); here we only have the Activity wrapper + the
 # translation into the contract's return models.
 # ===========================================================================

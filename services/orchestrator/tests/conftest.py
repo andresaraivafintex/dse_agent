@@ -180,7 +180,7 @@ def _require_postgres():
 
 
 async def wait_for_status(handle, expected, attempts: int = 120, sleep_s: float = 0.25) -> str:
-    """Resilient polling of a workflow status (Phase 4, plano 09).
+    """Resilient polling of a workflow status (Phase 4, plan 09).
 
     Two runner pitfalls this helper handles, both seen on the first real CI run
     (2 vCPU):

@@ -43,7 +43,7 @@ async def test_clarification_completes_after_answer(time_skipping_env):
 
         await handle.signal(
             "clarification_answer",
-            {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "deve fazer X"},
+            {"repo": "acme/repo", "base_branch": "main", "acceptance_criteria": "must do X"},
         )
         await wait_for_status(handle, {"review_ready"})
 

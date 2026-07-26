@@ -1,4 +1,4 @@
-"""agent-runner git ops (bootstrap/checkpoint) — Fase 1, plano 09.
+"""agent-runner git ops (bootstrap/checkpoint) — Phase 1, plan 09.
 
 They run IN PROCESS (real git in tmp dirs, no docker): the same code the K8s
 driver executes via `kubectl exec` and that Docker can execute via `docker
@@ -69,11 +69,11 @@ def test_checkpoint_remote_still_enforces_scope(tmp_path):
     # raw push to another branch → the pre-receive hook (installed by bootstrap)
     # refuses server-side, exactly as in the worker flow
     proc = subprocess.run(
-        ["git", "push", "origin", "HEAD:refs/heads/outro-branch"],
+        ["git", "push", "origin", "HEAD:refs/heads/other-branch"],
         cwd=ws, capture_output=True, text=True,
     )
     assert proc.returncode != 0
-    assert "recusado" in proc.stderr or "rejected" in proc.stderr.lower()
+    assert "refused" in proc.stderr or "rejected" in proc.stderr.lower()
 
 
 def test_bootstrap_error_is_structured_not_raised(tmp_path):
@@ -93,7 +93,7 @@ def test_bootstrap_with_repo_clone_failure_is_fail_closed(tmp_path):
         work_item_id="wi-clone",
         branch="dse/wi-clone",
         base_branch="main",
-        repo="acme/inexistente",
+        repo="acme/nonexistent",
         repo_host="127.0.0.1:1",  # immediate connection refused (fail-fast)
         workspace_dir=str(tmp_path / "workspace"),
         checkpoint_path=str(tmp_path / "checkpoint.git"),

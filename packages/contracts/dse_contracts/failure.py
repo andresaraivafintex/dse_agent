@@ -1,5 +1,5 @@
 """Structured failure classes at the Activity→workflow boundary (Phase 2,
-plano 09).
+plan 09).
 
 Before: the workflow classified a fail-closed refusal by SUBSTRING of the
 message (`_FAIL_CLOSED_MARKERS`) — a transient error carrying the wrong word

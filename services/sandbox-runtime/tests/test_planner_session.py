@@ -74,7 +74,7 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
     with conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO skill_registry (tenant_id, skill_key, title, body, category, created_by, status) "
-            "VALUES (%s,'no-plaintext-secrets','Sem segredos em claro','Nunca hardcode segredos.','security',"
+            "VALUES (%s,'no-plaintext-secrets','No cleartext secrets','Never hardcode secrets.','security',"
             "'principal:human:t','approved')",
             (tenant,),
         )
@@ -87,7 +87,7 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
             assert "AGENTS" in ctx.agents_md
             assert any(s.skill_key == "no-plaintext-secrets" for s in ctx.skills)
             return {
-                "steps": ["Adicionar validação no login"],
+                "steps": ["Add validation to the login"],
                 "expected_files": ["src/auth.py"],
                 "test_plan": "Test an invalid login.",
             }
@@ -107,7 +107,7 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
         )
         assert isinstance(plan, PlanArtifact)
         assert plan.work_item_id == work_item_id
-        assert plan.steps == ["Adicionar validação no login"]
+        assert plan.steps == ["Add validation to the login"]
         assert plan.expected_files == ["src/auth.py"]
         # auth is sensitive in the fintech domain → the deterministic classifier
         # raises it to 'high' (glob **/*auth*), regardless of what the proposer said.
@@ -130,10 +130,10 @@ def test_planner_risk_class_is_deterministic_floor_not_llm(work_item_id, state_d
         plan = asyncio.run(
             _run_planner_turn_impl(
                 RunPlannerTurnInput(
-                    work_item_id=work_item_id, tenant_id=tenant, instruction="mexe no schema", repo="app"
+                    work_item_id=work_item_id, tenant_id=tenant, instruction="touch the schema", repo="app"
                 ),
                 retrieval=svc,
-                proposer=lambda ctx: {"steps": ["alterar schema"], "expected_files": ["migrations/0099_x.sql"]},
+                proposer=lambda ctx: {"steps": ["change the schema"], "expected_files": ["migrations/0099_x.sql"]},
             )
         )
         assert plan.risk_class == "high"
@@ -176,7 +176,7 @@ def test_planner_runs_through_real_temporal_activity_environment(work_item_id, s
         plan = asyncio.run(
             env.run(
                 run_planner_turn,
-                RunPlannerTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="algo simples", repo="app"),
+                RunPlannerTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="something simple", repo="app"),
             )
         )
         assert isinstance(plan, PlanArtifact)

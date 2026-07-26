@@ -98,7 +98,7 @@ async def test_l2_review_receives_only_plan_and_diff_not_coder_history(time_skip
     # ABSENT (P3): nothing from the Coder's history/instructions
     for forbidden in ("instructions", "clarification_notes", "objections",
                       "model_override", "files_changed", "sandbox_id"):
-        assert forbidden not in payload, f"L2 recebeu '{forbidden}' — viola P3"
+        assert forbidden not in payload, f"L2 received '{forbidden}' — violates P3"
 
 
 @pytest.mark.asyncio

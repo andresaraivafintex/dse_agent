@@ -326,7 +326,7 @@ The console validates an OIDC `id_token` (RS256) against the IdP's JWKS.
 Configured by env (see `queue_board/asgi.py`):
 
 ```
-DSE_OIDC_ISSUER=https://login.cliente.com
+DSE_OIDC_ISSUER=https://login.customer.com
 DSE_OIDC_AUDIENCE=dse-admin-console          # client_id
 DSE_OIDC_JWKS_FILE=/etc/dse/idp-jwks.json    # or DSE_OIDC_JWKS='{"keys":[...]}'
 DSE_CONSOLE_SESSION_SECRET=<>=32 bytes>
@@ -461,7 +461,7 @@ from dse_platform import get_retention_policies, set_retention_policy, run_reten
 
 # rotation, for any service that needs to swap an internal secret
 from dse_platform import rotate_secret
-rotate_secret("dse/service/meu-secret", actor="system:secret-rotator")
+rotate_secret("dse/service/my-secret", actor="system:secret-rotator")
 ```
 
 ### Requests filed for other workstreams (we edited nothing of theirs)

@@ -4,7 +4,7 @@ Foundation (minimum) -> WS-F extends [...] per-WorkItem reconstruction queries
 (dse_audit.queries)").
 
 This module is purely additive: it does not touch `dse_audit.client` (`emit`
-remains the only write path). Two functions cover the Fase 1 exit criterion
+remains the only write path). Two functions cover the Phase 1 exit criterion
 ("first audit-based reconstruction exercise passes"):
 
   - `reconstruct_work_item_history(work_item_id)`: a WorkItem's full timeline via
@@ -34,7 +34,7 @@ def reconstruct_work_item_history(work_item_id: str, conn=None) -> list[dict[str
 
     Returns a list of dicts in the chronological order the events occurred:
     [{ts, actor, action, details, tenant_id}, ...]. Each dict represents "who did
-    what, when" — the audit-based reconstruction exercise required by the Fase 1
+    what, when" — the audit-based reconstruction exercise required by the Phase 1
     exit criterion.
 
     Makes no assumption about which actions exist (admitted, clarified, plan,

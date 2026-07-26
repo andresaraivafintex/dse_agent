@@ -88,7 +88,7 @@ def _make_scenario(tmp_path: Path, *, conflicting_drift: bool = False):
     if conflicting_drift:
         (seed / "shared.py").write_text("main-change\n")
         _git(seed, "add", "-A")
-        _git(seed, "commit", "-q", "-m", "base: shared.py conflita")
+        _git(seed, "commit", "-q", "-m", "base: shared.py conflicts")
     else:
         (seed / "drift.py").write_text("# base moved forward\n")
         _git(seed, "add", "-A")

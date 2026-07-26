@@ -343,7 +343,7 @@ def test_explicit_repo_in_text_overrides():
             "channel": "C_UNBOUND_XYZ",
             "ts": "9400.001",
             "user": "U_REQUESTER",
-            "text": "@fintex-dse repo=andre2654/outro-repo faz X",
+            "text": "@fintex-dse repo=andre2654/other-repo do X",
         }
     )
     conn = psycopg2.connect(DSN)
@@ -351,4 +351,4 @@ def test_explicit_repo_in_text_overrides():
         cur.execute("SELECT repo FROM work_items WHERE id = %s", (created["work_item_id"],))
         repo = cur.fetchone()[0]
     conn.close()
-    assert repo == "andre2654/outro-repo"
+    assert repo == "andre2654/other-repo"

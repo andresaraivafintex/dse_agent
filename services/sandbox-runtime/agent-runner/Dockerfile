@@ -1,35 +1,35 @@
-# Plano 08 §G — imagem do agent-runner (runtime isolado K8s).
+# Plan 08 §G — agent-runner image (isolated K8s runtime).
 #
-# Base mínima, NÃO-root, sem toolchain de build supérfluo. Roda UM estágio do
-# agente por invocação (python -m agent_runner --stage <stage>), lendo o payload
-# do stdin e escrevendo o resultado no stdout (o KubernetesSandboxDriver faz
-# `kubectl exec`). Nenhuma credencial de longo prazo na imagem — a virtual key e
-# o token de git são injetados por invocação (env efêmero), nunca em camada.
+# Minimal base, NON-root, no superfluous build toolchain. Runs ONE agent stage
+# per invocation (python -m agent_runner --stage <stage>), reading the payload
+# from stdin and writing the result to stdout (KubernetesSandboxDriver does the
+# `kubectl exec`). No long-lived credential in the image — the virtual key and
+# the git token are injected per invocation (ephemeral env), never into a layer.
 #
-# Postura: casa com o build_pod_manifest (runAsNonRoot=10001, readOnlyRootFs,
-# cap drop ALL). O RuntimeClass de isolamento forte (gVisor/Kata) é aplicado no
-# Pod, não na imagem.
+# Posture: matches build_pod_manifest (runAsNonRoot=10001, readOnlyRootFs,
+# cap drop ALL). The strong-isolation RuntimeClass (gVisor/Kata) is applied on
+# the Pod, not in the image.
 FROM python:3.12-slim AS base
 
-# usuário não-root fixo (mesmo UID do securityContext do Pod)
+# fixed non-root user (same UID as the Pod's securityContext)
 RUN groupadd -g 10001 dse && useradd -u 10001 -g 10001 -m -s /usr/sbin/nologin dse
 
 WORKDIR /app
 
-# deps do runtime do agente (substrato openhands + git). Pinar em produção.
-# git é necessário para o ScopedGitSession (checkpoint/push do branch da tarefa).
+# agent runtime deps (openhands substrate + git). Pin these in production.
+# git is required by ScopedGitSession (checkpoint/push of the task branch).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# node 20 + npm: o Tester roda a suíte de testes do repo alvo DENTRO do Pod
-# (ex. `node --test` p/ repos Node, `npm test`). O claude-agent-sdk embute o
-# Node internamente mas NÃO o expõe no PATH — sem isto o Tester falha com
-# "node: not found" em repos Node (achado empírico: fintex-wallet é Node).
-# NodeSource p/ node 22 LTS (satisfaz `engines.node >=20`). Node 22 (não 20)
-# porque o `node --test` só EXPANDE GLOB a partir do 21 — repos com
-# `"test": "node --test \"test/*.test.js\""` (ex. fintex-wallet) falham no 20
-# com "Could not find 'test/*.test.js'" (glob tratado como path literal).
+# node 20 + npm: the Tester runs the target repo's test suite INSIDE the Pod
+# (e.g. `node --test` for Node repos, `npm test`). claude-agent-sdk embeds Node
+# internally but does NOT expose it on the PATH — without this the Tester fails
+# with "node: not found" on Node repos (observed empirically: fintex-wallet is
+# Node). NodeSource for node 22 LTS (satisfies `engines.node >=20`). Node 22
+# (not 20) because `node --test` only EXPANDS GLOBS from 21 on — repos with
+# `"test": "node --test \"test/*.test.js\""` (e.g. fintex-wallet) fail on 20
+# with "Could not find 'test/*.test.js'" (the glob is taken as a literal path).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
@@ -38,17 +38,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# bandit: SAST do pipeline L1 (dse_validation.l1.sast roda `bandit -r <dir>`
-# DENTRO do Pod via kubectl exec). Sem bandit o L1 dá sast=ERROR e reprova. É
-# tool Python; num repo sem .py roda e não acha nada → PASS.
+# bandit: the L1 pipeline's SAST (dse_validation.l1.sast runs `bandit -r <dir>`
+# INSIDE the Pod via kubectl exec). Without bandit, L1 reports sast=ERROR and
+# fails the gate. It is a Python tool; in a repo with no .py it runs, finds
+# nothing and returns PASS.
 RUN pip install --no-cache-dir bandit
 
-# contrato tipado da fronteira worker→runner (AgentTurnRequest/Result): o
-# runner valida com o modelo REAL (spec §5), nunca com dict solto.
+# typed contract for the worker→runner boundary (AgentTurnRequest/Result): the
+# runner validates against the REAL model (spec §5), never against a loose dict.
 COPY packages/contracts /app/packages/contracts
 RUN pip install --no-cache-dir /app/packages/contracts
 
-# substrato openhands é OPT-IN (a imagem default fica enxuta p/ VPS 2vCPU):
+# the openhands substrate is OPT-IN (the default image stays lean for a 2vCPU VPS):
 # docker build --build-arg INSTALL_OPENHANDS=1 ...
 ARG INSTALL_OPENHANDS=0
 COPY services/sandbox-runtime/agent-runner/requirements-openhands.txt /app/requirements-openhands.txt
@@ -56,20 +57,22 @@ RUN if [ "$INSTALL_OPENHANDS" = "1" ]; then \
       pip install --no-cache-dir -r /app/requirements-openhands.txt; \
     fi
 
-# código do runner (o módulo agent_runner + o sandbox_runtime compartilhado)
+# runner code (the agent_runner module + the shared sandbox_runtime)
 COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
-# fonte única de verdade do git escopado e da higiene pós-turno: vendora os
-# módulos do worker na imagem (gitops/postturn importam com fallback p/ cópia)
+# single source of truth for scoped git and post-turn hygiene: vendor the
+# worker's modules into the image (gitops/postturn import with a fallback to
+# this copy)
 COPY services/sandbox-runtime/sandbox_runtime/scoped_git.py /app/agent_runner/_scoped_git.py
 COPY services/sandbox-runtime/sandbox_runtime/workspace_hygiene.py /app/agent_runner/_workspace_hygiene.py
 
 USER 10001:10001
-# /workspace e /tmp vêm de emptyDir graváveis (o rootfs é read-only no Pod)
-# PYTHONPATH: o exec roda com working_dir=/workspace (o driver monta o repo
-# lá) — sem isto `python -m agent_runner` não resolveria o módulo em /app.
+# /workspace and /tmp come from writable emptyDirs (the Pod rootfs is read-only)
+# PYTHONPATH: the exec runs with working_dir=/workspace (the driver mounts the
+# repo there) — without this `python -m agent_runner` would not resolve the
+# module under /app.
 ENV HOME=/tmp PYTHONUNBUFFERED=1 PYTHONPATH=/app
-# O container fica VIVO e ocioso; cada turno chega por exec
-# (`docker exec -i` / `kubectl exec -i` → python -m agent_runner). ENTRYPOINT
-# de runner aqui seria bug: o processo leria stdin EOF no boot e sairia antes
-# de qualquer exec (pod restartPolicy=Never morreria "Completed").
+# The container stays ALIVE and idle; each turn arrives through an exec
+# (`docker exec -i` / `kubectl exec -i` → python -m agent_runner). A runner
+# ENTRYPOINT here would be a bug: the process would read stdin EOF at boot and
+# exit before any exec (a pod with restartPolicy=Never would die "Completed").
 CMD ["sleep", "infinity"]

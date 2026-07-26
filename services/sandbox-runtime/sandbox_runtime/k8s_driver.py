@@ -1,4 +1,4 @@
-"""plano 08 §G — Kubernetes sandbox driver (real isolated runtime).
+"""plan 08 §G — Kubernetes sandbox driver (real isolated runtime).
 
 Today the agent runs in-process in the orchestrator (with the master key + creds
 in the env) → the "nothing to steal inside the sandbox" threat model does NOT

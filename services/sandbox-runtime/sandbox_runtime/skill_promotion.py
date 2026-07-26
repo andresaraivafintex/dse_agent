@@ -1,4 +1,4 @@
-"""Skill promotion pipeline (WSC-E4-T2 + T3) — Fase 4.
+"""Skill promotion pipeline (WSC-E4-T2 + T3) — Phase 4.
 
 Two halves, both DETERMINISTIC (P1 — no flow decision made by an LLM):
 
@@ -411,7 +411,7 @@ def evaluate_candidate(
             )
             row = cur.fetchone()
         if row is None:
-            raise SkillNotFound(f"{tenant_id}/{skill_key} v{candidate_version} inexistente")
+            raise SkillNotFound(f"{tenant_id}/{skill_key} v{candidate_version} does not exist")
         candidate_pattern_key = row[0] or skill_key
 
         cases = (
@@ -502,7 +502,7 @@ def _current_status(cur, tenant_id: str, skill_key: str, version: int) -> str:
     )
     row = cur.fetchone()
     if row is None:
-        raise SkillNotFound(f"{tenant_id}/{skill_key} v{version} inexistente")
+        raise SkillNotFound(f"{tenant_id}/{skill_key} v{version} does not exist")
     return row[0]
 
 

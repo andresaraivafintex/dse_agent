@@ -1,10 +1,10 @@
-# WS-F — imagem do queue board admin (WSF-E6-T3). Instala os pacotes da
-# fundação + este serviço e roda o ASGI em uvicorn na porta 8890.
+# WS-F — queue board admin image (WSF-E6-T3). Installs the foundation packages
+# + this service and runs the ASGI app under uvicorn on port 8890.
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# contexto de build é a raiz do monorepo (ver docker-compose.wsf.yml)
+# the build context is the monorepo root (see docker-compose.wsf.yml)
 COPY packages/contracts /app/packages/contracts
 COPY packages/dse_audit /app/packages/dse_audit
 COPY packages/dse_identity /app/packages/dse_identity

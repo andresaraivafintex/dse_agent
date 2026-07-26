@@ -34,7 +34,7 @@ def test_provision_is_idempotent_by_work_item_id(work_item_id, docker_client):
             c
             for c in docker_client.containers.list(all=True, filters={"label": f"dse.work_item_id={work_item_id}"})
         ]
-        assert len(matching) == 1, f"esperava exatamente 1 container, achou {len(matching)}"
+        assert len(matching) == 1, f"expected exactly 1 container, found {len(matching)}"
     finally:
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id="tenant-a")))
         # teardown already removes it; this guarantees cleanup even if the test

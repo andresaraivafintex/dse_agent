@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-adapter-github"
 version = "0.1.0"
-description = "WS-A: adapter GitHub (inbound issues/PR webhooks + outbound status comment via MutableCommentWriter, sob identidade GitHub App)"
+description = "WS-A: adapter GitHub (inbound issues/PR webhooks + outbound status comment via MutableCommentWriter, under the GitHub App identity)"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",

@@ -2,7 +2,7 @@
 monorepo may run `INSERT INTO audit_log` directly — import `emit` instead.
 
 Foundation minimum: writes using the `dse_app` role (which has no UPDATE/DELETE
-grant — see migrations/0001_foundation.sql). WS-F extends this package in Fase 1
+grant — see migrations/0001_foundation.sql). WS-F extends this package in Phase 1
 with:
   - per-WorkItem reconstruction queries (`dse_audit.queries`)
   - compliance-grade export per tenant/time range

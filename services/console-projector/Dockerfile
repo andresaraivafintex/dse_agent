@@ -1,4 +1,4 @@
-# Plano 06 — console-projector: SoR -> console_rm (read model do painel).
+# Plan 06 — console-projector: SoR -> console_rm (the console read model).
 FROM python:3.12-slim
 
 WORKDIR /app

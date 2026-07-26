@@ -1,10 +1,10 @@
-"""Identity map foundations (WSF-E3-T1). Fase 1: resolution by self-registration
+"""Identity map foundations (WSF-E3-T1). Phase 1: resolution by self-registration
 on first appearance — NO SSO/SCIM (that is ADR-22, closed, plus WSF-E3-T3, in
-Fase 2). Every adapter calls `resolve_principal` before writing `actor` into any
+Phase 2). Every adapter calls `resolve_principal` before writing `actor` into any
 `ConversationEvent`, `WorkItem.requester` or audit row.
 
-Stable contract (WS-A depends on it in Fase 1; WS-F swaps the implementation
-underneath in Fase 2 without breaking the signature — see WSA-E6-T2b).
+Stable contract (WS-A depends on it in Phase 1; WS-F swaps the implementation
+underneath in Phase 2 without breaking the signature — see WSA-E6-T2b).
 """
 from __future__ import annotations
 

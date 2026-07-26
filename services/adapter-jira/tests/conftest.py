@@ -7,8 +7,8 @@ import pytest
 
 os.environ.setdefault("JIRA_WEBHOOK_SECRET", "jira_webhook_secret_test")
 os.environ.setdefault("JIRA_TRIGGER_LABEL", "dse")
-os.environ.setdefault("JIRA_PLAN_APPROVED_STATUS", "Plano aprovado")
-os.environ.setdefault("JIRA_PLAN_REJECTED_STATUS", "Plano rejeitado")
+os.environ.setdefault("JIRA_PLAN_APPROVED_STATUS", "Plan approved")
+os.environ.setdefault("JIRA_PLAN_REJECTED_STATUS", "Plan rejected")
 os.environ["DSE_TENANT_ID"] = "test_tenant_jira_adapter"
 
 SUPERUSER_DSN = "postgresql://dse:dse_dev_only@localhost:5432/dse"

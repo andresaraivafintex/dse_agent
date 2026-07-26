@@ -46,7 +46,7 @@ def main():
         old_sha, new_sha, refname = line.strip().split()
         if refname != ALLOWED_REF:
             sys.stderr.write(
-                f"dse-scope: recusado — ref {{refname}} fora do branch permitido "
+                f"dse-scope: refused — ref {{refname}} outside the allowed branch "
                 f"{{ALLOWED_REF}}\\n"
             )
             rejected = True
@@ -100,7 +100,7 @@ def install_pre_receive_guard(bare_repo_path: str, allowed_branch: str) -> None:
 
 
 def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
-    """plano 08 §F (F6) — writes the `.dse-task-branch` marker (used by
+    """plan 08 §F (F6) — writes the `.dse-task-branch` marker (used by
     resume/checkpoint to rediscover the task branch) AND excludes it from EVERY
     commit via `.git/info/exclude`. The marker is DSE infrastructure — it must
     not leak into the customer's PR. Because `commit()` uses `--allow-empty`, the

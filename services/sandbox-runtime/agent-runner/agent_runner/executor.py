@@ -1,4 +1,4 @@
-"""Real agent-turn executor INSIDE the sandbox (plano 09, Fase 1).
+"""Real agent-turn executor INSIDE the sandbox (plan 09, Phase 1).
 
 This module runs in the hardened container/pod — never in the worker. It takes
 an `AgentTurnRequest` (typed dse_contracts contract), runs the requested
@@ -117,7 +117,7 @@ def _run_claude_agent(req: AgentTurnRequest) -> AgentTurnResult:
             cost_usd=totals["cost"],
             tokens_in=totals["tin"],
             tokens_out=totals["tout"],
-            error=f"turno excedeu {req.timeout_seconds:.0f}s sem concluir",
+            error=f"turn exceeded {req.timeout_seconds:.0f}s without finishing",
             error_kind="timeout",
         )
     except Exception as exc:  # noqa: BLE001 — P6: structured failure, never raw
@@ -195,7 +195,7 @@ def _run_openhands(req: AgentTurnRequest) -> AgentTurnResult:
         except concurrent.futures.TimeoutError:
             return AgentTurnResult(
                 done=False,
-                error=f"turno openhands excedeu {req.timeout_seconds:.0f}s",
+                error=f"openhands turn exceeded {req.timeout_seconds:.0f}s",
                 error_kind="timeout",
             )
         except Exception as exc:  # noqa: BLE001 — P6
@@ -225,6 +225,6 @@ def run_agent_turn(req: AgentTurnRequest) -> AgentTurnResult:
         return _run_openhands(req)
     return AgentTurnResult(
         done=False,
-        error=f"substrato desconhecido: {req.substrate!r}",
+        error=f"unknown substrate: {req.substrate!r}",
         error_kind="unsupported_substrate",
     )

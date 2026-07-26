@@ -1,4 +1,4 @@
-"""NIGHTLY canary for a real turn (plano 09, Fase 4) — the structural answer to
+"""NIGHTLY canary for a real turn (plan 09, Phase 4) — the structural answer to
 the series of "found on a real run" commits: every bug of the "only shows up
 with the real model" class now shows up here, at night, under a capped budget —
 not on a customer run.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dse-egress-proxy"
 version = "0.1.0"
-description = "WS-C: egress proxy default-deny com injecao de credenciais efemeras (allowlist derivada do WorkItem)"
+description = "WS-C: default-deny egress proxy with ephemeral credential injection (allowlist derived from the WorkItem)"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",

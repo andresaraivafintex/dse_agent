@@ -1,4 +1,4 @@
-"""Regression for the K8s mode of the lifecycle activities (plano 09,
+"""Regression for the K8s mode of the lifecycle activities (plan 09,
 adversarial review).
 
 No cluster needed: monkeypatches `activities.select_sandbox_driver` with a stub

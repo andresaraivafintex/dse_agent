@@ -1,4 +1,4 @@
-"""Closed vocabulary of failure classes (Phase 2, plano 09)."""
+"""Closed vocabulary of failure classes (Phase 2, plan 09)."""
 from __future__ import annotations
 
 from dse_contracts import (
@@ -27,7 +27,7 @@ def test_unknown_types_map_to_none():
     assert parse_failure_type(None) is None
     assert parse_failure_type("") is None
     assert parse_failure_type("ValueError") is None
-    assert parse_failure_type("dse.failure.inexistente") is None
+    assert parse_failure_type("dse.failure.nonexistent") is None
 
 
 def test_fail_closed_classes_vocabulary_is_closed():

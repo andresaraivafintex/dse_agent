@@ -1,3 +1,3 @@
-# Substrato openhands no agent-runner — OPT-IN (build-arg INSTALL_OPENHANDS=1).
-# Fora do default para manter a imagem enxuta (VPS piloto de 2 vCPU / 8 GB).
+# openhands substrate in the agent-runner — OPT-IN (build-arg INSTALL_OPENHANDS=1).
+# Left out of the default so the image stays lean (2 vCPU / 8 GB pilot VPS).
 openhands-sdk>=1.21

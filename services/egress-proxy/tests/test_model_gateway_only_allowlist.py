@@ -43,7 +43,7 @@ def test_direct_provider_call_is_blocked_and_audited(running_proxy_factory, work
 
     for provider_host in KNOWN_PROVIDER_HOSTS:
         resp = _request_via_proxy(rp.port, provider_host)
-        assert resp.status == 403, f"chamada direta a {provider_host} deveria ter sido bloqueada"
+        assert resp.status == 403, f"a direct call to {provider_host} should have been blocked"
 
     conn = psycopg2.connect("postgresql://dse_app:dse_app_dev_only@localhost:5432/dse")
     try:

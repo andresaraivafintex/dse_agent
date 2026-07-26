@@ -1,4 +1,4 @@
-"""Boundary tests of the isolated-turn contract (plano 09, Phase 1).
+"""Boundary tests of the isolated-turn contract (plan 09, Phase 1).
 
 Same discipline as `test_activity_boundaries`: LITERAL payloads (what actually
 crosses the worker → agent-runner boundary), never objects built with defaults
@@ -68,7 +68,7 @@ def test_request_rejects_unknown_field():
                 "substrate": "fake",
                 "instruction": "x",
                 "gateway": {"base_url": "u", "virtual_key": "vk"},
-                "host_workspace_path": "/Users/alguem/repo",  # NEVER crosses
+                "host_workspace_path": "/Users/someone/repo",  # NEVER crosses
             }
         )
 

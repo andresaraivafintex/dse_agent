@@ -146,7 +146,7 @@ def _replay_input(work_item_id: str):
         requester="usr_test",
         repo="acme/repo",
         base_branch="main",
-        acceptance_criteria="criterio verificavel",
+        acceptance_criteria="verifiable criterion",
         ci_poll_interval_seconds=0.01,
         ci_pending_poll_cap=10,
         activity_retry_cap=2,

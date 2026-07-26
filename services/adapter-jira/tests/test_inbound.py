@@ -114,8 +114,8 @@ def test_status_transition_to_approved_column_signals_approval():
         {
             "webhookEvent": "jira:issue_updated",
             "user": {"accountId": "acc_boss", "displayName": "Bob Boss"},
-            "issue": _issue("DSE-12", "10012", labels=["dse"], status="Plano aprovado"),
-            "changelog": {"id": "cl1", "items": [{"field": "status", "toString": "Plano aprovado"}]},
+            "issue": _issue("DSE-12", "10012", labels=["dse"], status="Plan approved"),
+            "changelog": {"id": "cl1", "items": [{"field": "status", "toString": "Plan approved"}]},
         }
     )
     approval = [r for r in data["results"] if r["path"] == "signal_approval"][0]
@@ -150,8 +150,8 @@ def test_status_transition_to_rejected_column_signals_rejection_with_route():
         {
             "webhookEvent": "jira:issue_updated",
             "user": {"accountId": "acc_boss", "displayName": "Bob Boss"},
-            "issue": _issue("DSE-13", "10013", labels=["dse"], status="Plano rejeitado"),
-            "changelog": {"id": "cl2", "items": [{"field": "status", "toString": "Plano rejeitado"}]},
+            "issue": _issue("DSE-13", "10013", labels=["dse"], status="Plan rejected"),
+            "changelog": {"id": "cl2", "items": [{"field": "status", "toString": "Plan rejected"}]},
         }
     )
     approval = [r for r in data["results"] if r["path"] == "signal_approval"][0]

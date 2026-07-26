@@ -50,7 +50,7 @@ class AdmissionBlock:
 # ---------------------------------------------------------------------------
 def set_global_kill_switch(*, enabled: bool, reason: str | None, actor: str, conn=None) -> None:
     if enabled and not reason:
-        raise ValueError("global kill switch exige `reason` ao ATIVAR (P8)")
+        raise ValueError("the global kill switch requires `reason` when ACTIVATING (P8)")
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -115,7 +115,7 @@ def set_channel_kill_switch(
     channel OFF (blocks admission) — same semantics as the `active` column of
     WS-A's table."""
     if active and not reason:
-        raise ValueError("channel kill switch exige `reason` ao ATIVAR (P8)")
+        raise ValueError("the channel kill switch requires `reason` when ACTIVATING (P8)")
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -191,7 +191,7 @@ def quarantine_work_item(
     already-quarantined item only updates the reason. `reason`/`actor` are
     mandatory (P8)."""
     if not reason:
-        raise ValueError("quarantine exige `reason` (P8)")
+        raise ValueError("quarantine requires `reason` (P8)")
     owns = conn is None
     if owns:
         conn = _get_connection()

@@ -19,7 +19,7 @@ SIGNAL_CLARIFICATION_ANSWER = "clarification_answer"
 SIGNAL_REVIEW_COMMENT = "review_comment"
 SIGNAL_MERGED_BY_HUMAN = "merged_by_human"
 
-# Phase 2 (adendo 01 §2.2): plan approval gate signal (WSB-E3-T2).
+# Phase 2 (addendum 01 §2.2): plan approval gate signal (WSB-E3-T2).
 # Payload: {"verdict": "approved"|"rejected", "route": "re_plan"|"re_clarify"|
 # "cancel" (required when rejected — WSB-E3-T3), "comment": str,
 # "actor": resolved principal}. The WS-A dispatcher routes `kind=approval` to
@@ -46,6 +46,6 @@ OTEL_ATTR_MODEL = "dse.model"
 OTEL_ATTR_COST_USD = "dse.cost_usd"
 OTEL_ATTR_TOKENS_IN = "dse.tokens_in"
 OTEL_ATTR_TOKENS_OUT = "dse.tokens_out"
-# Promoted from WS-D in Phase 2 (adendo 01 §4) — it was already emitted as the
+# Promoted from WS-D in Phase 2 (addendum 01 §4) — it was already emitted as the
 # ad-hoc attribute "dse.task_class" in Phase 1.
 OTEL_ATTR_TASK_CLASS = "dse.task_class"

@@ -48,7 +48,7 @@ def test_escalates_when_retries_exhausted(work_item_id, tenant_id):
         verdict=v, state=_state(work_item_id, tenant_id, iterations=3), cfg=_cfg(max_retries=3)
     )
     assert d.action == "escalate_operator"
-    assert "retorno" in d.reason or "cap" in d.reason
+    assert "returns" in d.reason or "cap" in d.reason
 
 
 def test_escalates_when_budget_exhausted_even_with_retries_left(work_item_id, tenant_id):
@@ -95,7 +95,7 @@ def test_register_retry_refuses_after_budget_cap_p6(work_item_id, tenant_id):
 
 def test_escalate_marks_exhausted_durably(work_item_id, tenant_id):
     state = _state(work_item_id, tenant_id, iterations=3, spent=0.3)
-    fix_loop.escalate_to_operator(state, reason="retries esgotados", objections=["z"])
+    fix_loop.escalate_to_operator(state, reason="retries exhausted", objections=["z"])
     loaded = fix_loop.load_state(work_item_id, tenant_id)
     assert loaded.exhausted is True
     assert loaded.iterations == 3
@@ -106,7 +106,7 @@ def test_full_bounded_loop_reject_reject_reject_escalate(work_item_id, tenant_id
     Each iteration debits budget; the 4th attempt never happens (P6)."""
     cfg = _cfg(max_retries=3)
     state = fix_loop.load_state(work_item_id, tenant_id)
-    fail = L2Verdict(work_item_id=work_item_id, passed=False, objections=["persiste"])
+    fail = L2Verdict(work_item_id=work_item_id, passed=False, objections=["still failing"])
 
     for _ in range(3):
         decision = fix_loop.decide_next_action(verdict=fail, state=state, cfg=cfg)

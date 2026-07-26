@@ -1,4 +1,4 @@
-# WS-A Fase 2 — adapter-jira (porta 8804). Build a partir da RAIZ do monorepo:
+# WS-A Phase 2 — adapter-jira (port 8804). Build from the monorepo ROOT:
 #   docker build -f services/adapter-jira/Dockerfile -t dse/adapter-jira .
 FROM python:3.11-slim
 

@@ -29,7 +29,7 @@ def work_item_id():
 
 
 def test_repeated_accepted_feedback_increments_occurrence(tenant_id, work_item_id):
-    body = "Use uma query parametrizada em vez de f-string no SQL."
+    body = "Use a parameterised query instead of an f-string in the SQL."
     path = "app/dao.py"
 
     first = record_review_feedback_episode(
@@ -82,7 +82,7 @@ def test_boundary_no_skill_created_or_activated(tenant_id, work_item_id):
 def test_not_accepted_feedback_records_nothing(tenant_id, work_item_id):
     result = record_review_feedback_episode(
         tenant_id=tenant_id, work_item_id=work_item_id, pr_number=300,
-        reviewer="usr_alice", comment_body="talvez repensar isso", path="x.py",
+        reviewer="usr_alice", comment_body="maybe rethink this", path="x.py",
         accepted=False,
     )
     assert result is None

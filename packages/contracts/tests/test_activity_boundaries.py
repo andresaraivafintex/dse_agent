@@ -1,4 +1,4 @@
-"""BOUNDARY regression tests (adendo 02 §2.3, Phase 3 entry gate).
+"""BOUNDARY regression tests (addendum 02 §2.3, Phase 3 entry gate).
 
 In Phases 1-2, 14 integration bugs came from the same pattern: the payload the
 workflow (WS-B) sends drifted away from the fields the Activity (WS-C/WS-E)
@@ -107,7 +107,7 @@ def test_l2_input_forbids_coder_history_structurally():
 
 
 def test_l2_verdict_roundtrip():
-    v = L2Verdict(work_item_id="wi_x", passed=False, objections=["app.py:12 sem teste"])
+    v = L2Verdict(work_item_id="wi_x", passed=False, objections=["app.py:12 has no test"])
     assert L2Verdict(**v.model_dump()) == v
 
 

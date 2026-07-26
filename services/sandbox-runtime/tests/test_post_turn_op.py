@@ -1,4 +1,4 @@
-"""The runner's post_turn op + the Coder Activity in K8s mode (Fase 1, F1.7).
+"""The runner's post_turn op + the Coder Activity in K8s mode (Phase 1, F1.7).
 
 Two layers of proof, without a cluster:
   1. The op itself (real git in tmp dirs): pruning disposables, restoring
@@ -66,7 +66,7 @@ def test_post_turn_full_hygiene_and_scoped_push(tmp_path):
             work_item_id=wi,
             branch=req.branch,
             turn_start_sha=boot.sha,
-            commit_message=f"coder({wi}): implementa",
+            commit_message=f"coder({wi}): implement",
             expected_files=["src/app.py"],
             workspace_dir=str(ws),
         )
@@ -115,7 +115,7 @@ class PodGitStubDriver:
             return checkpoint_workspace(CheckpointOpRequest.model_validate(payload)).model_dump()
         if op == "post_turn":
             return run_post_turn(PostTurnRequest.model_validate(payload)).model_dump()
-        raise AssertionError(f"op inesperada: {op}")
+        raise AssertionError(f"unexpected op: {op}")
 
     def execute_stage(self, request):
         self.ops.append(f"stage:{request.stage.value}")
@@ -150,7 +150,7 @@ def test_coder_activity_full_pipeline_in_pod_git_mode(tmp_path, work_item_id, st
     result = asyncio.run(
         _run_coder_turn_impl(
             RunCoderTurnInput(
-                work_item_id=work_item_id, tenant_id="tenant-a", instruction="implemente",
+                work_item_id=work_item_id, tenant_id="tenant-a", instruction="implement it",
             ),
             substrate=remote,
         )

@@ -171,7 +171,7 @@ class ConsumeCiStatusInput(BaseModel):
     tenant_id: str = ""
     repo: str = ""
     pr_number: int
-    ref: str = Field(default="", description="commit sha (ou nome de branch) para consultar check-runs")
+    ref: str = Field(default="", description="commit sha (or branch name) to query check-runs for")
     # Phase 3 (WSE-E4-T9b) — additive: when `surface_ref` comes populated, the L3
     # consumption reflects the status in the PR's single tracking comment and
     # enables targeted re-runs/repair episodes. Phase 1/2 payloads (without the
@@ -293,7 +293,7 @@ def _finalize_pr(inp: FinalizePrInput) -> PrRef:
 
 
 def _verify_merge_state(inp: VerifyMergeInput, github_client=None) -> MergeVerification:
-    """plano 08 §F (F1) — confirms via the GitHub API that the PR is REALLY merged
+    """plan 08 §F (F1) — confirms via the GitHub API that the PR is REALLY merged
     (and, if given, with the expected head_sha). Fail-safe: any error/doubt =>
     verified=False (the workflow never concludes as done based on that). The
     `github_client` is injectable for tests; in production it comes from env vars."""

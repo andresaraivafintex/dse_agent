@@ -1,4 +1,4 @@
-"""Plano 08 §D — deploys_preview gate (preview_enabled_for_repo).
+"""Plan 08 §D — deploys_preview gate (preview_enabled_for_repo).
 
 Tests the gate's deterministic, fail-safe semantics directly against Postgres
 (no Temporal): binding marked → enabled; no binding on the tenant → enabled

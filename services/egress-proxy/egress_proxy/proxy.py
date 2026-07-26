@@ -46,7 +46,7 @@ def _emit_audit(*, actor: str, action: str, tenant_id: str, work_item_id: str | 
             return
         except Exception:  # noqa: BLE001 - never let an egress denial fail because of the audit write
             logger.warning("failed to write audit_log, falling back to a local log: %s %s", action, details)
-    logger.info("AUDIT (fallback local, sem Postgres) action=%s details=%s", action, details)
+    logger.info("AUDIT (local fallback, no Postgres) action=%s details=%s", action, details)
 
 
 _ABSOLUTE_URI_RE = re.compile(r"^https?://([^/:]+)(:(\d+))?(/.*)?$")

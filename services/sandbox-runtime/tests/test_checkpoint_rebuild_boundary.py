@@ -1,4 +1,4 @@
-"""S7 (Fase 5) — boundary test of the workflow -> checkpoint/rebuild pair.
+"""S7 (Phase 5) — boundary test of the workflow -> checkpoint/rebuild pair.
 
 The call sites of these Activities live in the workflow (WS-B,
 `_checkpoint_or_rebuild`); the input models live here (WS-C). The WS-B test

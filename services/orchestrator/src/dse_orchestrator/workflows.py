@@ -97,12 +97,12 @@ _MAX_OPERATOR_EVENTS = 25
 # editable by this workstream), but the `work_items.status` column is TEXT
 # without a CHECK, and the foundation's own `constants.py` already references
 # this string as the status value the WS-A dispatcher queries to route
-# SIGNAL_PLAN_APPROVAL. Gap documented in the README ("Estado
-# awaiting_plan_approval"): the foundation enum should gain this member
+# SIGNAL_PLAN_APPROVAL. Gap documented in the README ("`awaiting_plan_approval`
+# state — documented enum gap"): the foundation enum should gain this member
 # (+ public map -> "blocked").
 STATUS_AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
 
-# Phase 2 (plano 09): the PRIMARY classification is structured — the raiser
+# Phase 2 (plan 09): the PRIMARY classification is structured — the raiser
 # declares the class in the ApplicationError `type` (dse.failure.* vocabulary +
 # legacy; see dse_contracts.failure and _failure_class_from). This substring
 # list is ONLY the fallback for histories/raisers predating the vocabulary —
@@ -882,7 +882,7 @@ class WorkItemLifecycleWorkflow:
             blob = f"{type(exc.cause).__name__}:{exc.cause}".lower() if exc.cause else str(exc).lower()
             fail_class = None
             if workflow.patched("structured-failure-codes-v1"):
-                # Phase 2 (plano 09): the decision comes from the structured
+                # Phase 2 (plan 09): the decision comes from the structured
                 # ApplicationError `type` — the MESSAGE no longer decides anything.
                 fail_class = _failure_class_from(exc)
             if fail_class is None and any(marker in blob for marker in _FAIL_CLOSED_MARKERS):
@@ -1590,7 +1590,8 @@ class WorkItemLifecycleWorkflow:
         await self._emit_history_metric("pr_finalized")
 
         # We do NOT `continue_as_new` here (deliberate — see README.md, section
-        # "continue_as_new e a corrida de sinais"): a human/CI can react to the
+        # "Determinism discipline (P1) and the \"clobber bug\" this code avoids",
+        # on the continue_as_new/signal race): a human/CI can react to the
         # `pr_ready` status (which just became visible via query) so fast that
         # the signal would arrive exactly during the window in which the old run
         # is closing via continue_as_new — and a signal addressed to a closing
@@ -2152,7 +2153,7 @@ class WorkItemLifecycleWorkflow:
         return True, "ok", merge
 
     async def _verify_merge_via_github_api(self, merge) -> tuple[bool, str]:
-        """Plano 08 §F (F1) — confirms the merge against the GitHub API (the
+        """Plan 08 §F (F1) — confirms the merge against the GitHub API (the
         truth), not just the envelope. Returns (ok_to_complete, reason).
 
         Policy:
@@ -2260,7 +2261,7 @@ class WorkItemLifecycleWorkflow:
                     raise _EscalateNow("ci_red_after_retry_cap_exhausted")
                 self._bump_review_round()
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="ci_red_retrying")
-                fix_result = await self._apply_coder_fix_cycle(["ci red: corrigir o pipeline"])
+                fix_result = await self._apply_coder_fix_cycle(["ci red: fix the pipeline"])
                 input.ci_pending_polls = 0
                 # ADR-26: fix cycle = new commit that changes behavior -> 1 refresh
                 input.last_files_changed = list(fix_result.files_changed)
@@ -2369,7 +2370,7 @@ class WorkItemLifecycleWorkflow:
                         break
                     valid, reason, merge = self._validate_merge_signal()
                     if valid:
-                        # Plano 08 §F (F1): the envelope (pr_number/repo/sha) is
+                        # Plan 08 §F (F1): the envelope (pr_number/repo/sha) is
                         # not a secret — a forged webhook with the right fields
                         # would pass the check above. Confirm on the GitHub API
                         # that the PR is REALLY merged before completing (P1/P8).
@@ -2584,7 +2585,7 @@ class WorkItemLifecycleWorkflow:
         # second refresh for the same branch state).
         self._refresh_evidence_requested = False
 
-        # Plano 08 §D — deploys_preview gate (operator-set in the Repos & ROI panel).
+        # Plan 08 §D — deploys_preview gate (operator-set in the Repos & ROI panel).
         # Replay guard: old histories did not call this local activity and must
         # replay with preview_enabled=True (previous behavior).
         preview_enabled = True
@@ -2653,7 +2654,7 @@ class WorkItemLifecycleWorkflow:
             await self._record_evidence(reason=reason, detail=(preview.detail or "")[:300])
             return
 
-        # Plano 08 §D (D1) — the user's goal: the preview LINK shows up on the
+        # Plan 08 §D (D1) — the user's goal: the preview LINK shows up on the
         # PR for the human to open and decide. Posted as soon as the preview
         # exists (independent of demo/visual, which degrade without blocking).
         # Best-effort and patch-guarded (old histories did not post) — never blocks.
@@ -2729,7 +2730,7 @@ class WorkItemLifecycleWorkflow:
         await self._record_evidence(reason=reason, detail="ok")
 
     async def _post_preview_link(self, url: str, kind: str) -> None:
-        """Plano 08 §D (D1) — posts/edits the originating surface's tracking
+        """Plan 08 §D (D1) — posts/edits the originating surface's tracking
         comment with the clickable preview LINK. Reuses the MutableCommentWriter
         (C3) via post_tracking_comment (custom body). Best-effort — it never
         blocks (the audit ledger is the truth; the comment is convenience)."""

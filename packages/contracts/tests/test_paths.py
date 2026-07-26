@@ -14,12 +14,12 @@ from dse_contracts.paths import is_disposable_artifact
 
 
 # The two cases from the statement, spelled out.
-def test_relatorio_espontaneo_do_cli_e_descartavel():
+def test_spontaneous_cli_report_is_disposable():
     assert is_disposable_artifact("BUG_FIX_REPORT.md") is True
 
 
-def test_arquivo_fonte_novo_legitimo_nao_e_descartavel():
-    assert is_disposable_artifact("src/novo-modulo.js") is False
+def test_legitimate_new_source_file_is_not_disposable():
+    assert is_disposable_artifact("src/new-module.js") is False
 
 
 # --- Anti-source INVARIANT: no code extension is disposable, not even when
@@ -34,7 +34,7 @@ _SOURCE_EXTS = [
 
 
 @pytest.mark.parametrize("ext", _SOURCE_EXTS)
-def test_nenhuma_extensao_de_fonte_e_descartavel(ext):
+def test_no_source_extension_is_disposable(ext):
     assert is_disposable_artifact(f"src/modulo.{ext}") is False
     # Not even with a report name — the name heuristic only applies to doc/text.
     assert is_disposable_artifact(f"REPORT.{ext}") is False
@@ -55,12 +55,12 @@ def test_nenhuma_extensao_de_fonte_e_descartavel(ext):
         "daemon.pid",
     ],
 )
-def test_extensoes_de_runtime_sao_descartaveis(path):
+def test_runtime_extensions_are_disposable(path):
     assert is_disposable_artifact(path) is True
 
 
 @pytest.mark.parametrize("base", [".DS_Store", "Thumbs.db", "desktop.ini", "nohup.out"])
-def test_lixo_de_so_editor_e_descartavel(base):
+def test_editor_only_junk_is_disposable(base):
     assert is_disposable_artifact(base) is True
     assert is_disposable_artifact(f"sub/dir/{base}") is True
 
@@ -76,7 +76,7 @@ def test_lixo_de_so_editor_e_descartavel(base):
         "SUMMARY.markdown",
     ],
 )
-def test_relatorios_de_doc_sao_descartaveis(path):
+def test_doc_reports_are_disposable(path):
     assert is_disposable_artifact(path) is True
 
 
@@ -97,10 +97,10 @@ def test_relatorios_de_doc_sao_descartaveis(path):
         ".env",
     ],
 )
-def test_docs_e_arquivos_legitimos_sobrevivem(path):
+def test_docs_and_legitimate_files_survive(path):
     assert is_disposable_artifact(path) is False
 
 
-def test_normaliza_separador_windows():
+def test_normalises_the_windows_separator():
     assert is_disposable_artifact("sub\\dir\\BUG_FIX_REPORT.md") is True
-    assert is_disposable_artifact("sub\\dir\\novo-modulo.js") is False
+    assert is_disposable_artifact("sub\\dir\\new-module.js") is False

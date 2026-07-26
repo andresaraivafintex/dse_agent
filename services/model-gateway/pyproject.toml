@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "model-gateway-client"
 version = "0.1.0"
-description = "Cliente Python do model-gateway (LiteLLM) do Fintex DSE — virtual keys, chamadas instrumentadas com OTel, export de custo (WSD-E1/WSD-E3)."
+description = "Python client for the Fintex DSE model-gateway (LiteLLM) — virtual keys, OTel-instrumented calls, cost export (WSD-E1/WSD-E3)."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",

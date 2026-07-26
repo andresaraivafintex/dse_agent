@@ -1,25 +1,25 @@
-# Plano 08 §F (F2) — imagem derivada do LiteLLM proxy para o pre-call hook.
+# Plan 08 §F (F2) — image derived from the LiteLLM proxy, for the pre-call hook.
 #
-# Achado da auditoria (2026-07-22): a imagem stock do LiteLLM NÃO traz nenhum
-# driver Postgres importável (só o prisma client interno) — sem isto o
-# dse_budget_hook conecta ao control-plane e falha sempre → fail-safe permitiria
-# tudo (gate INERTE). Esta imagem deriva DA MESMA imagem pinada por digest
-# (upgrade continua sendo um ato explícito: trocar o digest aqui) e adiciona só
-# o driver, pinado. O hook em si continua montado pelo compose (dev) — em
-# produção, copie-o para a imagem (imutável).
+# Audit finding (2026-07-22): the stock LiteLLM image ships NO importable
+# Postgres driver (only the internal prisma client) — without this the
+# dse_budget_hook fails on every connection to the control plane, so the
+# fail-safe would allow everything (an INERT gate). This image derives from THE
+# SAME digest-pinned image (an upgrade stays an explicit act: change the digest
+# here) and adds only the driver, pinned. The hook itself is still bind-mounted
+# by compose (dev) — in production, copy it into the image (immutable).
 FROM ghcr.io/berriai/litellm@sha256:4c76cc4f47b72c82194f2774f458cc92de369ac6439b236757f0f69b71392722
 
-# a imagem (build via uv) não traz pip no venv /app/.venv — bootstrap com
-# ensurepip (presente) e instala só o driver, pinado.
+# the image (built with uv) ships no pip in the /app/.venv venv — bootstrap it
+# with ensurepip (which is present) and install only the driver, pinned.
 RUN python -m ensurepip --upgrade \
     && python -m pip install --no-cache-dir psycopg2-binary==2.9.10
 
-# K8s (sem volume mount): o config e o hook do budget são EMBUTIDOS na imagem.
-# No compose (dev) os volumes ainda sobrescrevem estes arquivos p/ hot-reload.
-# Contexto de build = RAIZ do monorepo (release usa context: .; o compose foi
-# alinhado para o mesmo contexto).
+# K8s (no volume mount): the config and the budget hook are BAKED INTO the
+# image. Under compose (dev) the volumes still override these files for
+# hot-reload. Build context = monorepo ROOT (release uses context: . ; compose
+# was aligned to the same context).
 COPY services/model-gateway/litellm_config.yaml /app/config.yaml
 COPY services/model-gateway/dse_budget_hook.py /app/dse_budget_hook.py
 
-# args do entrypoint `litellm` (mesmos do compose command)
+# args for the `litellm` entrypoint (same as the compose command)
 CMD ["--config", "/app/config.yaml", "--port", "4000"]

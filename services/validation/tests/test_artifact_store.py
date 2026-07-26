@@ -47,7 +47,7 @@ def garage_ready() -> GarageConfig:
 @pytest.fixture
 def small_file(tmp_path: Path) -> Path:
     p = tmp_path / "evidence.txt"
-    p.write_text("linha de evidencia " * 10)
+    p.write_text("evidence line " * 10)
     return p
 
 
@@ -67,7 +67,7 @@ def test_publish_and_presigned_get_roundtrip(garage_ready, small_file, work_item
     # real download via presigned URL
     resp = httpx.get(ref.presigned_url)
     assert resp.status_code == 200
-    assert resp.text.startswith("linha de evidencia")
+    assert resp.text.startswith("evidence line")
     # audit (P8)
     assert len(_audit_rows(work_item_id, "artifact_published")) == 1
 
@@ -86,8 +86,8 @@ def test_presigned_url_expires_and_is_denied(garage_ready, small_file, work_item
     resp = httpx.get(ref.presigned_url)
     # Garage denies an expired signature with 400 (AuthorizationHeaderMalformed/
     # expired); AWS S3 would use 403 — both mean DENIED, never the content.
-    assert resp.status_code in (400, 401, 403), f"URL expirada deveria ser negada, veio {resp.status_code}"
-    assert b"linha de evidencia" not in resp.content
+    assert resp.status_code in (400, 401, 403), f"an expired URL should be denied, got {resp.status_code}"
+    assert b"evidence line" not in resp.content
     # and policy-based resolution refuses it too (P6 — clean failure)
     with pytest.raises(PermissionError, match="expired"):
         garage.resolve_artifact_url(
@@ -177,7 +177,7 @@ def test_quarantine_invalidates_access_before_ttl(garage_ready, small_file, work
     assert httpx.get(old_url).status_code == 200
 
     # REAL WS-F quarantine (dse_work_item_quarantine table + its own audit)
-    quarantine_work_item(work_item_id, tenant_id, reason="suspected exfiltration", actor="user:operador")
+    quarantine_work_item(work_item_id, tenant_id, reason="suspected exfiltration", actor="user:operator")
     assert is_quarantined(work_item_id)
 
     moved = garage.sweep_quarantined_work_items()
@@ -186,7 +186,7 @@ def test_quarantine_invalidates_access_before_ttl(garage_ready, small_file, work
     # 1) the OLD presigned URL (1h TTL still valid) is now denied —
     #    the original key no longer exists in the bucket.
     resp = httpx.get(old_url)
-    assert resp.status_code in (403, 404), f"acesso deveria estar invalidado, veio {resp.status_code}"
+    assert resp.status_code in (403, 404), f"access should have been invalidated, got {resp.status_code}"
     # 2) policy-based resolution refuses explicitly (P6)
     with pytest.raises(PermissionError, match="quarantine"):
         garage.resolve_artifact_url(

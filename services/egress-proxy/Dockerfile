@@ -1,8 +1,9 @@
-# WS-C — egress-proxy (porta 8806). Build a partir da RAIZ do monorepo:
+# WS-C — egress-proxy (port 8806). Build from the monorepo ROOT:
 #   docker build -f services/egress-proxy/Dockerfile -t dse/egress-proxy .
-# No compose (dev) roda de python:3.11-slim com o código montado; esta imagem
-# é a versão publicável para o chart (K8s), com o código COPIADO (não montado)
-# e usuário não-root (o chart exige runAsNonRoot + readOnlyRootFilesystem).
+# Under compose (dev) it runs from python:3.11-slim with the code bind-mounted;
+# this image is the publishable version for the chart (K8s), with the code
+# COPIED (not mounted) and a non-root user (the chart requires runAsNonRoot +
+# readOnlyRootFilesystem).
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -18,7 +19,7 @@ RUN pip install --no-cache-dir \
         -e packages/dse_identity \
         -e services/egress-proxy
 
-# não-root fixo (mesmo UID dos demais serviços do chart)
+# fixed non-root user (same UID as the chart's other services)
 RUN groupadd -g 10001 dse && useradd -u 10001 -g 10001 -m -s /usr/sbin/nologin dse
 
 WORKDIR /app/services/egress-proxy

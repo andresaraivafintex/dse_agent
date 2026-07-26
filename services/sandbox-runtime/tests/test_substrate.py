@@ -31,9 +31,9 @@ def test_fake_substrate_applies_scripted_edits_deterministically(tmp_path):
         gateway_base_url="http://localhost:4000",
     )
 
-    log1 = fake.run_turn("passo 1")
+    log1 = fake.run_turn("step 1")
     assert log1.done is False
-    log2 = fake.run_turn("passo 2")
+    log2 = fake.run_turn("step 2")
     assert log2.done is True
 
     assert (tmp_path / "a.py").read_text() == "x = 1\n"

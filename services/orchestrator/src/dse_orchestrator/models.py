@@ -39,8 +39,8 @@ class WorkItemLifecycleInput:
     task_content: str = ""
     # Source issue number (from work_items.source_ref, via load_work_item).
     # finalize uses it as issue_ref -> "Closes #N" in the PR body (back-link +
-    # auto-close on merge). Without it the PR went out with "(sem issue de
-    # origem vinculada)" even when it came from an issue.
+    # auto-close on merge). Without it the PR went out with "(no linked source
+    # issue)" even when it came from an issue.
     issue_number: int | None = None
 
     phase: str = PHASE_INTAKE

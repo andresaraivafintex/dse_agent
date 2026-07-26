@@ -119,8 +119,18 @@ def test_malformed_stored_policy_fails_clean_not_partial(tenant_id):
     conn = _su()
     try:
         with conn.cursor() as cur:
+            # `retention_days` is WRONG ON PURPOSE — the validator requires the
+            # key `days` (retention.py: `"days" not in spec`), so this stands for
+            # a policy corrupted by schema drift or an operator typo.
+            #
+            # It used to say `dias`. A language sweep translated that to `days`,
+            # which made the policy VALID and silently turned this test into one
+            # that asserts nothing: the `pytest.raises` stopped being reached.
+            # Any key other than `days` restores the intent; a plausible-but-wrong
+            # one is used here so no future sweep reads it as a word to fix.
             cur.execute(
-                "UPDATE tenant_config SET retention = '{\"internal\": {\"dias\": 90}}'::jsonb WHERE tenant_id = %s",
+                "UPDATE tenant_config SET retention = '{\"internal\": {\"retention_days\": 90}}'::jsonb "
+                "WHERE tenant_id = %s",
                 (tenant_id,),
             )
         conn.commit()
@@ -151,7 +161,7 @@ def test_no_policy_means_no_purge(tenant_id):
     try:
         with conn.cursor() as cur:
             wid = _mk_work_item(cur, tenant_id, "internal")
-            old_ev = _mk_event(cur, wid, processed=True, received_at=OLD, content="segredo antigo")
+            old_ev = _mk_event(cur, wid, processed=True, received_at=OLD, content="old secret")
         conn.commit()
     finally:
         conn.close()
@@ -160,7 +170,7 @@ def test_no_policy_means_no_purge(tenant_id):
 
     assert report.total_affected == 0
     assert report.results == []  # no class configured => no target
-    assert _event_payload(old_ev)["content_snapshot"] == "segredo antigo"
+    assert _event_payload(old_ev)["content_snapshot"] == "old secret"
     assert "retention_executed" in _audit_actions(tenant_id)  # run audited even when a no-op
 
 
@@ -170,10 +180,10 @@ def test_anonymizes_only_processed_old_events_of_the_class(tenant_id):
         with conn.cursor() as cur:
             wid_int = _mk_work_item(cur, tenant_id, "internal")
             wid_res = _mk_work_item(cur, tenant_id, "restricted")
-            ev_old_processed = _mk_event(cur, wid_int, processed=True, received_at=OLD, content="EXPURGAR")
-            ev_old_unprocessed = _mk_event(cur, wid_int, processed=False, received_at=OLD, content="outbox vivo")
-            ev_fresh = _mk_event(cur, wid_int, processed=True, received_at=FRESH, content="recente")
-            ev_other_class = _mk_event(cur, wid_res, processed=True, received_at=OLD, content="classe sem política")
+            ev_old_processed = _mk_event(cur, wid_int, processed=True, received_at=OLD, content="PURGE_ME")
+            ev_old_unprocessed = _mk_event(cur, wid_int, processed=False, received_at=OLD, content="live outbox")
+            ev_fresh = _mk_event(cur, wid_int, processed=True, received_at=FRESH, content="recent")
+            ev_other_class = _mk_event(cur, wid_res, processed=True, received_at=OLD, content="class with no policy")
         conn.commit()
     finally:
         conn.close()
@@ -189,11 +199,11 @@ def test_anonymizes_only_processed_old_events_of_the_class(tenant_id):
     purged = _event_payload(ev_old_processed)
     assert purged[TOMBSTONE_MARKER] is True
     assert purged["data_class"] == "internal"
-    assert "EXPURGAR" not in json.dumps(purged)
+    assert "PURGE_ME" not in json.dumps(purged)
 
-    assert _event_payload(ev_old_unprocessed)["content_snapshot"] == "outbox vivo"
-    assert _event_payload(ev_fresh)["content_snapshot"] == "recente"
-    assert _event_payload(ev_other_class)["content_snapshot"] == "classe sem política"
+    assert _event_payload(ev_old_unprocessed)["content_snapshot"] == "live outbox"
+    assert _event_payload(ev_fresh)["content_snapshot"] == "recent"
+    assert _event_payload(ev_other_class)["content_snapshot"] == "class with no policy"
 
 
 def test_run_is_idempotent(tenant_id):
@@ -201,7 +211,7 @@ def test_run_is_idempotent(tenant_id):
     try:
         with conn.cursor() as cur:
             wid = _mk_work_item(cur, tenant_id, "internal")
-            _mk_event(cur, wid, processed=True, received_at=OLD, content="uma vez só")
+            _mk_event(cur, wid, processed=True, received_at=OLD, content="only once")
         conn.commit()
     finally:
         conn.close()
@@ -219,7 +229,7 @@ def test_dry_run_counts_but_never_mutates(tenant_id):
     try:
         with conn.cursor() as cur:
             wid = _mk_work_item(cur, tenant_id, "internal")
-            ev = _mk_event(cur, wid, processed=True, received_at=OLD, content="ainda aqui")
+            ev = _mk_event(cur, wid, processed=True, received_at=OLD, content="still here")
         conn.commit()
     finally:
         conn.close()
@@ -230,7 +240,7 @@ def test_dry_run_counts_but_never_mutates(tenant_id):
     ingest = [r for r in report.results if r.target == "ingest_events"][0]
     assert ingest.candidates == 1
     assert ingest.affected == 0
-    assert _event_payload(ev)["content_snapshot"] == "ainda aqui"
+    assert _event_payload(ev)["content_snapshot"] == "still here"
     assert "retention_dry_run" in _audit_actions(tenant_id)
     assert "retention_executed" not in _audit_actions(tenant_id)
 

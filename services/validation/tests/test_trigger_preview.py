@@ -59,7 +59,7 @@ def test_glob_semantics_documented():
 
 
 def test_docs_only_pr_skips_and_counts_as_success(work_item_id, tenant_id):
-    # plano 08 §D: docs only (neither UI nor a deployable service) → skip, counts
+    # plan 08 §D: docs only (neither UI nor a deployable service) → skip, counts
     # as success, NEVER blocks. (Previously a backend .py also skipped; now it
     # gets a preview — see test_backend_service_change_now_previews.)
     ref = trigger_preview_core(
@@ -74,7 +74,7 @@ def test_docs_only_pr_skips_and_counts_as_success(work_item_id, tenant_id):
 
 
 # ---------------------------------------------------------------------------
-# plano 08 §D — previewability decision (ui | deployable | none)
+# plan 08 §D — previewability decision (ui | deployable | none)
 # ---------------------------------------------------------------------------
 def test_preview_decision_ui_has_precedence():
     kind, hits = preview_decision(["frontend/app.tsx", "api/main.py"], DEFAULT_GLOBS, DEPLOYABLE_GLOBS)
@@ -137,7 +137,7 @@ def test_external_url_is_browser_reachable_when_configured():
 
 
 # ---------------------------------------------------------------------------
-# plano 08 §D — D3 (Ingress) + D4 (PR image) in the manifests
+# plan 08 §D — D3 (Ingress) + D4 (PR image) in the manifests
 # ---------------------------------------------------------------------------
 def _manifests(cfg, **kw):
     from datetime import datetime, timedelta, timezone
@@ -178,7 +178,7 @@ def test_label_values_respect_k8s_63_char_limit():
     label_re = re.compile(r'dse\.fintex/work-item:\s+"([^"]*)"')
     for name, manifest in m.items():
         for val in label_re.findall(manifest):
-            assert len(val) <= 63, f"label em {name} tem {len(val)} chars (>63)"
+            assert len(val) <= 63, f"the label in {name} has {len(val)} chars (>63)"
     # the FULL id must be preserved in the namespace's annotation
     assert f'dse.fintex/work-item-id: "{wi}"' in m["namespace.yaml"]
 
@@ -450,7 +450,7 @@ def _k3d_cluster_available() -> bool:
     return argo.returncode == 0
 
 
-@pytest.mark.skipif(not _k3d_cluster_available(), reason="requer cluster k3d ativo (Argo CD)")
+@pytest.mark.skipif(not _k3d_cluster_available(), reason="requires an active k3d cluster (Argo CD)")
 def test_preview_e2e_real_cluster_create_serve_and_ttl_reap(work_item_id, tenant_id):
     """Against the REAL k3d cluster: (a) Argo CD's ApplicationSet materializes the
     ephemeral namespace with Deployment+Service; (b) the preview URL answers

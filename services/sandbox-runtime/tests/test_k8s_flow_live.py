@@ -1,4 +1,4 @@
-"""Live proof of the full K8s flow on a real cluster (local k3d) — Fase 1.
+"""Live proof of the full K8s flow on a real cluster (local k3d) — Phase 1.
 
 Exercises the KubernetesSandboxDriver against a real cluster: the hardened Pod
 comes up, the bootstrap materializes the git workspace INSIDE the Pod (exec op),
@@ -51,7 +51,7 @@ def _ready() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _ready(),
-    reason="exige kubectl+k3d com contexto k3d ativo e a imagem dse/agent-runner:local",
+    reason="requires kubectl+k3d with an active k3d context and the dse/agent-runner:local image",
 )
 
 
@@ -112,7 +112,7 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
         tenant_id="tenant-k8s",
         stage="coder",
         substrate="fake",
-        instruction="prova k8s",
+        instruction="k8s proof",
         fake_script=[{"write_files": {"src/pod.py": "IN_POD = True\n"}, "done": True}],
         gateway={"base_url": "http://model-gateway.dse.svc:4000", "virtual_key": "vk-k8s"},
     )
@@ -168,10 +168,10 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
             stage=Stage.coder,
             input_payload=AgentTurnRequest(
                 work_item_id=work_item_id, tenant_id="tenant-k8s", stage="coder",
-                substrate="fake", instruction="segundo turno",
+                substrate="fake", instruction="second turn",
                 fake_script=[{"write_files": {
                     "src/feature.py": "F = 2\n",
-                    "BUG_FIX_REPORT.md": "lixo\n",
+                    "BUG_FIX_REPORT.md": "junk\n",
                     "tests/test_smuggled.py": "def test_x(): pass\n",
                 }, "done": True}],
                 gateway={"base_url": "http://model-gateway.dse.svc:4000", "virtual_key": "vk-k8s"},
@@ -186,7 +186,7 @@ def test_full_pod_flow_provision_bootstrap_turn_checkpoint(k8s_driver, work_item
                 work_item_id=work_item_id,
                 branch=f"dse/{work_item_id}",
                 turn_start_sha=ref.git_ref,
-                commit_message=f"coder({work_item_id}): segundo turno",
+                commit_message=f"coder({work_item_id}): second turn",
                 expected_files=["src/feature.py"],
             ).model_dump(),
         )

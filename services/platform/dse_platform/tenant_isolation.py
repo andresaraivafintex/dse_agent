@@ -75,7 +75,7 @@ def guard_same_tenant(
         conn=conn,
     )
     raise CrossTenantViolation(
-        f"tenant {requesting_tenant!r} tentou acessar {layer} {resource_ref!r} "
+        f"tenant {requesting_tenant!r} tried to access {layer} {resource_ref!r} "
         f"do tenant {resource_tenant!r}"
     )
 
@@ -105,7 +105,7 @@ def artifact_prefix(tenant_id: str) -> str:
 
 def artifact_key(tenant_id: str, relative_path: str) -> str:
     if ".." in relative_path or relative_path.startswith("/"):
-        raise ValueError(f"path de artifact inseguro: {relative_path!r}")
+        raise ValueError(f"unsafe artifact path: {relative_path!r}")
     return artifact_prefix(tenant_id) + relative_path.lstrip("/")
 
 

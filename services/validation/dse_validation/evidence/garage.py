@@ -85,7 +85,7 @@ def ensure_layout(cfg: GarageConfig | None = None) -> None:
     version = layout.json().get("version", 0) + 1
     apply_resp = _admin(cfg, "POST", "/v1/layout/apply", {"version": version})
     apply_resp.raise_for_status()
-    logger.info("garage: layout single-node aplicado (version=%s)", version)
+    logger.info("garage: single-node layout applied (version=%s)", version)
 
 
 def ensure_service_key(cfg: GarageConfig | None = None) -> tuple[str, str]:

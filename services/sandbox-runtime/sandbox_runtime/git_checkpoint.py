@@ -1,6 +1,6 @@
 """Checkpoint/rebuild of the task branch (WSC-E1-T4).
 
-Fase 1 P0: "origin" is a LOCAL bare repo (it does not need to be a real remote —
+Phase 1 P0: "origin" is a LOCAL bare repo (it does not need to be a real remote —
 see CONVENTIONS/the task statement) living in its own directory, bind-mounted
 into the sandbox at `/checkpoint.git` (the same path is visible from the host
 via `checkpoint_bare_repo_path`, which allows operating either through

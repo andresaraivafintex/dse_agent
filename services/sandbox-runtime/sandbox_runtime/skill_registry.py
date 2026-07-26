@@ -1,8 +1,8 @@
 """Skill registry bootstrap (WSC-E4-T1).
 
 Tenant-scoped registry of human-curated skills, read by the Planner session
-(WSC-E3-T3) to hydrate context. Fase 2 has ONLY the registry + the read path —
-the promotion pipeline (automatic skill curation out of executions) is Fase 4,
+(WSC-E3-T3) to hydrate context. Phase 2 has ONLY the registry + the read path —
+the promotion pipeline (automatic skill curation out of executions) is Phase 4,
 deliberately out of scope here.
 
 Per-tenant isolation: `read_approved_skills(tenant_id)` only returns rows for
@@ -76,8 +76,8 @@ def read_approved_skills(
     `tenant_id = %s` — there is no path that returns another tenant's skill, and
     no parameter for "all tenants".
 
-    SERVED STATES (Fase 4): `status IN ('approved','active')` — hardcoded.
-    `approved` = human-curated/approved (includes the Fase 2 seeds);
+    SERVED STATES (Phase 4): `status IN ('approved','active')` — hardcoded.
+    `approved` = human-curated/approved (includes the Phase 2 seeds);
     `active` = a candidate that made it through the full pipeline (eval →
     approval → canary → active, WSC-E4-T3). NEVER served: `draft`, `candidate`,
     `canary` (= shadow at this phase), `rolled_back`, `retired`. The partial

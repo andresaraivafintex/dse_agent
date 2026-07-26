@@ -1,4 +1,4 @@
-"""Deterministic `@demo` fixture (WSC-E3-T4b-c, adendo 02 / ADR-27).
+"""Deterministic `@demo` fixture (WSC-E3-T4b-c, addendum 02 / ADR-27).
 
 Template of the Playwright demonstration test the Tester authors under the
 `demos/<work_item_id>/` convention (see `toolsets.demo_dir_for`). It is a
@@ -35,7 +35,7 @@ from .toolsets import demo_dir_for
 # ---------------------------------------------------------------------------
 
 _INDEX_HTML = """<!doctype html>
-<html lang="pt-br">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>DSE demo fixture</title>

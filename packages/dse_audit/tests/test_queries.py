@@ -1,4 +1,4 @@
-"""WSF-E1-T2 — audit-based reconstruction exercise (Fase 1 exit criterion:
+"""WSF-E1-T2 — audit-based reconstruction exercise (Phase 1 exit criterion:
 "first audit-based reconstruction exercise passes").
 
 Requires a real Postgres (`make up && make migrate` already running) — never mock
@@ -12,7 +12,7 @@ import uuid
 from dse_audit import emit, export_audit_range, export_audit_range_csv, reconstruct_work_item_history
 
 # Canonical sequence of a full WorkItem through the state machine from the
-# technical proposal §9.3 (Fase 1 core loop).
+# technical proposal §9.3 (Phase 1 core loop).
 LIFECYCLE: list[tuple[str, str, dict[str, object]]] = [
     ("system:ingest-gateway", "admitted", {"channel": "#eng-payments"}),
     ("usr_requester", "clarified", {"answer": "use the orders table"}),

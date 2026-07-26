@@ -1,4 +1,4 @@
-"""Fase 1 (plano 09): RemoteSubstrate — the worker dispatches the typed contract.
+"""Phase 1 (plan 09): RemoteSubstrate — the worker dispatches the typed contract.
 
 Proves, without docker/k8s (StubDriver), the boundary's properties:
   - no host path crosses over (the request's workspace is /workspace);
@@ -89,7 +89,7 @@ def test_request_never_carries_host_paths_or_master_key(tmp_path):
     sub = RemoteSubstrate(driver=driver, substrate_name="fake", fake_script=[{"done": True}])
     _session(sub, workspace=str(tmp_path))
 
-    sub.run_turn("implemente o handler")
+    sub.run_turn("implement the handler")
 
     assert len(driver.requests) == 1
     payload = driver.requests[0].input_payload
@@ -129,7 +129,7 @@ def test_cost_accumulates_and_collect_artifacts(tmp_path):
 def test_runner_failure_raises_typed_error_no_substring(tmp_path):
     driver = StubDriver(
         result=AgentTurnResult(
-            done=False, error="turno excedeu 900s", error_kind="timeout"
+            done=False, error="turn exceeded 900s", error_kind="timeout"
         ).model_dump()
     )
     sub = RemoteSubstrate(driver=driver, substrate_name="claude-agent")
@@ -166,7 +166,7 @@ def test_coder_turn_pipeline_with_remote_substrate(work_item_id, state_dir):
 
     result = asyncio.run(
         _run_coder_turn_impl(
-            RunCoderTurnInput(work_item_id=work_item_id, tenant_id=tenant_id, instruction="implemente"),
+            RunCoderTurnInput(work_item_id=work_item_id, tenant_id=tenant_id, instruction="implement it"),
             substrate=remote,
         )
     )

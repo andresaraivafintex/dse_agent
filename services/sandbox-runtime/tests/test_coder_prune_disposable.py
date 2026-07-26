@@ -45,12 +45,12 @@ def _write(ws: str, rel: str, content: str = "x\n") -> str:
     return dest
 
 
-def test_fonte_nova_fica_e_relatorio_espontaneo_e_podado(repo):
+def test_new_source_stays_and_a_spontaneous_report_is_pruned(repo):
     """The canonical case: the fix created a NEW source module outside the plan
     and the CLI spat out a report. The module has to survive; the report must
     not."""
-    src = _write(repo, "src/novo-modulo.js", "export const fix = 1;\n")
-    report = _write(repo, "BUG_FIX_REPORT.md", "# O que eu fiz\n")
+    src = _write(repo, "src/new-module.js", "export const fix = 1;\n")
+    report = _write(repo, "BUG_FIX_REPORT.md", "# What I did\n")
 
     pruned, kept = _prune_disposable_artifacts(
         repo, expected_files=["src/store.js"], work_item_id="wi_x"
@@ -59,10 +59,10 @@ def test_fonte_nova_fica_e_relatorio_espontaneo_e_podado(repo):
     assert os.path.exists(src), "a legitimate new source file must NOT be deleted"
     assert not os.path.exists(report), "a spontaneous CLI report must disappear"
     assert pruned == ["BUG_FIX_REPORT.md"]
-    assert kept == ["src/novo-modulo.js"]
+    assert kept == ["src/new-module.js"]
 
 
-def test_multiplos_artefatos_de_lixo_sao_podados(repo):
+def test_multiple_junk_artifacts_are_pruned(repo):
     for rel in ("run.log", "state.tmp", "app.js.orig", "IMPLEMENTATION_SUMMARY.md"):
         _write(repo, rel)
     _write(repo, "src/feature.py", "def f():\n    return 1\n")
@@ -76,7 +76,7 @@ def test_multiplos_artefatos_de_lixo_sao_podados(repo):
     assert os.path.exists(os.path.join(repo, "src/feature.py"))
 
 
-def test_arquivo_no_plano_nunca_e_podado_mesmo_parecendo_lixo(repo):
+def test_a_file_in_the_plan_is_never_pruned_even_if_it_looks_like_junk(repo):
     """If the plan ASKED for the file, it stays — even if it matches a junk pattern."""
     _write(repo, "REPORT.md", "content requested by the plan\n")
 
@@ -89,9 +89,9 @@ def test_arquivo_no_plano_nunca_e_podado_mesmo_parecendo_lixo(repo):
     assert os.path.exists(os.path.join(repo, "REPORT.md"))
 
 
-def test_test_paths_e_demos_do_wi_sao_isentos(repo):
+def test_test_paths_and_demos_of_the_wi_are_exempt(repo):
     _write(repo, "tests/DEBUG_REPORT.md", "report inside tests/\n")
-    _write(repo, "demos/wi_x/output.log", "log do demo do work item\n")
+    _write(repo, "demos/wi_x/output.log", "log of the work item demo\n")
 
     pruned, kept = _prune_disposable_artifacts(
         repo, expected_files=["src/x.py"], work_item_id="wi_x"
@@ -103,23 +103,23 @@ def test_test_paths_e_demos_do_wi_sao_isentos(repo):
     assert os.path.exists(os.path.join(repo, "demos/wi_x/output.log"))
 
 
-def test_demo_de_outro_wi_nao_e_isento(repo):
+def test_a_demo_of_another_wi_is_not_exempt(repo):
     """`demos/<other-wi>/` is NOT this work item's demo — a .log in there is junk."""
-    _write(repo, "demos/wi_outro/junk.log", "log de outro wi\n")
+    _write(repo, "demos/wi_other/junk.log", "log of another wi\n")
 
     pruned, _kept = _prune_disposable_artifacts(
         repo, expected_files=["src/x.py"], work_item_id="wi_x"
     )
 
-    assert pruned == ["demos/wi_outro/junk.log"]
+    assert pruned == ["demos/wi_other/junk.log"]
 
 
-def test_arquivo_rastreado_modificado_fora_do_plano_nunca_e_tocado(repo):
+def test_a_tracked_file_modified_outside_the_plan_is_never_touched(repo):
     """Only NEW files (untracked, `??`) enter the prune. An EXISTING file
     modified outside the plan stays — it is L1/the budget that judges it."""
     with open(os.path.join(repo, "app.js"), "w") as fh:
-        fh.write("// modificado fora do plano\n")
-    _write(repo, "trash.log", "lixo\n")
+        fh.write("// modified outside the plan\n")
+    _write(repo, "trash.log", "junk\n")
 
     pruned, kept = _prune_disposable_artifacts(
         repo, expected_files=["src/other.js"], work_item_id="wi_x"
@@ -129,12 +129,12 @@ def test_arquivo_rastreado_modificado_fora_do_plano_nunca_e_tocado(repo):
     assert kept == []  # app.js is tracked → neither pruned nor counted
     assert os.path.exists(os.path.join(repo, "app.js"))
     with open(os.path.join(repo, "app.js")) as fh:
-        assert fh.read() == "// modificado fora do plano\n"  # the modification stays
+        assert fh.read() == "// modified outside the plan\n"  # the modification stays
     porcelain = _git(repo, "status", "--porcelain")
     assert "app.js" in porcelain and "trash.log" not in porcelain
 
 
-def test_git_indisponivel_nao_apaga_nada(tmp_path):
+def test_unavailable_git_deletes_nothing(tmp_path):
     """Best-effort: without a git repo, the prune does not break and deletes
     nothing (L1 is the hard gate)."""
     ws = str(tmp_path / "not-a-repo")
@@ -164,7 +164,7 @@ def repo_with_test(tmp_path):
     os.makedirs(os.path.join(ws, "test"))
     # EXISTING test with a shared seed (like the wallet's test/api.test.js)
     with open(os.path.join(ws, "test", "api.test.js"), "w") as fh:
-        fh.write("// seed: Mercado 2026-07-10\nassert(first === 'Mercado');\n")
+        fh.write("// seed: Market 2026-07-10\nassert(first === 'Market');\n")
     with open(os.path.join(ws, "src.js"), "w") as fh:
         fh.write("// base\n")
     _git(ws, "add", "-A")
@@ -172,7 +172,7 @@ def repo_with_test(tmp_path):
     return ws
 
 
-def test_coder_edit_em_teste_existente_e_revertido(repo_with_test):
+def test_a_coder_edit_to_an_existing_test_is_reverted(repo_with_test):
     """The issue #1 bug: the Coder changed the shared seed in test/api.test.js
     and broke a sibling test. The Coder's edit to a test is reverted back to the
     start of the turn (the Tester owns the tests)."""
@@ -180,7 +180,7 @@ def test_coder_edit_em_teste_existente_e_revertido(repo_with_test):
     start = _git(ws, "rev-parse", "HEAD").strip()
     # the Coder edits the test (changes the seed) + edits the source
     with open(os.path.join(ws, "test", "api.test.js"), "w") as fh:
-        fh.write("// seed MUDADO: Mercado 2026-06-10\nassert(first === 'Mercado');\n")
+        fh.write("// seed CHANGED: Market 2026-06-10\nassert(first === 'Market');\n")
     with open(os.path.join(ws, "src.js"), "w") as fh:
         fh.write("// fix real\n")
 
@@ -193,22 +193,22 @@ def test_coder_edit_em_teste_existente_e_revertido(repo_with_test):
     assert "fix real" in open(os.path.join(ws, "src.js")).read()
 
 
-def test_coder_cria_teste_novo_e_removido(repo_with_test):
+def test_a_new_test_created_by_the_coder_is_removed(repo_with_test):
     ws = repo_with_test
     start = _git(ws, "rev-parse", "HEAD").strip()
-    _write(ws, "test/coder-invented.test.js", "// teste que o Coder inventou\n")
+    _write(ws, "test/coder-invented.test.js", "// a test the Coder invented\n")
     reverted = _revert_coder_test_edits(ws, start)
     assert reverted == ["test/coder-invented.test.js"]
     assert not os.path.exists(os.path.join(ws, "test", "coder-invented.test.js"))
 
 
-def test_revert_nao_toca_em_fonte(repo_with_test):
+def test_revert_does_not_touch_source(repo_with_test):
     ws = repo_with_test
     start = _git(ws, "rev-parse", "HEAD").strip()
-    _write(ws, "src/novo.js", "export const x = 1;\n")
+    _write(ws, "src/new.js", "export const x = 1;\n")
     with open(os.path.join(ws, "src.js"), "w") as fh:
-        fh.write("// mudou\n")
+        fh.write("// changed\n")
     reverted = _revert_coder_test_edits(ws, start)
     assert reverted == []  # no test was touched
-    assert os.path.exists(os.path.join(ws, "src", "novo.js"))
-    assert "mudou" in open(os.path.join(ws, "src.js")).read()
+    assert os.path.exists(os.path.join(ws, "src", "new.js"))
+    assert "changed" in open(os.path.join(ws, "src.js")).read()

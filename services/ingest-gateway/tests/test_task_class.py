@@ -1,4 +1,4 @@
-"""task_class classifier (Plano 08 §A) — deterministic, closed vocabulary."""
+"""task_class classifier (Plan 08 §A) — deterministic, closed vocabulary."""
 from ingest_gateway.task_class import classify_task_class, TASK_CLASSES, DEFAULT_TASK_CLASS
 
 

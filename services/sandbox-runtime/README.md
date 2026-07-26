@@ -442,7 +442,7 @@ uniqueness to `(tenant_id, skill_key, version)`, adds
 
 ## What is missing for production
 
-- **[Phase 1 of plano 09 — PARTIALLY CLOSED in dev]** The Coder turn now runs
+- **[Phase 1 of plan 09 — PARTIALLY CLOSED in dev]** The Coder turn now runs
   INSIDE the sandbox when `DSE_SANDBOX_INPROCESS=0` (and ALWAYS in
   production): `RemoteSubstrate` dispatches the typed `AgentTurnRequest`
   contract through `SandboxDriver.execute_stage` (`docker exec -i` →

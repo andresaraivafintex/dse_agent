@@ -1,4 +1,4 @@
-"""Plano 08 §F (F5) — operational (not decorative) Worker Deployment Versioning.
+"""Plan 08 §F (F5) — operational (not decorative) Worker Deployment Versioning.
 
 Proves the MODERN wiring (not the deprecated classic version-set) is assembled
 correctly: version = (deployment_name, build_id), versioning enabled, and PINNED

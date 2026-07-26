@@ -142,7 +142,7 @@ def test_sandbox_isolation_and_egress_proxy_only_route(isolation_topology, docke
         )
         exit_code, out = _exec(sandbox, ["python3", "-c", allowed_script])
         assert exit_code == 0, out
-        assert "ALLOWED_STATUS 200" in out, f"host permitido via egress-proxy deveria ter passado: {out}"
+        assert "ALLOWED_STATUS 200" in out, f"a host allowed through the egress-proxy should have gone through: {out}"
 
         denied_script = proxy_script + (
             "import urllib.error\n"
@@ -154,7 +154,7 @@ def test_sandbox_isolation_and_egress_proxy_only_route(isolation_topology, docke
         )
         exit_code, out = _exec(sandbox, ["python3", "-c", denied_script])
         assert exit_code == 0, out
-        assert "DENIED_STATUS 403" in out, f"host fora da allowlist deveria ter sido recusado com 403: {out}"
+        assert "DENIED_STATUS 403" in out, f"a host outside the allowlist should have been refused with 403: {out}"
 
     finally:
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id="tenant-isolation-test")))

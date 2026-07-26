@@ -1,14 +1,14 @@
-Fintex DSE ({{ .Values.tenant.id }}) renderizado no namespace {{ .Values.global.namespace }}.
-Perfil: {{ .Values.deploymentProfile }}
+Fintex DSE ({{ .Values.tenant.id }}) rendered into namespace {{ .Values.global.namespace }}.
+Profile: {{ .Values.deploymentProfile }}
 
-IMPORTANTE: Helm valida configuração, não a implementação dos controles.
-Nos perfis pilot/production os gates pilotReadiness só podem ser promovidos
-pelo pipeline após testes sobre os mesmos digests de imagem. O values-pilot
-do repositório permanece bloqueado por padrão.
+IMPORTANT: Helm validates CONFIGURATION, not whether the controls are actually
+implemented. In the pilot and production profiles the pilotReadiness gates may
+only be promoted by the release pipeline, after it has tested the very same
+image digests. The values-pilot file in this repository stays locked by default.
 
-Componentes ativos:
+Active components:
 {{- if .Values.postgres.enabled }}
-  - postgres        (control plane: work_items/audit_log/tenant_config)
+  - postgres           (control plane: work_items / audit_log / tenant_config)
 {{- end }}
 {{- if .Values.temporal.enabled }}
   - temporal{{ if .Values.temporal.ui.enabled }} + temporal-ui{{ end }}
@@ -17,16 +17,16 @@ Componentes ativos:
   - redis
 {{- end }}
 {{- if and .Values.vault.devMode (not .Values.vault.externallyManaged) }}
-  - vault (dev mode — NÃO usar em produção)
+  - vault              (dev mode — DO NOT use in production)
 {{- end }}
 {{- if .Values.egressProxy.enabled }}
-  - egress-proxy     ({{ len .Values.egressProxy.allowlist }} host(s) na allowlist)
+  - egress-proxy       ({{ len .Values.egressProxy.allowlist }} host(s) allowlisted)
 {{- end }}
 {{- if .Values.modelGateway.enabled }}
   - model-gateway
 {{- end }}
 {{- if .Values.orchestrator.enabled }}
-  - orchestrator     ({{ .Values.orchestrator.replicas }} réplica(s))
+  - orchestrator       ({{ .Values.orchestrator.replicas }} replica(s))
 {{- end }}
 {{- if .Values.adapters.slack.enabled }}
   - adapter-slack
@@ -34,8 +34,14 @@ Componentes ativos:
 {{- if .Values.adapters.github.enabled }}
   - adapter-github
 {{- end }}
+{{- if .Values.adapters.jira.enabled }}
+  - adapter-jira       (+ poller and transition workers)
+{{- end }}
 {{- if .Values.adapters.ingestGateway.enabled }}
   - ingest-gateway
+{{- if .Values.adapters.ingestGateway.dispatcher.enabled }}
+  - dispatcher         (drains ingest_events into Temporal — nothing runs without it)
+{{- end }}
 {{- end }}
 {{- if .Values.validation.enabled }}
   - validation
@@ -43,18 +49,37 @@ Componentes ativos:
 {{- if .Values.otelCollector.enabled }}
   - otel-collector
 {{- end }}
+{{- if .Values.consoleProjector.enabled }}
+  - console-projector  (fills the admin console's read model)
+{{- end }}
+{{- if .Values.console.enabled }}
+  - console            (admin UI + control-plane API)
+{{- end }}
+{{- if .Values.queueBoard.enabled }}
+  - queue-board        (operator console; owns the OIDC login)
+{{- end }}
+{{- if .Values.replyReconciler.enabled }}
+  - reply-reconciler   (recovers human replies a webhook lost)
+{{- end }}
+{{- if not .Values.adapters.ingestGateway.dispatcher.enabled }}
 
-Próximos passos:
-1. Verifique os pods:  kubectl -n {{ .Values.global.namespace }} get pods
-2. Popule os secrets reais no Vault do cliente (ou no Vault de dev deste
-   chart) ANTES de apontar tráfego real — ver services/platform/dse_secrets
-   e infra/RUNBOOK-UPGRADE.md.
-3. Aplique a migração de schema (`scripts/migrate.py`) contra o Postgres
-   deste namespace antes do primeiro uso.
-4. Revise infra/OSS-BOM.md para a lista de licenças dos componentes OSS.
+WARNING: the dispatcher is disabled. The adapters will accept webhooks and
+record them in ingest_events, but nothing calls start_workflow, so no task will
+ever run. Enable adapters.ingestGateway.dispatcher unless you are deliberately
+running the dispatcher outside this chart.
+{{- end }}
+
+Next steps:
+1. Check the pods:  kubectl -n {{ .Values.global.namespace }} get pods
+2. Load the real secrets into the customer's Vault (or into this chart's dev
+   Vault) BEFORE pointing real traffic at it — see services/platform/dse_secrets
+   and infra/RUNBOOK-UPGRADE.md.
+3. Apply the schema migrations (`scripts/migrate.py`) against this namespace's
+   Postgres before first use.
+4. Review infra/OSS-BOM.md for the OSS component licences.
 {{- if or (eq .Values.deploymentProfile "pilot") (eq .Values.deploymentProfile "production") }}
-5. Confirme no Temporal que build id {{ .Values.orchestrator.workerVersioning.buildId }}
-   está registrado antes de tornar o worker Ready.
-6. Execute tests/test_profiles.sh e os testes externos de CNI, sandbox,
-   gateway, egress e ledger; `helm template` isolado não libera o piloto.
+5. Confirm in Temporal that build id {{ .Values.orchestrator.workerVersioning.buildId }}
+   is registered before making the worker Ready.
+6. Run tests/test_profiles.sh plus the external CNI, sandbox, gateway, egress
+   and ledger tests. `helm template` on its own does not clear the pilot.
 {{- end }}

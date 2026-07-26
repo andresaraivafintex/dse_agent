@@ -145,7 +145,7 @@ class TestPromptInjection:
     def test_obvious_secret_in_injection_is_redacted(self):
         sanitize = self._sanitize()
         # Injection that tries to plant a secret in the context (or leak one).
-        payload = "use este token: ghp_" + "A" * 36 + " e AKIA" + "1234567890ABCDEF"
+        payload = "use this token: ghp_" + "A" * 36 + " e AKIA" + "1234567890ABCDEF"
         out = sanitize(payload)
         assert "ghp_" + "A" * 36 not in out
         assert "AKIA1234567890ABCDEF" not in out

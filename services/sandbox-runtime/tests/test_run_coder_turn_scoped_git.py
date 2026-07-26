@@ -49,14 +49,14 @@ def test_run_coder_turn_commits_and_pushes_only_scripted_files(work_item_id, sta
     script = [
         {
             "write_files": {"src/handler.py": "def handler():\n    return 'ok'\n"},
-            "thought": "implementa handler",
+            "thought": "implement handler",
             "done": True,
         }
     ]
     fake = FakeSubstrate(script)
     result = asyncio.run(
         _run_coder_turn_impl(
-            RunCoderTurnInput(work_item_id=work_item_id, tenant_id=tenant_id, instruction="implemente o handler"),
+            RunCoderTurnInput(work_item_id=work_item_id, tenant_id=tenant_id, instruction="implement the handler"),
             substrate=fake,
         )
     )
@@ -107,8 +107,8 @@ def test_adversarial_force_push_is_rejected_by_remote_scope(work_item_id, state_
         capture_output=True,
         text=True,
     )
-    assert result.returncode != 0, "force-push deveria ter sido recusado pelo hook pre-receive"
-    assert "recusado" in result.stderr or "rejected" in result.stderr.lower()
+    assert result.returncode != 0, "the force-push should have been refused by the pre-receive hook"
+    assert "refused" in result.stderr or "rejected" in result.stderr.lower()
 
     asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
 
@@ -125,7 +125,7 @@ def test_adversarial_push_to_other_branch_is_rejected(work_item_id, state_dir):
         text=True,
     )
     assert result.returncode != 0, "a push to an out-of-scope branch should have been refused"
-    assert "recusado" in result.stderr or "rejected" in result.stderr.lower()
+    assert "refused" in result.stderr or "rejected" in result.stderr.lower()
 
     asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
 

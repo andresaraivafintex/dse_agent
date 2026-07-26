@@ -54,9 +54,9 @@ managing "Build ID sets" on the server.
    (new signals, new branches guarded by `workflow.patched()`) during
    deploys — see section 3.
 
-### 2.2 Worker Deployment Versioning mode (modern — plano 08 §F/F5)
+### 2.2 Worker Deployment Versioning mode (modern — plan 08 §F/F5)
 
-> **Update (plano 08 §F, F5):** we swapped the **classic version-set**
+> **Update (plan 08 §F, F5):** we swapped the **classic version-set**
 > (`update-build-ids`, deprecated and DISABLED by default on current servers —
 > `RPCError: Worker versioning v0.1 ... is disabled`) for modern **Worker Deployment
 > Versioning**. The worker announces itself as version `(deployment_name,

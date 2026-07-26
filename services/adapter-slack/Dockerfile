@@ -1,4 +1,4 @@
-# WS-A — adapter-slack (porta 8801). Build a partir da RAIZ do monorepo:
+# WS-A — adapter-slack (port 8801). Build from the monorepo ROOT:
 #   docker build -f services/adapter-slack/Dockerfile -t dse/adapter-slack .
 FROM python:3.11-slim
 

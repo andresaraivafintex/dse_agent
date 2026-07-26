@@ -32,14 +32,14 @@ ACTIVITY_REBUILD_SANDBOX = "rebuild_sandbox"
 ACTIVITY_TEARDOWN_SANDBOX = "teardown_sandbox"
 ACTIVITY_RUN_L1_PIPELINE = "run_l1_pipeline"
 ACTIVITY_FINALIZE_PR = "finalize_pr"
-ACTIVITY_VERIFY_MERGE_STATE = "verify_merge_state"  # plano 08 §F (F1)
+ACTIVITY_VERIFY_MERGE_STATE = "verify_merge_state"  # plan 08 §F (F1)
 ACTIVITY_POST_TRACKING_COMMENT = "post_tracking_comment"
 ACTIVITY_CONSUME_CI_STATUS = "consume_ci_status"
 ACTIVITY_EMIT_AUDIT = "emit_audit_event"
 
 # --- Phase 2 (stage-scoped session split + L2, ADR-13/FR-08/FR-13) ---
 # Owners: WS-C implements the sessions (planner/tester/reviewer L2 — the L2
-# session is built in WS-C by the de-duplication decision of plano mestre §7;
+# session is built in WS-C by the de-duplication decision of master plan §7;
 # WS-E orchestrates the fix-retry loop around it); WS-B calls them by name.
 ACTIVITY_RUN_PLANNER_TURN = "run_planner_turn"
 ACTIVITY_RUN_TESTER_TURN = "run_tester_turn"
@@ -48,7 +48,7 @@ ACTIVITY_RUN_L2_REVIEW = "run_l2_review"
 # --- Phase 3 (evidence pipeline, ADR-26/ADR-27/§10.12-13) ---
 # Owners: WS-E implements it (evidence/preview/artifacts); WS-B calls by name
 # after the PR is finalized. Defined BEFORE the implementation (Phase 3 entry
-# gate, adendo 02 §2.3) — the matching input/output models live in THIS file
+# gate, addendum 02 §2.3) — the matching input/output models live in THIS file
 # from day zero, so the boundary bug class of Phases 1-2 (14 occurrences) has
 # nowhere to be born.
 ACTIVITY_RUN_DEMO_EVIDENCE = "run_demo_evidence"
@@ -57,7 +57,7 @@ ACTIVITY_TRIGGER_PREVIEW = "trigger_preview"
 ACTIVITY_RUN_VISUAL_DIFF = "run_visual_diff"
 
 # --- Phase 4 (loop hardening & learning) ---
-# Defined BEFORE the implementation (entry gate §4 of adendo 03, same
+# Defined BEFORE the implementation (entry gate §4 of addendum 03, same
 # discipline as Phase 3). Owners: merge-base = WS-E; skill promotion = WS-C
 # (the eval->approval->canary->rollback pipeline); WS-B calls them by name.
 ACTIVITY_UPDATE_BASE_BRANCH = "update_base_branch"   # merge-base, never rebase (WSE-E6-T16)
@@ -315,7 +315,7 @@ class L1Result(BaseModel):
 
 
 class PrRef(BaseModel):
-    # Phase 2 (adendo 01 §4, approved by the architect): optional `pr_number` +
+    # Phase 2 (addendum 01 §4, approved by the architect): optional `pr_number` +
     # `compare_url` for the strict mode (WSE-E3-T8) in which the system only
     # pushes the branch and posts a compare link — the PR is opened by a human.
     # Additive change: every Phase 1 caller keeps building with pr_number
@@ -329,7 +329,7 @@ class PrRef(BaseModel):
 
 
 class VerifyMergeInput(BaseModel):
-    """Plano 08 §F (F1) — asks for the REAL state of the PR at the source
+    """Plan 08 §F (F1) — asks for the REAL state of the PR at the source
     (GitHub) to confirm a merge signal against the truth, not only against the
     envelope (which a forged webhook could fake — pr_number/repo/sha are not
     secrets)."""
@@ -388,7 +388,7 @@ class CiStatusResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Session models promoted to the foundation (adendo 02 §2.3 — Phase 3, entry
+# Session models promoted to the foundation (addendum 02 §2.3 — Phase 3, entry
 # gate). In Phases 1-2 these models lived in `sandbox_runtime.activities` and
 # the caller payload (WS-B) drifted away from the declared fields without any
 # test catching it (lenient fakes on both sides) — 14 boundary bugs in total.
@@ -568,7 +568,7 @@ class TriggerPreviewInput(BaseModel):
     """Triggers (or skips) the per-PR preview environment. The decision is
     DETERMINISTIC by paths-filter (FR-20) — never by model:
 
-    - `preview_enabled` (plano 08 §D) — operator-set gate (`repo_bindings.
+    - `preview_enabled` (plan 08 §D) — operator-set gate (`repo_bindings.
       deploys_preview`): a repo not marked as "generates preview" skips with
       `skipped_disabled`. Default True keeps the previous behavior for callers
       that do not pass the gate (single-repo/no config).
@@ -587,7 +587,7 @@ class TriggerPreviewInput(BaseModel):
     # of a UI change, and without it a PR that only edits index.html was
     # classified backend-only and silently skipped the preview.
     ui_path_globs: list[str] = Field(default_factory=lambda: ["ui/**", "frontend/**", "**/*.html", "**/*.css", "**/*.tsx", "**/*.jsx", "**/*.vue", "**/*.svelte"])
-    # plano 08 §D — deployable service (back): source/manifest/container that
+    # plan 08 §D — deployable service (back): source/manifest/container that
     # change the artifact served in the preview. Docs/test-only do not match
     # and skip.
     deployable_globs: list[str] = Field(default_factory=lambda: [
@@ -604,7 +604,7 @@ class PreviewRef(BaseModel):
     namespace: str | None = None
     url: str | None = None
     detail: str = ""
-    # plano 08 §D — "ui" | "deployable" | "" — which filter triggered the
+    # plan 08 §D — "ui" | "deployable" | "" — which filter triggered the
     # preview (evidence in the PR/console for why this PR did or did not get
     # a preview).
     kind: str = ""
@@ -634,7 +634,7 @@ class VisualDiffResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Phase 4 — merge-base / base-drift (owner WS-E, WSE-E6-T16) and skill
 # promotion (owner WS-C, WSC-E4-T3). Contracts defined at the entry gate,
-# before the build. VALIDATION NOTE (adendo 03): merge-base is NEW
+# before the build. VALIDATION NOTE (addendum 03): merge-base is NEW
 # construction — Phase 1 never implemented drift handling, despite what the
 # plan text says.
 # ---------------------------------------------------------------------------

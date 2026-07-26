@@ -42,7 +42,7 @@ def test_no_provider_sdk_imported_anywhere_in_package():
             hit = _FORBIDDEN_SDK_IMPORTS & set(names)
             if hit:
                 offending.append(f"{py_file.name}: {hit}")
-    assert not offending, f"SDK de provider importado diretamente: {offending}"
+    assert not offending, f"a provider SDK is imported directly: {offending}"
 
 
 def test_all_http_calls_go_through_the_gateway_base_url(unique_ids, monkeypatch):
@@ -80,4 +80,4 @@ def test_all_http_calls_go_through_the_gateway_base_url(unique_ids, monkeypatch)
             gateway.scheme,
             gateway.hostname,
             gateway.port,
-        ), f"chamada saiu do gateway: {url}"
+        ), f"a call left the gateway: {url}"

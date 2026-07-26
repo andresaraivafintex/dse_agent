@@ -1,4 +1,4 @@
-"""Fase 2 stage-scoped sessions (WSC-E3-T3/T4/T5): Planner context hydration,
+"""Phase 2 stage-scoped sessions (WSC-E3-T3/T4/T5): Planner context hydration,
 DETERMINISTIC risk classifier, scripted session runner (which ALWAYS executes
 tools through the toolset), and the fresh-context Reviewer session.
 
@@ -201,7 +201,7 @@ class ScriptedAgentSession:
     In production the OpenHands adapter registers only the tools whose names are
     in the toolset's allowlist and routes every tool-call through the same
     `check` — see the README (the same pattern as the Coder's
-    `OpenHandsSubstrate` in Fase 1).
+    `OpenHandsSubstrate` in Phase 1).
     """
 
     def __init__(
@@ -335,7 +335,7 @@ class ReviewerContext:
             f"# L2 review — work_item {self.work_item_id}\n\n"
             f"## Plan the diff must adhere to\n"
             f"steps: {self.plan.steps}\n"
-            f"expected_files (blast radius declarado): {self.plan.expected_files}\n"
+            f"expected_files (declared blast radius): {self.plan.expected_files}\n"
             f"diff_budget_lines: {self.plan.diff_budget_lines}\n"
             f"test_plan: {self.plan.test_plan}\n"
             f"risk_class: {self.plan.risk_class}\n"
