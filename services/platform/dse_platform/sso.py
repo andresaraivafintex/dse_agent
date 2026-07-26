@@ -1,23 +1,24 @@
-"""WSF-E3-T3 — SSO/OIDC do console admin + identidade de console (ADR-22).
+"""WSF-E3-T3 — admin console SSO/OIDC + console identity (ADR-22).
 
-Duas responsabilidades:
-1. `OIDCVerifier` — valida um `id_token` (RS256) contra um JWKS (do IdP real em
-   produção; do `dev_idp.DevIdP` em dev/teste — ver README). Verifica assinatura,
-   `iss`, `aud`, `exp`. Nunca confia num token não verificado (P8).
-2. Ligação com o identity map da fundação + offboarding: `login` resolve o
-   `sub` do IdP para um `principal_id` (via `dse_identity.resolve_principal`
-   com plataforma "sso"), garante uma linha em `dse_console_identity`, e RECUSA
-   o login se a conta estiver offboardada (`active = false`) ou expirada
-   (contractor além de `expires_at`). `offboard` desativa a conta — o que
-   também a remove da resolução de approver/steering (ver access_bundles e
+Two responsibilities:
+1. `OIDCVerifier` — validates an `id_token` (RS256) against a JWKS (from the real
+   IdP in production; from `dev_idp.DevIdP` in dev/test — see README). Checks the
+   signature, `iss`, `aud`, `exp`. Never trusts an unverified token (P8).
+2. Wiring to the foundation identity map + offboarding: `login` resolves the
+   IdP's `sub` to a `principal_id` (via `dse_identity.resolve_principal` with
+   platform "sso"), guarantees a row in `dse_console_identity`, and REFUSES the
+   login if the account is offboarded (`active = false`) or expired (contractor
+   past `expires_at`). `offboard` deactivates the account — which also removes it
+   from approver/steering resolution (see access_bundles and
    steering_resolution).
 
-Account matching (ADR-22): por `sub` (subject) estável do IdP, NÃO por email
-(email pode ser reatribuído). O email é guardado só para exibição/contato.
+Account matching (ADR-22): by the IdP's stable `sub` (subject), NOT by email
+(email can be reassigned). The email is stored only for display/contact.
 """
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
 import uuid
 from typing import Any
@@ -25,7 +26,10 @@ from typing import Any
 import jwt
 import psycopg2
 import psycopg2.extras
+
 from dse_audit import emit
+
+logger = logging.getLogger("dse_platform.sso")
 
 _DSN = os.environ.get(
     "DSE_PLATFORM_DATABASE_URL",
@@ -38,19 +42,19 @@ def _get_connection():
 
 
 def ensure_sso_principal(sso_subject: str, *, display_name: str | None = None, conn=None) -> str:
-    """Account matching do ADR-22 para usuários de SSO: resolve (ou mina) o
-    `principal_id` de um `sso_subject`.
+    """ADR-22 account matching for SSO users: resolves (or mints) the
+    `principal_id` for an `sso_subject`.
 
-    NOTA DE FUNDAÇÃO (documentada no README + ADR-22): o `identity_links` da
-    fundação tem um CHECK que só admite `platform IN ('slack','github','jira')`
-    — não podemos gravar `platform = 'sso'` lá (e não editamos a migração da
-    fundação). Portanto o principal de um usuário de SSO é criado DIRETO em
-    `principals`, e a chave de account-matching (`sso_subject`) vive em
-    `dse_console_identity`. Consumidores continuam vendo um `usr_<uuid>` normal
-    em `principals` — a assinatura pública (`principal_id`) não muda.
+    FOUNDATION NOTE (documented in the README + ADR-22): the foundation's
+    `identity_links` has a CHECK that only allows `platform IN
+    ('slack','github','jira')` — we cannot write `platform = 'sso'` there (and we
+    do not edit the foundation migration). So an SSO user's principal is created
+    DIRECTLY in `principals`, and the account-matching key (`sso_subject`) lives
+    in `dse_console_identity`. Consumers still see a normal `usr_<uuid>` in
+    `principals` — the public signature (`principal_id`) does not change.
 
-    Idempotente por `sso_subject` (a linha de console_identity é a fonte da
-    verdade do matching)."""
+    Idempotent by `sso_subject` (the console_identity row is the source of truth
+    for matching)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -81,11 +85,11 @@ def ensure_sso_principal(sso_subject: str, *, display_name: str | None = None, c
 
 
 class InvalidToken(Exception):
-    """id_token falhou a verificação (assinatura/iss/aud/exp)."""
+    """id_token failed verification (signature/iss/aud/exp)."""
 
 
 class LoginDenied(Exception):
-    """Token válido mas a conta de console está offboardada/expirada."""
+    """Token is valid but the console account is offboarded/expired."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,28 +103,66 @@ class OIDCClaims:
 
 
 class OIDCVerifier:
-    """Verificador de id_token OIDC. Construa com o JWKS do IdP (dict no formato
-    `{"keys": [...]}`) e o `issuer`/`audience` (client_id) esperados. Em
-    produção, `jwks` vem do `jwks_uri` do IdP (buscado e cacheado pelo caller);
-    o contrato de verificação é idêntico ao do dev IdP."""
+    """OIDC id_token verifier. Build it with the IdP's JWKS (a dict shaped like
+    `{"keys": [...]}`) and the expected `issuer`/`audience` (client_id). In
+    production, `jwks` comes from the IdP's `jwks_uri` (fetched and cached by the
+    caller); the verification contract is identical to the dev IdP's."""
 
-    def __init__(self, *, jwks: dict, issuer: str, audience: str):
+    def __init__(self, *, jwks: dict, issuer: str, audience: str, jwks_uri: str | None = None):
         self._issuer = issuer
         self._audience = audience
+        self._jwks_uri = jwks_uri
         self._keys = {}
-        for jwk in jwks.get("keys", []):
-            kid = jwk.get("kid")
-            self._keys[kid] = jwt.PyJWK.from_dict(jwk)
+        self._load(jwks)
+
+    def _load(self, jwks: dict) -> None:
+        self._keys = {
+            jwk.get("kid"): jwt.PyJWK.from_dict(jwk) for jwk in jwks.get("keys", [])
+        }
+
+    def _refresh(self) -> bool:
+        """Re-fetch the JWKS. True when a new set of keys was loaded.
+
+        Identity providers rotate their signing keys on their own schedule —
+        Entra does it routinely — and a verifier built once at startup keeps a
+        snapshot that eventually contains none of the keys in use. The failure
+        is total and undramatic: every login starts returning "invalid token"
+        while the IdP, the network and this service all look healthy, and the
+        only cure is a restart nobody knows to perform.
+
+        Best-effort: if the fetch fails, the caller still rejects the token, so
+        the worst case is the behaviour we had before instead of an exception
+        from an unrelated layer.
+        """
+        if not self._jwks_uri:
+            return False
+        try:
+            import json
+            import urllib.request
+
+            with urllib.request.urlopen(self._jwks_uri, timeout=10) as resp:
+                self._load(json.loads(resp.read().decode()))
+            return True
+        except Exception:  # noqa: BLE001 — an unreachable IdP must not raise from here
+            logger.warning("could not refresh the JWKS from %s", self._jwks_uri, exc_info=True)
+            return False
 
     def verify(self, id_token: str) -> OIDCClaims:
         try:
             header = jwt.get_unverified_header(id_token)
         except jwt.InvalidTokenError as e:
-            raise InvalidToken(f"header inválido: {e}") from e
+            raise InvalidToken(f"invalid header: {e}") from e
         kid = header.get("kid")
         signing = self._keys.get(kid)
         if signing is None:
-            raise InvalidToken(f"kid {kid!r} desconhecido no JWKS")
+            # An unknown kid is the signal that the IdP rotated. Re-fetch once
+            # and retry rather than rejecting: this is the difference between a
+            # console that keeps working through a rotation and one that stops
+            # authenticating everybody until someone restarts it.
+            if self._refresh():
+                signing = self._keys.get(kid)
+        if signing is None:
+            raise InvalidToken(f"kid {kid!r} unknown in the JWKS")
         try:
             claims = jwt.decode(
                 id_token,
@@ -131,9 +173,9 @@ class OIDCVerifier:
                 options={"require": ["exp", "iss", "aud", "sub"]},
             )
         except jwt.ExpiredSignatureError as e:
-            raise InvalidToken(f"token expirado: {e}") from e
+            raise InvalidToken(f"token expired: {e}") from e
         except jwt.InvalidTokenError as e:
-            raise InvalidToken(f"token inválido: {e}") from e
+            raise InvalidToken(f"invalid token: {e}") from e
         return OIDCClaims(
             subject=claims["sub"],
             audience=self._audience,
@@ -155,9 +197,9 @@ class ConsoleSession:
 
 
 def login(verifier: OIDCVerifier, id_token: str, *, conn=None) -> ConsoleSession:
-    """Verifica o token, resolve/garante a identidade de console e devolve a
-    sessão. Levanta `LoginDenied` se offboardado/expirado (P6: falha limpa).
-    Grava audit `console_login` (ou `console_login_denied`)."""
+    """Verifies the token, resolves/guarantees the console identity and returns
+    the session. Raises `LoginDenied` if offboarded/expired (P6: clean failure).
+    Writes a `console_login` (or `console_login_denied`) audit entry."""
     claims = verifier.verify(id_token)
 
     owns = conn is None
@@ -183,10 +225,10 @@ def login(verifier: OIDCVerifier, id_token: str, *, conn=None) -> ConsoleSession
             )
             if owns:
                 conn.commit()
-            raise LoginDenied(f"conta de console offboardada/expirada (sub={claims.subject})")
+            raise LoginDenied(f"console account offboarded or expired (sub={claims.subject})")
 
         if row is None:
-            # primeira aparição: mina o principal (account matching por subject)
+            # first sighting: mint the principal (account matching by subject)
             principal_id = ensure_sso_principal(claims.subject, display_name=claims.name, conn=conn)
             with conn.cursor() as cur:
                 cur.execute(
@@ -249,13 +291,13 @@ def provision_console_user(
     actor: str = "system:platform-admin",
     conn=None,
 ) -> None:
-    """Provisiona/atualiza uma identidade de console explicitamente (ex.: admin
-    concede papel `approver`/`operator` antes do primeiro login). `principal_id`
-    deve existir em `principals` (resolvido via dse_identity)."""
+    """Provisions/updates a console identity explicitly (e.g. an admin grants the
+    `approver`/`operator` role before the first login). `principal_id` must exist
+    in `principals` (resolved via dse_identity)."""
     if roles is not None:
         for r in roles:
             if r not in {"operator", "approver", "viewer", "admin"}:
-                raise ValueError(f"role desconhecido: {r!r}")
+                raise ValueError(f"unknown role: {r!r}")
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -298,12 +340,12 @@ def provision_console_user(
 
 
 def offboard(principal_id: str, *, reason: str, actor: str, conn=None) -> None:
-    """Offboarding (ADR-22): desativa a identidade de console. Efeito em cascata:
-    o principal é removido da resolução de approver (access_bundles.resolve_plan_approvers
-    filtra `active = false`) e de steering (steering_resolution.is_steering_allowed).
-    Idempotente. Grava audit (P8). `reason` obrigatório."""
+    """Offboarding (ADR-22): deactivates the console identity. Cascading effect:
+    the principal is dropped from approver resolution (access_bundles.resolve_plan_approvers
+    filters `active = false`) and from steering (steering_resolution.is_steering_allowed).
+    Idempotent. Writes an audit entry (P8). `reason` is required."""
     if not reason:
-        raise ValueError("offboard exige `reason` (P8: nunca silencioso)")
+        raise ValueError("offboard requires `reason` (P8: never silent)")
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -336,10 +378,10 @@ def offboard(principal_id: str, *, reason: str, actor: str, conn=None) -> None:
 
 
 def is_console_active(principal_id: str, conn=None) -> bool:
-    """True sse o principal tem identidade de console ativa e não expirada.
-    Um principal SEM linha em dse_console_identity retorna False aqui (não é um
-    usuário de console) — mas note que `resolve_plan_approvers` trata CODEOWNERS
-    sem linha como ativos; são checagens de propósitos diferentes."""
+    """True iff the principal has an active, non-expired console identity.
+    A principal with NO row in dse_console_identity returns False here (it is not
+    a console user) — but note that `resolve_plan_approvers` treats CODEOWNERS
+    without a row as active; these are checks with different purposes."""
     owns = conn is None
     if owns:
         conn = _get_connection()

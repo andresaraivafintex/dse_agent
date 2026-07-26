@@ -1,0 +1,186 @@
+{{/*
+Operator console (queue board) — the surface that can actually ACT on a task:
+kill switches, quarantine, pause/resume/cancel, retry from checkpoint, force
+clarification, escalate, reassign model or runtime.
+
+It complements the admin console rather than competing with it. The admin
+console reads the derived `console_rm` model and is where cost, ROI and the
+skill registry live; this one reads the system of record directly, shows all 17
+internal states instead of the 11 the console collapses them into, and is
+multi-tenant. Neither had a chart until now, which is why the VPS ran with no
+operator surface at all.
+
+Login is OIDC and is a hard gate: `asgi.py` builds the verifier from env, and
+with no verifier every login attempt answers 503 rather than falling open. Every
+control here audits the INTENT before the effect and requires a resolved human
+principal, so a service token cannot drive it — which is the point.
+*/}}
+{{- if .Values.queueBoard.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-queue-board
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "queue-board" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "queue-board" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "queue-board" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      containers:
+        - name: queue-board
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.queueBoard.image.repository "tag" .Values.queueBoard.image.tag "digest" .Values.queueBoard.image.digest) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
+          ports:
+            - containerPort: 8890
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # DSE_OIDC_ISSUER + DSE_OIDC_AUDIENCE live here. Without both, the
+            # verifier is not built and login answers 503 — the deployment comes
+            # up refusing everyone rather than admitting anyone.
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
+          env:
+            - name: DSE_TEMPORAL_TARGET
+              value: "{{ include "dse.fullname" . }}-temporal:7233"
+            # The IdP is the one external host this service talks to (JWKS at
+            # start and again whenever the provider rotates a key), so it goes
+            # through the egress proxy like every other outbound call. The host
+            # must be on the proxy's allowlist or login fails with a 503 that
+            # looks like a configuration error rather than a blocked request.
+            - name: HTTPS_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: HTTP_PROXY
+              value: "http://{{ include "dse.fullname" . }}-egress-proxy:{{ .Values.egressProxy.port }}"
+            - name: NO_PROXY
+              value: ".svc,.cluster.local"
+            {{- with .Values.queueBoard.consoleUrl }}
+            # Cross-link to the admin console. The two surfaces answer different
+            # questions and an operator moves between them constantly; without a
+            # link they have to know both hostnames by heart.
+            - name: DSE_CONSOLE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.queueBoard.publicUrl }}
+            - name: DSE_QUEUE_BOARD_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.queueBoard.cookieDomain }}
+            # Widens the session cookie to cover the admin panel too. Only has
+            # an effect together with the panel's forwardAuth.
+            - name: DSE_CONSOLE_COOKIE_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.queueBoard.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+          readinessProbe:
+            # `/`, not `/login`: the login route is POST-only and answers 405 to
+            # a GET, so probing it reports an unhealthy pod that is serving fine.
+            # There is no dedicated /health here — `/` is the redirect to login
+            # for an unauthenticated caller, which is exactly the "the app is up
+            # and refusing anonymous access" signal we want.
+            httpGet: { path: /, port: 8890 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-queue-board
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "queue-board" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 8890
+      targetPort: 8890
+      name: http
+{{- if .Values.queueBoard.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dse.fullname" . }}-queue-board
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+  {{- if .Values.queueBoard.ingress.certResolver }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls.certresolver: {{ .Values.queueBoard.ingress.certResolver | quote }}
+    traefik.ingress.kubernetes.io/router.entrypoints: "websecure"
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.queueBoard.ingress.className }}
+  tls:
+    - hosts: [{{ .Values.queueBoard.ingress.host | quote }}]
+  rules:
+    - host: {{ .Values.queueBoard.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dse.fullname" . }}-queue-board
+                port: { number: 8890 }
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+Postgres for the board itself, Temporal to send the operator signals, and the
+IdP over the egress proxy to fetch and refresh the JWKS.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-queue-board-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: queue-board
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: temporal
+      ports:
+        - { protocol: TCP, port: 7233 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: egress-proxy
+      ports:
+        - { protocol: TCP, port: {{ .Values.egressProxy.port }} }
+{{- end }}
+{{- end }}

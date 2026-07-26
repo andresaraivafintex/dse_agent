@@ -1,13 +1,13 @@
-"""WSF-E6-T1 — API do queue board sobre o Postgres (system of record).
+"""WSF-E6-T1 — queue board API over Postgres (the system of record).
 
-Projeções somente-leitura sobre `work_items` (a máquina de estados §9.3 é a
-fonte da verdade — o board NÃO consulta o Temporal para o estado corrente, só
-para controles em operator.py) + `tenant_config` (budgets) + `audit_log`
-(trilha + custo corrente agregado) + `dse_work_item_quarantine`.
+Read-only projections over `work_items` (the §9.3 state machine is the source of
+truth — the board does NOT query Temporal for the current state, only for
+controls in operator.py) + `tenant_config` (budgets) + `audit_log` (trail +
+aggregated running cost) + `dse_work_item_quarantine`.
 
-Deliberadamente cru: dataclasses + funções puras de query. A projeção pública
-grosseira reusa `dse_contracts.work_item.to_public_status` (contrato já testado)
-para não redefinir o mapeamento estado-interno -> estado-público.
+Deliberately crude: dataclasses + pure query functions. The coarse public
+projection reuses `dse_contracts.work_item.to_public_status` (an already tested
+contract) so the internal-state -> public-state mapping is not redefined here.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ _DSN = os.environ.get(
     os.environ.get("DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"),
 )
 
-# Todos os estados da máquina §9.3 (ordem de exibição no board).
+# Every state of the §9.3 machine (display order on the board).
 ALL_STATES = [s.value for s in WorkItemStatus]
 
 
@@ -39,8 +39,8 @@ class WorkItemRow:
     work_item_id: str
     tenant_id: str
     source: str
-    status: str            # estado interno §9.3
-    public_status: str     # projeção grosseira (running/blocked/done/failed)
+    status: str            # internal §9.3 state
+    public_status: str     # coarse projection (running/blocked/done/failed)
     repo: str | None
     pr_number: int | None
     requester: str
@@ -82,8 +82,8 @@ def _row_to_work_item(row) -> WorkItemRow:
 
 
 def list_work_items(*, tenant_id: str | None = None, conn=None) -> list[WorkItemRow]:
-    """Todos os work items (ou de um tenant), com flag de quarentena (join com
-    dse_work_item_quarantine ativa)."""
+    """All work items (or those of one tenant), with a quarantine flag (join on
+    the active rows of dse_work_item_quarantine)."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -109,8 +109,8 @@ def list_work_items(*, tenant_id: str | None = None, conn=None) -> list[WorkItem
 
 
 def work_items_by_state(*, tenant_id: str | None = None, conn=None) -> dict[str, list[WorkItemRow]]:
-    """Agrupa por estado interno §9.3. Todos os estados aparecem como chave
-    (mesmo vazios) para o board mostrar a máquina inteira."""
+    """Groups by internal §9.3 state. Every state shows up as a key (even when
+    empty) so the board can display the whole machine."""
     grouped: dict[str, list[WorkItemRow]] = {s: [] for s in ALL_STATES}
     for wi in list_work_items(tenant_id=tenant_id, conn=conn):
         grouped.setdefault(wi.status, []).append(wi)
@@ -118,7 +118,7 @@ def work_items_by_state(*, tenant_id: str | None = None, conn=None) -> dict[str,
 
 
 def list_tenants(conn=None) -> list[str]:
-    """União dos tenants vistos em work_items e em tenant_config."""
+    """Union of the tenants seen in work_items and in tenant_config."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -139,11 +139,11 @@ def list_tenants(conn=None) -> list[str]:
 
 
 def get_tenant_budget(tenant_id: str, conn=None) -> TenantBudget:
-    """Budget + custo corrente. Custo agregado das linhas de audit que carregam
-    `details->>'cost_usd'` (ex.: `coder_turn_completed`) — a mesma fonte que o
-    OTel collector consome; é uma aproximação honesta enquanto o custo real de
-    provider não é gravado (ver README, gaps). `active` = work items em estados
-    não-terminais."""
+    """Budget + running cost. The cost is aggregated from the audit rows that
+    carry `details->>'cost_usd'` (e.g. `coder_turn_completed`) — the same source
+    the OTel collector consumes; it is an honest approximation while the real
+    provider cost is not recorded (see README, gaps). `active` = work items in
+    non-terminal states."""
     owns = conn is None
     if owns:
         conn = _get_connection()
@@ -194,7 +194,7 @@ def get_tenant_budget(tenant_id: str, conn=None) -> TenantBudget:
 
 
 def get_audit_trail(work_item_id: str, *, limit: int = 200, conn=None) -> list[dict[str, Any]]:
-    """Trilha de audit de um work item (ordem cronológica)."""
+    """Audit trail of a work item (chronological order)."""
     owns = conn is None
     if owns:
         conn = _get_connection()

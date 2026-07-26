@@ -1,0 +1,284 @@
+{{/*
+Admin console — the UI (Next.js) and the control-plane API it reads through.
+
+Only the UI is reachable from outside. next.config.js rewrites `/api/dse/*` to
+the API from the Next server, so the browser only ever talks to one origin: no
+CORS, no second certificate, and an API that cannot be reached from the internet
+at all. The UI image bakes a RELATIVE `NEXT_PUBLIC_API_URL`, so the same image
+serves any hostname — the API's address is runtime configuration
+(`API_PROXY_TARGET`), not something welded in at build time.
+
+The API keeps a SQLite cache of what it reads from `console_rm`. That cache is
+rebuildable by definition, but it is not disposable in practice: losing it drops
+the skills registry rows the console owns, so it gets a volume.
+*/}}
+{{- if .Values.console.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dse.fullname" . }}-console-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.console.api.persistence.size }}
+  {{- with .Values.console.api.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-console-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "console-api" "Release" .Release) | nindent 4 }}
+spec:
+  # One writer: SQLite on a ReadWriteOnce volume cannot be shared, and a second
+  # replica would either fail to schedule or corrupt the file.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "console-api" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "console-api" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      containers:
+        - name: console-api
+          image: {{ .Values.console.api.image.repository }}:{{ .Values.console.api.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            # readOnlyRootFilesystem is off here on purpose: SQLite writes its
+            # WAL and shared-memory files next to the database.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 4000
+              name: http
+          env:
+            - name: PORT
+              value: "4000"
+            - name: DSE_DB_PATH
+              value: /data/dse.db
+            # Reads the read model the projector fills. Without this the console
+            # falls back to its own seeded demo data and shows fiction.
+            - name: DSE_DATA_SOURCE
+              value: "controlplane"
+            # Not optional and easy to miss: the console defaults to the tenant
+            # `tenant_dev`, so pointing it at this database without setting this
+            # produces an empty, healthy-looking console.
+            - name: DSE_TENANT_ID
+              value: {{ .Values.tenant.id | quote }}
+            # The console reads DSE_CONTROLPLANE_DSN; the shared Postgres secret
+            # publishes the same value under DSE_DATABASE_URL. Mapped explicitly
+            # rather than assumed — the default silently points at localhost and
+            # the sync then fails against a database that is not there.
+            - name: DSE_CONTROLPLANE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dse.postgresSecretName" . }}
+                  key: DSE_DATABASE_URL
+          envFrom:
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+          resources:
+            {{- toYaml .Values.console.api.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "dse.fullname" . }}-console-api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-console-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "console-api" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 4000
+      targetPort: 4000
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-console-ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "console-ui" "Release" .Release) | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "console-ui" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "console-ui" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      containers:
+        - name: console-ui
+          image: {{ .Values.console.ui.image.repository }}:{{ .Values.console.ui.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            # Next writes its own cache under .next at runtime.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            # Runtime, not build time: next.config.js reads this when rewrites()
+            # runs on server start, which is what keeps the image portable.
+            - name: API_PROXY_TARGET
+              value: "http://{{ include "dse.fullname" . }}-console-api.{{ .Values.global.namespace }}.svc.cluster.local:4000"
+          resources:
+            {{- toYaml .Values.console.ui.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dse.fullname" . }}-console-ui
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "dse.selectorLabels" (dict "component" "console-ui" "Release" .Release) | nindent 4 }}
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+{{- if .Values.console.ingress.enabled }}
+{{- if .Values.console.ingress.forwardAuth.enabled }}
+---
+{{/*
+The panel's front door. Next.js here knows nothing about sessions, so the check
+happens before the request ever reaches it: Traefik calls the queue board's
+/auth/verify and only forwards what comes back 2xx. Anything else — including
+the redirect to the login — is handed to the browser untouched.
+
+`authResponseHeaders` is the allowlist of headers copied from the auth response
+onto the forwarded request. It is also a filter in the other direction: any
+X-Auth-* a client tries to send is dropped and replaced, so these cannot be
+spoofed from outside.
+*/}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "dse.fullname" . }}-console-auth
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  forwardAuth:
+    address: http://{{ include "dse.fullname" . }}-queue-board.{{ .Values.global.namespace }}.svc.cluster.local:8890/auth/verify
+    authResponseHeaders:
+      - X-Auth-Principal
+      - X-Auth-Subject
+      - X-Auth-Tenant
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dse.fullname" . }}-console
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+  {{- if or .Values.console.ingress.certResolver .Values.console.ingress.forwardAuth.enabled }}
+  annotations:
+    {{- if .Values.console.ingress.certResolver }}
+    traefik.ingress.kubernetes.io/router.tls.certresolver: {{ .Values.console.ingress.certResolver | quote }}
+    traefik.ingress.kubernetes.io/router.entrypoints: "websecure"
+    {{- end }}
+    {{- if .Values.console.ingress.forwardAuth.enabled }}
+    traefik.ingress.kubernetes.io/router.middlewares: "{{ .Values.global.namespace }}-{{ include "dse.fullname" . }}-console-auth@kubernetescrd"
+    {{- end }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.console.ingress.className }}
+  tls:
+    - hosts: [{{ .Values.console.ingress.host | quote }}]
+  rules:
+    - host: {{ .Values.console.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dse.fullname" . }}-console-ui
+                port: { number: 3000 }
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+The UI proxies to the API; the API reads Postgres. Neither needs anything else,
+and neither should reach the internet.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-console-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: ["console-api", "console-ui"]
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: console-api
+      ports:
+        - { protocol: TCP, port: 4000 }
+{{- end }}
+{{- end }}

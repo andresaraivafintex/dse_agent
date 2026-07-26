@@ -1,74 +1,110 @@
-# Overlay do POC na VPS (2 vCPU / 8 GB) — plano 09, deploy k3s/Helm + túnel.
-# Perfil DEVELOPMENT (sem os gates estritos de piloto: sem ESO, sem worker
-# versioning, sem exigir digest em tudo) MAS com o sandbox ISOLADO de verdade
-# (gVisor + driver k8s), que é o ponto do POC.
+# POC overlay for the VPS (4 vCPU / 16 GB) — plan 09, k3s/Helm deploy.
+# DEVELOPMENT profile (none of the strict pilot gates: no ESO, no worker
+# versioning, no digest pinning everywhere) BUT with a genuinely ISOLATED
+# sandbox (gVisor + k8s driver), which is the whole point of the POC.
 #
-# Uso:
+# Usage:
 #   helm upgrade --install dse infra/helm/dse \
 #     -f infra/helm/dse/values-dev.yaml \
 #     -f deploy/vps/values-vps-poc.yaml
 #
-# IPs REAIS do cluster k3s desta VPS (verificados 2026-07-24):
+# REAL IPs of this VPS's k3s cluster (verified 2026-07-24):
 #   apiserver ClusterIP (NO_PROXY) = 10.43.0.1 ; node InternalIP (netpol) = 172.16.0.4
 #
-# PRÉ-REQUISITOS (ver README.md, seção "POC k3s/Helm"):
-#  1. namespace `dse` criado; pull secret do GHCR (ghcr-pull) no namespace.
-#  2. `kubectl apply -f deploy/k8s/sandbox-isolation.yaml` ANTES do helm
-#     (o chart põe Role/RoleBinding em dse-sandboxes, que este arquivo cria).
-#  3. Vault dev do chart semeado com o secrets.env (Anthropic/GitHub App/Slack).
+# PREREQUISITES (see README.md, section "POC k3s/Helm"):
+#  1. namespace `dse` created; GHCR pull secret (ghcr-pull) in the namespace.
+#  2. `kubectl apply -f deploy/k8s/sandbox-isolation.yaml` BEFORE helm
+#     (the chart puts a Role/RoleBinding in dse-sandboxes, which that file creates).
+#  3. The chart's dev Vault seeded from secrets.env (Anthropic/GitHub App/Slack).
 
 tenant:
   id: "fintex-poc"
   dataClass: "internal"
 
+# Public entrypoint. Slack and GitHub both refuse to deliver webhooks over
+# plain HTTP, so TLS here is a requirement, not a nicety — and Traefik issuing
+# it via ACME is what removes the manual certificate rotation that would
+# otherwise silently break deliveries months from now.
+ingress:
+  enabled: true
+  className: "traefik"
+  host: "dse.notas.api.br"
+  tls:
+    enabled: true
+    certResolver: "le"
+
 deploymentProfile: development
 
-# Secret K8s (criado à mão no deploy, passo 3 do runbook) com as chaves que o
-# LiteLLM e o orchestrator leem do AMBIENTE — NÃO do Vault:
+# K8s Secret (created by hand at deploy time, step 3 of the runbook) holding the
+# keys that LiteLLM and the orchestrator read from the ENVIRONMENT — NOT Vault:
 #   ANTHROPIC_API_KEY, LITELLM_MASTER_KEY, DSE_LITELLM_MASTER_KEY,
 #   GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY.
 extraEnvSecret: "dse-poc-secrets"
 
 global:
-  imageRegistry: ""            # vazio: só as imagens DSE ganham o path GHCR abaixo
+  imageRegistry: ""            # empty: only the DSE images get the GHCR path below
   imagePullSecrets:
     - name: ghcr-pull
 
-# --- imagens DSE do release (GHCR, por tag rc). Stock (postgres/temporal/redis/
-#     vault/otel) ficam nos repositórios públicos, sem prefixo. ---
+# --- DSE release images (GHCR, by rc tag). Stock ones (postgres/temporal/redis/
+#     vault/otel) stay in the public repositories, with no prefix. ---
 _ghcrTag: &ghcrTag "v0.1.0-rc.2"
 
+# --- CPU requests right-sized against MEASURED usage (2026-07-25) ------------
+# The node sat at 97% CPU *reserved* while using 9%: 1843m of the 2000m was
+# parked in requests nothing ever spent. That reservation — not real load — is
+# what blocked every rollout (surge pods could not be scheduled) and what would
+# have blocked the Jira workloads.
+#
+# Requests now track observed usage plus headroom; limits stay generous so
+# bursts (an agent turn, a LiteLLM boot) are still absorbed. Requests are a
+# scheduling promise, not a quota — sizing them for peak wastes the whole node.
 orchestrator:
-  replicas: 1                  # POC: 1 réplica no node 2-core (HA fora do escopo; libera ~400m de CPU)
+  replicas: 1                  # POC: 1 replica on the 2-core node (HA out of scope; frees ~400m of CPU)
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/orchestrator, tag: *ghcrTag, digest: "" }
   resources:
-    requests: { cpu: "350m", memory: "512Mi" }
+    # Measured 3m/80Mi idle. Runs validation activities in-process, so it bursts
+    # well above idle — hence a request far above measured, and a 1-core limit.
+    requests: { cpu: "150m", memory: "384Mi" }
     limits: { cpu: "1", memory: "1Gi" }
 egressProxy:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
-  replicas: 1                  # POC: 1 réplica (o gate de >=2 é só perfil estrito)
+  replicas: 1                  # POC: 1 replica (the >=2 gate is strict-profile only)
   resources:
-    requests: { cpu: "75m", memory: "160Mi" }
+    # Measured 1m/15Mi — it only shuttles bytes; the allowlist check is trivial.
+    requests: { cpu: "50m", memory: "96Mi" }
     limits: { cpu: "500m", memory: "384Mi" }
-  # Allowlist: api.anthropic.com (o gateway chama a Anthropic via HTTPS_PROXY)
-  # + github (clone/PR). Sem anthropic o turno morre na 1ª chamada de modelo.
+  # Allowlist: api.anthropic.com (the gateway calls Anthropic through HTTPS_PROXY)
+  # + github (clone/PR). Without anthropic the turn dies on its first model call.
   allowlist:
     - { host: "api.github.com", port: 443, purpose: "GitHub API (finalize PR)" }
     - { host: "github.com", port: 443, purpose: "clone do repo alvo" }
     - { host: "api.anthropic.com", port: 443, purpose: "provider de modelo (Coder)" }
+    - { host: "slack.com", port: 443, purpose: "Slack Web API (status-comment / dropdown de repo)" }
+    # Exact host, not a wildcard: Allowlist.is_allowed compares hosts by string
+    # equality, so "*.atlassian.net" would never match anything.
+    - { host: "fintexinc.atlassian.net", port: 443, purpose: "Jira REST API (poller, comments, transitions)" }
+    # OIDC discovery + JWKS. Fetched at start and again on every key
+    # rotation, so blocking it does not fail once — it fails forever.
+    - { host: "login.microsoftonline.com", port: 443, purpose: "Entra ID OIDC (discovery + JWKS)" }
 modelGateway:
   image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
-  allowFixture: true           # POC: sem provider real obrigatório
+  allowFixture: true           # POC: no real provider required
   resources:
-    # LiteLLM é memory-hungry no boot (carrega o cost map + providers); 768Mi
-    # dava OOMKilled (exit 137). Memória não é escassa no node (8GB), só CPU.
-    requests: { cpu: "200m", memory: "512Mi" }
+    # LiteLLM is memory-hungry at boot (it loads the cost map + providers); 768Mi
+    # got OOMKilled (exit 137).
+    # Measured 2m CPU / 1023Mi RAM: it is an I/O proxy that wants memory, not
+    # cores. The memory REQUEST goes UP — it was asking for 512Mi while holding
+    # 1Gi, so the scheduler was placing it on a promise it always broke, which
+    # is exactly how the earlier OOMKill happened.
+    requests: { cpu: "100m", memory: "1280Mi" }
     limits: { cpu: "750m", memory: "1536Mi" }
 adapters:
-  # Track B (webhook): adapter-github LIGADO — recebe o webhook do GitHub
-  # (issues.labeled com label `dse`), verifica o HMAC (GITHUB_WEBHOOK_SECRET) e
-  # chama admit_work_item. O dispatcher (Deployment separado) faz o start_workflow.
-  # Slack segue desligado (POC é só GitHub).
+  # Track B (webhook): adapter-github ON — it receives the GitHub webhook
+  # (issues.labeled with the `dse` label), verifies the HMAC
+  # (GITHUB_WEBHOOK_SECRET) and calls admit_work_item. The dispatcher (a
+  # separate Deployment) does the start_workflow.
+  # Slack stays off (the POC is GitHub only).
   slack:
     enabled: true
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
@@ -81,21 +117,111 @@ adapters:
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
+  jira:
+    # Jira runs by POLLING in the POC: the webhook needs a public URL and a
+    # JIRA_WEBHOOK_SECRET (still empty in secrets.env), while the poller only
+    # needs base_url + email + api_token, all of which already exist. The poller
+    # is required anyway — Jira webhooks are best-effort and expire.
+    enabled: true
+    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-jira, tag: *ghcrTag, digest: "" }
+    resources:
+      requests: { cpu: "40m", memory: "128Mi" }
+      limits: { cpu: "400m", memory: "256Mi" }
+    workerResources:
+      requests: { cpu: "40m", memory: "128Mi" }
+      limits: { cpu: "300m", memory: "256Mi" }
   ingestGateway:
     image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
 
-# validation NÃO sobe: a imagem dse/validation não está no release (→
-# ImagePullBackOff) e o finalize_pr roda no worker do orchestrator, não aqui.
+# Recovery of lost replies. Both adapters expose /internal/reconcile; the Jira
+# poller already sweeps on its own loop.
+replyReconciler:
+  enabled: true
+  schedule: "*/2 * * * *"
+  targets:
+    slack: "http://dse-dse-adapter-slack.dse.svc.cluster.local:8801/internal/reconcile"
+    github: "http://dse-dse-adapter-github.dse.svc.cluster.local:8802/internal/reconcile"
+
+
+# Feeds the admin console's read model. The image is already released and
+# digest-pinned; only this Deployment was missing, which is why console_rm sat
+# empty next to 21 real work items.
+consoleProjector:
+  enabled: true
+  image: { repository: ghcr.io/andresaraivafintex/dse_agent/console-projector, tag: *ghcrTag, digest: "" }
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits: { cpu: "400m", memory: "384Mi" }
+
+
+# Previews run from SOURCE and are applied with kubectl: this cluster has no
+# Docker daemon (the sandbox substrate is gVisor/containerd) and no registry, so
+# the image-building path is structurally unreachable here — it is what made
+# every previous preview attempt degrade. Argo CD is skipped for the same
+# reason: it would be ~600m/1.6Gi of new infrastructure to schedule manifests we
+# can apply directly.
+# Admin console. It shows costs and task detail and writes skills/repo_bindings
+# into the engine's Postgres, so it does not face the internet unauthenticated.
+# It has no login of its own and is not getting one: forwardAuth puts the queue
+# board's Entra session in front of it, so both consoles share a single sign-in.
+console:
+  enabled: true
+  ui:
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.2" }
+  api:
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.2" }
+  ingress:
+    enabled: true
+    className: "traefik"
+    host: "painel.notas.api.br"
+    certResolver: "le"
+    forwardAuth:
+      enabled: true
+
+
+# Operator console. It owns the OIDC flow for both surfaces: it is where a login
+# starts and ends, and the cookie it issues is what guards the panel.
+queueBoard:
+  enabled: true
+  image: { repository: ghcr.io/andresaraivafintex/dse_agent/platform, tag: *ghcrTag, digest: "" }
+  consoleUrl: "https://painel.notas.api.br"
+  publicUrl: "https://admin.notas.api.br"
+  # The parent of both hostnames, so one session covers admin and painel. Not
+  # ".api.br" — that would offer the cookie to every unrelated host under it.
+  cookieDomain: ".notas.api.br"
+  ingress:
+    enabled: true
+    className: "traefik"
+    host: "admin.notas.api.br"
+    certResolver: "le"
+
+
+preview:
+  enabled: true
+  mode: "source"
+  apply: "kubectl"
+  kubeContext: ""              # in-cluster: the worker's service account
+  # HTTP on purpose. With HTTP-01 each preview hostname needs its OWN
+  # certificate, and Let's Encrypt allows 50 per registered domain per week —
+  # previews churn, so they would burn that budget and take the webhook
+  # certificate down with them. A wildcard cert via the DNS-01 challenge is the
+  # fix when previews need HTTPS; it is one certificate for every preview.
+  externalHostTemplate: "http://{namespace}.preview.notas.api.br"
+  ttlSeconds: 3600
+  maxConcurrent: 3
+
+# validation does NOT come up: the dse/validation image is not in the release (→
+# ImagePullBackOff) and finalize_pr runs on the orchestrator worker, not here.
 validation:
   enabled: false
-# otel é best-effort; poupa RAM na VPS 2 vCPU.
+# otel is best-effort; this saves RAM on the 2 vCPU VPS.
 otelCollector:
   enabled: false
 
-# --- sandbox ISOLADO de verdade (o ponto do POC) ---
+# --- a genuinely ISOLATED sandbox (the point of the POC) ---
 runtime:
   inProcess: false
   localFallbackAllowed: false
@@ -104,32 +230,39 @@ runtime:
   sandboxDriver: k8s
   sandboxRbac:
     create: true
+  previewRbac:
+    create: true
   agentRunnerImage:
     repository: ghcr.io/andresaraivafintex/dse_agent/agent-runner
     tag: *ghcrTag
     digest: ""
-  sandboxCpuLimit: "1"         # 1 tarefa por vez na VPS 2 vCPU
+  # Ceiling per sandbox, not a concurrency cap: each turn may burst to a full
+  # core, and how many run at once follows from what the node has left. On 4
+  # vCPU with ~1.2 of them reserved, several fit — the 2-core node was what made
+  # this read like "one task at a time".
+  sandboxCpuLimit: "1"
   sandboxMemLimit: "1536Mi"
 
 networkPolicy:
   kubeApiServer:
-    serviceHost: "10.43.0.1"   # ClusterIP que o kubectl mira → NO_PROXY
-    cidrs: ["172.16.0.4/32"]   # node InternalIP → regra de egress (pós-DNAT)
+    serviceHost: "10.43.0.1"   # ClusterIP kubectl aims at → NO_PROXY
+    cidrs: ["172.16.0.4/32"]   # node InternalIP → egress rule (post-DNAT)
     port: 6443
-  # egress do proxy p/ internet (clone do repo + Anthropic). RFC1918/loopback/
-  # metadata excluídos (mesma regra que o gate estrito exigiria).
+  # proxy egress to the internet (repo clone + Anthropic). RFC1918/loopback/
+  # metadata excluded (the same rule the strict gate would require).
   egressProxyExternalCidrs:
     - cidr: "0.0.0.0/0"
       except: ["10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16"]
 
-# As imagens STOCK (postgres/redis/temporal) iniciam como root e fazem o drop
-# de privilégio internamente (chown do PGDATA + gosu, que exigem CHOWN/SETUID).
-# O SC não-root estrito do chart (runAsNonRoot + drop ALL) as impede de subir
-# ("container has runAsNonRoot and image will run as root"). No POC relaxamos o
-# SC de POD (permite root) e o statefulContainerSecurityContext (mantém as caps
-# default). As imagens DSE seguem não-root (USER 10001 no Dockerfile) e travadas
-# pelo appContainerSecurityContext (INALTERADO). Fast-follow: helper
-# stockPodDefaults dedicado no chart em vez de relaxar o SC de pod global.
+# The STOCK images (postgres/redis/temporal) start as root and drop privilege
+# internally (chown of PGDATA + gosu, which require CHOWN/SETUID). The chart's
+# strict non-root SC (runAsNonRoot + drop ALL) stops them from starting at all
+# ("container has runAsNonRoot and image will run as root"). In the POC we relax
+# the POD SC (root allowed) and the statefulContainerSecurityContext (it keeps
+# the default caps). The DSE images stay non-root (USER 10001 in the Dockerfile)
+# and locked down by appContainerSecurityContext (UNCHANGED). Fast-follow: a
+# dedicated stockPodDefaults helper in the chart instead of relaxing the global
+# pod SC.
 security:
   podSecurityContext:
     runAsNonRoot: false
@@ -140,31 +273,31 @@ security:
     capabilities:
       drop: []
 
-# --- infra na VPS (Postgres interno; Vault dev semeado com o secrets.env) ---
+# --- infra on the VPS (internal Postgres; dev Vault seeded from secrets.env) ---
 postgres:
   enabled: true
   persistence: { enabled: true, size: 10Gi }
   resources:
-    requests: { cpu: "200m", memory: "512Mi" }
+    requests: { cpu: "100m", memory: "256Mi" }   # measured 30m / 87Mi
     limits: { cpu: "750m", memory: "1Gi" }
 redis:
   resources:
-    requests: { cpu: "50m", memory: "128Mi" }
+    requests: { cpu: "50m", memory: "64Mi" }     # measured 18m / 15Mi
     limits: { cpu: "300m", memory: "256Mi" }
 vault:
   resources:
-    requests: { cpu: "50m", memory: "160Mi" }
+    requests: { cpu: "50m", memory: "192Mi" }    # measured 4m / 138Mi
     limits: { cpu: "300m", memory: "384Mi" }
 temporal:
-  # UI do Temporal DESLIGADA no POC (economiza ~100m de CPU no node 2-core);
-  # observo os workflows via `kubectl` / logs do orchestrator.
+  # Temporal UI stays OFF: workflows are inspected through `kubectl` and the
+  # orchestrator logs, so the UI would be idle CPU and one more thing to expose.
   ui:
     enabled: false
   resources:
-    requests: { cpu: "250m", memory: "640Mi" }
+    requests: { cpu: "100m", memory: "320Mi" }   # measured 21m / 130Mi
     limits: { cpu: "1", memory: "1280Mi" }
 
-# Teams/model-server desligados (topologia A, POC)
+# Teams/model-server off (topology A, POC)
 modelServer:
   enabled: false
 adapters_teams_note: "adapter-jira/teams não estão no chart adapters.yaml — fast-follow"

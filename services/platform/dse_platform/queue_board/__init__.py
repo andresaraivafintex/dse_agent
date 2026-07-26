@@ -1,4 +1,4 @@
-"""WSF-E6 — Admin queue board (data model + controles + UI mínima)."""
+"""WSF-E6 — Admin queue board (data model + controls + minimal UI)."""
 from .api import (
     TenantBudget,
     WorkItemRow,

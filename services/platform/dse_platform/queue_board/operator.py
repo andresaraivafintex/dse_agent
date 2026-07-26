@@ -1,17 +1,17 @@
-"""WSF-E6-T2 — controles de operador do queue board, conectados a signals
-Temporal + estado durável, CADA AÇÃO AUDITADA com a identidade do operador (P8).
+"""WSF-E6-T2 — queue board operator controls, wired to Temporal signals +
+durable state, EVERY ACTION AUDITED with the operator's identity (P8).
 
-`OperatorConsole` recebe um `SignalSender` (real ou fake) e um `operator`
-(principal_id resolvido do console via SSO — nunca um platform_user_id bruto).
-Todos os controles do enunciado:
+`OperatorConsole` takes a `SignalSender` (real or fake) and an `operator`
+(console principal_id resolved via SSO — never a raw platform_user_id).
+All the controls from the spec:
   pause / resume / cancel / retry_from_checkpoint / reassign_model /
   reassign_runtime / force_clarification / escalate / quarantine / release /
   kill switches (global, tenant, channel, task).
 
-Ordem de cada controle: (1) audita a INTENÇÃO do operador (`operator_action`,
-com actor = operador), (2) envia o signal / grava o estado durável. Se o signal
-falhar, a falha é propagada (fail-closed, P6) — mas o audit da intenção já ficou
-registrado (a evidência de que o operador tentou nunca se perde).
+Order for every control: (1) audit the operator's INTENT (`operator_action`,
+with actor = operator), (2) send the signal / write the durable state. If the
+signal fails, the failure is propagated (fail-closed, P6) — but the intent audit
+is already recorded (the evidence that the operator tried is never lost).
 """
 from __future__ import annotations
 
@@ -35,13 +35,13 @@ class OperatorConsole:
     def __init__(self, sender: SignalSender, *, operator: str):
         if not operator or not (operator.startswith("usr_") or operator.startswith("system:")):
             raise ValueError(
-                "operator deve ser um principal resolvido (usr_...) ou system:<component> — "
-                "nunca um platform_user_id bruto (P8)"
+                "operator must be a resolved principal (usr_...) or system:<component> — "
+                "never a raw platform_user_id (P8)"
             )
         self._sender = sender
         self._operator = operator
 
-    # -- helper: audita a intenção do operador (sempre antes do efeito) --
+    # -- helper: audit the operator's intent (always before the effect) --
     def _audit_action(self, action: str, work_item_id: str | None, tenant_id: str, details: dict) -> None:
         emit(
             actor=self._operator,
@@ -52,11 +52,11 @@ class OperatorConsole:
         )
 
     def _signal(self, work_item_id: str, name: str, arg=None) -> None:
-        # workflow_id == work_item_id (contrato da fundação)
+        # workflow_id == work_item_id (foundation contract)
         self._sender.signal(work_item_id, name, arg)
 
     # ------------------------------------------------------------------
-    # Controles ligados a signals de workflow (escopo TASK)
+    # Controls wired to workflow signals (TASK scope)
     # ------------------------------------------------------------------
     def pause(self, work_item_id: str, tenant_id: str, *, reason: str | None = None) -> None:
         self._audit_action("pause", work_item_id, tenant_id, {"reason": reason})
@@ -84,25 +84,25 @@ class OperatorConsole:
 
     def reassign_model(self, work_item_id: str, tenant_id: str, *, model: str) -> None:
         if not model:
-            raise ValueError("reassign_model exige `model`")
+            raise ValueError("reassign_model requires `model`")
         self._audit_action("reassign_model", work_item_id, tenant_id, {"model": model})
         self._signal(work_item_id, SIGNAL_REASSIGN_MODEL, model)
 
     def reassign_runtime(self, work_item_id: str, tenant_id: str, *, runtime: str) -> None:
         if not runtime:
-            raise ValueError("reassign_runtime exige `runtime`")
+            raise ValueError("reassign_runtime requires `runtime`")
         self._audit_action("reassign_runtime", work_item_id, tenant_id, {"runtime": runtime})
         self._signal(work_item_id, SIGNAL_REASSIGN_RUNTIME, runtime)
 
     # ------------------------------------------------------------------
-    # Quarentena (escopo TASK, com estado durável + pause)
+    # Quarantine (TASK scope, with durable state + pause)
     # ------------------------------------------------------------------
     def quarantine(self, work_item_id: str, tenant_id: str, *, reason: str) -> None:
-        """Grava a quarentena durável (sobrevive a restart) E pausa o workflow.
-        A quarentena é registrada mesmo que o pause falhe (o flag durável é a
-        garantia; o pause é best-effort para parar o trabalho em voo)."""
+        """Writes the durable quarantine (survives restart) AND pauses the
+        workflow. The quarantine is recorded even if the pause fails (the durable
+        flag is the guarantee; the pause is best-effort to stop in-flight work)."""
         if not reason:
-            raise ValueError("quarantine exige `reason` (P8)")
+            raise ValueError("quarantine requires `reason` (P8)")
         self._audit_action("quarantine", work_item_id, tenant_id, {"reason": reason})
         kill_switches.quarantine_work_item(work_item_id, tenant_id, reason=reason, actor=self._operator)
         self._signal(work_item_id, SIGNAL_PAUSE, f"quarantined: {reason}")
@@ -114,7 +114,7 @@ class OperatorConsole:
             self._signal(work_item_id, SIGNAL_RESUME, "quarantine_released")
 
     # ------------------------------------------------------------------
-    # Kill switches nos 4 escopos
+    # Kill switches across the 4 scopes
     # ------------------------------------------------------------------
     def kill_switch_global(self, *, enabled: bool, reason: str | None) -> None:
         self._audit_action("kill_switch_global", None, "platform", {"enabled": enabled, "reason": reason})
@@ -129,6 +129,6 @@ class OperatorConsole:
         kill_switches.set_channel_kill_switch(tenant_id, channel, active=active, reason=reason, actor=self._operator)
 
     def kill_switch_task(self, work_item_id: str, tenant_id: str, *, reason: str | None = None) -> None:
-        """Kill switch de escopo TASK = cancelar o workflow (fim limpo em
-        fronteira, P6 — o cancel do WS-B faz teardown do sandbox e marca failed)."""
+        """TASK-scope kill switch = cancel the workflow (clean stop at a
+        boundary, P6 — WS-B's cancel tears down the sandbox and marks failed)."""
         self.cancel(work_item_id, tenant_id, reason=reason or "task_kill_switch")

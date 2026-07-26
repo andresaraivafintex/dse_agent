@@ -1,31 +1,31 @@
-# Fintex DSE — values.yaml (topologia A: uma instalação = um tenant = um
-# namespace dentro do VPC/K8s do próprio cliente). Parametrizado por tenant:
-# rode `helm install dse-<tenant> infra/helm/dse -f values-<tenant>.yaml`
-# com um arquivo de overrides por cliente (nunca commitar valores reais de
-# produção — usar `--set` a partir do secrets backend/CI em vez disso).
+# Fintex DSE — values.yaml (topology A: one installation = one tenant = one
+# namespace inside the customer's own VPC/K8s). Parameterized per tenant:
+# run `helm install dse-<tenant> infra/helm/dse -f values-<tenant>.yaml`
+# with a per-customer overrides file (never commit real production values —
+# use `--set` fed from the secrets backend/CI instead).
 
 tenant:
-  id: "acme-dev"            # usado em labels, nomes de recurso e como tenant_id default
-  dataClass: "internal"     # internal | confidential | restricted (mapeia para NFR de residência)
+  id: "acme-dev"            # used in labels, resource names and as the default tenant_id
+  dataClass: "internal"     # internal | confidential | restricted (maps to the residency NFR)
 
-# O chart base continua sendo seguro para desenvolvimento local. Os perfis
-# `pilot` e `production` ativam validações fail-closed em templates/_helpers.tpl:
-# não é possível renderizá-los mantendo fixtures, execução in-process,
-# credenciais default ou componentes obrigatórios desligados.
+# The base chart stays safe for local development. The `pilot` and `production`
+# profiles turn on fail-closed validations in templates/_helpers.tpl: they cannot
+# be rendered while keeping fixtures, in-process execution, default credentials
+# or mandatory components switched off.
 deploymentProfile: development  # development | pilot | production
 
-# Secret K8s opcional (nome) montado via envFrom NO model-gateway E no
-# orchestrator. Usado pelo POC para injetar ANTHROPIC_API_KEY/LITELLM_MASTER_KEY
-# (o LiteLLM lê do ambiente, não do Vault) + creds do GitHub App (finalize_pr /
-# mint de virtual key rodam no orchestrator). Vazio = não injeta nada.
-# Em produção estrita, prefira ESO/Vault Agent em vez de um secret plano.
+# Optional K8s Secret (name) mounted via envFrom ON the model-gateway AND on the
+# orchestrator. Used by the POC to inject ANTHROPIC_API_KEY/LITELLM_MASTER_KEY
+# (LiteLLM reads them from the environment, not from Vault) + GitHub App creds
+# (finalize_pr / virtual key minting run in the orchestrator). Empty = nothing is
+# injected. In strict production, prefer ESO/Vault Agent over a plain secret.
 extraEnvSecret: ""
 
-# Gates que dependem de uma evidência externa ao Helm (teste de conformidade
-# da imagem/migrações). Permanecem false no repositório por intenção. Só o
-# pipeline de release, depois de verificar os digests imutáveis, deve promovê-
-# los. Isto impede que `helm template` seja confundido com prova de que o
-# runtime/ledger implementam controles que o chart não consegue inspecionar.
+# Gates that depend on evidence external to Helm (image/migration conformance
+# tests). They intentionally stay false in the repository. Only the release
+# pipeline, after verifying the immutable digests, should promote them. This
+# prevents `helm template` from being mistaken for proof that the runtime/ledger
+# implement controls the chart cannot inspect.
 pilotReadiness:
   sandboxIsolationVerified: false
   modelGatewayFailClosedVerified: false
@@ -35,10 +35,10 @@ pilotReadiness:
 
 global:
   namespace: dse
-  imageRegistry: ""          # ex.: "123456789.dkr.ecr.us-east-1.amazonaws.com/" (com barra final) — vazio = Docker Hub/registro público
+  imageRegistry: ""          # e.g. "123456789.dkr.ecr.us-east-1.amazonaws.com/" (with a trailing slash) — empty = Docker Hub/public registry
   imagePullPolicy: IfNotPresent
-  imagePullSecrets: []       # nomes de Secret docker-registry, se o registry do cliente exigir
-  labels: {}                 # labels extra aplicadas a todos os recursos (ex.: cost-center)
+  imagePullSecrets: []       # docker-registry Secret names, if the customer's registry requires them
+  labels: {}                 # extra labels applied to every resource (e.g. cost-center)
 
 serviceAccount:
   create: true
@@ -46,10 +46,10 @@ serviceAccount:
   automountServiceAccountToken: false
   annotations: {}
 
-# Defaults Pod Security Standards "restricted" para workloads da aplicação.
-# Imagens de infraestrutura que precisam escrever no rootfs usam o perfil
-# `statefulContainerSecurityContext`, mas ainda rodam sem privilege escalation
-# e sem capabilities Linux.
+# Pod Security Standards "restricted" defaults for application workloads.
+# Infrastructure images that need to write to the rootfs use the
+# `statefulContainerSecurityContext` profile, but still run without privilege
+# escalation and without Linux capabilities.
 security:
   tmpSizeLimit: 256Mi
   podSecurityContext:
@@ -67,50 +67,56 @@ security:
     capabilities:
       drop: ["ALL"]
 
-# Migrações como Job de hook do Helm (Fase 5 — deploy autossuficiente).
+# Migrations as a Helm hook Job (Phase 5 — self-sufficient deploy).
 migrations:
   enabled: true
 
 runtime:
-  # Único valor permitido nos perfis pilot/production. `false` faz o runtime
-  # atual falhar fechado em K8s (não há Docker socket montado); o provisionador
-  # Kubernetes real continua sendo um blocker externo e é coberto pelo gate
-  # pilotReadiness.sandboxIsolationVerified.
+  # The only value allowed in the pilot/production profiles. `false` makes the
+  # current runtime fail closed on K8s (no Docker socket is mounted); the real
+  # Kubernetes provisioner remains an external blocker and is covered by the
+  # pilotReadiness.sandboxIsolationVerified gate.
   inProcess: true
   localFallbackAllowed: true
   agentSubstrate: fixture
   sandboxRuntimeClassName: ""
-  # Driver do sandbox: "docker" (dev local, workspace host-visível) ou "k8s"
-  # (Pod efêmero gVisor por tarefa; o worker cria/exec/deleta via kubectl).
+  # Sandbox driver: "docker" (local dev, host-visible workspace) or "k8s"
+  # (an ephemeral gVisor Pod per task; the worker creates/execs/deletes via kubectl).
   sandboxDriver: "docker"
-  # Namespace dos Pods de sandbox — SEPARADO do control plane (PSA restricted +
-  # NetworkPolicies próprias em deploy/k8s/sandbox-isolation.yaml).
+  # Namespace for the sandbox Pods — SEPARATE from the control plane (PSA
+  # restricted + its own NetworkPolicies in deploy/k8s/sandbox-isolation.yaml).
   sandboxNamespace: "dse-sandboxes"
-  # RBAC do worker (SA dedicada + Role para criar/exec/deletar pods no
-  # sandboxNamespace). Ligar SÓ com sandboxDriver=k8s.
+  # Worker RBAC (dedicated SA + Role to create/exec/delete pods in
+  # sandboxNamespace). Turn on ONLY with sandboxDriver=k8s.
   sandboxRbac:
     create: false
-  # Imagem do agent-runner que roda DENTRO do Pod de sandbox (pinada por digest
-  # em perfil estrito, igual aos demais componentes).
+  # Cluster-scoped grant that lets the worker create/delete preview namespaces.
+  # Off by default because it is the widest permission the chart hands out —
+  # see templates/preview-rbac.yaml for why it cannot be namespace-scoped.
+  previewRbac:
+    create: false
+  # The agent-runner image that runs INSIDE the sandbox Pod (pinned by digest in
+  # the strict profile, like every other component).
   agentRunnerImage:
     repository: dse/agent-runner
     tag: "0.1.0"
     digest: ""
   sandboxCpuLimit: "1"
   sandboxMemLimit: "2Gi"
-  # PVC do checkpoint git do sandbox (recuperação pós-chaos/rebuild). emptyDir
-  # basta para o 1º turno; PVC é fast-follow.
+  # PVC for the sandbox's git checkpoint (recovery after chaos/rebuild). emptyDir
+  # is enough for the 1st turn; the PVC is a fast-follow.
   checkpointPvc:
     enabled: false
     size: 5Gi
     storageClassName: ""
 
 # ---------------------------------------------------------------------------
-# Postgres — control plane (work_items/audit_log/etc.) reside no VPC do
-# cliente na topologia A (decisão fixada em WSF-E5-T1). Produção deve preferir
-# um Postgres gerenciado (RDS/CloudSQL) com PITR em vez deste StatefulSet —
-# ver infra/RUNBOOK-UPGRADE.md e infra/OSS-BOM.md. Este chart cobre o caso
-# self-managed-in-cluster para ambientes sem serviço gerenciado disponível.
+# Postgres — the control plane (work_items/audit_log/etc.) lives in the
+# customer's VPC under topology A (decision fixed in WSF-E5-T1). Production
+# should prefer a managed Postgres (RDS/CloudSQL) with PITR over this
+# StatefulSet — see infra/RUNBOOK-UPGRADE.md and infra/OSS-BOM.md. This chart
+# covers the self-managed-in-cluster case for environments with no managed
+# service available.
 # ---------------------------------------------------------------------------
 postgres:
   enabled: true
@@ -119,8 +125,8 @@ postgres:
     tag: "16-alpine"
     digest: ""
   auth:
-    # Dev/local apenas — produção DEVE usar existingSecret (populado via
-    # ExternalSecret/Vault, nunca valores em texto plano neste values.yaml).
+    # Dev/local only — production MUST use existingSecret (populated via
+    # ExternalSecret/Vault, never plaintext values in this values.yaml).
     existingSecret: ""
     username: dse
     password: dse_dev_only
@@ -134,9 +140,9 @@ postgres:
     limits: { cpu: "1", memory: "1Gi" }
 
 # ---------------------------------------------------------------------------
-# Temporal — orquestração durável (WS-B). auto-setup para Fase 1/piloto;
-# produção deve migrar para Temporal Cloud ou um cluster self-hosted
-# multi-nó dedicado (ver RUNBOOK-UPGRADE.md, Worker Versioning).
+# Temporal — durable orchestration (WS-B). auto-setup for Phase 1/pilot;
+# production should move to Temporal Cloud or a dedicated multi-node
+# self-hosted cluster (see RUNBOOK-UPGRADE.md, Worker Versioning).
 # ---------------------------------------------------------------------------
 temporal:
   enabled: true
@@ -168,10 +174,10 @@ redis:
     limits: { cpu: "500m", memory: "256Mi" }
 
 # ---------------------------------------------------------------------------
-# Vault — em produção, `externallyManaged: true` e apontar `secrets.vaultAddr`
-# para o Vault/HSM do próprio cliente (ou um cluster Vault HA dedicado) — o
-# `dev mode` deste chart (mesma imagem do docker-compose da fundação) NUNCA
-# deve rodar em produção (dados em memória, um único unseal key).
+# Vault — in production, set `externallyManaged: true` and point
+# `secrets.vaultAddr` at the customer's own Vault/HSM (or a dedicated HA Vault
+# cluster) — this chart's `dev mode` (the same image as the foundation's
+# docker-compose) must NEVER run in production (in-memory data, a single unseal key).
 # ---------------------------------------------------------------------------
 vault:
   externallyManaged: false
@@ -180,30 +186,30 @@ vault:
     repository: hashicorp/vault
     tag: "1.17"
     digest: ""
-  devRootToken: ""  # produção: nunca setar aqui — gerar e guardar fora do chart
+  devRootToken: ""  # production: never set it here — generate and store it outside the chart
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
 
 # ---------------------------------------------------------------------------
-# Secrets backend (WSF-E2-T3a) — como os demais serviços obtêm credenciais.
-# `externalSecrets.enabled: true` requer o External Secrets Operator (ESO)
-# já instalado no cluster; caso contrário os serviços leem VAULT_ADDR/
-# VAULT_TOKEN diretamente via env (dev/staging apenas).
+# Secrets backend (WSF-E2-T3a) — how the other services obtain credentials.
+# `externalSecrets.enabled: true` requires the External Secrets Operator (ESO)
+# to be already installed in the cluster; otherwise the services read
+# VAULT_ADDR/VAULT_TOKEN straight from env (dev/staging only).
 # ---------------------------------------------------------------------------
 secrets:
   vaultAddr: "http://dse-vault:8200"
   externalSecrets:
     enabled: false
     secretStoreRef: "dse-vault-backend"
-    secretStoreKind: ClusterSecretStore  # pilot/production exigem SecretStore namespaced
+    secretStoreKind: ClusterSecretStore  # pilot/production require a namespaced SecretStore
     refreshInterval: "1h"
-    remoteKey: ""  # vazio => dse/<tenant.id>/postgres
+    remoteKey: ""  # empty => dse/<tenant.id>/postgres
 
 # ---------------------------------------------------------------------------
-# Egress proxy (WS-C constrói, WS-F assina a política/aceite — WSF-E2).
-# `allowlist` é injetada como ConfigMap montado pelo proxy; nunca hardcode
-# tokens aqui (o proxy busca credenciais efêmeras do secrets backend).
+# Egress proxy (WS-C builds it, WS-F signs off on the policy — WSF-E2).
+# `allowlist` is injected as a ConfigMap mounted by the proxy; never hardcode
+# tokens here (the proxy fetches ephemeral credentials from the secrets backend).
 # ---------------------------------------------------------------------------
 egressProxy:
   enabled: true
@@ -235,8 +241,8 @@ egressProxy:
     limits: { cpu: "500m", memory: "256Mi" }
 
 # ---------------------------------------------------------------------------
-# Model gateway (WS-D) — LiteLLM. Chave virtual por tenant/task/stage vem do
-# secrets backend, nunca deste values.yaml.
+# Model gateway (WS-D) — LiteLLM. The per-tenant/task/stage virtual key comes
+# from the secrets backend, never from this values.yaml.
 # ---------------------------------------------------------------------------
 modelGateway:
   enabled: true
@@ -252,8 +258,8 @@ modelGateway:
     limits: { cpu: "1", memory: "512Mi" }
 
 # ---------------------------------------------------------------------------
-# Orchestrator (WS-B) — worker Temporal. Escala horizontal segura (Temporal
-# faz o balanceamento de tasks entre workers do mesmo task queue).
+# Orchestrator (WS-B) — Temporal worker. Safe to scale horizontally (Temporal
+# balances tasks across the workers on the same task queue).
 # ---------------------------------------------------------------------------
 orchestrator:
   enabled: true
@@ -273,6 +279,123 @@ orchestrator:
 # ---------------------------------------------------------------------------
 # Adapters + ingest-gateway (WS-A)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Per-PR preview environments. `mode: source` runs the branch straight from
+# source and needs neither a Docker daemon nor a registry, which is what makes
+# it viable on the k3s/gVisor substrate; `mode: image` is the original design
+# and expects a prebuilt image. `apply: kubectl` skips Argo CD entirely — see
+# templates/preview-rbac.yaml for the permission that path requires.
+# ---------------------------------------------------------------------------
+preview:
+  enabled: false
+  mode: "image"
+  apply: "gitops"
+  # Empty means "use the ambient credentials" (the pod's service account).
+  # A named context only exists on a developer machine.
+  kubeContext: ""
+  sourceImage: "node:22-alpine"
+  sourcePort: 3000
+  # `{namespace}` is substituted. Empty means no Ingress is created and the URL
+  # stays cluster-internal — i.e. not clickable, which defeats the purpose.
+  externalHostTemplate: ""
+  ingressClass: "traefik"
+  ttlSeconds: 3600
+  maxConcurrent: 3
+  # How often expired preview namespaces are collected. Only meaningful with
+  # apply=kubectl, where nothing else prunes them.
+  reaperSchedule: "*/10 * * * *"
+
+# ---------------------------------------------------------------------------
+# Scheduled recovery of human replies whose delivery was lost. The Jira poller
+# runs its own loop; this drives the two webhook-driven adapters.
+# ---------------------------------------------------------------------------
+replyReconciler:
+  enabled: false
+  # A safety net for an already-lost delivery, not a delivery path — recovering
+  # a reply a couple of minutes late is a success.
+  schedule: "*/2 * * * *"
+  targets: {}
+
+
+# ---------------------------------------------------------------------------
+# console-projector — materializes the `console_rm` read model that the admin
+# console (dse_console_pane) reads. Without it that schema stays empty and the
+# console shows nothing, however healthy the engine is.
+# ---------------------------------------------------------------------------
+consoleProjector:
+  enabled: false
+  image: { repository: dse/console-projector, tag: "0.1.0", digest: "" }
+  # The console feels live at a couple of seconds; below that it is just more
+  # transactions for the same picture.
+  intervalSeconds: 2
+  batch: 2000
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits: { cpu: "400m", memory: "384Mi" }
+
+
+# ---------------------------------------------------------------------------
+# Admin console (dse_console_pane). Only the UI is exposed; it proxies to the
+# API from the Next server, so the API stays cluster-internal.
+# ---------------------------------------------------------------------------
+console:
+  enabled: false
+  api:
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.1" }
+    persistence:
+      size: 2Gi
+      storageClassName: ""
+    resources:
+      requests: { cpu: "50m", memory: "192Mi" }
+      limits: { cpu: "500m", memory: "512Mi" }
+  ui:
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.1" }
+    resources:
+      requests: { cpu: "50m", memory: "256Mi" }
+      limits: { cpu: "500m", memory: "768Mi" }
+  ingress:
+    enabled: false
+    className: "traefik"
+    host: "console.example.com"
+    certResolver: ""
+    # The panel has no login of its own. With this on, Traefik checks the queue
+    # board's session before forwarding anything here, so both surfaces share
+    # one OIDC implementation and one sign-in. Turning it off publishes the
+    # panel — and everything it reads — to anyone who knows the hostname.
+    forwardAuth:
+      enabled: false
+
+
+# ---------------------------------------------------------------------------
+# Operator console (queue board). Complements the admin console: this is the
+# surface that can act on a task (kill switch, quarantine, pause, retry).
+# Login is OIDC and fails closed — with no verifier configured it answers 503.
+# ---------------------------------------------------------------------------
+queueBoard:
+  enabled: false
+  image: { repository: dse/platform, tag: "0.1.0", digest: "" }
+  # Shown as a cross-link so an operator can move between the two surfaces, and
+  # doubles as the allowlist for where a login is allowed to land: without it
+  # set, a sign-in started from the panel returns to the board instead.
+  consoleUrl: ""
+  # This service's own public origin. Needed only to guard the panel: a
+  # forward-auth request carries the PANEL's hostname in every header, so the
+  # login URL cannot be inferred from it and has to be stated.
+  publicUrl: ""
+  # Scope of the session cookie. Set to the parent domain shared by both
+  # consoles (".example.com") to make one login cover both; leaving it empty
+  # keeps the cookie host-only, which is correct when only one is exposed.
+  cookieDomain: ""
+  resources:
+    requests: { cpu: "50m", memory: "192Mi" }
+    limits: { cpu: "400m", memory: "512Mi" }
+  ingress:
+    enabled: false
+    className: "traefik"
+    host: "admin.example.com"
+    certResolver: ""
+
+
 adapters:
   slack:
     enabled: true
@@ -288,6 +411,20 @@ adapters:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "256Mi" }
+  jira:
+    # Off by default: Jira needs a site URL + API token, and enabling it without
+    # them would leave the poller crash-looping against a 401.
+    enabled: false
+    image: { repository: dse/adapter-jira, tag: "0.1.0", digest: "" }
+    port: 8804
+    resources:
+      requests: { cpu: "100m", memory: "128Mi" }
+      limits: { cpu: "500m", memory: "256Mi" }
+    # The poller and the transition worker are idle loops that wake on an
+    # interval; they need far less than the HTTP receiver.
+    workerResources:
+      requests: { cpu: "40m", memory: "128Mi" }
+      limits: { cpu: "300m", memory: "256Mi" }
   ingestGateway:
     enabled: true
     image: { repository: dse/ingest-gateway, tag: "0.1.0", digest: "" }
@@ -304,18 +441,18 @@ validation:
     requests: { cpu: "100m", memory: "128Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
 
-# O ledger é implementado pelo schema Postgres e pelo pacote dse_audit. Este
-# flag só controla se a instalação exige esse caminho; a prova de que as
-# migrations foram aplicadas é deliberadamente um gate separado acima.
+# The ledger is implemented by the Postgres schema and the dse_audit package.
+# This flag only controls whether the installation requires that path; proof that
+# the migrations were applied is deliberately a separate gate above.
 auditLedger:
   enabled: true
 
 # ---------------------------------------------------------------------------
-# Model server SELF-HOSTED / air-gapped (Tier 2, WSD-E5-T2/T3) — DESLIGADO na
-# topologia A (o model-gateway fala Bedrock via PrivateLink). LIGADO só na
-# topologia B / tier mais estrito, onde NENHUM dado de inferência pode sair do
-# VPC: o modelo roda in-cluster (GPU) e o model-gateway o consome in-VPC.
-# Ver infra/helm/dse/values-topology-b.yaml e infra/helm/dse/TOPOLOGY-B.md.
+# SELF-HOSTED / air-gapped model server (Tier 2, WSD-E5-T2/T3) — OFF under
+# topology A (the model-gateway talks to Bedrock over PrivateLink). ON only under
+# topology B / the strictest tier, where NO inference data may leave the VPC: the
+# model runs in-cluster (GPU) and the model-gateway consumes it in-VPC.
+# See infra/helm/dse/values-topology-b.yaml and infra/helm/dse/TOPOLOGY-B.md.
 # ---------------------------------------------------------------------------
 modelServer:
   enabled: false
@@ -325,15 +462,15 @@ modelServer:
     digest: ""
   replicas: 1
   port: 8000
-  # GPU: em produção air-gapped, requests/limits de nvidia.com/gpu. Deixado
-  # vazio no chart base para o `helm template` validar sem um device plugin.
+  # GPU: in air-gapped production, nvidia.com/gpu requests/limits. Left empty in
+  # the base chart so that `helm template` validates without a device plugin.
   gpu: 0
   resources:
     requests: { cpu: "1", memory: "2Gi" }
     limits: { cpu: "4", memory: "8Gi" }
 
 # ---------------------------------------------------------------------------
-# Observabilidade (WSF-E7-T1)
+# Observability (WSF-E7-T1)
 # ---------------------------------------------------------------------------
 otelCollector:
   enabled: true
@@ -352,11 +489,16 @@ ingress:
   tls:
     enabled: true
     secretName: "dse-tls"
+    # When set, Traefik obtains the certificate itself via ACME using this
+    # resolver and `secretName` is ignored. Requires inbound port 80 to be
+    # reachable from the internet — that is how the HTTP-01 challenge is
+    # answered, so it is not just for redirects.
+    certResolver: ""
 
-# Default-deny de egress a nível de NetworkPolicy — defesa em profundidade
-# ADICIONAL ao egress-proxy (o proxy é a linha de defesa primária no data
-# path da aplicação; a NetworkPolicy é uma segunda camada estrutural que
-# nem depende do proxy estar corretamente configurado para valer).
+# Egress default-deny at the NetworkPolicy level — defence in depth IN ADDITION
+# to the egress-proxy (the proxy is the primary line of defence on the
+# application data path; the NetworkPolicy is a second, structural layer that
+# holds even if the proxy is not correctly configured).
 networkPolicy:
   enabled: true
   dns:
@@ -364,20 +506,20 @@ networkPolicy:
       kubernetes.io/metadata.name: kube-system
     podSelector:
       k8s-app: kube-dns
-  # Só o egress-proxy recebe esta saída. Em pilot/production a lista não pode
-  # ficar vazia. O default sugerido no overlay bloqueia redes privadas e o
-  # metadata endpoint; a allowlist L7 do proxy continua sendo obrigatória.
+  # Only the egress-proxy gets this egress. In pilot/production the list cannot
+  # be left empty. The default suggested in the overlay blocks private networks
+  # and the metadata endpoint; the proxy's L7 allowlist remains mandatory.
   egressProxyExternalCidrs: []
-  # Rota do worker do orchestrator até o API server do K8s (o kubectl que cria
-  # os Pods de sandbox). Necessário com sandboxDriver=k8s sob default-deny.
-  # DOIS consumidores com endereços DIFERENTES (não confundir):
-  #  - serviceHost: o ClusterIP que o kubectl MIRA (KUBERNETES_SERVICE_HOST,
-  #    ex.: 10.43.0.1 no k3s). Vai para o NO_PROXY do orchestrator (senão o
-  #    HTTPS_PROXY sequestra a chamada). NO_PROXY é agnóstico de porta.
-  #  - cidrs: o endpoint que a NetworkPolicy de egress precisa LIBERAR. Sob
-  #    k3s/Calico/Cilium a policy é avaliada PÓS-DNAT → geralmente o IP do NÓ
-  #    (nodeIP/32), não o ClusterIP. VERIFICAR contra o CNI do cluster-alvo.
-  #  - port: porta do endpoint na regra da NetworkPolicy (6443 no nodeIP).
+  # Route from the orchestrator worker to the K8s API server (the kubectl that
+  # creates the sandbox Pods). Required with sandboxDriver=k8s under default-deny.
+  # TWO consumers with DIFFERENT addresses (do not mix them up):
+  #  - serviceHost: the ClusterIP that kubectl TARGETS (KUBERNETES_SERVICE_HOST,
+  #    e.g. 10.43.0.1 on k3s). Goes into the orchestrator's NO_PROXY (otherwise
+  #    HTTPS_PROXY hijacks the call). NO_PROXY is port-agnostic.
+  #  - cidrs: the endpoint the egress NetworkPolicy has to ALLOW. Under
+  #    k3s/Calico/Cilium the policy is evaluated POST-DNAT → usually the NODE IP
+  #    (nodeIP/32), not the ClusterIP. VERIFY against the target cluster's CNI.
+  #  - port: the endpoint port in the NetworkPolicy rule (6443 on the nodeIP).
   kubeApiServer:
     serviceHost: "10.43.0.1"
     cidrs: []

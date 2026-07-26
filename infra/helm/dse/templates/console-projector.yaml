@@ -1,0 +1,62 @@
+{{/*
+console-projector — projects the system of record into the `console_rm` read
+model that dse_console_pane consumes.
+
+It is the missing link, not missing code: the image is built and digest-pinned
+by the release pipeline, the `console_rm` schema is created by migrations 0022 /
+0026 / 0027, and the source tables are full. Without this Deployment the schema
+simply sits empty next to the real data, and any console pointed at the database
+shows nothing at all — which is exactly the state the VPS was in.
+
+No port, no Service, no probes: it is a loop that reads Postgres and writes
+Postgres. Its liveness is visible in `console_rm.projection_cursor`, which is a
+better signal than an HTTP 200 would be — a cursor that stops advancing means
+the projection is stale, which an alive-but-idle process would hide.
+*/}}
+{{- if .Values.consoleProjector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dse.fullname" . }}-console-projector
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+    {{- include "dse.selectorLabels" (dict "component" "console-projector" "Release" .Release) | nindent 4 }}
+spec:
+  # Single writer on purpose: the projector advances shared cursors in
+  # `console_rm.projection_cursor`, so a second replica would race on the same
+  # keyset and reprocess or skip windows.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dse.selectorLabels" (dict "component" "console-projector" "Release" .Release) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dse.labels" . | nindent 8 }}
+        {{- include "dse.selectorLabels" (dict "component" "console-projector" "Release" .Release) | nindent 8 }}
+    spec:
+      {{- include "dse.appPodDefaults" . | nindent 6 }}
+      containers:
+        - name: console-projector
+          image: {{ include "dse.image" (dict "root" $ "repository" .Values.consoleProjector.image.repository "tag" .Values.consoleProjector.image.tag "digest" .Values.consoleProjector.image.digest) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "dse.appContainerSecurityContext" . | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "dse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+          env:
+            - name: DSE_PROJECTOR_INTERVAL_SECONDS
+              value: {{ .Values.consoleProjector.intervalSeconds | quote }}
+            - name: DSE_PROJECTOR_BATCH
+              value: {{ .Values.consoleProjector.batch | quote }}
+          resources:
+            {{- toYaml .Values.consoleProjector.resources | nindent 12 }}
+          volumeMounts:
+            {{- include "dse.appTmpMount" . | nindent 12 }}
+{{- end }}
