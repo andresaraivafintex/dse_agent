@@ -65,6 +65,9 @@ data:
   DSE_SANDBOX_MEM_LIMIT: {{ .Values.runtime.sandboxMemLimit | quote }}
   DSE_SANDBOX_TTL_SECONDS: {{ .Values.runtime.sandboxTtlSeconds | quote }}
   DSE_SANDBOX_CHECKPOINT_PVC: {{ if .Values.runtime.checkpointPvc.enabled }}{{ include "dse.fullname" . }}-sandbox-checkpoint{{ else }}""{{ end }}
+  # Per-WorkItem dollar ceiling applied when work_items.budget carries no
+  # max_usd of its own — which is every item today. 0 disables it.
+  DSE_DEFAULT_WORK_ITEM_MAX_USD: {{ .Values.orchestrator.defaultWorkItemMaxUsd | quote }}
   DSE_WORKER_USE_VERSIONING: {{ ternary "true" "false" .Values.orchestrator.workerVersioning.enabled | quote }}
   DSE_WORKER_BUILD_ID: {{ .Values.orchestrator.workerVersioning.buildId | quote }}
   DSE_EGRESS_PORT: {{ .Values.egressProxy.port | quote }}

@@ -122,6 +122,15 @@ class WorkItemLifecycleInput:
     # ------------------------------------------------------------------
     budget_max_usd: float | None = None
     spent_usd: float = 0.0
+    # Set once the deployment default has been RESOLVED (the resolve_budget_cap
+    # Activity). It only matters in the DISABLED case: when the default is a real
+    # number, `budget_max_usd is not None` already short-circuits every later
+    # boundary. When an operator sets the env to 0 the cap stays None, and
+    # without this flag all nine boundaries would re-schedule the Activity and
+    # inflate the event history. Deliberately NOT set when the Activity fails, so
+    # the resolution is retried at the next boundary instead of failing open for
+    # the rest of the run.
+    budget_default_resolved: bool = False
 
     # ------------------------------------------------------------------
     # Configurable caps/timers (WSB-E3-T1 / E2-T3 / E5-T1). They are part of the

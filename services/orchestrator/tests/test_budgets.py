@@ -18,7 +18,7 @@ import pytest
 from temporalio.worker import Worker
 
 from dse_contracts.work_item import WorkItemStatus
-from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
+from dse_orchestrator.local_activities import LOCAL_ACTIVITIES, _default_work_item_max_usd
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
@@ -128,3 +128,104 @@ async def test_budget_consumption_aggregates_gateway_costs(time_skipping_env):
     assert result.status == WorkItemStatus.done.value
     # coder(0.02) + tester(0.03) + l2(0.01) = 0.06 aggregated from the gateway
     assert abs(state_snapshot["spent_usd"] - 0.06) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Deployment default (the ceiling that applies when the work item carries none).
+#
+# Before this existed, `work_items.budget` was `{}` for every item, nothing ever
+# wrote `max_usd`, and `_budget_boundary` returned early on `cap is None` — so in
+# 20k audit rows on the pilot cluster there was not one `budget_boundary_ok`.
+# The financial stop criterion had never been evaluated once.
+# ---------------------------------------------------------------------------
+
+
+def test_default_ceiling_applies_when_the_env_is_unset(monkeypatch):
+    monkeypatch.delenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", raising=False)
+    assert _default_work_item_max_usd() == 25.0
+
+
+def test_operator_can_disable_the_ceiling_with_zero(monkeypatch):
+    """0 is the explicit opt-out: it restores the pre-default behaviour where
+    nothing denominated in dollars can end a run."""
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "0")
+    assert _default_work_item_max_usd() is None
+
+
+def test_a_malformed_env_var_never_silently_removes_the_ceiling(monkeypatch):
+    """A ConfigMap typo must not be a way to lose the cost guard."""
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "twenty-five")
+    assert _default_work_item_max_usd() == 25.0
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "")
+    assert _default_work_item_max_usd() == 25.0
+
+
+def test_a_negative_ceiling_is_read_as_disabled_not_as_a_cap(monkeypatch):
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "-1")
+    assert _default_work_item_max_usd() is None
+
+
+@pytest.mark.asyncio
+async def test_work_item_with_no_budget_is_stopped_by_the_deployment_default(
+    time_skipping_env, monkeypatch
+):
+    """The regression that matters: an item whose JSONB budget is empty — i.e.
+    every item in production — must now hit a ceiling instead of running until
+    the review-round cap."""
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "0.01")
+    work_item_id = new_work_item_id("budgetdef")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    state = FakeControlPlane(plan_risk_class="low", coder_cost_usd=0.05)
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        wf_input = WorkItemLifecycleInput(
+            work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
+            repo="acme/repo", base_branch="main", acceptance_criteria="crit",
+            # deliberately NO budget_max_usd — this is the production shape
+        )
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.failed.value
+    assert "budget_exhausted" in (result.detail or "")
+    actions = read_audit_actions(work_item_id)
+    assert "budget_default_applied" in actions   # the default was resolved and recorded
+    assert "budget_boundary_denied" in actions
+    assert state.finalize_calls == 0             # no PR from a run that overran
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_work_item_budget_still_wins_over_the_default(
+    time_skipping_env, monkeypatch
+):
+    """The default is a floor under items that have none — it must never
+    override a ceiling the work item carries."""
+    monkeypatch.setenv("DSE_DEFAULT_WORK_ITEM_MAX_USD", "0.01")
+    work_item_id = new_work_item_id("budgetexp")
+    insert_work_item(work_item_id)
+    task_queue = f"tq-{uuid.uuid4().hex[:8]}"
+    state = FakeControlPlane(plan_risk_class="low", coder_cost_usd=0.02,
+                             tester_cost_usd=0.03, l2_cost_usd=0.01)
+    activities = list(LOCAL_ACTIVITIES) + build_fake_activities(state)
+
+    async with Worker(time_skipping_env.client, task_queue=task_queue,
+                      workflows=[WorkItemLifecycleWorkflow], activities=activities):
+        wf_input = WorkItemLifecycleInput(
+            work_item_id=work_item_id, tenant_id="test-tenant", requester="usr_test",
+            repo="acme/repo", base_branch="main", acceptance_criteria="crit",
+            budget_max_usd=10.0,
+        )
+        handle = await time_skipping_env.client.start_workflow(
+            WorkItemLifecycleWorkflow.run, wf_input, id=work_item_id, task_queue=task_queue)
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+
+    assert result.status == WorkItemStatus.done.value
+    actions = read_audit_actions(work_item_id)
+    assert "budget_default_applied" not in actions  # never consulted

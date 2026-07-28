@@ -76,6 +76,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_RECORD_GATE,
         LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
         LOCAL_ACTIVITY_RESOLVE_APPROVER,
+        LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP,
         LOCAL_ACTIVITY_UPDATE_STATUS,
     )
     from dse_orchestrator.models import (
@@ -893,6 +894,17 @@ class WorkItemLifecycleWorkflow:
         never cuts mid-Activity — only here, between them). Every check is
         audited."""
         self._apply_pending_budget_raise()
+        # Fall back to the deployment default when the work item carries no
+        # ceiling of its own — which is every item today, since nothing writes
+        # `max_usd` into the work_items.budget JSONB. Ordered AFTER the pending
+        # raise so an explicit operator raise always wins. Patch-guarded: this
+        # adds commands to a path present in every recorded history.
+        if (
+            self._input.budget_max_usd is None
+            and not self._input.budget_default_resolved
+            and workflow.patched("default-work-item-budget-v1")
+        ):
+            await self._resolve_default_budget(boundary)
         cap = self._input.budget_max_usd
         if cap is None:
             return  # no ceiling configured: nothing to enforce
@@ -908,6 +920,42 @@ class WorkItemLifecycleWorkflow:
         await self._audit(
             "budget_boundary_ok",
             {"boundary": boundary, "spent_usd": round(self._input.spent_usd, 6), "max_usd": cap},
+        )
+
+    async def _resolve_default_budget(self, boundary: str) -> None:
+        """Reads the deployment default for the per-WorkItem ceiling in an
+        Activity — outside the workflow sandbox — so the resolved number lands in
+        history and replay stays deterministic across worker versions (P1).
+        Only ever called under the `default-work-item-budget-v1` patch guard."""
+        try:
+            resolved = await workflow.execute_activity(
+                LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP,
+                {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id},
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError:
+            # run() has no generic `except ActivityError`, so letting this escape
+            # would turn a cost guard into an availability incident — the
+            # concrete case being a rolling deploy where an old worker without
+            # this Activity registered is still polling the same queue. Fail OPEN
+            # but LOUD, and retry at the next boundary: budget_default_resolved
+            # deliberately stays False.
+            logger.warning(
+                "resolve_budget_cap failed at boundary=%s; no ceiling applied at this boundary", boundary
+            )
+            await self._audit("budget_default_unavailable", {"boundary": boundary})
+            return
+        self._input.budget_default_resolved = True
+        max_usd = resolved.get("max_usd")
+        if max_usd is None:
+            await self._audit("budget_default_disabled", {"boundary": boundary})
+            return
+        self._input.budget_max_usd = float(max_usd)
+        await self._audit(
+            "budget_default_applied",
+            {"boundary": boundary, "max_usd": self._input.budget_max_usd,
+             "source": resolved.get("source", "deployment_default")},
         )
 
     async def _consume_cost(self, cost_usd: float, *, source: str) -> None:

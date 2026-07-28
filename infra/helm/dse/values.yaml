@@ -293,6 +293,12 @@ orchestrator:
     digest: ""
   replicas: 2
   healthPort: 8900
+  # Per-WorkItem dollar ceiling, applied at every phase boundary when the work
+  # item carries no max_usd of its own. Without it NOTHING denominated in money
+  # can end a run: measured burn on the pilot cluster was $11.74 on a single
+  # item in 9m14s (~$108/h), and review_round_cap permits roughly $60 by design.
+  # 0 disables the ceiling and restores that behaviour.
+  defaultWorkItemMaxUsd: 25.0
   workerVersioning:
     enabled: false
     buildId: "dev"

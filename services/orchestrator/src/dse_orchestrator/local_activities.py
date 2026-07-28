@@ -61,6 +61,11 @@ LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
 # Plan 08 §D — resolves the repo's deploys_preview gate (repo_bindings) to
 # decide whether the preview environment applies (P1, deterministic, fail-safe).
 LOCAL_ACTIVITY_PREVIEW_ENABLED = "preview_enabled_for_repo"
+# The deployment default for the per-WorkItem dollar ceiling. It is an Activity,
+# not a module read inside the workflow body, so the env read happens OUTSIDE the
+# sandbox and its RESULT lands in history — replay stays deterministic even if
+# the ConfigMap changes between worker versions (P1).
+LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP = "resolve_budget_cap"
 
 _DSN = os.environ.get(
     "DSE_DATABASE_URL", "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse"
@@ -775,6 +780,49 @@ def _jira_status_map() -> dict[str, str]:
     return _DEFAULT_JIRA_STATUS_MAP
 
 
+# Default per-WorkItem dollar ceiling. Measured burn on the live cluster
+# (audit_log, 2026-07-28): worst single item $11.74 in 9m14s, next $8.16, the
+# rest under $1.30 — while review_round_cap permits roughly $60 by design. 25.00
+# is ~2x the worst observed run and well under the design ceiling, so it stops a
+# runaway without cutting a legitimately expensive task in half.
+#
+# <= 0 DISABLES the ceiling (explicit operator opt-out, restoring the behaviour
+# where nothing denominated in dollars can end a run).
+#
+# NOTE: spent_usd under-counts — the Planner, L1 and evidence stages report no
+# cost_usd — so real spend when this trips is strictly higher than the cap.
+_DEFAULT_WORK_ITEM_MAX_USD = 25.0
+
+
+def _default_work_item_max_usd() -> float | None:
+    raw = os.environ.get("DSE_DEFAULT_WORK_ITEM_MAX_USD")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_WORK_ITEM_MAX_USD
+    try:
+        value = float(raw)
+    except ValueError:  # a malformed env var must not silently remove the ceiling
+        logging.getLogger("dse_orchestrator").warning(
+            "DSE_DEFAULT_WORK_ITEM_MAX_USD=%r is not a number; using %.2f", raw, _DEFAULT_WORK_ITEM_MAX_USD
+        )
+        return _DEFAULT_WORK_ITEM_MAX_USD
+    return value if value > 0 else None
+
+
+@activity.defn(name=LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP)
+async def resolve_budget_cap(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deployment default for the per-WorkItem ceiling, for items whose
+    `work_items.budget` JSONB carries no `max_usd` — which is every item today.
+
+    Pure: no DB, no network, so it cannot stall a boundary on a Postgres blip.
+    It exists as an Activity purely so the env read stays outside the workflow
+    sandbox and the resolved number is recorded in history."""
+    value = _default_work_item_max_usd()
+    return {
+        "max_usd": value,
+        "source": "deployment_default" if value is not None else "disabled",
+    }
+
+
 @activity.defn(name=LOCAL_ACTIVITY_POST_STATUS_TRANSITION)
 async def post_status_transition(payload: dict[str, Any]) -> dict[str, Any]:
     """Phase B (report 07): reflects the WorkItem status on the Jira board by
@@ -843,4 +891,5 @@ LOCAL_ACTIVITIES = [
     emit_pr_quality_metric,
     post_tracking_comment,
     preview_enabled_for_repo,
+    resolve_budget_cap,
 ]
