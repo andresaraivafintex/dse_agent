@@ -1,4 +1,9 @@
-# VPS pilot (2 vCPU / 8 GB) — Phase 5 runbook (plan 09)
+# VPS pilot — Phase 5 runbook (plan 09)
+
+> The box in use since 2026-07 is **4 vCPU / 15 GB / 29 GB disk** (`dse-vm-01`).
+> The sizing rules below were written for the original 2 vCPU / 8 GB target and
+> still hold as floors — sandbox concurrency 1 is a disk and heartbeat constraint,
+> not only a CPU one.
 
 Ready-to-run kit. Prerequisites outside the VPS: repo published on GitHub
 (the release builds the images — **never build on the VPS**), a managed Postgres
@@ -38,15 +43,24 @@ a domain for the webhooks.
 8. **Restore drill**: test the managed Postgres restore ONCE before
    go-live. No tested restore, no go-live.
 
-## Hard rules for the 2 vCPU VPS (plan 09)
+## Hard rules for this VPS (plan 09)
 
 - Sandbox concurrency = **1** (mandatory).
 - Image builds: **never** on the VPS.
 - Guaranteed CPU `requests` for orchestrator/temporal; limits on the sandbox
   pod (~1.0–1.5 vCPU) — anti-starvation for the heartbeat.
 - Full suite/red-team run in CI/on the laptop; on the VPS, smoke + canary only.
-- The console (`dse_console_pane`) STAYS OUT of this go-live (default-open auth) —
-  or goes behind Tailscale/VPN.
+- The console (`dse_console_pane`) IS deployed here and Helm-owned since rc.5
+  (`console-ui`, `console-api`, `queue-board`, ingresses `painel.` and
+  `admin.notas.api.br`, behind the `console-auth` forwardAuth middleware).
+  The original "default-open auth" caveat is half-retired: **authentication** is
+  enforced (Entra ID, RS256, tenant-scoped issuer, `aud == client_id`), but
+  **authorization is not** — `sso.py:login()` auto-provisions any subject the
+  tenant will issue a token for, and the `roles` claim is written into the session
+  JWT and never compared against anything, so every `/control/*` endpoint
+  (including `kill_switch_global`) is reachable by any identity in the tenant.
+  Before a customer go-live: deny-by-default provisioning + a real role check.
+  Until then, treat the console as an internal-only surface.
 
 ## Known pilot limitations that remain
 
@@ -100,7 +114,26 @@ Order (each step is idempotent):
    **Check:** `kubectl exec deploy/dse-dse-model-gateway -n dse -- sh -c 'echo $ANTHROPIC_API_KEY'` is non-empty.
 
 4. **Install**:
+
+   > ⚠️ **Run the preflight first — every time.** The chart deletes whatever the
+   > checkout you deploy from does not render, silently and with exit 0. On
+   > 2026-07-28 the on-box checkout was 17 commits behind (its `templates/` had no
+   > console, queue-board, projector, dispatcher, preview-rbac, preview-reaper or
+   > reply-reconciler) and this very command would have removed **26 of the 62 live
+   > resources** — all three Ingresses, the `console-auth` middleware and the
+   > `console-api` PVC included — while reporting success.
+   >
+   > ```bash
+   > bash deploy/vps/preflight-upgrade.sh    # aborts if anything live would disappear
+   > ```
+   >
+   > The deploy checkout must sit at **`origin/main`**. Do **not** `git checkout
+   > v0.1.0-rc.N`: the `values-vps-poc.yaml` inside tag `rc.N` still pins the
+   > `rc.N-1` images (the pin lands in the commit that follows the tag), so
+   > deploying from the tag quietly rolls every image back one RC.
+
    ```bash
+   bash deploy/vps/preflight-upgrade.sh
    helm upgrade --install dse infra/helm/dse \
      -f infra/helm/dse/values-dev.yaml -f deploy/vps/values-vps-poc.yaml -n dse
    ```
