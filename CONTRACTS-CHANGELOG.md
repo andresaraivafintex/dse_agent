@@ -49,6 +49,41 @@ change to the public surface.
 
 ## Entries
 
+### `dse_contracts` — `CiStatusResult.status` gains `no_ci` (CI gate fix)
+
+- **What:** the `status` field of `CiStatusResult` can now carry a fourth value,
+  `no_ci`, alongside `pending`, `green` and `red`. Nothing is removed or
+  renamed and the field stays a plain `str` (no `Literal`, so nothing validates
+  at runtime — the comment on the field is the whole contract).
+- **Why:** `pending` meant two different facts at once — "nothing has reported
+  yet" and "nothing will ever report". A PR opened against a repo with no CI
+  configured returned an empty check-run array forever, the aggregator read it
+  as "still running", and the wait had no way to end. On the pilot cluster that
+  produced 8 PRs stuck in `ci_pending` and **0 of 25 work items completed in the
+  deployment's lifetime**. `no_ci` makes the difference expressible so the
+  workflow can treat it as terminal.
+- **Consumed by:** WS-B (the orchestrator's review loop is the only consumer;
+  `unknown_ci_status` there previously escalated on any value other than
+  `green`, which is why the workflow change ships together with this one).
+- **Change type — NEEDS A RULING, and it is why this PR is not self-merged.**
+  It reads as additive under rule 1 (nothing removed, renamed or re-typed) but
+  as breaking under rule 2 ("changing the semantics of a status/enum already
+  consumed by another workstream"), because an existing input — an empty
+  check-run array — now produces a different value than before. Under rule 2
+  this needs an isolated contract PR, a MAJOR bump, and approval from someone
+  who is not the proposer (P3). Under rule 1 it is a MINOR bump and needs no
+  prior approval.
+  The proposer's reading is **MINOR/additive**: the only consumer ships in the
+  same image and is updated in the same change, and no external workstream can
+  observe the old value for a new input. But the classification is the
+  architect's call, not the proposer's, and `packages/contracts/pyproject.toml`
+  is deliberately left at `0.1.0` until it is made.
+- **Migration:** `migrations/0033_ci_no_ci_status.sql` widens the CHECK
+  constraints on `wse_ci_status.status` and `work_items.ci_status` to accept
+  `no_ci`. It is purely permissive, so it is safe to apply while the previous
+  image is still running — and it MUST be applied before the new image, or the
+  first `no_ci` write fails the work item.
+
 ### `dse_audit` 0.1.0 → additive extension (WSF-E1-T2, no version bump declared in pyproject — see note below)
 
 - **What:** new module `dse_audit/queries.py` with

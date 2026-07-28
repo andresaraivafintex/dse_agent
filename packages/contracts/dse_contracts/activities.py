@@ -383,7 +383,11 @@ class L2Verdict(BaseModel):
 class CiStatusResult(BaseModel):
     work_item_id: str
     pr_number: int
-    status: str  # "pending" | "green" | "red"
+    # "pending" | "green" | "red" | "no_ci". `no_ci` means neither a check run
+    # nor a commit status exists for the ref — the repo has no CI, which is a
+    # TERMINAL observation, not a wait. It is deliberately distinct from
+    # `pending`: collapsing the two is what made every PR wait forever.
+    status: str
     head_sha: str | None = None
 
 

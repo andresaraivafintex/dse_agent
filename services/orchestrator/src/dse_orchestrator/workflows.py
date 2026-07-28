@@ -797,6 +797,27 @@ class WorkItemLifecycleWorkflow:
         except ActivityError:
             logger.warning("best-effort post_board_transition failed (status=%s)", status)
 
+    async def _exhaust_ci_wait(self, cause: str, *, elapsed_seconds: float = 0.0) -> None:
+        """ONE audit row at a real state transition — never one per timer tick.
+
+        Its whole purpose is to be greppable. Before this, exhausting the CI
+        wait raised into the generic escalation handler, which wrote
+        `action="escalated"` with the cause buried inside `details.reason`, left
+        `ci_status` reading "pending" on a terminal row, and had no test
+        anywhere. An operator had no way to distinguish "the CI gate gave up"
+        from any other escalation. The caller raises `_EscalateNow` immediately
+        after; this only names the cause."""
+        await self._audit("ci_wait_exhausted", {
+            "reason": f"ci_wait_exhausted:{cause}",
+            "status": self._input.ci_status,
+            "pr_number": self._input.pr_number,
+            "polls": self._input.ci_pending_polls,
+            "poll_cap": self._input.ci_pending_poll_cap,
+            "elapsed_seconds": int(elapsed_seconds),
+            "deadline_hours": self._input.ci_wait_deadline_hours,
+            "head_sha": self._input.head_sha,
+        })
+
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
         # Escalation is TERMINAL for this execution — nothing will ever exec
         # into this sandbox again — and it was the ONLY terminal path without a
@@ -2345,6 +2366,12 @@ class WorkItemLifecycleWorkflow:
             # metric on every pass to the collector/WS-F.
             await self._emit_history_metric("review_loop")
             fine_states = workflow.patched("ci-pending-blocks-review-v1")
+            # REPLAY GUARD — the wall-clock branch below issues an Activity
+            # command at a point where in-flight histories recorded only a
+            # StartTimer. On replay this marker is absent, the deadline branch is
+            # skipped, and the old command sequence is reproduced one for one;
+            # only live execution records it.
+            ci_deadline = fine_states and workflow.patched("ci-wait-deadline-v1")
             if fine_states:
                 input.ci_status = "pending"
                 await self._set_status(
@@ -2381,11 +2408,27 @@ class WorkItemLifecycleWorkflow:
 
             if fine_states and ci.status == "pending":
                 input.ci_pending_polls += 1
+                # NOT gated on the patch: assigning a dataclass field emits no
+                # Temporal command, so it is replay-safe unconditionally — and
+                # gating it would give every item already stuck for days a FRESH
+                # clock at upgrade instead of one reconstructed from its own
+                # recorded history.
+                if input.ci_wait_started_at_epoch is None:
+                    input.ci_wait_started_at_epoch = workflow.now().timestamp()
                 await self._persist_status()
                 if input.ci_pending_polls >= input.ci_pending_poll_cap:
+                    if ci_deadline:
+                        await self._exhaust_ci_wait("poll_cap")
                     raise _EscalateNow(
                         f"ci_pending_poll_cap_exhausted:{input.ci_pending_polls}"
                     )
+                if ci_deadline and input.ci_wait_deadline_hours > 0:
+                    elapsed = workflow.now().timestamp() - input.ci_wait_started_at_epoch
+                    if elapsed >= input.ci_wait_deadline_hours * 3600:
+                        await self._exhaust_ci_wait("wall_clock", elapsed_seconds=elapsed)
+                        raise _EscalateNow(
+                            f"ci_wait_deadline_exhausted:elapsed_s={int(elapsed)}"
+                        )
                 await workflow.sleep(timedelta(seconds=max(0.01, input.ci_poll_interval_seconds)))
                 continue
 
@@ -2399,13 +2442,61 @@ class WorkItemLifecycleWorkflow:
                 await self._set_status(WorkItemStatus.review_feedback, audit_action="ci_red_retrying")
                 fix_result = await self._apply_coder_fix_cycle(["ci red: fix the pipeline"])
                 input.ci_pending_polls = 0
+                # A new head_sha starts a NEW wait; without this reset the fix
+                # cycle inherits the previous commit's elapsed time and blows the
+                # deadline on its first pending poll.
+                input.ci_wait_started_at_epoch = None
                 # ADR-26: fix cycle = new commit that changes behavior -> 1 refresh
                 input.last_files_changed = list(fix_result.files_changed)
                 await self._run_evidence_pipeline(fix_result.files_changed,
                                                   reason="fix_cycle_ci_red")
                 continue
 
-            if fine_states and ci.status != "green":
+            if ci.status == "no_ci":
+                # The repo reported NOTHING — no check run and no commit status
+                # — which is a terminal observation, not a wait. No patch marker
+                # is needed: `no_ci` is unreachable in any pre-upgrade history
+                # because the Activity could not produce it, and the workflow and
+                # the Activity ship in the same image.
+                #
+                # It proceeds to human review rather than escalating. Escalation
+                # is terminal, so escalating here would convert "0 of 25 finish"
+                # into "25 of 25 escalate" while throwing away a PR and evidence
+                # that already exist. P3 is not weakened: the merge gate is a
+                # HUMAN signal verified against the GitHub API, and CI was never
+                # the gate P3 depends on — it is an extra gate this repo does not
+                # have. The comment below makes that explicit to the reviewer
+                # rather than letting a silent green imply verification.
+                await self._audit("ci_no_ci_detected", {
+                    "reason": "no_ci_configured",
+                    "status": ci.status,
+                    "pr_number": input.pr_number,
+                    "head_sha": input.head_sha,
+                })
+                # Body override on the real status, the shape the plan-approval
+                # reminder already uses: the reviewer must not read the ordinary
+                # "ready for human review" line and assume something verified
+                # this commit.
+                try:
+                    await workflow.execute_activity(
+                        ACTIVITY_POST_TRACKING_COMMENT,
+                        {"work_item_id": input.work_item_id, "tenant_id": input.tenant_id,
+                         "status": "pr_ready",
+                         "body": (
+                             "✅ PR opened with the change and evidence — ready for human "
+                             "review.\n\n"
+                             "⚠️ **This repository has no CI**: no check run and no commit "
+                             "status was reported for this commit. Nothing automated verified "
+                             "this change beyond the DSE's own L1/L2 gates. You are the only "
+                             "gate."
+                         )},
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=5),
+                    )
+                except ActivityError:
+                    logger.warning("best-effort no_ci notice failed; the item still proceeds")
+
+            if fine_states and ci.status not in ("green", "no_ci"):
                 raise _EscalateNow(f"unknown_ci_status:{ci.status!r}")
 
             # IMPORTANT: we do not reset `_review_received` here before
@@ -2677,6 +2768,12 @@ class WorkItemLifecycleWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=5),
         )
         input.ci_status = None
+        # A refinalize means a new head_sha, so the CI wait starts over on both
+        # axes. The count was already not reset here — an asymmetry with the
+        # CI-red fix cycle that only becomes visible once the counter is paired
+        # with a clock that IS reset there.
+        input.ci_pending_polls = 0
+        input.ci_wait_started_at_epoch = None
         refinalized_status = (
             WorkItemStatus.pr_open
             if workflow.patched("refinalize-resets-ci-v1")

@@ -1,8 +1,14 @@
 """WSE-E4-T9a — minimal consumption of PR status checks: reads GitHub's
 check-runs for the branch's tip commit and aggregates them into a coarse signal
-(`pending|green|red`) for the WS-B workflow to decide what to do (P1: the
+(`pending|green|red|no_ci`) for the WS-B workflow to decide what to do (P1: the
 workflow decides, this function only delivers the result). No previews, no
 selective re-run (Phase 3) — just reading + deterministic aggregation.
+
+`no_ci` exists because "nothing has reported yet" and "nothing will ever report"
+are not the same fact, and collapsing them into `pending` is what kept every
+work item this system ever produced from finishing: the target repo has no
+workflows, GitHub returns an empty check-run array forever, and the wait had no
+way to end.
 """
 from __future__ import annotations
 
@@ -18,14 +24,20 @@ except ImportError:  # pragma: no cover
 
 _TERMINAL_FAILURE_CONCLUSIONS = {"failure", "timed_out", "cancelled", "action_required", "stale"}
 
+CI_NO_CI = "no_ci"
+
 
 def aggregate_check_runs(check_runs: list[dict]) -> str:
     """green only if ALL check-runs finished with a non-failure conclusion;
-    red if ANY of them finished in failure; pending if no check-run exists yet
-    or some are still running (decline-never-truncate: we never "guess" green
-    before everything has completed)."""
+    red if ANY of them finished in failure; pending while some are still
+    running (decline-never-truncate: we never "guess" green before everything
+    has completed); `no_ci` when the ref has no check run at all.
+
+    Per-source: `no_ci` here means only "check runs reported nothing". The
+    caller combines it with the legacy commit-status signal before concluding
+    that the repo has no CI — see `aggregate_ci`."""
     if not check_runs:
-        return "pending"
+        return CI_NO_CI
     saw_failure = False
     for run in check_runs:
         if run.get("status") != "completed":
@@ -33,6 +45,42 @@ def aggregate_check_runs(check_runs: list[dict]) -> str:
         if run.get("conclusion") in _TERMINAL_FAILURE_CONCLUSIONS:
             saw_failure = True
     return "red" if saw_failure else "green"
+
+
+def aggregate_combined_status(combined: dict | None) -> str:
+    """The legacy commit-status API, for repos whose CI reports through
+    statuses rather than check runs.
+
+    Keys off the `statuses` ARRAY, never off `state`: GitHub answers
+    `{"state": "pending", "statuses": [], "total_count": 0}` for a commit
+    nothing has reported on — the identical trap that produced this bug on the
+    check-run side."""
+    statuses = (combined or {}).get("statuses") or []
+    if not statuses:
+        return CI_NO_CI
+    state = (combined or {}).get("state")
+    if state == "success":
+        return "green"
+    if state in ("failure", "error"):
+        return "red"
+    return "pending"
+
+
+def aggregate_ci(check_runs: list[dict], combined: dict | None) -> str:
+    """Combines both sources. `no_ci` only when NEITHER reported anything;
+    red wins over pending, pending wins over green — a signal that is still
+    running can still turn red."""
+    signals = [
+        s for s in (aggregate_check_runs(check_runs), aggregate_combined_status(combined))
+        if s != CI_NO_CI
+    ]
+    if not signals:
+        return CI_NO_CI
+    if "red" in signals:
+        return "red"
+    if "pending" in signals:
+        return "pending"
+    return "green"
 
 
 def consume_ci_status_core(
@@ -45,13 +93,29 @@ def consume_ci_status_core(
     actor: str = "system:validation",
 ) -> CiStatusResult:
     check_runs = github_client.list_check_runs(repo, ref)
-    status = aggregate_check_runs(check_runs)
+    # Lazily: only ask about legacy commit statuses when check runs reported
+    # nothing. On a healthy repo this keeps the hot path at one call per poll
+    # instead of two, and it keeps an endpoint the App may not be permitted to
+    # use off the path of every green PR.
+    combined = github_client.get_combined_status(repo, ref) if not check_runs else None
+    status = aggregate_ci(check_runs, combined)
 
     summary = [
         {"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion")}
         for r in check_runs
     ]
-    db.save_ci_status(work_item_id, pr_number, status, {"check_runs": summary})
+    combined_summary = (
+        None
+        if combined is None
+        else {
+            "state": combined.get("state"),
+            "contexts": [s.get("context") for s in (combined.get("statuses") or [])],
+        }
+    )
+    db.save_ci_status(
+        work_item_id, pr_number, status,
+        {"check_runs": summary, "combined_status": combined_summary},
+    )
 
     if audit_emit is not None:
         audit_emit(
@@ -59,7 +123,8 @@ def consume_ci_status_core(
             action="ci_status_consumed",
             tenant_id=tenant_id,
             work_item_id=work_item_id,
-            details={"repo": repo, "pr_number": pr_number, "status": status, "check_runs": summary},
+            details={"repo": repo, "pr_number": pr_number, "status": status,
+                     "check_runs": summary, "combined_status": combined_summary},
         )
 
     return CiStatusResult(work_item_id=work_item_id, pr_number=pr_number, status=status)

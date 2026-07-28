@@ -45,6 +45,25 @@ class GitHubClient(Protocol):
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]: ...
 
+    def get_combined_status(self, repo: str, ref: str) -> dict:
+        """`GET /repos/{repo}/commits/{ref}/status` — the LEGACY commit-status
+        API, for repos whose CI reports through statuses rather than check runs.
+        Returns the raw `{state, statuses, total_count}` body.
+
+        Two things about this contract are load-bearing:
+
+        1. Callers key off the `statuses` ARRAY, never off `state`. GitHub
+           answers `{"state": "pending", "statuses": [], "total_count": 0}` for a
+           commit nothing has reported on — the exact trap that made an empty
+           check-run list read as "CI is still running" forever.
+        2. It is FAIL-SOFT: on 403/404/5xx or a transport error it returns the
+           empty body instead of raising. The endpoint needs a `statuses:read`
+           App permission the deployed App does not currently hold, and a
+           raising implementation would convert a missing permission into a
+           failed work item.
+        """
+        ...
+
     def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
         """Phase 3 (WSE-E4-T9b) — targeted re-run of ONE check-run (fix commit).
         `POST /repos/{repo}/check-runs/{id}/rerequest`. Returns False when the
@@ -208,6 +227,33 @@ class RealGitHubClient:
         resp.raise_for_status()
         return resp.json().get("check_runs", [])
 
+    def get_combined_status(self, repo: str, ref: str) -> dict:
+        empty: dict = {"state": "pending", "statuses": [], "total_count": 0}
+        try:
+            resp = httpx.get(
+                f"{self._cfg.api_base_url}/repos/{repo}/commits/{ref}/status",
+                headers=self._headers(),
+                timeout=15.0,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "combined status unavailable for %s@%s (%s) — treating as no legacy signal",
+                repo, ref, exc,
+            )
+            return empty
+        if resp.status_code in (403, 404) or resp.status_code >= 500:
+            # Fail soft, never fail the work item. A 403 here almost certainly
+            # means the App lacks `statuses:read`; check runs remain the primary
+            # signal and this one simply contributes nothing.
+            logger.warning(
+                "combined status %s for %s@%s — the App likely lacks `statuses:read`; "
+                "treating as no legacy signal",
+                resp.status_code, repo, ref,
+            )
+            return empty
+        resp.raise_for_status()
+        return resp.json()
+
     def rerequest_check_run(self, repo: str, check_run_id: int) -> bool:
         resp = httpx.post(
             f"{self._cfg.api_base_url}/repos/{repo}/check-runs/{check_run_id}/rerequest",
@@ -258,6 +304,7 @@ class FakeGitHubClient:
     _pr_by_number: dict[tuple[str, int], dict] = field(default_factory=dict)
     _comments: dict[str, str] = field(default_factory=dict)  # comment_id -> body
     _check_runs: dict[tuple[str, str], list[dict]] = field(default_factory=dict)
+    _combined: dict[tuple[str, str], dict] = field(default_factory=dict)
     _comment_id_seq: itertools.count = field(default_factory=lambda: itertools.count(1))
     _pr_number_seq: itertools.count = field(default_factory=lambda: itertools.count(100))
     create_pr_calls: int = 0
@@ -311,6 +358,16 @@ class FakeGitHubClient:
     def set_check_runs(self, repo: str, ref: str, runs: list[dict]) -> None:
         """Test-only — populates the check-runs "reported by CI"."""
         self._check_runs[(repo, ref)] = runs
+
+    def get_combined_status(self, repo: str, ref: str) -> dict:
+        # The default mimics GitHub's real answer for a commit nothing has
+        # reported on, NOT an empty dict — a test that populates only check runs
+        # must see the same shape production sees.
+        return self._combined.get((repo, ref), {"state": "pending", "statuses": [], "total_count": 0})
+
+    def set_combined_status(self, repo: str, ref: str, body: dict) -> None:
+        """Test-only — populates the LEGACY commit statuses reported by CI."""
+        self._combined[(repo, ref)] = body
 
     # Phase 3 (WSE-E4-T9b) — targeted re-runs
     rerequest_supported: bool = True
