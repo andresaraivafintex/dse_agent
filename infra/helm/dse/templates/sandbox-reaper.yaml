@@ -1,0 +1,110 @@
+{{/*
+TTL reaper for sandbox Pods.
+
+Sandbox Pods are bare Pods with no ownerReference, so nothing in Kubernetes
+collects them. A cross-namespace ownerReference is not available — the owner
+would have to live in the sandbox namespace or be cluster-scoped — and since
+1.20 an invalid one makes the dependent eligible for IMMEDIATE deletion, which
+would kill every sandbox seconds after creation. See
+services/sandbox-runtime/sandbox_runtime/reaper.py for the full reasoning.
+
+That leaves teardown_sandbox as the only collector, and teardown cannot run if
+the orchestrator crashed or Temporal purged the workflow. This CronJob is the
+floor under that: it reads `dse.fintex/expires-at` off the Pod, so it stays
+correct for a Pod whose workflow no longer exists and while the orchestrator is
+down.
+
+The decision rule is a real module rather than inline Python so it can be unit
+tested without a cluster (services/sandbox-runtime/tests/test_reaper.py). The
+orchestrator image already ships sandbox_runtime, which is why this reuses it.
+*/}}
+{{- if and .Values.runtime.sandboxRbac.create (gt (int .Values.runtime.sandboxTtlSeconds) 0) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dse.fullname" . }}-sandbox-reaper
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.runtime.sandboxReaperSchedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "dse.labels" . | nindent 12 }}
+            # Load-bearing: this pod runs in a namespace under default-deny
+            # egress, so without a label a NetworkPolicy selects it cannot reach
+            # the API server at all and every run fails on the first kubectl
+            # call. The policy below is keyed on exactly this label.
+            app.kubernetes.io/component: sandbox-reaper
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "dse.fullname" . }}-orchestrator-worker
+          # The ServiceAccount defaults this to false. kubectl needs the
+          # projected token to detect in-cluster config at all — without it it
+          # silently falls back to localhost:8080 and every run fails looking
+          # like a network issue.
+          automountServiceAccountToken: true
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: reaper
+              image: {{ include "dse.image" (dict "root" $ "repository" .Values.orchestrator.image.repository "tag" .Values.orchestrator.image.tag "digest" .Values.orchestrator.image.digest) }}
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              securityContext:
+                {{- include "dse.appContainerSecurityContext" . | nindent 16 }}
+              command: ["python3", "-m", "sandbox_runtime.reaper"]
+              args:
+                - "--namespace"
+                - {{ .Values.runtime.sandboxNamespace | quote }}
+                - "--terminated-grace-seconds"
+                - {{ .Values.runtime.sandboxReaperTerminatedGraceSeconds | quote }}
+              volumeMounts:
+                {{- include "dse.appTmpMount" . | nindent 16 }}
+              resources:
+                requests: { cpu: "20m", memory: "64Mi" }
+                limits: { cpu: "200m", memory: "192Mi" }
+          volumes:
+            # Declared inline rather than via dse.appPodDefaults: this Pod needs
+            # automountServiceAccountToken=true (kubectl cannot find in-cluster
+            # config without it), which those defaults deliberately switch off.
+            - name: dse-runtime-tmp
+              emptyDir:
+                sizeLimit: {{ .Values.security.tmpSizeLimit }}
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+The reaper's only egress need is the Kubernetes API server. It talks to nothing
+else — no database, no Jira, no internet — so the policy is exactly that one
+route, and DNS comes from the cluster-wide allow-cluster-dns policy.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-sandbox-reaper-kube-api
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: sandbox-reaper
+  policyTypes: ["Egress"]
+  egress:
+    {{- range .Values.networkPolicy.kubeApiServer.cidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - { protocol: TCP, port: {{ $.Values.networkPolicy.kubeApiServer.port }} }
+    {{- end }}
+{{- end }}
+{{- end }}
