@@ -83,12 +83,18 @@ def main(path: str) -> None:
     require(policies, "NetworkPolicy missing")
     external = [p for p in policies if p["metadata"]["name"].endswith("egress-proxy-external")]
     require(len(external) == 1, "expected exactly one egress-proxy external policy")
-    # Two — and only two — owners of an external CIDR are allowed: (1) the
-    # egress-proxy path to the internet (L7 allowlist on the proxy) and (2) the
-    # orchestrator route to the K8s API server (sandbox kubectl), scoped to the
-    # orchestrator pod. Any other policy carrying an ipBlock is a violation.
+    # Only three kinds of owner may carry an external CIDR: (1) the egress-proxy
+    # path to the internet (L7 allowlist on the proxy); (2) the orchestrator
+    # route to the K8s API server (sandbox kubectl), scoped to the orchestrator
+    # pod; and (3) the reaper CronJobs, whose ONLY egress is that same API
+    # server — they run in a namespace under default-deny, so without the route
+    # every sweep fails on its first kubectl call and leaked Pods/namespaces
+    # accumulate silently. Any other policy carrying an ipBlock is a violation,
+    # and every one of these is held to the same bar below: scoped to one
+    # component, never to the namespace.
     kube_api = [p for p in policies if p["metadata"]["name"].endswith("orchestrator-kube-api")]
-    allowed_ip_owners = set(map(id, external + kube_api))
+    reaper_api = [p for p in policies if p["metadata"]["name"].endswith("-reaper-kube-api")]
+    allowed_ip_owners = set(map(id, external + kube_api + reaper_api))
     for policy in policies:
         has_ip_block = any(isinstance(node, dict) and "ipBlock" in node for node in walk(policy))
         if has_ip_block:
@@ -99,6 +105,16 @@ def main(path: str) -> None:
         require(
             kube_api[0]["spec"]["podSelector"]["matchLabels"].get("app.kubernetes.io/name") == "orchestrator",
             "kube-api egress not scoped to the orchestrator pod",
+        )
+    for policy in reaper_api:
+        # `.get` all the way down on purpose: `podSelector: {}` selects EVERY pod
+        # in the namespace, which is the dangerous shape this check exists to
+        # catch. It has to fail with the reason, not with a KeyError.
+        selector = (policy.get("spec") or {}).get("podSelector") or {}
+        component = (selector.get("matchLabels") or {}).get("app.kubernetes.io/component", "")
+        require(
+            component.endswith("-reaper"),
+            f"{policy['metadata']['name']}: kube-api egress not scoped to a reaper pod",
         )
 
 
