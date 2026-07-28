@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from dse_contracts import (
@@ -50,6 +51,28 @@ from .driver import (
 
 NONROOT_UID = 10001
 
+# 72h, deliberately not 24h. A reaped sandbox is NOT transparently rebuilt:
+# the next agent turn fails to exec, retries until schedule_to_close and the
+# work item ends `failed`. The lifetime has to sit beyond realistic human
+# review dwell time, not just beyond the working phase.
+DEFAULT_SANDBOX_TTL_SECONDS = 259200
+
+
+def _ttl_seconds_from_env(default: int = DEFAULT_SANDBOX_TTL_SECONDS) -> int:
+    """Tolerant parse. K8sSandboxConfig is evaluated at IMPORT time, so a bare
+    int() would turn an empty or malformed DSE_SANDBOX_TTL_SECONDS — trivially
+    produced by a Helm value rendering as "" — into a ValueError during import
+    and crashloop the orchestrator worker. An unparsable TTL must degrade to the
+    default, never take the worker down."""
+    raw = (os.environ.get("DSE_SANDBOX_TTL_SECONDS") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
 
 @dataclass
 class K8sSandboxConfig:
@@ -71,6 +94,12 @@ class K8sSandboxConfig:
     # a rebuild after the Pod dies starts from scratch); production/VPS must
     # point at a PVC so the chaos rebuild can recover the last checkpoint.
     checkpoint_pvc: str = os.environ.get("DSE_SANDBOX_CHECKPOINT_PVC", "")
+    # Absolute lifetime stamped on the Pod as `dse.fintex/expires-at`; the
+    # sandbox-reaper CronJob collects Pods past that instant. This is the
+    # BACKSTOP for Pods whose workflow died before teardown ran — never the
+    # normal collection path, which is teardown on every terminal branch.
+    # 0 disables the stamp (and with it any reaping of Pods from this build).
+    ttl_seconds: int = _ttl_seconds_from_env()
 
 
 def pod_name_for(work_item_id: str) -> str:
@@ -162,9 +191,21 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
             {"name": "tmp", "emptyDir": {}},
         ],
     }
+    annotations: dict[str, str] = {}
+    # The FULL work_item_id. It does not fit in a label — `wi_` + 64 hex = 67
+    # chars and _label_value truncates to 63 — so the label cannot identify the
+    # owner. Annotations have no such limit: this is what the reaper and any
+    # operator use to correlate a leaked Pod back to its work item (the
+    # workflow id IS the work_item_id).
+    annotations["dse.fintex/work-item-id"] = request.work_item_id
+    if cfg.ttl_seconds > 0:
+        created = datetime.now(timezone.utc)
+        annotations["dse.fintex/created-at"] = created.isoformat()
+        annotations["dse.fintex/expires-at"] = (
+            created + timedelta(seconds=cfg.ttl_seconds)
+        ).isoformat()
     # Strong-isolation RuntimeClass: set only when configured. Empty = default
     # runtime (weak isolation) — we flag it in an annotation for the operator.
-    annotations = {}
     if cfg.runtime_class:
         spec["runtimeClassName"] = cfg.runtime_class
     else:

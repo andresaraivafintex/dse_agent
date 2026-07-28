@@ -687,25 +687,40 @@ class WorkItemLifecycleWorkflow:
             schedule_to_close_timeout=timedelta(seconds=self._input.activity_schedule_to_close_seconds),
         )
 
+    async def _teardown_sandbox_best_effort(self, stage: str) -> None:
+        """The ONE place a sandbox is released. Best-effort by construction: a
+        teardown failure must never change the terminal state the caller already
+        decided on.
+
+        Callers on a path that EXISTS in closed histories (cancel, fail) call
+        this unguarded — the command stream has to stay byte-identical to what
+        those histories recorded, which is why the activity name, the three
+        payload keys and both timeouts below are frozen. Callers on a path that
+        never tore down before (escalate, block) must wrap the call in the
+        `teardown-on-escalation-v1` patch guard.
+
+        Boundary fix (post-S7 audit) preserved verbatim: TeardownSandboxInput
+        requires tenant_id — without it the decode failed and NO teardown ran
+        (orphaned sandboxes). `reason` becomes `stage` (the model's real field).
+        """
+        if not self._input.sandbox_id:
+            return
+        try:
+            await workflow.execute_activity(
+                ACTIVITY_TEARDOWN_SANDBOX,
+                {
+                    "work_item_id": self._input.work_item_id,
+                    "tenant_id": self._input.tenant_id,
+                    "stage": stage,
+                },
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+        except ActivityError:
+            logger.warning("teardown failed at stage=%s; continuing anyway", stage)
+
     async def _finish_cancelled(self) -> WorkItemLifecycleResult:
-        if self._input.sandbox_id:
-            try:
-                await workflow.execute_activity(
-                    ACTIVITY_TEARDOWN_SANDBOX,
-                    # Boundary fix (post-S7 audit): TeardownSandboxInput requires
-                    # tenant_id — without it the decode failed and NO teardown ran
-                    # (orphaned sandboxes). `reason` becomes `stage` (the model's
-                    # real field).
-                    {
-                        "work_item_id": self._input.work_item_id,
-                        "tenant_id": self._input.tenant_id,
-                        "stage": "cancelled_by_operator",
-                    },
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-            except ActivityError:
-                logger.warning("teardown failed during cancellation; continuing anyway")
+        await self._teardown_sandbox_best_effort("cancelled_by_operator")
         detail = f"cancelled_by_operator: {self._cancel_reason or 'no reason given'}"
         self._input.terminal_detail = detail
         await self._set_status(
@@ -782,6 +797,22 @@ class WorkItemLifecycleWorkflow:
             logger.warning("best-effort post_board_transition failed (status=%s)", status)
 
     async def _finish_escalated(self, reason: str) -> WorkItemLifecycleResult:
+        # Escalation is TERMINAL for this execution — nothing will ever exec
+        # into this sandbox again — and it was the ONLY terminal path without a
+        # teardown, while being the path every stalled review lands on: the
+        # single `except _EscalateNow` in run() funnels every escalate raise
+        # here, including _checkpoint_or_rebuild("done"), which is called one
+        # line before the merge-path teardown. That is how eight work items
+        # that opened a PR ended `checkpointed` with the Pod still Running.
+        #
+        # PATCH GUARD (spec §5, same discipline as status-comment-surfacing-v1):
+        # this schedules a NEW command on a path that closed histories ran with
+        # no command at all. Without the guard, replaying a closed escalated
+        # history — which Temporal does on a query against a closed workflow and
+        # on a reset — is nondeterministic. Old histories skip; new executions
+        # tear down.
+        if workflow.patched("teardown-on-escalation-v1"):
+            await self._teardown_sandbox_best_effort(f"escalated:{reason[:64]}")
         detail = f"escalated: {reason}"
         self._input.terminal_detail = detail
         await self._set_status(
@@ -806,17 +837,7 @@ class WorkItemLifecycleWorkflow:
     async def _finish_failed(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
         """CLEAN terminal failure (P6): Failed status + audit, with no truncated
         output. Tears down the sandbox if one exists (best-effort)."""
-        if self._input.sandbox_id:
-            try:
-                await workflow.execute_activity(
-                    ACTIVITY_TEARDOWN_SANDBOX,
-                    {"work_item_id": self._input.work_item_id,
-                     "tenant_id": self._input.tenant_id, "stage": audit_action},
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=3),
-                )
-            except ActivityError:
-                logger.warning("teardown failed during a terminal failure; continuing anyway")
+        await self._teardown_sandbox_best_effort(audit_action)
         detail = reason
         self._input.terminal_detail = detail
         await self._set_status(
@@ -834,6 +855,14 @@ class WorkItemLifecycleWorkflow:
         """Blocked terminal state (WSB-E3-T2: empty approver cascade). Distinct
         from Failed — the WorkItem is waiting for human intervention (naming an
         approver), not dead. It escalates alongside (audit)."""
+        # Blocked is terminal too. Today it is unreachable WITH a sandbox — the
+        # only _BlockNow raise lives in _run_planner_and_gate, which the
+        # implementation phase calls only under `if not input.sandbox_id` — so
+        # this guards against the gate ever moving after provision; it is not a
+        # live leak. Same patch id as the escalate path: one marker, one
+        # decision, both new terminal teardowns.
+        if workflow.patched("teardown-on-escalation-v1"):
+            await self._teardown_sandbox_best_effort(f"blocked:{audit_action}")
         detail = reason
         self._input.terminal_detail = detail
         await self._set_status(

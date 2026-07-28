@@ -63,6 +63,7 @@ data:
   DSE_SANDBOX_SERVICE_ACCOUNT: "dse-sandbox-runner"
   DSE_SANDBOX_CPU_LIMIT: {{ .Values.runtime.sandboxCpuLimit | quote }}
   DSE_SANDBOX_MEM_LIMIT: {{ .Values.runtime.sandboxMemLimit | quote }}
+  DSE_SANDBOX_TTL_SECONDS: {{ .Values.runtime.sandboxTtlSeconds | quote }}
   DSE_SANDBOX_CHECKPOINT_PVC: {{ if .Values.runtime.checkpointPvc.enabled }}{{ include "dse.fullname" . }}-sandbox-checkpoint{{ else }}""{{ end }}
   DSE_WORKER_USE_VERSIONING: {{ ternary "true" "false" .Values.orchestrator.workerVersioning.enabled | quote }}
   DSE_WORKER_BUILD_ID: {{ .Values.orchestrator.workerVersioning.buildId | quote }}

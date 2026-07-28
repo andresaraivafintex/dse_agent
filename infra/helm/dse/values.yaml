@@ -103,6 +103,22 @@ runtime:
     digest: ""
   sandboxCpuLimit: "1"
   sandboxMemLimit: "2Gi"
+  # Absolute lifetime stamped on each sandbox Pod (annotation
+  # dse.fintex/expires-at) and enforced by the sandbox-reaper CronJob. It is the
+  # BACKSTOP for Pods whose workflow died without calling teardown_sandbox — the
+  # normal path is still teardown on every terminal branch.
+  #
+  # 72h, not 24h: a reaped sandbox is NOT transparently rebuilt. The next agent
+  # turn fails to exec, retries until schedule_to_close and the work item ends
+  # `failed`. Size this beyond realistic human-review dwell time, not just
+  # beyond the working phase. 0 disables both the stamp and the reaper.
+  sandboxTtlSeconds: 259200
+  # How often the reaper sweeps.
+  sandboxReaperSchedule: "*/10 * * * *"
+  # Grace before a Succeeded/Failed sandbox Pod is collected, so a crashed
+  # sandbox can still be inspected. The worker has no pods/log RBAC, so
+  # `kubectl describe` is the only forensic surface there is.
+  sandboxReaperTerminatedGraceSeconds: 900
   # PVC for the sandbox's git checkpoint (recovery after chaos/rebuild). emptyDir
   # is enough for the 1st turn; the PVC is a fast-follow.
   checkpointPvc:
