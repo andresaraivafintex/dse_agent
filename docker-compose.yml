@@ -49,6 +49,11 @@ services:
       # in its own Postgres databases (temporal, temporal_visibility), so the
       # upgrade is safe — the schema is migrated by auto-setup at boot.
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+      # auto-setup defaults this to 24h, so a work item's workflow history is
+      # gone a day after it closes — the same 30d the chart sets. Unlike the
+      # cluster, a fresh compose volume really does hit the namespace-creation
+      # branch, so this is the one place the value takes effect end to end.
+      DEFAULT_NAMESPACE_RETENTION: 720h
     ports:
       - "7233:7233"
     networks: [dse_net]
