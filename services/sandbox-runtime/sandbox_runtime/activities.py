@@ -28,6 +28,11 @@ from typing import Any
 
 logger = logging.getLogger("sandbox_runtime.activities")
 
+# How much of a failed suite's output travels back to the Coder. Enough
+# for a stack trace and the failing assertions; bounded because it ends up
+# in a model prompt and in Temporal's history.
+_FAILURE_OUTPUT_CHARS = 4000
+
 from pydantic import BaseModel, Field
 from temporalio import activity
 
@@ -1387,9 +1392,14 @@ def _tester_pod_sync(
     tests_ran = bool(test_files)
     tests_passed = tests_ran and run.returncode == 0
     returncode = run.returncode
+    # Kept, not just logged. The workflow feeds this back to the Coder on the
+    # next attempt; without it the retry repeats the original instruction
+    # verbatim and the same test fails again. Tail, because the useful part of a
+    # test runner's output is the end.
+    failure_output = ""
     if tests_ran and not tests_passed:
-        logger.warning("tester k8s: suite failed (rc=%s): %.300s",
-                       returncode, ((run.stdout or "") + (run.stderr or ""))[-300:])
+        failure_output = ((run.stdout or "") + (run.stderr or ""))[-_FAILURE_OUTPUT_CHARS:]
+        logger.warning("tester k8s: suite failed (rc=%s): %.300s", returncode, failure_output[-300:])
 
     # commit the test files IN THE POD (current branch; the post-tester checkpoint
     # picks them up and finalize pushes). No push here.
@@ -1422,6 +1432,7 @@ def _tester_pod_sync(
         returncode=returncode,
         head_sha=head_sha,
         cost_usd=0.0,
+        failure_output=failure_output,
     )
 
 
@@ -1570,6 +1581,7 @@ async def _run_tester_turn_impl(
     tests_ran = False
     tests_passed = False
     returncode = -1
+    failure_output = ""
     for index, step in enumerate(authoring_script or [], start=1):
         res = await run_sync_with_heartbeat(
             session.invoke,
@@ -1585,6 +1597,14 @@ async def _run_tester_turn_impl(
             tests_ran = True
             tests_passed = bool(res.detail.get("passed"))
             returncode = int(res.detail.get("returncode", -1))
+            if not tests_passed:
+                # Same reason as the k8s path: the retry is useless without it.
+                # Whichever of these the toolset filled is what the Coder gets.
+                raw = (
+                    res.detail.get("output")
+                    or (str(res.detail.get("stdout") or "") + str(res.detail.get("stderr") or ""))
+                )
+                failure_output = str(raw)[-_FAILURE_OUTPUT_CHARS:]
 
     _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="tester")
 
@@ -1628,6 +1648,7 @@ async def _run_tester_turn_impl(
         tests_passed=tests_passed,
         returncode=returncode,
         cost_usd=0.0,
+        failure_output=failure_output,
     )
 
 
