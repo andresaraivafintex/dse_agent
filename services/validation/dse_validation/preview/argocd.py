@@ -483,20 +483,39 @@ def trigger_preview_core(
         # previews" — nothing to evict. A removal failure does NOT take down the
         # flow here: it falls into the degraded path right below (failure
         # mode 9).
-        try:
-            for row in db.list_oldest_active_previews(inp.tenant_id, limit=active - cap + 1):
-                old_ns = row["namespace"] or namespace_for(row["work_item_id"])
+        for row in db.list_oldest_active_previews(inp.tenant_id, limit=active - cap + 1):
+            old_ns = row["namespace"] or namespace_for(row["work_item_id"])
+            # Per row, not around the loop. One `try` covering the whole loop
+            # meant the first failure aborted every remaining eviction, so a
+            # single stuck row froze the cap for the entire tenant.
+            removed = True
+            try:
                 gitops.remove_preview_dir(cfg.repo_dir, old_ns)
-                db.mark_preview_reaped(row["work_item_id"])
-                if audit_emit is not None:
-                    audit_emit(
-                        actor=actor, action="preview_evicted_lru", tenant_id=inp.tenant_id,
-                        work_item_id=row["work_item_id"],
-                        details={"namespace": old_ns, "evicted_for": inp.work_item_id,
-                                 "pr_number": inp.pr_number, "cap": cap},
-                    )
-        except Exception as exc:  # noqa: BLE001 — eviction is best-effort; degraded decides below
-            logger.warning("LRU eviction of preview failed (%s: %s)", type(exc).__name__, exc)
+            except Exception as exc:  # noqa: BLE001 — see below: the slot is freed regardless
+                removed = False
+                logger.warning(
+                    "could not remove the preview directory for %s (%s: %s); freeing the slot anyway",
+                    old_ns, type(exc).__name__, exc,
+                )
+            # Freed whether or not the removal worked, and this is the whole
+            # fix. The row is ACCOUNTING; the namespace is the RESOURCE, and the
+            # reaper collects the resource on its own — it works from cluster
+            # state and the namespace's own expiry annotation, and never reads
+            # this table. So a failed removal leaks at most one namespace until
+            # its TTL, while a slot that is never released disables previews for
+            # the tenant permanently. That is exactly how this broke: the
+            # removal raised because the reaper had already deleted those
+            # namespaces days earlier, and the eviction it aborted was the only
+            # thing that ever freed a slot.
+            db.mark_preview_reaped(row["work_item_id"])
+            if audit_emit is not None:
+                audit_emit(
+                    actor=actor, action="preview_evicted_lru", tenant_id=inp.tenant_id,
+                    work_item_id=row["work_item_id"],
+                    details={"namespace": old_ns, "evicted_for": inp.work_item_id,
+                             "pr_number": inp.pr_number, "cap": cap,
+                             "namespace_removed": removed},
+                )
         active = db.count_active_previews(inp.tenant_id)
     if not already_active and active >= cap:
         detail = f"tenant concurrent preview cap reached ({active}/{cap}, ADR-26)"

@@ -526,12 +526,26 @@ def get_preview(work_item_id: str) -> dict[str, Any] | None:
 
 
 def count_active_previews(tenant_id: str) -> int:
+    """How many previews are actually holding a slot.
+
+    A row past its TTL does NOT hold one. The reaper runs entirely from cluster
+    state — it lists the namespaces carrying the preview label, reads their
+    `dse.fintex/expires-at` annotation and deletes the expired ones — and never
+    writes to this table. So an expired row is stale accounting, not capacity:
+    the namespace it refers to is already gone.
+
+    Counting those was a permanent outage, not a rounding error. Three previews
+    expired on a Saturday, the reaper deleted their namespaces, the rows stayed
+    `created`, and every later preview was refused with `concurrency_cap` — the
+    feature switched itself off for good after three uses.
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM wse_previews "
-                "WHERE tenant_id = %s AND status = 'created' AND reaped_at IS NULL",
+                "WHERE tenant_id = %s AND status = 'created' AND reaped_at IS NULL "
+                "  AND (expires_at IS NULL OR expires_at > now())",
                 (tenant_id,),
             )
             return cur.fetchone()[0]
@@ -540,9 +554,13 @@ def count_active_previews(tenant_id: str) -> int:
 
 
 def list_oldest_active_previews(tenant_id: str, limit: int = 1) -> list[dict[str, Any]]:
-    """The tenant's active previews from OLDEST to newest — the queue for the cap's
-    LRU eviction (operator decision 2026-07-23): cap full => the oldest yields its
-    slot to the new PR."""
+    """The eviction queue for the cap (operator decision 2026-07-23): cap full =>
+    the oldest yields its slot to the new PR.
+
+    Expired rows come first. They cost nothing to evict — the reaper has already
+    deleted the namespace they name — so taking one of those never interrupts a
+    preview somebody is looking at, while taking the oldest live one does.
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -550,7 +568,8 @@ def list_oldest_active_previews(tenant_id: str, limit: int = 1) -> list[dict[str
                 """
                 SELECT work_item_id, tenant_id, namespace FROM wse_previews
                  WHERE tenant_id = %s AND status = 'created' AND reaped_at IS NULL
-                 ORDER BY created_at ASC
+                 ORDER BY (expires_at IS NOT NULL AND expires_at <= now()) DESC,
+                          created_at ASC
                  LIMIT %s
                 """,
                 (tenant_id, limit),
