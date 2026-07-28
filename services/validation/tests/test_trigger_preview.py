@@ -367,8 +367,21 @@ def test_concurrency_cap_evicts_oldest_lru(work_item_id, tenant_id, tmp_path):
 
 
 def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, tmp_path, monkeypatch):
-    """If the GitOps removal fails, the eviction is best-effort and the gate
-    degrades as before (failure mode 9 — a preview never blocks the PR)."""
+    """A failed removal must still free the slot.
+
+    This test used to assert the opposite — "nothing was marked reaped without a
+    real removal" — which reads as prudence and was the bug. The reaper works
+    from cluster state and the namespace's own expiry annotation and never reads
+    `wse_previews`, so a row that is never released is not caution: it is a slot
+    lost for good. Three of them expired on a Saturday, the reaper deleted their
+    namespaces, the removal then raised because the directory was already gone,
+    the eviction aborted, and previews stayed off for the tenant from that day
+    on.
+
+    The trade is deliberate and asymmetric. Freeing the slot risks leaking one
+    namespace until its TTL expires — which the reaper collects anyway. Not
+    freeing it disables the feature permanently.
+    """
     db.set_preview_cap(tenant_id, 1)
     db.upsert_preview(
         work_item_id=f"{work_item_id}-old", tenant_id=tenant_id, pr_number=1,
@@ -387,10 +400,41 @@ def test_concurrency_cap_degrades_when_eviction_fails(work_item_id, tenant_id, t
             pr_number=14, files_changed=["frontend/app.tsx"],
         )
     )
-    assert ref.status == "degraded"
-    assert "cap" in ref.detail
-    # the old one is still active — nothing was marked reaped without a real removal
-    assert db.get_preview(f"{work_item_id}-old")["status"] == "created"
+    # The slot IS released, so the cap is no longer what stops this preview.
+    # It may still degrade further down (there is no cluster in this test), but
+    # never again for `concurrency_cap`.
+    assert db.get_preview(f"{work_item_id}-old")["status"] == "reaped"
+    assert "cap" not in (ref.detail or "")
+
+
+def test_an_expired_preview_does_not_hold_a_slot(work_item_id, tenant_id):
+    """The reaper deletes namespaces on TTL and never writes to this table, so a
+    row past its expiry names a namespace that no longer exists. Counting it
+    against the cap is how the feature switched itself off after three uses."""
+    from datetime import datetime, timedelta, timezone
+
+    db.set_preview_cap(tenant_id, 1)
+    db.upsert_preview(
+        work_item_id=f"{work_item_id}-dead", tenant_id=tenant_id, pr_number=1,
+        repo="acme/app", status="created", namespace="preview-x-dead",
+        # `expires_at` is stored verbatim, not derived from ttl_seconds — so an
+        # expired row has to be written as one.
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    assert db.count_active_previews(tenant_id) == 0, "an expired preview still held a slot"
+
+    # And a live one does hold its slot — the cap is still a real ceiling.
+    db.upsert_preview(
+        work_item_id=f"{work_item_id}-live", tenant_id=tenant_id, pr_number=2,
+        repo="acme/app", status="created", namespace="preview-x-live",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    assert db.count_active_previews(tenant_id) == 1
+
+    # Eviction takes the dead one first: evicting a preview somebody is looking
+    # at, while a corpse sits next to it, would be gratuitous.
+    oldest = db.list_oldest_active_previews(tenant_id, limit=1)
+    assert oldest[0]["work_item_id"] == f"{work_item_id}-dead"
 
 
 def test_cap_zero_blocks_immediately_without_touching_cluster(work_item_id, tenant_id):
