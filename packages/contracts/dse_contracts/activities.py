@@ -471,6 +471,12 @@ class TesterTurnResult(BaseModel):
     files_changed: list[str] = Field(default_factory=list)
     base_sha: str | None = None
     head_sha: str | None = None
+    # Tail of the suite's stdout+stderr when it failed. The runtime already
+    # captured this and wrote it to a log line, where nothing could read it: the
+    # workflow retried the Coder with the SAME instruction because it had
+    # nothing else to say. Four rounds of an identical request, then the retry
+    # cap. Empty on success, and defaulted so an older worker still decodes.
+    failure_output: str = ""
 
     @model_validator(mode="after")
     def _mirror_test_files(self) -> "TesterTurnResult":

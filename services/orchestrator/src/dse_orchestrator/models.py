@@ -101,6 +101,18 @@ class WorkItemLifecycleInput:
     l2_objections: list[str] = field(default_factory=list)
     l2_retry_count: int = 0
 
+    # Why the LAST automated attempt failed: the tester's output, or the L1
+    # checks that did not pass. Carried into the next Coder turn exactly as the
+    # L2 objections above already were.
+    #
+    # Without this the two loops were not symmetric, and the difference decided
+    # whether a task could ever recover. The human-review loop appended its
+    # comments; the tester/L1 loop re-sent the original request byte for byte,
+    # so a task that failed once failed identically until the cap — four rounds
+    # of the same instruction, the last one changing no files at all. Cleared on
+    # a pass so a later attempt is never told about a failure that is fixed.
+    fix_context: list[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Phase 2 — budgets (WSB-E4-T1). `budget_max_usd` comes from the JSONB
     # `work_items.budget` (key "max_usd") read at admission; `spent_usd`

@@ -502,6 +502,43 @@ class WorkItemLifecycleWorkflow:
             f"WorkItemLifecycleWorkflow.run got an unsupported input type: {type(raw_input)!r}"
         )
 
+    # Both helpers are pure string formatting over values already in hand — no
+    # Activity, no clock, no randomness — so they are safe to call from inside
+    # the workflow and deterministic on replay (P1).
+    @staticmethod
+    def _tester_failure_context(tester_result) -> list[str]:
+        """What the Coder needs to know about a suite that just failed."""
+        output = (getattr(tester_result, "failure_output", "") or "").strip()
+        if not output:
+            # An older worker returns no output. Say so plainly rather than
+            # implying the suite was silent — the two call for different fixes.
+            return [
+                "The test suite failed (exit code "
+                f"{getattr(tester_result, 'returncode', '?')}) and its output was not captured. "
+                "Re-read the tests and the code under test, and look for the mismatch."
+            ]
+        return [
+            "The test suite you must satisfy is FAILING. Fix the code so it passes; "
+            "do not weaken or delete the tests.\n"
+            f"Exit code: {getattr(tester_result, 'returncode', '?')}\n"
+            f"Output:\n{output}"
+        ]
+
+    @staticmethod
+    def _l1_failure_context(failed_checks) -> list[str]:
+        """The L1 checks that did not pass, with the reason each gave."""
+        lines = []
+        for f in failed_checks:
+            detail = (getattr(f, "detail", "") or "").strip()
+            status = getattr(getattr(f, "status", None), "value", None) or "FAIL"
+            lines.append(f"- {f.check} [{status}]: {detail or 'no detail reported'}")
+        if not lines:
+            return []
+        return [
+            "The L1 validation pipeline rejected the previous attempt. "
+            "Fix these, and change nothing else:\n" + "\n".join(lines)
+        ]
+
     def _agent_instruction(self, *, include_objections: bool = False) -> str:
         """S1 (Phase 5): builds the REAL instruction the Planner/Coder receive —
         the task description (issue title+body), plus acceptance criteria and
@@ -522,6 +559,12 @@ class WorkItemLifecycleWorkflow:
             for obj in getattr(input, "l2_objections", []) or []:
                 if obj and str(obj).strip():
                     parts.append(f"Review objection to fix: {str(obj).strip()}")
+        # Why the previous attempt failed. Last, so it is the freshest thing the
+        # Coder reads, and unconditional: it is only ever non-empty while a
+        # retry is pending, so the first turn is unaffected.
+        for note in getattr(input, "fix_context", []) or []:
+            if note and str(note).strip():
+                parts.append(str(note).strip())
         return "\n\n".join(parts) or "Implement the requested task."
 
     def _pr_summary(self) -> str:
@@ -1401,10 +1444,13 @@ class WorkItemLifecycleWorkflow:
                             "tester_failed_after_retry_cap",
                             audit_action="tester_retry_cap_exhausted",
                         )
+                    if workflow.patched("fix-loop-carries-the-failure-v1"):
+                        input.fix_context = self._tester_failure_context(tester_result)
                     await self._set_status(
                         WorkItemStatus.implementing,
                         audit_action="tester_failed_retrying",
-                        details={"attempt": input.coder_retry_count},
+                        details={"attempt": input.coder_retry_count,
+                                 "returncode": tester_result.returncode},
                     )
                     continue
 
@@ -1441,6 +1487,10 @@ class WorkItemLifecycleWorkflow:
                 if workflow.patched("structured-gate-status-v1")
                 else l1_result.passed
             )
+            if l1_passed and workflow.patched("fix-loop-carries-the-failure-v1"):
+                # Cleared on success, like l2_objections below: a later attempt
+                # must never be handed a failure that has already been fixed.
+                input.fix_context = []
             if not l1_passed:
                 # Finding from a real run (burned ~$8 in useless fix cycles): a
                 # missing/broken L1 manifest is a REPO CONFIG problem — no Coder
@@ -1479,8 +1529,17 @@ class WorkItemLifecycleWorkflow:
                         detail=self._input.terminal_detail,
                         pr_number=input.pr_number,
                     )
-                await self._set_status(WorkItemStatus.implementing, audit_action="l1_failed_retrying",
-                                        details={"attempt": input.coder_retry_count})
+                failed_checks = [f for f in l1_result.findings if not f.passed]
+                if workflow.patched("fix-loop-carries-the-failure-v1"):
+                    input.fix_context = self._l1_failure_context(failed_checks)
+                await self._set_status(
+                    WorkItemStatus.implementing, audit_action="l1_failed_retrying",
+                    # Which checks failed, not how many attempts. `l1_completed`
+                    # below records every check that RAN, so a reader could not
+                    # tell one broken gate from eight.
+                    details={"attempt": input.coder_retry_count,
+                             "failed": [f.check for f in failed_checks]},
+                )
                 continue  # new Coder turn on the same sandbox/branch
 
             # L1 passed -> fresh-context Reviewer L2 (WSC-E3-T5/WSE-E2).
