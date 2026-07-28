@@ -37,6 +37,22 @@ spec:
               value: {{ include "dse.fullname" . }}-postgres
             - name: DYNAMIC_CONFIG_FILE_PATH
               value: "config/dynamicconfig/docker.yaml"
+            # auto-setup defaults DEFAULT_NAMESPACE_RETENTION to 24h
+            # (/etc/temporal/auto-setup.sh), which destroys a work item's
+            # workflow history a day after it closes — exactly when someone
+            # asks why an item is stuck and whether re-running it is safe.
+            #
+            # CREATE-ONLY. auto-setup passes --retention only on the branch
+            # that CREATES the namespace; where `default` already exists this
+            # value is inert and every restart takes the else branch. An
+            # existing cluster must be repaired once, out of band:
+            #   kubectl exec -n <ns> deploy/<release>-temporal -- \
+            #     temporal --address <release>-temporal:7233 \
+            #     operator namespace update -n default --retention 720h
+            # (--address is required: the server binds the pod IP, not
+            # loopback.) Done on dse-vm-01 on 2026-07-28.
+            - name: DEFAULT_NAMESPACE_RETENTION
+              value: {{ .Values.temporal.namespaceRetention | default "720h" | quote }}
             # Temporal's auto-setup reads POSTGRES_PWD (not POSTGRES_PASSWORD,
             # which is the name in the secret). Without this: "password
             # authentication failed for user dse". POSTGRES_USER comes from the

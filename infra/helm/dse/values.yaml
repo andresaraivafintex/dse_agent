@@ -146,6 +146,14 @@ postgres:
 # ---------------------------------------------------------------------------
 temporal:
   enabled: true
+  # Retention of the `default` namespace's workflow history. Temporal's own
+  # minimum is 24h, which is also auto-setup's default — too short to answer
+  # "what did this work item already do, and is re-running it safe?" the day
+  # after it stalls. 720h = 30d costs little at this scale (the temporal
+  # databases are 79MB + 11MB for ~31 executions).
+  # Applied at namespace CREATION only — see the note in templates/temporal.yaml
+  # before assuming a helm upgrade repairs an existing cluster.
+  namespaceRetention: "720h"
   image:
     repository: temporalio/auto-setup
     tag: "1.29"
