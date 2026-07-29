@@ -316,10 +316,12 @@ def _seed_metered(conn, wi_id: str) -> int:
     row carrying its id — the shape every turn has from rc.7 onward."""
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO work_items (id, tenant_id, source, source_ref, title, requester, "
-            "status, risk_class, budget, idempotency_key) VALUES "
-            "(%s, 'crm-test', 'github', %s::jsonb, 'metered', 'usr_test', 'implementing', "
-            "'low', %s::jsonb, %s)",
+            """
+            INSERT INTO work_items (id, tenant_id, source, source_ref, repo, base_branch,
+                                    requester, status, risk_class, budget, idempotency_key)
+            VALUES (%s, 'crm-test', 'github', %s::jsonb, 'acme/repo', 'main',
+                    'usr_test', 'implementing', 'low', %s::jsonb, %s)
+            """,
             (wi_id, json.dumps({"repo": "acme/repo", "number": 7}),
              json.dumps({"max_usd": 5.0}), f"idem-{wi_id}"),
         )
@@ -371,10 +373,12 @@ def test_a_backfilled_turn_stays_single_across_a_full_replay():
         _cleanup(wi_id)
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO work_items (id, tenant_id, source, source_ref, title, requester, "
-                "status, risk_class, budget, idempotency_key) VALUES "
-                "(%s, 'crm-test', 'github', %s::jsonb, 'backfilled', 'usr_test', 'implementing', "
-                "'low', %s::jsonb, %s)",
+                """
+                INSERT INTO work_items (id, tenant_id, source, source_ref, repo, base_branch,
+                                        requester, status, risk_class, budget, idempotency_key)
+                VALUES (%s, 'crm-test', 'github', %s::jsonb, 'acme/repo', 'main',
+                        'usr_test', 'implementing', 'low', %s::jsonb, %s)
+                """,
                 (wi_id, json.dumps({"repo": "acme/repo", "number": 8}),
                  json.dumps({"max_usd": 5.0}), f"idem-{wi_id}"),
             )
