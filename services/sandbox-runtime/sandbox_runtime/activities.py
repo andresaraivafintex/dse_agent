@@ -1118,6 +1118,13 @@ CRITICAL RULES:
 - Paths MUST be test paths (tests/, __tests__/, *.test.js|ts, test_*.py…).
 - 1 file (2 at most); CONCISE (~40-80 lines). Truncated JSON = failure.
 - Do not modify production code — tests only.
+- THE PROCESS MUST EXIT WHEN THE TESTS FINISH. Close every resource you open —
+  an http server started in a test or a before() hook must be closed in an
+  after() that runs even when a test fails; clear every timer/interval; do not
+  leave a connection open. A suite whose tests all pass but whose process never
+  exits is a FAILURE here: the runner is killed on a timeout and your tests
+  count for nothing. If you need a server, prefer `server.listen(0)` and
+  `after(() => new Promise(r => server.close(r)))`.
 {error_feedback}
 ## Task
 {instruction}
@@ -1338,6 +1345,12 @@ _TEST_INFRA_ERROR_MARKERS = (
     "err_require_esm", "syntaxerror", "modulenotfounderror", "importerror",
 )
 
+# How long the authored suite gets before it is declared non-terminating.
+# Comfortably above a real suite (the target repo's runs in ~4 s) and far below
+# the 600 s activity timeout, so the activity always returns a RESULT the Tester
+# can read instead of dying and being retried blind.
+_SUITE_TIMEOUT_SECONDS = 180
+
 
 def _authored_test_infra_error(workspace_dir: str, test_paths: list[str]) -> str | None:
     """Run ONLY the freshly authored tests and detect an INFRA error
@@ -1465,16 +1478,37 @@ def _tester_pod_sync(
     # run the suite IN THE POD (deterministic detection: package.json with a
     # "test" script → npm test; otherwise pytest). node/npm/pytest come from the
     # image (rebuild).
+    # The suite runs UNDER `timeout` inside the Pod, and that is load-bearing.
+    #
+    # A test that leaves a handle open — an http server the test forgot to
+    # close, a pending timer — makes the runner sit there forever. Without an
+    # inner bound the only thing that ever ended the run was the 600s activity
+    # timeout, which Temporal reports as TimeoutExpired with no output: the
+    # Tester cannot see that its own test hangs, so on the next attempt it
+    # authors ANOTHER test file, which hangs too. Observed live: six authored
+    # files, one every ~10 minutes, each one a fresh name, none of them ever
+    # terminating.
+    #
+    # Node's own guards do NOT rescue this — verified in the live sandbox:
+    # `--test-timeout` and `--test-force-exit` both still hung, because they
+    # bound the tests, not whatever is holding the loop open around them.
+    # `timeout` from coreutils does, and it turns a hang into rc=124 with the
+    # output the runner already produced.
     run = _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
-        'npm install --no-audit --no-fund >/dev/null 2>&1 || true; npm test --silent; '
-        'else python3 -m pytest -q; fi',
+        'npm install --no-audit --no-fund >/dev/null 2>&1 || true; '
+        f'timeout -k 10 {_SUITE_TIMEOUT_SECONDS} npm test --silent; '
+        f'else timeout -k 10 {_SUITE_TIMEOUT_SECONDS} python3 -m pytest -q; fi',
         timeout=600,
     )
     tests_ran = bool(test_files)
     tests_passed = tests_ran and run.returncode == 0
     returncode = run.returncode
+    # 124 is `timeout`'s signal that the suite never terminated. That is an
+    # INFRA defect in the authored test, not a failing assertion, and it has to
+    # be reported as such — the Coder cannot fix an assertion that never ran.
+    suite_hung = returncode == 124
     # Kept, not just logged. The workflow feeds this back to the Coder on the
     # next attempt; without it the retry repeats the original instruction
     # verbatim and the same test fails again. Tail, because the useful part of a
@@ -1482,7 +1516,20 @@ def _tester_pod_sync(
     failure_output = ""
     if tests_ran and not tests_passed:
         failure_output = ((run.stdout or "") + (run.stderr or ""))[-_FAILURE_OUTPUT_CHARS:]
-        logger.warning("tester k8s: suite failed (rc=%s): %.300s", returncode, failure_output[-300:])
+        if suite_hung:
+            # Say it in words the next authoring round will actually act on. The
+            # raw output ends mid-run and reads like a pass, which is precisely
+            # how six non-terminating files got authored in a row.
+            failure_output = (
+                f"THE SUITE DID NOT TERMINATE within {_SUITE_TIMEOUT_SECONDS}s and was killed.\n"
+                "The tests themselves may well pass — the process never exits. Something is "
+                "holding the event loop open: an http server started in the test and not closed "
+                "in after(), a pending timer, or an open handle in a before() hook. Close every "
+                "resource you open, in an after() that runs even when a test fails.\n\n"
+            ) + failure_output
+        logger.warning("tester k8s: suite %s (rc=%s): %.300s",
+                       "DID NOT TERMINATE" if suite_hung else "failed", returncode,
+                       failure_output[-300:])
 
     # commit the test files IN THE POD (current branch; the post-tester checkpoint
     # picks them up and finalize pushes). No push here.
