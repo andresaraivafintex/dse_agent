@@ -56,10 +56,15 @@ def record_call(
     cost_usd: float,
     tokens_in: int,
     tokens_out: int,
-) -> None:
-    """Writes an immutable row into the ledger. Called by
+) -> int:
+    """Writes an immutable row into the ledger and RETURNS its id. Called by
     `gateway_call.chat_completion` AFTER a 2xx response (only real cost goes
-    into the ledger — a denied/failed call produces no row here)."""
+    into the ledger — a denied/failed call produces no row here), and by the
+    coder Activity, whose spend never passes through the gateway client at all.
+
+    The id is returned so the caller can record WHICH ledger row represents a
+    turn: the console projector needs that to tell a metered turn from a legacy
+    one and avoid counting the same money twice."""
     conn = db.get_connection()
     try:
         with conn.cursor() as cur:
@@ -69,6 +74,7 @@ def record_call(
                     (tenant_id, work_item_id, stage, task_class, model,
                      cost_usd, tokens_in, tokens_out)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (
                     tenant_id,
@@ -81,7 +87,9 @@ def record_call(
                     tokens_out,
                 ),
             )
+            new_id = cur.fetchone()[0]
         conn.commit()
+        return new_id
     finally:
         conn.close()
 

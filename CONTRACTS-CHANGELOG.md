@@ -43,11 +43,29 @@ change to the public surface.
 
 | Package | Version | Owner | Consumed by |
 |---|---|---|---|
-| `dse_contracts` (`packages/contracts`) | 0.1.0 | Foundation | WS-A, WS-B, WS-C, WS-D, WS-E, WS-F |
+| `dse_contracts` (`packages/contracts`) | 0.3.0 | Foundation | WS-A, WS-B, WS-C, WS-D, WS-E, WS-F |
 | `dse_audit` (`packages/dse_audit`) | 0.1.0 | Foundation (minimal) → **extended by WS-F in Phase 1** | Everyone (via `emit`); `dse_audit.queries` (reconstruction/export) consumed by any compliance service/report |
 | `dse_identity` (`packages/dse_identity`) | 0.1.0 | Foundation (minimal) | WS-A (adapters resolve `platform_user_id` before writing `actor`) |
 
 ## Entries
+
+### `dse_contracts` 0.2.0 → 0.3.0 — `CoderTurnResult` gains optional `ledger_id`
+
+- **What:** a new optional `ledger_id: int | None = None` on `CoderTurnResult`.
+  Nothing is removed, renamed or re-typed, and old Temporal payloads decode
+  unchanged.
+- **Why:** the coder drives the bundled CLI with the gateway configured by env,
+  so its spend never passed through the Python client that is the only writer of
+  `model_call_ledger`. The console's cost rollup is computed from that table
+  alone, so it reported **$0.50 against $27.91** of real spend — 56x — under a
+  panel header that read "rollup reconciled with the ledger". Turns are now
+  metered at the source, and this field is how the console projector tells a
+  metered turn from a legacy one, so the same money is never counted twice.
+- **Consumed by:** WS-B (orchestrator carries it up into the audit row), WS-C
+  (sandbox-runtime writes it), console-projector (reads it as a dedup guard).
+- **Change type:** additive (rule 1) — no prior approval required. MINOR bump.
+  The version table below was stale at 0.1.0 while `pyproject.toml` already said
+  0.2.0; corrected in passing.
 
 ### `dse_contracts` — `CiStatusResult.status` gains `no_ci` (CI gate fix)
 

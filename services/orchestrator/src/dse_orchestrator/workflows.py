@@ -1498,10 +1498,23 @@ class WorkItemLifecycleWorkflow:
                 CoderTurnResult,
             )
             await self._consume_cost(coder_result.cost_usd, source="coder")
-            await self._audit(
-                "coder_turn_completed",
-                {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
-            )
+            # The projector filters audit-derived runs to system:orchestrator
+            # rows, so the ledger marker the Activity writes into its OWN audit
+            # copy is invisible to it and has to be carried up here. Without it
+            # the projector would create a second run for a turn already in the
+            # ledger and double the cost it reports.
+            if workflow.patched("coder-cost-ledger-id-v1"):
+                await self._audit(
+                    "coder_turn_completed",
+                    {"files_changed": coder_result.files_changed,
+                     "cost_usd": coder_result.cost_usd,
+                     "ledger_id": coder_result.ledger_id},
+                )
+            else:
+                await self._audit(
+                    "coder_turn_completed",
+                    {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
+                )
 
             # WSB-E2-T3 — Tester session (writes/adjusts tests BEFORE L1).
             await self._boundary_gate()
