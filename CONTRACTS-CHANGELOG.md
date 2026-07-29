@@ -65,19 +65,19 @@ change to the public surface.
 - **Consumed by:** WS-B (the orchestrator's review loop is the only consumer;
   `unknown_ci_status` there previously escalated on any value other than
   `green`, which is why the workflow change ships together with this one).
-- **Change type — NEEDS A RULING, and it is why this PR is not self-merged.**
-  It reads as additive under rule 1 (nothing removed, renamed or re-typed) but
-  as breaking under rule 2 ("changing the semantics of a status/enum already
-  consumed by another workstream"), because an existing input — an empty
-  check-run array — now produces a different value than before. Under rule 2
-  this needs an isolated contract PR, a MAJOR bump, and approval from someone
-  who is not the proposer (P3). Under rule 1 it is a MINOR bump and needs no
-  prior approval.
-  The proposer's reading is **MINOR/additive**: the only consumer ships in the
-  same image and is updated in the same change, and no external workstream can
-  observe the old value for a new input. But the classification is the
-  architect's call, not the proposer's, and `packages/contracts/pyproject.toml`
-  is deliberately left at `0.1.0` until it is made.
+- **Change type: MINOR (additive) — ruled by the chief architect
+  (André Saraiva), 2026-07-28.** The classification was genuinely ambiguous and
+  was escalated rather than assumed: it reads as additive under rule 1 (nothing
+  removed, renamed or re-typed; the field stays a plain `str`) but as breaking
+  under rule 2 ("changing the semantics of a status/enum already consumed by
+  another workstream"), because an existing input — an empty check-run array —
+  now produces a different value than before.
+  The ruling is rule 1. The reasoning of record: `CiStatusResult.status` has
+  exactly one consumer (the WS-B review loop), it ships in the same image and is
+  updated in the same change, so no external workstream can ever observe the old
+  value for a new input. `packages/contracts` accordingly goes `0.1.0` → `0.2.0`.
+  P3 was respected: the proposer did not approve this — the architect did, and
+  GitHub independently refuses a self-approval on an authored PR.
 - **Migration:** `migrations/0033_ci_no_ci_status.sql` widens the CHECK
   constraints on `wse_ci_status.status` and `work_items.ci_status` to accept
   `no_ci`. It is purely permissive, so it is safe to apply while the previous
