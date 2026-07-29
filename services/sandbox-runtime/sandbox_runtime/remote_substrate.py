@@ -150,6 +150,13 @@ class RemoteSubstrate:
     def driver(self) -> SandboxDriver:
         return self._driver
 
+    @property
+    def substrate_name(self) -> str:
+        """Exposed so callers can tell a SCRIPTED turn from one that spent real
+        money. FakeSubstrate reports a non-zero cost per step, so "cost > 0" is
+        not that discriminator — the substrate name is."""
+        return self._name
+
     def checkpoint_sha(self, *, branch: str, phase: str) -> str:
         """Current SHA of the branch INSIDE the sandbox (the checkpoint is a
         no-op when there are no changes) — replaces the host's

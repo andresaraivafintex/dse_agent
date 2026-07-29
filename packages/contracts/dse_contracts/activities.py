@@ -96,6 +96,13 @@ class CoderTurnResult(BaseModel):
     tokens_out: int = 0
     base_sha: str | None = None
     head_sha: str | None = None
+    # model_call_ledger.id written for this turn; None = not metered into the
+    # ledger. The coder's spend never passes through the gateway client, so it
+    # was absent from the ledger entirely and the console's cost rollup — which
+    # is computed only from that table — understated real spend 56x. The
+    # projector uses this to tell a metered turn from a legacy one, so the same
+    # money is never counted twice.
+    ledger_id: int | None = None
 
 
 # ---------------------------------------------------------------------------

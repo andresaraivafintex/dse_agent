@@ -301,3 +301,112 @@ def test_projects_evidence_preview_into_view():
         conn.rollback()
         conn.close()
         _cleanup(wi_id)
+
+
+# ---------------------------------------------------------------------------
+# The coder's spend is now metered into model_call_ledger at turn time. The
+# audit-derived path stays as the legacy fallback, and these pin the boundary
+# between them — because getting it wrong makes the fix WORSE than the bug: the
+# one surface that was correct ($27.91 in runs_view) would double to $55.82.
+# ---------------------------------------------------------------------------
+
+
+def _seed_metered(conn, wi_id: str) -> int:
+    """A coder turn that WAS metered: a ledger row plus an orchestrator audit
+    row carrying its id — the shape every turn has from rc.7 onward."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO work_items (id, tenant_id, source, source_ref, title, requester, "
+            "status, risk_class, budget, idempotency_key) VALUES "
+            "(%s, 'crm-test', 'github', %s::jsonb, 'metered', 'usr_test', 'implementing', "
+            "'low', %s::jsonb, %s)",
+            (wi_id, json.dumps({"repo": "acme/repo", "number": 7}),
+             json.dumps({"max_usd": 5.0}), f"idem-{wi_id}"),
+        )
+        cur.execute(
+            "INSERT INTO model_call_ledger (tenant_id, work_item_id, stage, task_class, model, "
+            "cost_usd, tokens_in, tokens_out) VALUES "
+            "('crm-test', %s, 'coder', 'default', 'anthropic/claude', 3.00, 10, 5) RETURNING id",
+            (wi_id,),
+        )
+        ledger_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO audit_log (work_item_id, tenant_id, actor, action, details) "
+            "VALUES (%s, 'crm-test', 'system:orchestrator', 'coder_turn_completed', %s::jsonb)",
+            (wi_id, json.dumps({"cost_usd": 3.00, "ledger_id": ledger_id})),
+        )
+    conn.commit()
+    return ledger_id
+
+
+def test_a_metered_turn_produces_one_run_not_two():
+    conn = psycopg2.connect(DSN)
+    wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
+    try:
+        _cleanup(wi_id)
+        ledger_id = _seed_metered(conn, wi_id)
+        drain(conn)
+        drain(conn)  # idempotency: a second pass must not add anything
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_key, cost_usd FROM console_rm.runs_view WHERE work_item_id = %s",
+                (wi_id,),
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1, f"expected exactly one run, got {rows}"
+        assert rows[0][0] == f"ledger:{ledger_id}"
+        assert float(rows[0][1]) == 3.00
+    finally:
+        _cleanup(wi_id)
+        conn.close()
+
+
+def test_a_backfilled_turn_stays_single_across_a_full_replay():
+    """The DR case. audit_log is append-only, so a historical row can never gain
+    a ledger_id — a backfill points the LEDGER row at the audit row instead. A
+    rebuild from cursor 0 must not resurrect the legacy run on top of it."""
+    conn = psycopg2.connect(DSN)
+    wi_id = f"wi-crm-{uuid.uuid4().hex[:10]}"
+    try:
+        _cleanup(wi_id)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO work_items (id, tenant_id, source, source_ref, title, requester, "
+                "status, risk_class, budget, idempotency_key) VALUES "
+                "(%s, 'crm-test', 'github', %s::jsonb, 'backfilled', 'usr_test', 'implementing', "
+                "'low', %s::jsonb, %s)",
+                (wi_id, json.dumps({"repo": "acme/repo", "number": 8}),
+                 json.dumps({"max_usd": 5.0}), f"idem-{wi_id}"),
+            )
+            # the historical audit row: no ledger_id, and it can never get one
+            cur.execute(
+                "INSERT INTO audit_log (work_item_id, tenant_id, actor, action, details) "
+                "VALUES (%s, 'crm-test', 'system:orchestrator', 'coder_turn_completed', %s::jsonb) "
+                "RETURNING id",
+                (wi_id, json.dumps({"cost_usd": 4.00})),
+            )
+            audit_id = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO model_call_ledger (tenant_id, work_item_id, stage, task_class, model, "
+                "cost_usd, tokens_in, tokens_out, source_audit_id) VALUES "
+                "('crm-test', %s, 'coder', 'default', 'anthropic/claude', 4.00, 10, 5, %s)",
+                (wi_id, audit_id),
+            )
+        conn.commit()
+        drain(conn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM console_rm.runs_view WHERE work_item_id = %s", (wi_id,))
+            assert cur.fetchone()[0] == 1
+            cur.execute("UPDATE console_rm.projection_cursor SET last_id = 0")
+        conn.commit()
+        drain(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_key FROM console_rm.runs_view WHERE work_item_id = %s", (wi_id,)
+            )
+            rows = cur.fetchall()
+        assert len(rows) == 1, f"a cursor-0 replay duplicated the run: {rows}"
+        assert rows[0][0].startswith("ledger:")
+    finally:
+        _cleanup(wi_id)
+        conn.close()

@@ -19,6 +19,7 @@ keeps state in process memory across calls. All state lives:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -693,6 +694,51 @@ async def _run_coder_turn_impl(
 
         files_changed = git_session.files_changed_against(base_sha) if base_sha != git_session.current_sha() else []
 
+    # Meter the coder into model_call_ledger. Every other stage lands there
+    # through the gateway client, but the coder drives the bundled CLI with the
+    # gateway configured by env, so its cost only ever existed on this result —
+    # which is why the console's rollup, computed from the ledger alone,
+    # reported $0.50 against $27.91 of real spend.
+    #
+    # The guard is the SUBSTRATE NAME, not the cost: FakeSubstrate reports
+    # $0.01 per step, so a cost-based guard would start writing ledger rows from
+    # four existing scripted tests into a table nothing is allowed to delete
+    # from.
+    ledger_id: int | None = None
+    _scripted = getattr(agent, "substrate_name", "") == "fake" or type(agent).__name__ == "FakeSubstrate"
+    if artifacts.cost_usd and not _scripted:
+        try:
+            from model_gateway_client.ledger import record_call
+
+            ledger_id = record_call(
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                stage=inp.stage,
+                task_class=inp.task_class,
+                model=os.environ.get("DSE_CODER_MODEL", "anthropic/claude"),
+                cost_usd=artifacts.cost_usd,
+                tokens_in=artifacts.tokens_in,
+                tokens_out=artifacts.tokens_out,
+            )
+        except Exception as exc:  # noqa: BLE001 — never re-raise here
+            # The commit and push above ALREADY happened. Raising would burn a
+            # Temporal retry and re-spend real money to fix a bookkeeping miss.
+            # Fail loud and fall back to the legacy audit-derived path.
+            ledger_id = None
+            logger.error(
+                "coder cost ledger write FAILED (%s: %s); $%.4f falls back to the audit path",
+                type(exc).__name__, str(exc)[:200], artifacts.cost_usd,
+            )
+            with contextlib.suppress(Exception):
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="coder_cost_ledger_write_failed",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"error": type(exc).__name__, "cost_usd": artifacts.cost_usd,
+                             "stage": inp.stage},
+                )
+
     audit_emit(
         actor="system:sandbox-runtime",
         action="coder_turn_completed",
@@ -703,10 +749,12 @@ async def _run_coder_turn_impl(
             "files_changed": files_changed or artifacts.files_changed,
             "cost_usd": artifacts.cost_usd,
             "virtual_key_fixture": vk.fixture,
+            "ledger_id": ledger_id,
         },
     )
 
     return CoderTurnResult(
+        ledger_id=ledger_id,
         sandbox_id=artifacts.sandbox_id,
         diff_summary=artifacts.diff_summary,
         files_changed=files_changed or artifacts.files_changed,

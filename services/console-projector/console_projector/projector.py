@@ -248,13 +248,32 @@ def _maybe_run_from_audit(cur, row) -> None:
     Dedup (found via the dashboard showing ~2x the real spend): the SAME turn is
     audited TWICE — once by the activity (system:sandbox-runtime) and once by the
     workflow (system:orchestrator). Only the ORCHESTRATOR row becomes a run; the
-    activity row stays on the timeline but does not add cost again."""
+    activity row stays on the timeline but does not add cost again.
+
+    THIS IS NOW THE LEGACY PATH. Coder turns are metered into
+    model_call_ledger at the source, and a metered turn must NOT also produce a
+    run here — otherwise the one surface that was CORRECT (runs_view, $27.91)
+    would double to $55.82, which is worse than the bug being fixed. Two guards
+    below cover the two ways a turn can already be accounted for."""
     engine = _AUDIT_COST_ACTIONS.get(row["action"])
     if not engine:
         return
     if row.get("actor") != "system:orchestrator":
         return
     details = row["details"] or {}
+    # (1) Metered at turn time: _project_ledger owns this run.
+    if details.get("ledger_id") is not None:
+        return
+    # (2) Metered retroactively by a backfill. audit_log is append-only, so a
+    #     historical row can never gain a ledger_id — the ledger row points back
+    #     at it instead. Without this, a full replay from cursor 0 (the
+    #     documented DR path) recreates every audit:<id> run on top of the
+    #     backfilled ledger:<id> rows.
+    cur.execute(
+        "SELECT 1 FROM model_call_ledger WHERE source_audit_id = %s LIMIT 1", (row["id"],)
+    )
+    if cur.fetchone() is not None:
+        return
     cost = details.get("cost_usd")
     if cost in (None, ""):
         return
