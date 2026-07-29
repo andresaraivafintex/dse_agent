@@ -118,6 +118,12 @@ def consume_ci_status_l3(
          "output_summary": (r.get("output") or {}).get("summary", "")}
         for r in _failed_runs(check_runs)
     ]
+    # `save_ci_status` REPLACES detail wholesale (its upsert does
+    # `detail = EXCLUDED.detail`, not a merge), so anything the core consumer
+    # recorded and is not repeated here is lost. Carry the legacy-status
+    # evidence forward rather than blanking it.
+    previous = db.get_ci_status(work_item_id) or {}
+    combined_summary = (previous.get("detail") or {}).get("combined_status")
     db.save_ci_status(
         work_item_id, pr_number, result.status,
         {
@@ -127,6 +133,7 @@ def consume_ci_status_l3(
                 {"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion")}
                 for r in check_runs
             ],
+            "combined_status": combined_summary,
         },
     )
 

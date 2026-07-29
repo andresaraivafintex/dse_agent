@@ -171,6 +171,17 @@ class WorkItemLifecycleInput:
     ci_poll_interval_seconds: float = 60.0
     ci_pending_poll_cap: int = 1440
     ci_pending_polls: int = 0
+    # Wall clock on the CI wait. `ci_pending_poll_cap` bounds a COUNT, which is
+    # only a duration if every poll is fast and the worker never restarts — and
+    # the counter resets on every CI-red fix cycle, so a flapping item can
+    # outlive any nominal window indefinitely. These two bound the elapsed time
+    # instead. Like the caps below, they are literals rather than env vars
+    # because `config.apply_to_input` has no production caller (the dispatcher
+    # starts the workflow with a bare work-item id, so this dataclass is built
+    # from its defaults) — a DSE_CI_* env var would be dead on arrival.
+    # <= 0 disables the deadline.
+    ci_wait_started_at_epoch: float | None = None
+    ci_wait_deadline_hours: float = 6.0
 
     # Phase 2 (WSB-E3-T2/E3-T3/E4) — new caps/policy. `require_approval_risk_classes`
     # is the POLICY of which risk classes require human approval; it lives in the
