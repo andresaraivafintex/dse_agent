@@ -34,6 +34,15 @@ logger = logging.getLogger("sandbox_runtime.activities")
 # in a model prompt and in Temporal's history.
 _FAILURE_OUTPUT_CHARS = 4000
 
+# How much of a failing suite's output is kept ON THE LEDGER. The full text
+# already travels back to the Coder; what was missing is the answer to "why did
+# this work item fail?" surviving anywhere durable. It lived only in the
+# orchestrator pod's log, truncated to 300 chars and rotated away — so the one
+# question the audit ledger exists to answer had to be chased through
+# `kubectl logs`. Smaller than the Coder's copy on purpose: this is for a human
+# reading the trail, not for the model.
+_FAILURE_OUTPUT_AUDIT_CHARS = 1200
+
 from pydantic import BaseModel, Field
 from temporalio import activity
 
@@ -1527,9 +1536,11 @@ def _tester_pod_sync(
                 "in after(), a pending timer, or an open handle in a before() hook. Close every "
                 "resource you open, in an after() that runs even when a test fails.\n\n"
             ) + failure_output
-        logger.warning("tester k8s: suite %s (rc=%s): %.300s",
+        # 1200, not 300: at 300 the cut landed mid-token ("e: 'suite'") and the
+        # actual assertion never appeared.
+        logger.warning("tester k8s: suite %s (rc=%s): %s",
                        "DID NOT TERMINATE" if suite_hung else "failed", returncode,
-                       failure_output[-300:])
+                       failure_output[-_FAILURE_OUTPUT_AUDIT_CHARS:])
 
     # commit the test files IN THE POD (current branch; the post-tester checkpoint
     # picks them up and finalize pushes). No push here.
@@ -1552,6 +1563,9 @@ def _tester_pod_sync(
         details={
             "stage": "tester", "runtime": "k8s", "test_files": test_files,
             "tests_ran": tests_ran, "tests_passed": tests_passed, "returncode": returncode,
+            # WHY it failed, not just THAT it failed. Empty on success.
+            "failure_output": failure_output[-_FAILURE_OUTPUT_AUDIT_CHARS:],
+            "suite_hung": suite_hung,
         },
     )
     return TesterTurnResult(
@@ -1769,6 +1783,8 @@ async def _run_tester_turn_impl(
             "tests_passed": tests_passed,
             "returncode": returncode,
             "virtual_key_fixture": vk.fixture,
+            # WHY it failed, not just THAT it failed. Empty on success.
+            "failure_output": (failure_output or "")[-_FAILURE_OUTPUT_AUDIT_CHARS:],
         },
     )
     return TesterTurnResult(

@@ -54,3 +54,40 @@ def test_a_hung_suite_is_named_as_such_not_reported_as_a_failed_assertion():
     body = inspect.getsource(activities._tester_pod_sync)
     assert "suite_hung = returncode == 124" in body
     assert "DID NOT TERMINATE" in body
+
+
+# ---------------------------------------------------------------------------
+# "Why did this work item fail?" has to be answerable from the ledger. On the
+# 2026-07-29 run it was not: tester_turn_completed audited returncode=1 and
+# nothing else, and the assertion text existed only in the orchestrator pod's
+# log, truncated to 300 characters and rotating away.
+# ---------------------------------------------------------------------------
+
+
+def test_the_failing_output_is_persisted_on_both_runtimes():
+    import inspect
+
+    for fn in (activities._tester_pod_sync, activities._run_tester_turn_impl):
+        body = inspect.getsource(fn)
+        if "tester_turn_completed" not in body:
+            continue
+        assert '"failure_output"' in body, (
+            f"{fn.__name__} audits the tester result without the reason it failed"
+        )
+
+
+def test_the_audit_copy_is_bounded_and_smaller_than_the_coder_copy():
+    """The Coder needs the full tail to fix the test; the ledger needs enough
+    for a human to see the assertion. Unbounded audit details are how a hung
+    poll loop wrote 16k rows once already."""
+    assert activities._FAILURE_OUTPUT_AUDIT_CHARS < activities._FAILURE_OUTPUT_CHARS
+    assert activities._FAILURE_OUTPUT_AUDIT_CHARS >= 800
+
+
+def test_the_log_line_no_longer_cuts_the_assertion_off():
+    """At 300 chars the cut landed mid-token and printed `e: 'suite'` — the
+    actual failure never reached the log."""
+    import inspect
+
+    body = inspect.getsource(activities._tester_pod_sync)
+    assert "%.300s" not in body
