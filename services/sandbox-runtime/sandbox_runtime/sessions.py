@@ -112,14 +112,21 @@ class PlannerContext:
     retrieval_hits: list[RetrievalHit] = field(default_factory=list)
     repo_map: str = ""
 
-    def render(self) -> str:
+    def render(self, *, skill_body_chars: int | None = None) -> str:
+        """`skill_body_chars` is forwarded to each skill's context block — see
+        Skill.as_context_block. The default keeps the full bodies so no existing
+        caller changes behaviour; the Planner passes 0 because its context is
+        cut to a fixed budget and full bodies would evict everything below."""
         parts: list[str] = [f"# Planner context — work_item {self.work_item_id} (tenant {self.tenant_id})"]
         if self.agents_md:
             parts.append("## AGENTS.md (trusted)\n" + self.agents_md)
         if self.codeowners:
             parts.append("## CODEOWNERS (trusted)\n" + self.codeowners)
         if self.skills:
-            parts.append("## Approved tenant skills (trusted)\n" + "\n\n".join(s.as_context_block() for s in self.skills))
+            parts.append(
+                "## Approved tenant skills (trusted)\n"
+                + "\n\n".join(s.as_context_block(body_chars=skill_body_chars) for s in self.skills)
+            )
         if self.repo_map:
             parts.append("## Repo map\n" + self.repo_map)
         # Untrusted last, clearly demarcated.

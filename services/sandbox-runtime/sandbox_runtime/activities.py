@@ -183,7 +183,23 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
         try:
             from .skill_files import materialize_skills as _materialize
             from .skill_registry import read_approved_skills as _read_skills
-            _mat = _materialize(workspace_dir, _read_skills(inp.tenant_id, repo=inp.repo))
+            _served = _read_skills(inp.tenant_id, repo=inp.repo)
+            if not _served:
+                # Keyed off the REGISTRY READ, not off the materialize result:
+                # an empty _mat with a non-empty _served is the legitimate
+                # "the repo already commits these skills" case, and the
+                # "workspace has no .git yet" no-op. Only an empty READ means
+                # the agent is running with no guidance at all — which is the
+                # state this whole tenant was silently in, because an empty
+                # list is a perfectly valid return and nothing said so.
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="skills_resolved_empty",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"repo": inp.repo, "stage": "provision"},
+                )
+            _mat = _materialize(workspace_dir, _served)
             if _mat:
                 audit_emit(
                     actor="system:sandbox-runtime",
@@ -803,7 +819,14 @@ def _model_plan_proposer(
     # issue, planned a generic wallet feature instead of the DELETE bug).
     prompt = _PLAN_PROMPT.format(
         instruction=(inp.instruction or "").strip()[:6000] or "(instruction missing)",
-        context=ctx.render()[:8000],
+        # skill_body_chars=0 renders the skills as an INDEX (key, category,
+        # title, path) instead of inlining their bodies. The Planner is a single
+        # gateway chat_completion with a fixed 8 KB context budget, and render()
+        # puts skills BEFORE the repo map and the untrusted block — so inlining
+        # 21 real skills (~100 KB of body) delivered about one and a half of
+        # them and silently evicted everything after. The Coder still gets the
+        # full text: it reads .claude/skills/<key>/SKILL.md as files.
+        context=ctx.render(skill_body_chars=0)[:8000],
         files_rule=files_rule,
         tree_section=tree_section[:8000],
     )
@@ -892,6 +915,18 @@ async def _run_planner_turn_impl(
         retrieval=retrieval,
         skills_conn=skills_conn,
     )
+    if not ctx.skills:
+        # The emptiness was already ON the ledger — planner_turn_completed
+        # carries skills_hydrated=[] — but buried in a details field, so it
+        # could not be found with `WHERE action = …`. This makes the symmetric
+        # provision-stage fact queryable at the Planner too.
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="skills_resolved_empty",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={"repo": inp.repo, "stage": "planner", "task_class": inp.task_class},
+        )
 
     # File-based skills (`.claude/skills/`) are materialized by
     # provision_sandbox (after the clone — the Planner may run BEFORE the

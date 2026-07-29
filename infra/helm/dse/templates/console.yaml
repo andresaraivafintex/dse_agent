@@ -58,6 +58,49 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.security.podSecurityContext | nindent 8 }}
+      # The skill content ships INSIDE the console-api image (CI vendors the
+      # private dse_skills repo into it) and is imported here, before the API —
+      # the single writer of the SQLite file on this ReadWriteOnce volume —
+      # opens the database. An initContainer, not a Job, precisely because of
+      # that: a Job would be a concurrent second writer against a WAL database
+      # that the Deployment pins to replicas:1 / strategy:Recreate.
+      #
+      # It exists because "somebody remembers to run the sync CLI" is not a
+      # delivery mechanism: nobody ever ran it against this cluster, so the
+      # registry held 5 demo rows for two fictitious tenants and every Planner
+      # and Coder turn ran with zero skills, silently.
+      #
+      # Idempotent (INSERT OR REPLACE / ON CONFLICT DO UPDATE) and it preserves
+      # operator governance state, because the sync reads the existing row first.
+      {{- if .Values.console.api.skillsSync.enabled }}
+      initContainers:
+        - name: skills-sync
+          image: {{ .Values.console.api.image.repository }}:{{ .Values.console.api.image.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["npm", "run", "skills:sync", "-w", "control-plane/api"]
+          env:
+            - name: DSE_DB_PATH
+              value: /data/dse.db
+            - name: DSE_DATA_SOURCE
+              value: "controlplane"
+            - name: DSE_TENANT_ID
+              value: {{ .Values.tenant.id | quote }}
+            - name: DSE_CONTROLPLANE_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dse.postgresSecretName" . }}
+                  key: DSE_DATABASE_URL
+          envFrom:
+            - secretRef:
+                name: {{ include "dse.postgresSecretName" . }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
       containers:
         - name: console-api
           image: {{ .Values.console.api.image.repository }}:{{ .Values.console.api.image.tag }}
