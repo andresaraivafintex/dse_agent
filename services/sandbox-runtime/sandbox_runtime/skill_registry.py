@@ -43,12 +43,31 @@ class Skill:
             return True
         return "*" in self.repo_scope or repo in self.repo_scope
 
-    def as_context_block(self) -> str:
+    def as_context_block(self, *, body_chars: int | None = None) -> str:
         """Deterministic rendering of the skill for the Planner bundle.
         Skills ARE trusted (human-curated) — unlike retrieval content — so they
-        go in as guidance, not as untrusted data."""
+        go in as guidance, not as untrusted data.
+
+        `body_chars` bounds how much of the body is inlined:
+          None -> the whole body (unchanged behaviour, the default);
+          0    -> header + title only, an INDEX entry;
+          n>0  -> the first n chars plus a pointer to the file.
+
+        It exists because the Planner's context is truncated to a fixed budget:
+        21 real skills are ~100 KB of body, so inlining them whole delivers
+        about one and a half skills and silently evicts everything the render
+        puts after them. The Coder does not need this — it reads the full
+        bodies as files from .claude/skills/."""
         applies = ", ".join(self.applies_to) if self.applies_to else "general"
-        return f"### skill:{self.skill_key} [{self.category}; applies to: {applies}]\n{self.title}\n{self.body}"
+        header = f"### skill:{self.skill_key} [{self.category}; applies to: {applies}]\n{self.title}"
+        if body_chars is None:
+            return f"{header}\n{self.body}"
+        pointer = f"[full text at .claude/skills/{self.skill_key}/SKILL.md]"
+        if body_chars <= 0:
+            return f"{header}\n{pointer}"
+        if len(self.body) <= body_chars:
+            return f"{header}\n{self.body}"
+        return f"{header}\n{self.body[:body_chars]}\n… {pointer}"
 
 
 class SkillRegistryUnavailable(Exception):

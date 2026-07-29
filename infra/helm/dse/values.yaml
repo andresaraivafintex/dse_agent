@@ -372,6 +372,17 @@ console:
   enabled: false
   api:
     image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.1" }
+    # Import the skill registry from the content vendored into the console-api
+    # image, in an initContainer, before the API opens the SQLite file.
+    #
+    # REQUIRES an image that carries /app/vendor/dse_skills — i.e. one built
+    # after the console repo's Dockerfile started vendoring it. Point this at an
+    # older image and the pod sits in Init:Error with the panel down. The chart
+    # default is `true` because that is the correct steady state; a deployment
+    # still pinned to an older console-api tag must set it to false until the
+    # tag is bumped in the same change.
+    skillsSync:
+      enabled: true
     persistence:
       size: 2Gi
       storageClassName: ""

@@ -184,6 +184,13 @@ console:
     image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.5" }
   api:
     image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.5" }
+    # OFF until this tag is bumped to an image that carries
+    # /app/vendor/dse_skills. rc.5 predates the vendoring, so leaving the chart
+    # default (true) here would put console-api in Init:Error and take the panel
+    # down. Flip to true in the SAME commit that bumps the tag above — that is
+    # the change that makes the 21 skills reach the agent on this cluster.
+    skillsSync:
+      enabled: false
   ingress:
     enabled: true
     className: "traefik"
