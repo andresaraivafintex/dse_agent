@@ -317,6 +317,26 @@ class KubernetesSandboxDriver:
             created_new=True,
         )
 
+    def run_in_pod(self, sandbox_id: str, argv: list[str], input_text: str | None = None,
+                   *, timeout: int = 120) -> tuple[int, str]:
+        """Run a plain command inside the sandbox Pod and return (rc, stdout).
+
+        Public because skill materialization needs it and reaching into
+        `_kubectl` from outside would couple that code to this class's private
+        shape. Unlike `_exec_op` this does NOT go through the agent-runner
+        protocol — it is for file plumbing, not lifecycle ops. It swallows the
+        failure into an rc rather than raising: guidance must never be able to
+        take a provision down.
+        """
+        try:
+            proc = self._kubectl(
+                ["exec", "-i", sandbox_id, "-n", self._cfg.namespace, "--", *argv],
+                input_text=input_text, timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            return 1, str(exc)[:300]
+        return proc.returncode, proc.stdout or ""
+
     def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
         started = time.time()
         payload = json.dumps({"stage": request.stage.value, "input": request.input_payload})

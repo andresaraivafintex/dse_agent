@@ -140,9 +140,9 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
         # the worker), so NOTHING is cloned/init'd on the host — the driver
         # brings up the Pod and the bootstrap clones the real repo INSIDE it,
         # through the egress-proxy; the repo token never enters the control
-        # plane. Skills materialized on the host (the Docker path below) do NOT
-        # reach the Pod — a known limitation of the K8s driver (in-pod skills is
-        # a fast-follow). ===
+        # plane. Skills are materialized INTO the Pod after the bootstrap has
+        # cloned (below) — the host writer used by the Docker path cannot reach
+        # this workspace. ===
         provisioned = driver.provision(
             SandboxProvisionRequest(
                 work_item_id=inp.work_item_id,
@@ -155,6 +155,51 @@ async def provision_sandbox(inp: ProvisionSandboxInput) -> SandboxHandle:
                 base_branch=inp.base_branch,
             )
         )
+        # Guidance into the Pod. `provision` returns only after `_bootstrap`, so
+        # the repo is cloned and `.git` exists — which the repo-sovereignty rule
+        # and the local exclude both depend on.
+        #
+        # Best-effort by construction: a skill that fails to land must never
+        # take down a provision that otherwise succeeded. The audit says which
+        # way it went, because the failure mode this replaces was silence — the
+        # Planner reading 21 skills while the Coder worked with none, and
+        # nothing anywhere recording the difference.
+        try:
+            from .skill_files import materialize_skills_in_pod as _materialize_pod
+            from .skill_registry import read_approved_skills as _read_skills
+            _served = _read_skills(inp.tenant_id, repo=inp.repo)
+            if not _served:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="skills_resolved_empty",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"repo": inp.repo, "stage": "provision", "runtime": "k8s"},
+                )
+            else:
+                _mat = _materialize_pod(
+                    _served,
+                    run=lambda argv, stdin: driver.run_in_pod(
+                        provisioned.container_id, argv, stdin
+                    ),
+                )
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="skills_materialized" if _mat else "skills_materialization_skipped",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"skills": _mat, "repo": inp.repo, "runtime": "k8s",
+                             "served": len(_served)},
+                )
+        except Exception as exc:  # noqa: BLE001 — guidance never fails a provision
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="skills_materialization_skipped",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                         "repo": inp.repo, "runtime": "k8s"},
+            )
     else:
         is_new_checkpoint_repo = not Path(bare_repo_path).exists()
         if is_new_checkpoint_repo:
