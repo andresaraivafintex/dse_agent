@@ -13,7 +13,11 @@ from sandbox_runtime.activities import _default_plan_proposer, _model_plan_propo
 
 
 class _Ctx:
-    def render(self) -> str:
+    # Mirrors PlannerContext.render's signature, keyword included: the Planner
+    # passes skill_body_chars=0 to keep 21 skills inside its 8 KB context
+    # budget, and a double that does not accept it fails every test here with a
+    # TypeError that says nothing about what actually changed.
+    def render(self, *, skill_body_chars: int | None = None) -> str:
         return "## Task\nFix DELETE /api/transactions/:id, which deletes the wrong transaction."
 
 
