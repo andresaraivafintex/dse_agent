@@ -1,0 +1,109 @@
+{{/*
+Scheduled caller for the stranded-work-item sweep.
+
+`ingest_gateway/stranded.py` was written on 2026-07-24 for four rows that had
+been silent for forty hours with no workflow left in Temporal. It detects them,
+it escalates them, it is tested — and nothing ever called it. Its own README
+said so: "Not wired yet". Five days later the same four rows were still there,
+joined by six more, all still showing in the console as work in progress, idle
+between 70 and 119 hours.
+
+Recovery code that nothing invokes is worse than absent: the runbook claims the
+failure mode is handled, so nobody goes looking. This is the caller.
+
+The decision logic lives in the module (stranded.py detects, stranded_sweep.py
+runs it) rather than in this file's args — the same reason the sandbox reaper is
+a module: a rule that writes terminal states deserves unit tests, and YAML
+cannot have them.
+*/}}
+{{- if .Values.strandedSweep.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dse.fullname" . }}-stranded-sweep
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.strandedSweep.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            {{- include "dse.labels" . | nindent 12 }}
+            # Selected by the NetworkPolicy below. Without a label a policy can
+            # select, this pod sits under the namespace default-deny and cannot
+            # reach Postgres at all — the sweep would fail on every run.
+            app.kubernetes.io/component: stranded-sweep
+        spec:
+          restartPolicy: Never
+          {{- with .Values.global.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.security.podSecurityContext | nindent 12 }}
+          containers:
+            - name: sweep
+              image: {{ include "dse.image" (dict "root" $ "repository" .Values.adapters.ingestGateway.image.repository "tag" .Values.adapters.ingestGateway.image.tag "digest" .Values.adapters.ingestGateway.image.digest) }}
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              securityContext:
+                {{- include "dse.appContainerSecurityContext" . | nindent 16 }}
+              command: ["python3", "-m", "ingest_gateway.stranded_sweep"]
+              args:
+                - "--idle-seconds"
+                - {{ .Values.strandedSweep.idleSeconds | quote }}
+                - "--limit"
+                - {{ .Values.strandedSweep.limit | quote }}
+              env:
+                # Required, and the module REFUSES to run without it: the sweep
+                # writes terminal states, so a guessed tenant would escalate
+                # somebody else's live work.
+                - name: DSE_TENANT_ID
+                  value: {{ .Values.tenant.id | quote }}
+                - name: DSE_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "dse.postgresSecretName" . }}
+                      key: DSE_DATABASE_URL
+              volumeMounts:
+                {{- include "dse.appTmpMount" . | nindent 16 }}
+              resources:
+                requests: { cpu: "20m", memory: "64Mi" }
+                limits: { cpu: "200m", memory: "192Mi" }
+          volumes:
+            - name: dse-runtime-tmp
+              emptyDir:
+                sizeLimit: {{ .Values.security.tmpSizeLimit }}
+{{- if .Values.networkPolicy.enabled }}
+---
+{{/*
+Postgres and nothing else. The sweep reads work_items and audit_log and writes
+one escalation row; it talks to no adapter, no model, no internet.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dse.fullname" . }}-stranded-sweep-egress
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    {{- include "dse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: stranded-sweep
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
+{{- end }}

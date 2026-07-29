@@ -339,6 +339,25 @@ preview:
 # Scheduled recovery of human replies whose delivery was lost. The Jira poller
 # runs its own loop; this drives the two webhook-driven adapters.
 # ---------------------------------------------------------------------------
+# Escalates work items whose workflow no longer exists. The detection has been
+# in ingest_gateway/stranded.py since 2026-07-24 and nothing called it: ten rows
+# sat in implementing/queued/new/ci_pending for up to 119 hours, showing in the
+# console as work in progress. Recovery code that nothing invokes is worse than
+# absent, because the runbook then claims the failure mode is handled.
+strandedSweep:
+  enabled: true
+  # Hourly. The window below is what decides whether an item is stranded; the
+  # schedule only decides how soon after that it is noticed.
+  schedule: "17 * * * *"
+  # 6h: comfortably above any legitimate step (a coder turn runs minutes, the CI
+  # wait writes a row every 60s) and below "decorates the console for a week".
+  # Human waits — plan approval, review — are excluded by the query itself, not
+  # by this number.
+  idleSeconds: 21600
+  # A sweep finding dozens has found a systemic failure, not stragglers.
+  # Escalating them all at once would bury the signal in the ledger.
+  limit: 25
+
 replyReconciler:
   enabled: false
   # A safety net for an already-lost delivery, not a delivery path — recovering
