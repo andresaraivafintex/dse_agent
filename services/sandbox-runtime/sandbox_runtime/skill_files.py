@@ -55,6 +55,42 @@ def _git_exclude(workspace_dir: Path, rel_paths: list[str]) -> None:
         exclude.write_text(existing.rstrip("\n") + ("\n" if existing else "") + "\n".join(lines) + "\n")
 
 
+def plan_materialization(
+    skills: list[Skill],
+    *,
+    existing_skill_keys: set[str],
+    marker_entries: set[str],
+) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """Decide WHAT to write, without touching a filesystem.
+
+    Both writers go through here — the host one below and the in-Pod one used by
+    the K8s runtime — because the interesting part of this feature is not the
+    writing, it is the rule that a skill COMMITTED in the target repo beats the
+    registry copy. Two implementations of that rule would drift, and the drift
+    would be invisible: the Coder would silently get a different set of
+    conventions depending on which runtime it happened to run under.
+
+    Returns (files, excludes, keys):
+      files    — [(relative path, full content)] to write
+      excludes — relative directories to add to .git/info/exclude
+      keys     — the skill_keys actually materialized
+    """
+    files: list[tuple[str, str]] = []
+    excludes: list[str] = []
+    keys: list[str] = []
+    for skill in skills:
+        key = _safe_key(skill.skill_key)
+        rel_dir = f"{_SKILLS_SUBDIR.as_posix()}/{key}/"
+        if key in existing_skill_keys and rel_dir not in marker_entries:
+            # Present but not written by us => committed in the target repo.
+            # Sovereign; leave it alone.
+            continue
+        files.append((f"{_SKILLS_SUBDIR.as_posix()}/{key}/SKILL.md", _frontmatter(skill) + skill.body))
+        excludes.append(rel_dir)
+        keys.append(skill.skill_key)
+    return files, excludes, keys
+
+
 def materialize_skills(workspace_dir: str, skills: list[Skill]) -> list[str]:
     """Write each served skill to the workspace's `.claude/skills/<key>/SKILL.md`.
     Idempotent; returns the keys actually materialized (skills already present
@@ -67,21 +103,17 @@ def materialize_skills(workspace_dir: str, skills: list[Skill]) -> list[str]:
     ws = Path(workspace_dir)
     if not (ws / ".git").exists():
         return []
-    written: list[str] = []
-    excluded: list[str] = []
-    for skill in skills:
-        key = _safe_key(skill.skill_key)
-        target_dir = ws / _SKILLS_SUBDIR / key
-        target = target_dir / "SKILL.md"
-        rel = f"{_SKILLS_SUBDIR.as_posix()}/{key}/"
-        if target.is_file() and rel not in _materialized_marker(ws):
-            # A pre-existing SKILL.md that we did NOT materialize = committed in
-            # the target repo — sovereign, do not overwrite.
-            continue
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_text(_frontmatter(skill) + skill.body, encoding="utf-8")
-        written.append(skill.skill_key)
-        excluded.append(rel)
+    existing = {
+        d.name for d in (ws / _SKILLS_SUBDIR).iterdir()
+        if d.is_dir() and (d / "SKILL.md").is_file()
+    } if (ws / _SKILLS_SUBDIR).is_dir() else set()
+    files, excluded, written = plan_materialization(
+        skills, existing_skill_keys=existing, marker_entries=_materialized_marker(ws),
+    )
+    for rel_path, content in files:
+        target = ws / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
     if written:
         _git_exclude(ws, excluded)
         _write_materialized_marker(ws, excluded)
@@ -136,3 +168,111 @@ def workspace_skills_note(workspace_dir: str) -> str:
         "Before writing code, read each SKILL.md below and follow its rules:\n"
         + "\n".join(entries)
     )
+
+
+# ---------------------------------------------------------------------------
+# In-Pod materialization (K8s runtime).
+#
+# Under the K8s driver the workspace lives inside the sandbox Pod, so the host
+# writer above reaches nothing: the Planner got the skills as context while the
+# Coder — the one that actually writes code — worked with none of them. That
+# asymmetry was documented in provision_sandbox as a known limitation and is
+# what this closes.
+#
+# The rules are NOT reimplemented here; both writers go through
+# plan_materialization for exactly that reason.
+# ---------------------------------------------------------------------------
+
+_POD_WORKSPACE = "/workspace"
+
+
+def _read_pod_state(run) -> tuple[set[str], set[str]]:
+    """One exec: which skill dirs already carry a SKILL.md, and what we wrote on
+    a previous round. Anything unreadable degrades to "nothing known", which is
+    the safe direction — an unknown dir is then treated as ours to write, and
+    the repo-sovereignty check below is what protects a committed skill."""
+    script = (
+        f"cd {_POD_WORKSPACE} 2>/dev/null || exit 0; "
+        "echo '--dirs--'; "
+        f"for d in {_SKILLS_SUBDIR.as_posix()}/*/; do "
+        '[ -f "$d/SKILL.md" ] && basename "$d"; done 2>/dev/null; '
+        "echo '--marker--'; "
+        f"cat {_MARKER} 2>/dev/null"
+    )
+    rc, out = run(["sh", "-c", script], None)
+    if rc != 0:
+        return set(), set()
+    dirs: set[str] = set()
+    marker: set[str] = set()
+    bucket = None
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line == "--dirs--":
+            bucket = dirs
+            continue
+        if line == "--marker--":
+            bucket = marker
+            continue
+        if line and bucket is not None:
+            bucket.add(line)
+    return dirs, marker
+
+
+def materialize_skills_in_pod(skills: list[Skill], *, run) -> list[str]:
+    """Write the served skills into the sandbox Pod's workspace.
+
+    `run(argv, input_text) -> (returncode, stdout)` is injected so this is
+    testable without a cluster — the same reason build_pod_manifest is a pure
+    function.
+
+    Two execs, not one per skill: 21 skills would otherwise be 21 round trips
+    through the API server. The payload travels base64-encoded so arbitrary
+    SKILL.md content never has to survive shell quoting.
+    """
+    if not skills:
+        return []
+    existing, marker = _read_pod_state(run)
+    files, excludes, written = plan_materialization(
+        skills, existing_skill_keys=existing, marker_entries=marker
+    )
+    if not files:
+        return []
+
+    import base64
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel_path, content in files:
+            data = content.encode("utf-8")
+            info = tarfile.TarInfo(name=rel_path)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    payload = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    exclude_lines = "".join(f"{e}\n" for e in excludes)
+    script = (
+        f"set -e; cd {_POD_WORKSPACE}; "
+        "base64 -d > /tmp/_skills.tgz && tar xzf /tmp/_skills.tgz -C . && rm -f /tmp/_skills.tgz; "
+        # LOCAL exclude, never committed: the Coder's deterministic commit must
+        # not drag guidance into the customer's PR. Appended idempotently.
+        "mkdir -p .git/info; "
+        f"printf '%s' {_sh_quote(exclude_lines)} | while IFS= read -r l; do "
+        '[ -n "$l" ] && grep -qxF "$l" .git/info/exclude 2>/dev/null || printf \'%s\\n\' "$l" >> .git/info/exclude; '
+        "done; "
+        # Provenance marker: tells a later round "we wrote this" so it may be
+        # refreshed, versus "the repo ships it" which is untouchable.
+        f"mkdir -p $(dirname {_MARKER}); "
+        f"printf '%s' {_sh_quote(exclude_lines)} >> {_MARKER}; "
+        "echo OK"
+    )
+    rc, out = run(["sh", "-c", script], payload)
+    if rc != 0 or "OK" not in (out or ""):
+        return []
+    return written
+
+
+def _sh_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
