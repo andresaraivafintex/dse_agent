@@ -16,6 +16,7 @@ import json
 
 from dse_contracts import GateStatus, L1Finding
 
+from dse_validation.config import default_scan_timeout_seconds
 from dse_validation.sandbox_exec import SandboxExecutor
 
 # stdlib-only script executed inside the sandbox. It emits one JSON line on
@@ -89,7 +90,14 @@ print(json.dumps({"findings": findings}))
 '''
 
 
-def secret_scan_check(executor: SandboxExecutor, target_dir: str = ".", timeout: int = 60) -> L1Finding:
+def secret_scan_check(
+    executor: SandboxExecutor, target_dir: str = ".", timeout: int | None = None
+) -> L1Finding:
+    # Same reason as in `sast.py`: 60 s was frozen in this signature. At the
+    # 91k lines/s the scanner measures inside the sandbox pod it covers ~5,5M
+    # lines, so a big repository needs to be able to ask for more.
+    if timeout is None:
+        timeout = default_scan_timeout_seconds("secret_scan")
     result = executor.run(["python3", "-c", _SCANNER_SCRIPT, target_dir], timeout=timeout)
     if result.returncode == 127:
         return L1Finding(

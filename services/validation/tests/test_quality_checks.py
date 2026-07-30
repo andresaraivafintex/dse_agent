@@ -8,6 +8,7 @@ from dse_contracts import GateStatus
 from dse_validation.config import L1Config
 from dse_validation.l1.quality_checks import build_check, lint_check, typecheck_check
 from dse_validation.l1.quality_checks import test_check as run_test_check
+from dse_validation.sandbox_exec import ExecResult
 
 
 def test_lint_check_passes_on_clean_code(sandbox):
@@ -90,3 +91,52 @@ def test_empty_commands_are_not_configured_never_green(sandbox):
     ]
     assert all(f.passed is False for f in findings)
     assert all(f.status == GateStatus.NOT_CONFIGURED for f in findings)
+
+
+class _RecordingSandbox:
+    """Captures the timeout each check hands to the executor. Nothing else makes
+    the number observable — and a per-stage budget that never reaches the
+    executor is a manifest field that validates, escalates, and does nothing."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[int] = []
+
+    def run(self, argv, cwd=None, timeout: int = 300) -> ExecResult:
+        self.timeouts.append(timeout)
+        return ExecResult(argv=argv, returncode=0, stdout="", stderr="")
+
+
+def test_the_manifests_per_stage_timeout_is_the_one_that_runs():
+    """`timeouts` is validated against the activity's budget and can ERROR a work
+    item; if the value then never reaches the executor, the guard is policing a
+    number nothing uses while the stage runs on the scalar."""
+    cfg = L1Config(
+        lint_cmd=["ruff"], typecheck_cmd=["mypy"], test_cmd=["pytest"], build_cmd=["make"],
+        timeout_seconds=300,
+        timeouts={"lint": 30, "test": 700},
+    )
+    box = _RecordingSandbox()
+
+    lint_check(box, cfg)
+    typecheck_check(box, cfg)
+    run_test_check(box, cfg)
+    build_check(box, cfg)
+
+    # declared -> declared; not declared -> the scalar, exactly as before.
+    assert box.timeouts == [30, 300, 700, 300]
+
+
+def test_a_timed_out_stage_names_the_budget_that_actually_ran():
+    """The message is what a human reads when L1 goes ERROR. Printing the scalar
+    while the stage ran on `timeouts.test` sends them to the wrong knob."""
+
+    class _Slow(_RecordingSandbox):
+        def run(self, argv, cwd=None, timeout: int = 300) -> ExecResult:
+            super().run(argv, cwd=cwd, timeout=timeout)
+            return ExecResult(argv=argv, returncode=-1, stdout="", stderr="", timed_out=True)
+
+    cfg = L1Config(test_cmd=["pytest"], timeout_seconds=300, timeouts={"test": 700})
+    finding = run_test_check(_Slow(), cfg)
+
+    assert finding.status == GateStatus.ERROR
+    assert "700s" in finding.detail

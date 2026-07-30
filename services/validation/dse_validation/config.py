@@ -26,9 +26,272 @@ if TYPE_CHECKING:
 L1_MANIFEST_PATH = ".dse/validation.json"
 _FULL_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
 _COMMAND_NAMES = ("lint", "typecheck", "test", "build")
+# The two scans belong to the platform, not to the repository, but they run in
+# the same activity and therefore spend the same budget. Their timeouts used to
+# be literal defaults inside `l1/sast.py` and `l1/secret_scan.py`, reachable
+# neither from the manifest nor from the environment.
+_SCAN_NAMES = ("sast", "secret_scan")
+_STAGE_NAMES = _COMMAND_NAMES + _SCAN_NAMES
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_COMMAND_ARGS = 128
 _MAX_ARG_LENGTH = 4096
+
+_DEFAULT_COMMAND_TIMEOUT_SECONDS = 300
+# `test` is not one of four interchangeable commands: it is the only one that
+# runs the repository's SUITE, and the Tester ran that same suite one activity
+# earlier, in the same Pod and the same /workspace, under
+# `DSE_TESTER_SUITE_TIMEOUT_SECONDS` — 1200 s today, sized for the 10-15 minute
+# suite on 1 vCPU the exit criterion asks for. Two clocks measure one suite and
+# only the TIGHTER of them is ever observed, so which service holds it decides
+# the DIAGNOSIS: an overrun caught by the Tester is `suite_hung`, named for what
+# was measured, worth one Coder turn and then an escalation that says so; the
+# same overrun caught here arrives as a `test` finding with status ERROR,
+# `coder_retry_count += 1`, up to three paid Coder turns hunting an assert that
+# never failed. At 300 s this side was the tighter one, and the suite the Tester
+# had just passed died here.
+#
+# So this is a FLOOR under L1's clock, and it sits deliberately ABOVE the
+# Tester's rather than equal to it: L1 runs the suite a SECOND time, and with
+# both clocks on the same number which one fires is settled by whichever run
+# happens to be slower — a coin toss between the cheap ending and the
+# three-turn one. The margin is a quarter of the Tester's clock, the same order
+# of headroom the Tester itself keeps over the criterion's 15 minutes.
+#
+# What the platform guarantees is the ORDER, not the pair of literals, and both
+# sides assert it against the other's live value: `tests/test_l1_manifest.py`
+# here, `test_the_default_never_outruns_the_l1_clock_on_the_same_suite` there.
+_DEFAULT_TEST_TIMEOUT_SECONDS = 1500
+_DEFAULT_SCAN_TIMEOUT_SECONDS = {"sast": 120, "secret_scan": 60}
+# Floor of every per-stage number derived below. Under a minute a stage timeout
+# is not a budget, it is a scheduled ERROR — the same reason the Tester floors
+# its own install and suite clocks at 60 s.
+_MIN_STAGE_TIMEOUT_SECONDS = 60
+# What the SHIPPED defaults resolve to, all six stages together. Kept derived:
+# it is the floor of `stage_budget_seconds()`, and a floor below the platform's
+# own defaults would refuse every untouched manifest on a small start_to_close.
+_DEFAULT_STAGE_BUDGET_SECONDS = (
+    (len(_COMMAND_NAMES) - 1) * _DEFAULT_COMMAND_TIMEOUT_SECONDS
+    + _DEFAULT_TEST_TIMEOUT_SECONDS
+    + sum(_DEFAULT_SCAN_TIMEOUT_SECONDS.values())
+)
+# Historical range of the scalar `timeout_seconds`. Kept as-is: narrowing it
+# would turn manifests that are valid today into escalated work items.
+_MAX_MANIFEST_TIMEOUT_SECONDS = 3600
+_DEFAULT_ACTIVITY_START_TO_CLOSE_SECONDS = 3600
+# Exec time the L1 activity spends OUTSIDE the timed stages, worst case: the two
+# `git` calls that load the manifest (15 s each, below) plus the three of
+# `plan_compliance.compute_diff_summary` (60 s each). It comes out of the same
+# start_to_close, so the stage budget may not claim it.
+_PIPELINE_FIXED_COST_SECONDS = 2 * 15 + 3 * 60
+# What the activity still has to do AFTER the last stage returns: the
+# `validation_runs` insert, the audit row, and encoding the L1Result. Without it
+# the budget claims start_to_close down to the last second, and a manifest that
+# spends all of it leaves the server killing the activity — no L1Result, retry
+# from zero, which is the exact ending the budget guard exists to prevent.
+_ACTIVITY_TAIL_MARGIN_SECONDS = 60
+
+
+def _env_int(name: str, default: int) -> int:
+    """Platform-side integer setting.
+
+    A typo in the deployment must not take the whole L1 activity down — which is
+    how it would read from the outside, as an infra failure — so anything
+    unparseable or non-positive falls back to the default. Floats are accepted
+    because the orchestrator publishes ``DSE_ACTIVITY_START_TO_CLOSE_SECONDS``
+    as one.
+    """
+
+    try:
+        value = int(float(os.environ[name]))
+    except (KeyError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _activity_start_to_close_seconds() -> int:
+    """The clock the SERVER will enforce on THIS L1 attempt.
+
+    Read from the live activity first, env only as the fallback. The env var is
+    this worker's *copy* of a number that lives in the WORKFLOW's input, and the
+    two drift the moment an operator changes one of them — it is in no ConfigMap
+    today, so both sides currently sit on the same 3600 s default. Lowering
+    start_to_close on the orchestrator alone would leave this guard admitting
+    manifests the activity can no longer finish, and an activity the server kills
+    returns NO L1Result at all: the precise ending the guard exists to prevent.
+    The context survives the ``asyncio.to_thread`` hop the pipeline runs in
+    (contextvars are copied into the worker thread), which is how the Tester side
+    reads the same clock.
+    """
+
+    try:
+        from temporalio import activity
+
+        if activity.in_activity():
+            scheduled = activity.info().start_to_close_timeout
+            if scheduled is not None and scheduled.total_seconds() > 0:
+                return int(scheduled.total_seconds())
+    except Exception:  # noqa: BLE001 — no context, no temporalio: use the env
+        pass
+    return _env_int(
+        "DSE_ACTIVITY_START_TO_CLOSE_SECONDS", _DEFAULT_ACTIVITY_START_TO_CLOSE_SECONDS
+    )
+
+
+def stage_budget_seconds() -> int:
+    """Seconds of stage timeouts that fit inside one L1 activity.
+
+    The whole pipeline runs in a single Temporal activity, so the sum of the
+    stage timeouts — not each one separately — is what has to stay under
+    ``start_to_close``.
+
+    Floored at the shipped defaults on purpose: a platform configured with a
+    start_to_close too small for its own pipeline must not turn every repo's
+    manifest into an ERROR. That would report a platform problem as a repository
+    failure and escalate the work item for it.
+    """
+
+    return max(
+        _DEFAULT_STAGE_BUDGET_SECONDS,
+        _activity_start_to_close_seconds()
+        - _PIPELINE_FIXED_COST_SECONDS
+        - _ACTIVITY_TAIL_MARGIN_SECONDS,
+    )
+
+
+def _scan_reserve_seconds() -> int:
+    """Seconds the two platform scans hold back from the four repo commands.
+
+    Read from the environment, NOT from the shipped defaults: an operator who
+    raises ``DSE_L1_SAST_TIMEOUT_SECONDS`` moves the scans' share of the budget,
+    and a reserve frozen at 120+60 would let the resolved sum exceed the budget —
+    turning every repository's untouched manifest into an ERROR because of a
+    platform setting. Deliberately NOT capped by
+    ``stage_timeout_ceiling_seconds()``: that function is derived from this one,
+    and the reserve only has to be an upper bound of what the scans can resolve
+    to for the guard to stay satisfiable.
+    """
+
+    return sum(
+        _env_int(f"DSE_L1_{name.upper()}_TIMEOUT_SECONDS", _DEFAULT_SCAN_TIMEOUT_SECONDS[name])
+        for name in _SCAN_NAMES
+    )
+
+
+def _even_command_share(budget: int) -> int:
+    """What ONE repo command may take when all four take the same and the two
+    platform scans take their reserve: ``(budget - sast - secret_scan) / 4``.
+
+    This is what the manifest's single SCALAR asks for — one number for four
+    commands — so it bounds the scalar and the scans, and nothing else. It is
+    deliberately not the per-stage ceiling: see below.
+    """
+
+    return max(_MIN_STAGE_TIMEOUT_SECONDS, (budget - _scan_reserve_seconds()) // len(_COMMAND_NAMES))
+
+
+def stage_timeout_ceiling_seconds() -> int:
+    """Platform ceiling for a single stage — the repository may go under it,
+    never over it.
+
+    NOT an even share of the budget. The four commands are not alike: `test`
+    runs the suite and the other three are short, so dividing the budget in four
+    made the only distribution that matters — the 10-15 minute suite of the exit
+    criterion — inexpressible, while protecting nothing that
+    ``_validate_timeout_budget`` did not already protect. The sum is what shares
+    the activity's start_to_close, and the sum is what is guarded.
+
+    What is left for the ceiling is the one thing the sum cannot say: no single
+    stage may take so much that the other mandatory stages are left under a
+    workable floor. Hence budget minus the floor of every OTHER command minus
+    the scans' reserve — 2970 s at the shipped 3600 s start_to_close. Derived
+    from the activity's own budget so the two cannot drift apart, and the
+    platform — never the manifest — can override it.
+    """
+
+    others = (len(_COMMAND_NAMES) - 1) * _MIN_STAGE_TIMEOUT_SECONDS + _scan_reserve_seconds()
+    return _env_int(
+        "DSE_L1_TIMEOUT_CEILING_SECONDS",
+        max(_MIN_STAGE_TIMEOUT_SECONDS, stage_budget_seconds() - others),
+    )
+
+
+def _legacy_command_cap() -> int:
+    """Cap applied to the manifest's single scalar.
+
+    The scalar is one number for four commands, and `test` now resolves to at
+    least ``_DEFAULT_TEST_TIMEOUT_SECONDS`` regardless of it, so the largest
+    scalar that still fits is the smaller of two shares: an even quarter (when
+    the scalar is above the test floor and therefore governs all four) and a
+    third of what is left once `test` takes that floor and the scans take their
+    reserve. Bounded by the ceiling too. That is what keeps a manifest carrying
+    only the old scalar from ever failing the budget guard: it gets clamped,
+    never refused.
+
+    Floored at ``_MIN_STAGE_TIMEOUT_SECONDS`` for the same reason every other
+    number here is: "not refused" is not the invariant, "not escalated" is. A
+    scan reserve wide enough to drive this share to a second does not produce a
+    rejected manifest — it produces lint, typecheck and build all timing out,
+    three findings with status ERROR, `coder_retry_count += 1` and up to three
+    paid Coder turns, from a platform setting no repository asked for. That is
+    the outcome the clamp exists to avoid, arrived at by the other door.
+    """
+
+    room = stage_budget_seconds() - _scan_reserve_seconds()
+    return max(
+        _MIN_STAGE_TIMEOUT_SECONDS,
+        min(
+            stage_timeout_ceiling_seconds(),
+            _even_command_share(stage_budget_seconds()),
+            (room - _DEFAULT_TEST_TIMEOUT_SECONDS) // (len(_COMMAND_NAMES) - 1),
+        ),
+    )
+
+
+def default_scan_timeout_seconds(stage: str) -> int:
+    """Timeout of a platform scan for a caller with no manifest at hand.
+
+    Public because ``l1/sast.py`` and ``l1/secret_scan.py`` are the callers: this
+    is the mechanism that puts those two numbers inside the escape hatch.
+    """
+
+    default = _DEFAULT_SCAN_TIMEOUT_SECONDS[stage]
+    return min(
+        _env_int(f"DSE_L1_{stage.upper()}_TIMEOUT_SECONDS", default),
+        stage_timeout_ceiling_seconds(),
+        # ALSO the even share, and not only the ceiling: the ceiling can be
+        # overridden by the platform while `_even_command_share` — and therefore
+        # `_legacy_command_cap` — is derived from the RAW scan reserve. Without
+        # this third bound the two settings can disagree, the resolved scans
+        # claim more of the budget than the clamped scalar left them, and a
+        # manifest carrying only the old scalar gets REFUSED by
+        # `_validate_timeout_budget` — the escalated work item this whole path
+        # exists to prevent. Reproduced with DSE_L1_SAST_TIMEOUT_SECONDS=3000 +
+        # DSE_L1_TIMEOUT_CEILING_SECONDS=3000 + start_to_close=600: 4563s of
+        # resolved stages against a 2580s budget, from a manifest nobody edited.
+        _even_command_share(stage_budget_seconds()),
+    )
+
+
+def _default_test_timeout_seconds(scalar: int) -> int:
+    """The `test` clock when the manifest states no per-stage policy for it.
+
+    A floor, not an override. The scalar is a statement about "commands" in
+    general — one number for four — and cannot say "test is the long one"; only
+    ``timeouts.test`` can, and it wins outright. Until a repository says it, L1
+    must not run the suite on a shorter clock than the Tester already gave the
+    very same suite, or it reports as a repository failure a run the platform cut
+    short. A scalar ABOVE the floor still governs: raising it lengthens `test`.
+    """
+
+    return min(max(scalar, _DEFAULT_TEST_TIMEOUT_SECONDS), stage_timeout_ceiling_seconds())
+
+
+def _resolve_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dict[str, int]:
+    resolved = {name: scalar for name in _COMMAND_NAMES}
+    resolved["test"] = _default_test_timeout_seconds(scalar)
+    resolved.update({name: default_scan_timeout_seconds(name) for name in _SCAN_NAMES})
+    resolved.update(declared or {})
+    return resolved
 
 
 class L1ManifestError(ValueError):
@@ -69,6 +332,65 @@ def _validate_command(name: str, raw: Any) -> list[str]:
     return command
 
 
+def _validate_timeouts(raw: Any, *, source: str) -> dict[str, int]:
+    """Per-stage block. Optional: absent means "the scalar governs everything",
+    which is what every manifest written so far says."""
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise L1ManifestError(
+            GateStatus.ERROR,
+            f"manifest {source}: timeouts must be a JSON object of stage -> seconds",
+        )
+    unknown = sorted(set(raw) - set(_STAGE_NAMES))
+    if unknown:
+        raise L1ManifestError(
+            GateStatus.ERROR,
+            f"manifest {source} has unknown timeouts: {unknown} "
+            f"(valid stages: {list(_STAGE_NAMES)})",
+        )
+    ceiling = stage_timeout_ceiling_seconds()
+    declared: dict[str, int] = {}
+    for name in _STAGE_NAMES:
+        if name not in raw:
+            continue
+        value = raw[name]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifest {source}: timeouts.{name} must be a positive integer of seconds",
+            )
+        if value > ceiling:
+            raise L1ManifestError(
+                GateStatus.ERROR,
+                f"manifest {source}: timeouts.{name}={value}s exceeds the platform "
+                f"ceiling of {ceiling}s per stage",
+            )
+        declared[name] = value
+    return declared
+
+
+def _validate_timeout_budget(resolved: dict[str, int], *, source: str) -> None:
+    """The stages run one after another inside a single activity, so what has to
+    fit is the SUM. Nothing validated it before: four commands at the 3600 s the
+    scalar allowed added up to well past the activity's own start_to_close."""
+
+    total = sum(resolved.values())
+    budget = stage_budget_seconds()
+    if total <= budget:
+        return
+    requested = ", ".join(f"{name}={resolved[name]}s" for name in _STAGE_NAMES)
+    raise L1ManifestError(
+        GateStatus.ERROR,
+        f"manifest {source}: the stage timeouts add up to {total}s, over the {budget}s "
+        f"available inside the L1 activity (start_to_close of "
+        f"{_activity_start_to_close_seconds()}s minus {_PIPELINE_FIXED_COST_SECONDS}s "
+        f"of git execs the pipeline itself runs and {_ACTIVITY_TAIL_MARGIN_SECONDS}s "
+        f"to persist the result); requested {requested}",
+    )
+
+
 class L1Config:
     """L1 policy materialized from a traceable source.
 
@@ -86,6 +408,7 @@ class L1Config:
         test_cmd: list[str] | None = None,
         build_cmd: list[str] | None = None,
         timeout_seconds: int | None = None,
+        timeouts: dict[str, int] | None = None,
         sast_severity_gate: str | None = None,
         source: str = "not-configured",
         manifest_status: GateStatus = GateStatus.NOT_CONFIGURED,
@@ -95,15 +418,32 @@ class L1Config:
         self.typecheck_cmd = list(typecheck_cmd or [])
         self.test_cmd = list(test_cmd or [])
         self.build_cmd = list(build_cmd or [])
-        self.timeout_seconds = timeout_seconds or int(
-            os.environ.get("DSE_L1_TIMEOUT_SECONDS", "300")
+        # Clamped, never refused: a repository whose scalar is above the ceiling
+        # is asking for more than the activity has, but refusing it here would
+        # escalate a work item over a manifest that was valid yesterday.
+        self.timeout_seconds = min(
+            timeout_seconds
+            or _env_int("DSE_L1_TIMEOUT_SECONDS", _DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            _legacy_command_cap(),
         )
+        self.timeouts = _resolve_stage_timeouts(self.timeout_seconds, timeouts)
         self.sast_severity_gate = (
             sast_severity_gate or os.environ.get("DSE_L1_SAST_SEVERITY_GATE", "MEDIUM")
         ).upper()
         self.source = source
         self.manifest_status = manifest_status
         self.manifest_detail = manifest_detail
+
+    def timeout_for(self, stage: str) -> int:
+        """Seconds allowed for one pipeline stage.
+
+        ``timeout_seconds`` remains the default of lint, typecheck and build, so
+        a manifest carrying only the old scalar behaves exactly as it did for
+        them; `test` additionally has the floor described in
+        ``_default_test_timeout_seconds``.
+        """
+
+        return self.timeouts.get(stage, self.timeout_seconds)
 
     @classmethod
     def for_test_repo(cls) -> "L1Config":
@@ -183,7 +523,7 @@ class L1Config:
     def _from_manifest_payload(cls, payload: Any, *, source: str) -> "L1Config":
         if not isinstance(payload, dict):
             raise L1ManifestError(GateStatus.ERROR, f"manifest {source} must be a JSON object")
-        allowed = {"version", "commands", "timeout_seconds", "sast_severity_gate"}
+        allowed = {"version", "commands", "timeout_seconds", "timeouts", "sast_severity_gate"}
         unknown = sorted(set(payload) - allowed)
         if unknown:
             raise L1ManifestError(
@@ -209,12 +549,30 @@ class L1Config:
             )
 
         timeout = payload.get(
-            "timeout_seconds", int(os.environ.get("DSE_L1_TIMEOUT_SECONDS", "300"))
+            "timeout_seconds",
+            _env_int("DSE_L1_TIMEOUT_SECONDS", _DEFAULT_COMMAND_TIMEOUT_SECONDS),
         )
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 3600:
+        if (
+            not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or not 1 <= timeout <= _MAX_MANIFEST_TIMEOUT_SECONDS
+        ):
             raise L1ManifestError(
                 GateStatus.ERROR,
-                f"manifest {source}: timeout_seconds must be between 1 and 3600",
+                f"manifest {source}: timeout_seconds must be between 1 and "
+                f"{_MAX_MANIFEST_TIMEOUT_SECONDS}",
+            )
+        declared_timeouts = _validate_timeouts(payload.get("timeouts"), source=source)
+        effective_scalar = min(timeout, _legacy_command_cap())
+        _validate_timeout_budget(
+            _resolve_stage_timeouts(effective_scalar, declared_timeouts), source=source
+        )
+        detail = f"trusted manifest loaded from {source}"
+        if effective_scalar != timeout:
+            detail += (
+                f"; timeout_seconds={timeout}s clamped to {effective_scalar}s per command, "
+                f"the largest single scalar that fits the L1 activity's budget of "
+                f"{stage_budget_seconds()}s (declare timeouts.<stage> to spend it unevenly)"
             )
         severity = payload.get(
             "sast_severity_gate", os.environ.get("DSE_L1_SAST_SEVERITY_GATE", "MEDIUM")
@@ -232,10 +590,11 @@ class L1Config:
             test_cmd=parsed["test"],
             build_cmd=parsed["build"],
             timeout_seconds=timeout,
+            timeouts=declared_timeouts,
             sast_severity_gate=severity,
             source=source,
             manifest_status=GateStatus.PASS,
-            manifest_detail=f"trusted manifest loaded from {source}",
+            manifest_detail=detail,
         )
 
 

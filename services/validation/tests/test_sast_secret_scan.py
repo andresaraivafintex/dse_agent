@@ -2,8 +2,25 @@
 scanner) running through LocalFakeSandbox against actual files."""
 from __future__ import annotations
 
+from dse_contracts import GateStatus
+
+from dse_validation.config import stage_timeout_ceiling_seconds
 from dse_validation.l1.sast import sast_check
 from dse_validation.l1.secret_scan import secret_scan_check
+from dse_validation.sandbox_exec import ExecResult
+
+
+class _RecordingSandbox:
+    """Captures the timeout the check hands to the executor — the only place
+    where these two numbers become observable."""
+
+    def __init__(self, stdout: str):
+        self.stdout = stdout
+        self.timeouts: list[int] = []
+
+    def run(self, argv, cwd=None, timeout: int = 300) -> ExecResult:
+        self.timeouts.append(timeout)
+        return ExecResult(argv=argv, returncode=0, stdout=self.stdout, stderr="")
 
 
 def test_sast_passes_on_clean_code(sandbox):
@@ -48,3 +65,73 @@ def test_secret_scan_ignores_placeholder_values(sandbox, git_repo):
     (git_repo / "settings_placeholder.py").write_text('password = "changeme"\ntoken = "your_key_here"\n')
     finding = secret_scan_check(sandbox)
     assert finding.passed is True
+
+
+def test_scan_timeouts_default_to_the_historical_numbers():
+    sast_box = _RecordingSandbox('{"results": []}')
+    secret_box = _RecordingSandbox('{"findings": []}')
+
+    sast_check(sast_box)
+    secret_scan_check(secret_box)
+
+    assert sast_box.timeouts == [120]
+    assert secret_box.timeouts == [60]
+
+
+def test_scan_timeouts_are_reachable_from_the_platform_env(monkeypatch):
+    monkeypatch.setenv("DSE_L1_SAST_TIMEOUT_SECONDS", "480")
+    monkeypatch.setenv("DSE_L1_SECRET_SCAN_TIMEOUT_SECONDS", "300")
+    sast_box = _RecordingSandbox('{"results": []}')
+    secret_box = _RecordingSandbox('{"findings": []}')
+
+    sast_check(sast_box)
+    secret_scan_check(secret_box)
+
+    assert sast_box.timeouts == [480]
+    assert secret_box.timeouts == [300]
+
+
+def test_scan_timeout_from_the_env_is_still_capped_by_the_platform_ceiling(monkeypatch):
+    monkeypatch.setenv("DSE_L1_SAST_TIMEOUT_SECONDS", "99999")
+    sast_box = _RecordingSandbox('{"results": []}')
+
+    sast_check(sast_box)
+
+    assert sast_box.timeouts == [stage_timeout_ceiling_seconds()]
+
+
+def test_explicit_scan_timeout_still_wins(monkeypatch):
+    monkeypatch.setenv("DSE_L1_SAST_TIMEOUT_SECONDS", "480")
+    sast_box = _RecordingSandbox('{"results": []}')
+
+    sast_check(sast_box, timeout=17)
+
+    assert sast_box.timeouts == [17]
+
+
+class _TimingOutSandbox(_RecordingSandbox):
+    """The executor's answer when the clock kills the command: no stdout, and
+    `timed_out` set. Every real executor in `sandbox_exec.py` returns this."""
+
+    def run(self, argv, cwd=None, timeout: int = 300) -> ExecResult:
+        self.timeouts.append(timeout)
+        return ExecResult(argv=argv, returncode=-1, stdout="", stderr="", timed_out=True)
+
+
+def test_a_timed_out_sast_is_an_error_not_a_clean_pass():
+    """`json.loads("{}")` on a killed bandit yields zero findings, i.e. a GREEN
+    security gate that never ran. Unreachable while 120s was frozen in the
+    signature; now the budget comes from the environment and the manifest, so a
+    short clock would BUY the pass."""
+    finding = sast_check(_TimingOutSandbox(""))
+
+    assert finding.passed is False
+    assert finding.status is GateStatus.ERROR
+    assert "timed out" in finding.detail
+
+
+def test_a_timed_out_secret_scan_stays_an_error():
+    finding = secret_scan_check(_TimingOutSandbox(""))
+
+    assert finding.passed is False
+    assert finding.status is GateStatus.ERROR

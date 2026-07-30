@@ -25,7 +25,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger("sandbox_runtime.activities")
 
@@ -1397,7 +1397,7 @@ def _model_authored_test_script(
             # 8000: found in the real run with Haiku — 4000 truncated the JSON in
             # the middle of the content ("Unterminated string") and the whole
             # authoring pass fell over.
-            timeout=180.0, max_tokens=8000, temperature=0,
+            timeout=_AUTHORING_CALL_TIMEOUT_SECONDS, max_tokens=8000, temperature=0,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_if_permanent_provider_error(exc)  # billing/auth: the right message on the issue
@@ -1518,11 +1518,205 @@ _TEST_INFRA_ERROR_MARKERS = (
     "err_require_esm", "syntaxerror", "modulenotfounderror", "importerror",
 )
 
-# How long the authored suite gets before it is declared non-terminating.
-# Comfortably above a real suite (the target repo's runs in ~4 s) and far below
-# the 600 s activity timeout, so the activity always returns a RESULT the Tester
-# can read instead of dying and being retried blind.
-_SUITE_TIMEOUT_SECONDS = 180
+# ---------------------------------------------------------------------------
+# The Tester's clocks.
+#
+# They nest, and the nesting is the whole point:
+#
+#     npm install ─┐
+#                  ├─ pod exec ─ start_to_close ─ schedule_to_close
+#     the suite   ─┘
+#
+# An inner clock that is not STRICTLY smaller than the one wrapping it never
+# fires — the outer one gets there first and the ending is MISNAMED. A suite
+# that overruns then comes back as `exec_timeout` (the worker's own deadline: an
+# infra fact) instead of `suite_hung` (the suite itself), and those two escalate
+# down different paths, so a clock out of order hands the reader someone else's
+# problem.
+#
+# This was one module constant, 180 s, calibrated against a 1,4 s suite in a
+# 12-file repo. Before it existed the suite ran bare under the 600 s exec, so
+# anything from 180 s to 600 s passed; afterwards it could not. And the exit
+# criterion is a real suite of 10 to 15 minutes on 1 vCPU, which 180 s makes
+# impossible by construction. So the numbers come from CONFIGURATION and the
+# code guarantees only the order.
+# ---------------------------------------------------------------------------
+
+# Named after the L1 side's DSE_L1_TIMEOUT_SECONDS: the same concept, for the
+# same repo, at the other end of the system. They are still two numbers — the
+# single source is the repo's own `.dse/validation.json` (RunTesterTurnInput
+# already carries the `base_sha` it would be read at), and joining them is the
+# item that gives that manifest a per-command `timeouts` block.
+_SUITE_TIMEOUT_ENV_VAR = "DSE_TESTER_SUITE_TIMEOUT_SECONDS"
+_INSTALL_TIMEOUT_ENV_VAR = "DSE_TESTER_INSTALL_TIMEOUT_SECONDS"
+
+# 20 minutes. The criterion asks for a real suite of 10 to 15 minutes on 1 vCPU;
+# a default sitting exactly on the requirement's ceiling would kill the run it
+# exists to allow.
+#
+# It is also HALF OF A PAIR, which is the part no reader can see from here.
+# Once this turn passes, L1 runs the repository's own `test` command in THIS
+# SAME Pod, in the same /workspace, over the node_modules this turn's install
+# just wrote: a SECOND clock on the SAME suite
+# (`dse_validation.config._DEFAULT_TEST_TIMEOUT_SECONDS`, which is derived FROM
+# this one and must stay above it). Only the SHORTER of the two is ever
+# observed, so which service holds it decides what the ending gets called — and
+# the two endings are not priced alike:
+#
+#   shorter here → `suite_hung`, named for what was actually measured, worth one
+#                  Coder turn and then an escalation that says so;
+#   shorter in L1 → a `test` finding with status ERROR, worth up to THREE paid
+#                  Coder turns (~US$1.03 each) hunting an assertion that never
+#                  failed. That is the mis-diagnosis rc.12 removed from this
+#                  service, reappearing one service to the right.
+#
+# So this number never moves alone: it is the FLOOR the other side sizes itself
+# against. Raising it without raising L1's re-creates that diagnosis; lowering
+# it below the criterion's 15 minutes makes the acceptance run impossible here
+# instead, which is why the fix for the inversion was L1 coming up rather than
+# this coming down. `test_the_default_never_outruns_the_l1_clock_on_the_same_
+# suite` is what fails when the pair comes apart.
+_DEFAULT_SUITE_TIMEOUT_SECONDS = 1200
+
+# 15 minutes. `npm install` had no budget of its own: it shared the exec with
+# the suite, so whatever one did not spend belonged to the other and nothing
+# said which one ran out. Every install here is COLD (the workspace is an
+# emptyDir recreated per sandbox), the acceptance repo's node_modules is ≥ 1 GB,
+# and this pod measures 6,7x slower than the laptop the reference numbers came
+# from — 60-90 s there is 400-600 s here.
+#
+# So the band's own slow end (90 s x 6,7 = 603 s) lands OUTSIDE a 600 s budget,
+# which is why that is not the number. What an install killed at its own clock
+# costs is not a lost turn — the suite still runs, and the note on stderr says
+# the tree is incomplete — it is a WRONG VERDICT: the suite resolves against a
+# half-written node_modules, fails with MODULE_NOT_FOUND, and `tests_failed` is
+# a statement about the code. That is the mis-diagnosis rc.12 removed from this
+# service, and the exit criterion asks for a real PASS/FAIL on a BIG repository,
+# where this is the likeliest way to not get one.
+#
+# 900 is 1,5x the slow end of the band and costs nothing structurally: with the
+# suite at its default the fit against a 3600 s start_to_close admits an install
+# of up to 1140 s before anything is clamped, so nothing here moves.
+_DEFAULT_INSTALL_TIMEOUT_SECONDS = 900
+
+# Floors for the clamp below: under a minute neither number is a budget.
+_MIN_SUITE_TIMEOUT_SECONDS = 60
+_MIN_INSTALL_TIMEOUT_SECONDS = 60
+
+# What the exec gets ON TOP of install+suite: the two `timeout -k 10` grace
+# windows, the kubectl round trip, and the shell around them. This is what keeps
+# the exec strictly outside the suite, so an overrun is named `suite_hung`.
+_POD_EXEC_MARGIN_SECONDS = 60
+
+# Short commands in the Pod — git config, the reuse probe, writing a test file,
+# the commit. None of them is a suite, and the 600 s they used to inherit as the
+# default was room the suite could not have.
+_POD_CONTROL_TIMEOUT_SECONDS = 120
+_HEAD_READ_TIMEOUT_SECONDS = 60
+_WORKSPACE_CP_TIMEOUT_SECONDS = 180
+_AUTHORING_CALL_TIMEOUT_SECONDS = 180.0
+
+# Everything one turn spends inside the SAME activity besides the suite's exec:
+# the authoring call, the kubectl cp of the workspace, at most six control
+# commands (git config, the reuse probe, up to three file writes, the commit)
+# and the HEAD read. The suite's exec has to fit in what is LEFT of
+# start_to_close: an activity the server kills returns NO result, so the turn is
+# retried from zero — cold install included — with nothing durable saying why.
+_MAX_POD_CONTROL_CALLS = 6
+_TESTER_NON_SUITE_BUDGET_SECONDS = (
+    int(_AUTHORING_CALL_TIMEOUT_SECONDS)
+    + _WORKSPACE_CP_TIMEOUT_SECONDS
+    + _MAX_POD_CONTROL_CALLS * _POD_CONTROL_TIMEOUT_SECONDS
+    + _HEAD_READ_TIMEOUT_SECONDS
+)
+
+
+class _TesterClocks(NamedTuple):
+    """The nested budgets of one Tester turn, in seconds."""
+
+    install: int
+    suite: int
+    pod_exec: int
+    #: (install, suite) AS CONFIGURED, when they did not fit and were clamped.
+    clamped_from: tuple[int, int] | None
+
+
+def _timeout_env(name: str, default: int) -> int:
+    """A clock from the environment. Anything that is not a positive whole
+    number of seconds is a typo in a ConfigMap, and failing the turn over it
+    would throw away work the tenant already paid for — so it falls back to the
+    documented default, loudly."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        seconds = int(raw)
+    except ValueError:
+        seconds = 0
+    if seconds <= 0:
+        logger.error(
+            "%s=%r is not a positive number of seconds — using the default %ds",
+            name, raw, default,
+        )
+        return default
+    return seconds
+
+
+def _outer_activity_budget_seconds() -> float | None:
+    """The clock the SERVER will enforce on THIS attempt, or None when there is
+    no activity context (the Docker path, and the tests). `start_to_close` is
+    the per-attempt ceiling; `schedule_to_close` bounds the whole chain of
+    attempts, so it is only the fallback for a caller that sets one and not the
+    other."""
+    try:
+        if not activity.in_activity():
+            return None
+        info = activity.info()
+    except Exception:  # noqa: BLE001 — a missing context never fails a turn
+        return None
+    for candidate in (info.start_to_close_timeout, info.schedule_to_close_timeout):
+        if candidate is not None and candidate.total_seconds() > 0:
+            return candidate.total_seconds()
+    return None
+
+
+def _tester_clocks() -> _TesterClocks:
+    """Read the budgets and hand them back ALREADY ordered.
+
+    Two things are guaranteed here and nowhere else: the suite is strictly
+    inside the exec that wraps it (by construction — the exec is their sum plus
+    a margin), and the exec is inside what the activity has left. The second is
+    not the operator's to get right: `start_to_close` lives in the WORKFLOW's
+    input, so a suite budget that was legal yesterday stops being legal the day
+    someone lowers it, and nothing on this side would notice."""
+    install = _timeout_env(_INSTALL_TIMEOUT_ENV_VAR, _DEFAULT_INSTALL_TIMEOUT_SECONDS)
+    suite = _timeout_env(_SUITE_TIMEOUT_ENV_VAR, _DEFAULT_SUITE_TIMEOUT_SECONDS)
+    configured = (install, suite)
+
+    outer = _outer_activity_budget_seconds()
+    if outer is not None:
+        # Twice the margin: once for the shell inside the exec, once for the
+        # activity's own work around it (the audit writes, encoding the result).
+        # It is what makes the total STRICTLY less than the activity's clock
+        # instead of exactly equal to it.
+        room = int(outer) - _TESTER_NON_SUITE_BUDGET_SECONDS - 2 * _POD_EXEC_MARGIN_SECONDS
+        if install + suite > room:
+            # Clamped, not refused. Refusing produces no verdict at all — which
+            # is the failure mode this whole path exists to end — while a
+            # shorter clock still produces one, and the audit says the number
+            # was not the one that was asked for. Proportional, so the ratio the
+            # operator chose between preparing and measuring survives.
+            budget = max(room, _MIN_INSTALL_TIMEOUT_SECONDS + _MIN_SUITE_TIMEOUT_SECONDS)
+            scale = budget / (install + suite)
+            suite = max(_MIN_SUITE_TIMEOUT_SECONDS, int(suite * scale))
+            install = max(_MIN_INSTALL_TIMEOUT_SECONDS, budget - suite)
+
+    return _TesterClocks(
+        install=install,
+        suite=suite,
+        pod_exec=install + suite + _POD_EXEC_MARGIN_SECONDS,
+        clamped_from=None if (install, suite) == configured else configured,
+    )
 
 
 def _authored_test_infra_error(workspace_dir: str, test_paths: list[str]) -> str | None:
@@ -1586,15 +1780,19 @@ def _suite_outcome(*, tests_ran: bool, returncode: int) -> str:
     return "passed" if returncode == 0 else "tests_failed"
 
 
-def _infra_outcome_note(outcome: str, returncode: int) -> str:
+def _infra_outcome_note(outcome: str, returncode: int, *, suite_timeout_seconds: int) -> str:
     """The first thing the Coder reads about a suite that produced no verdict.
     It says what was MEASURED and nothing more: the old timeout text asserted an
     open http server or a pending timer as fact, while a timeout cannot tell
     stuck from slow — so the Coder spent paid turns hunting a handle that may
-    never have existed."""
+    never have existed.
+
+    `suite_timeout_seconds` is passed, not read from a constant: the budget is
+    configuration now, and a note that names a number the run did not use is the
+    same lie in a different font."""
     if outcome == "suite_hung":
         return (
-            f"THE SUITE DID NOT TERMINATE within {_SUITE_TIMEOUT_SECONDS}s and was killed.\n"
+            f"THE SUITE DID NOT TERMINATE within {suite_timeout_seconds}s and was killed.\n"
             "That is all that was measured. It may have been STUCK (nothing left to run and "
             "the process still up) or merely SLOW (still working when the clock ran out) — "
             "this cannot tell them apart, and no assertion failed here.\n"
@@ -1677,7 +1875,33 @@ def _tester_pod_sync(
     kctx = os.environ.get("DSE_SANDBOX_KUBE_CONTEXT", "")
     kbase = [kubectl] + (["--context", kctx] if kctx else [])
 
-    def _pod_sh(script: str, *, timeout: int = 600, input_text: str | None = None) -> "_sp.CompletedProcess":
+    clocks = _tester_clocks()
+    if clocks.clamped_from is not None:
+        # The turn still runs — but a suite measured against a budget nobody
+        # asked for is a result with a footnote, and the footnote has to be
+        # somewhere a human can find it later.
+        logger.error(
+            "tester clocks CLAMPED to fit the activity: install %ds→%ds, suite %ds→%ds",
+            clocks.clamped_from[0], clocks.install, clocks.clamped_from[1], clocks.suite,
+        )
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="tester_clock_clamped",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={
+                "configured_install_seconds": clocks.clamped_from[0],
+                "configured_suite_seconds": clocks.clamped_from[1],
+                "install_seconds": clocks.install,
+                "suite_seconds": clocks.suite,
+                "pod_exec_seconds": clocks.pod_exec,
+                "activity_budget_seconds": _outer_activity_budget_seconds(),
+            },
+        )
+
+    def _pod_sh(
+        script: str, *, timeout: int = _POD_CONTROL_TIMEOUT_SECONDS, input_text: str | None = None
+    ) -> "_sp.CompletedProcess":
         argv = kbase + ["exec", "-i", sandbox_id, "-n", ns, "--", "sh", "-c", script]
         try:
             return _sp.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text)
@@ -1724,11 +1948,14 @@ def _tester_pod_sync(
             local_ws = os.path.join(tmp, "ws")
             cp_argv = kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws]
             try:
-                cp = _sp.run(cp_argv, capture_output=True, text=True, timeout=180)
+                cp = _sp.run(
+                    cp_argv, capture_output=True, text=True,
+                    timeout=_WORKSPACE_CP_TIMEOUT_SECONDS,
+                )
             except _sp.TimeoutExpired as exc:
                 # 180s is not much for a real node_modules, and uncaught this
                 # loses the entire turn instead of one authoring pass.
-                cp = _timed_out_process(cp_argv, exc, 180)
+                cp = _timed_out_process(cp_argv, exc, _WORKSPACE_CP_TIMEOUT_SECONDS)
             if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
                 authoring_script, authoring_cost_usd = _model_authored_test_script(
                     inp, local_ws, headers, virtual_key
@@ -1793,13 +2020,19 @@ def _tester_pod_sync(
         # had broken. Still non-fatal (a failed install can leave a usable
         # tree), but no longer invisible — and on stderr, which the tail below
         # keeps.
-        'npm install --no-audit --no-fund >/tmp/dse-npm-install.log 2>&1 || '
+        #
+        # Its own `timeout` too: sharing one exec with the suite meant the
+        # install silently ate the suite's budget, and a run that died in the
+        # install looked exactly like a run that died in the tests.
+        f'timeout -k 10 {clocks.install} npm install --no-audit --no-fund '
+        '>/tmp/dse-npm-install.log 2>&1 || '
         'echo "DSE: npm install FAILED (rc=$?). The suite ran against an INCOMPLETE '
         'node_modules — this is an install problem, not a test problem. '
+        f'rc=124 means the install alone outlived its own {clocks.install}s budget. '
         'install tail: $(tail -c 800 /tmp/dse-npm-install.log)" >&2; '
-        f'timeout -k 10 {_SUITE_TIMEOUT_SECONDS} npm test --silent; '
-        f'else timeout -k 10 {_SUITE_TIMEOUT_SECONDS} python3 -m pytest -q; fi',
-        timeout=600,
+        f'timeout -k 10 {clocks.suite} npm test --silent; '
+        f'else timeout -k 10 {clocks.suite} python3 -m pytest -q; fi',
+        timeout=clocks.pod_exec,
     )
     tests_ran = bool(test_files)
     tests_passed = tests_ran and run.returncode == 0
@@ -1819,7 +2052,9 @@ def _tester_pod_sync(
         # Say it in words the next round will act on. The raw output of a killed
         # suite ends mid-run and reads like a pass, which is precisely how six
         # non-terminating files got authored in a row.
-        failure_output = _infra_outcome_note(outcome, returncode) + failure_output
+        failure_output = _infra_outcome_note(
+            outcome, returncode, suite_timeout_seconds=clocks.suite
+        ) + failure_output
         # 1200, not 300: at 300 the cut landed mid-token ("e: 'suite'") and the
         # actual assertion never appeared.
         logger.warning("tester k8s: suite %s (rc=%s): %s", outcome, returncode,
@@ -1833,9 +2068,9 @@ def _tester_pod_sync(
         msg = f"tester({inp.work_item_id}): {(inp.instruction or '')[:60]}"
         _pod_sh(
             f"cd /workspace && git add {files_arg} && git commit -m {_shlex.quote(msg)} || true",
-            timeout=120,
+            timeout=_POD_CONTROL_TIMEOUT_SECONDS,
         )
-    h = _pod_sh("cd /workspace && git rev-parse HEAD", timeout=60)
+    h = _pod_sh("cd /workspace && git rev-parse HEAD", timeout=_HEAD_READ_TIMEOUT_SECONDS)
     head_sha = (h.stdout or "").strip() or None
 
     audit_emit(
@@ -1853,6 +2088,10 @@ def _tester_pod_sync(
             # 'resource_kill'` is how an OOM is told from a broken assertion
             # without reading 4 KB of runner output.
             "outcome": outcome,
+            # The budget this run was actually measured against. It is
+            # configuration now, so `suite_hung` without it is unreadable a week
+            # later: nobody can tell a hang from a ConfigMap that was too tight.
+            "suite_timeout_seconds": clocks.suite,
             "cost_usd": authoring_cost_usd,
         },
     )

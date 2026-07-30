@@ -43,7 +43,9 @@ def _fake_cluster(*, suite, reused=("tests/test_dse.py",), cp=None, seen=None):
 
     def fake_run(argv, **kwargs):
         if seen is not None:
-            seen.append(argv)
+            # The kwargs too: `timeout` is the clock that decides whether an
+            # overrun is named `exec_timeout` or `suite_hung`.
+            seen.append((argv, kwargs))
         joined = " ".join(argv)
         if "cp" in argv[:3]:
             local_ws = argv[-1]
@@ -89,6 +91,11 @@ def _run_bridge(monkeypatch, *, seen=None, **cluster):
 
 def _completed_row(audits):
     return next(a for a in audits if a["action"] == "tester_turn_completed")
+
+
+def _suite_call(seen):
+    """The `kubectl exec` that runs the suite: (argv, kwargs)."""
+    return next(call for call in seen if "npm test" in call[0][-1])
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +166,12 @@ def test_a_hung_suite_message_does_not_invent_the_cause(monkeypatch, audits):
 
     assert _completed_row(audits)["details"]["outcome"] == "suite_hung"
     assert result.status is GateStatus.ERROR
-    assert str(activities._SUITE_TIMEOUT_SECONDS) in result.failure_output
+    # The budget is configuration now, so the text has to name the one THIS run
+    # was measured against — and the ledger has to carry the same number, or a
+    # `suite_hung` a week old cannot be told from a ConfigMap that was too tight.
+    effective = activities._tester_clocks().suite
+    assert f"{effective}s" in result.failure_output
+    assert _completed_row(audits)["details"]["suite_timeout_seconds"] == effective
     assert "SLOW" in result.failure_output and "STUCK" in result.failure_output
     assert "may well pass" not in result.failure_output
 
@@ -179,8 +191,10 @@ def test_the_suite_exec_timing_out_returns_a_named_result(monkeypatch, audits):
     assert result.tests_passed is False
     assert result.status is GateStatus.ERROR
     assert _completed_row(audits)["details"]["outcome"] == "exec_timeout"
-    # the command and the limit that blew, not just "it failed"
-    assert "600s" in result.failure_output
+    # the command and the limit that blew, not just "it failed". The limit is
+    # the exec's, which is derived from the two configured budgets — reporting
+    # the suite's here would point the reader at the wrong clock.
+    assert f"{activities._tester_clocks().pod_exec}s" in result.failure_output
     assert "kubectl" in result.failure_output
     assert "partial" in result.failure_output, "whatever the process printed is evidence"
 
@@ -192,7 +206,7 @@ def test_a_timeout_with_no_output_at_all_is_still_readable(monkeypatch, audits):
     result = _run_bridge(monkeypatch, suite=boom)
 
     assert result.returncode == activities._RC_POD_EXEC_TIMEOUT
-    assert "TIMEOUT after 600s" in result.failure_output
+    assert f"TIMEOUT after {activities._tester_clocks().pod_exec}s" in result.failure_output
 
 
 def test_the_workspace_copy_timing_out_does_not_lose_the_turn(monkeypatch, audits):
@@ -214,15 +228,52 @@ def test_a_broken_npm_install_says_so_instead_of_hiding_in_dev_null(monkeypatch,
     Pod, so this checks the exact string that would be sent there, and parses
     it for real (`sh -n`) because it is built by concatenation and a quoting
     slip would only show up live."""
-    seen: list[list[str]] = []
+    seen: list[tuple[list[str], dict]] = []
     _run_bridge(monkeypatch, suite=_done([], 0), seen=seen)
-    script = next(argv[-1] for argv in seen if "npm test" in argv[-1])
+    script = _suite_call(seen)[0][-1]
 
     assert "/dev/null" not in script
     assert "npm install FAILED" in script
     assert "not a test problem" in script
+    # It also has a clock of its own now — without one it silently ate the
+    # suite's share of the exec, and rc=124 had no meaning here.
+    assert f"timeout -k 10 {activities._tester_clocks().install} npm install" in script
     parse = _REAL_RUN(["sh", "-n", "-c", script], capture_output=True, text=True)
     assert parse.returncode == 0, parse.stderr
+
+
+# ---------------------------------------------------------------------------
+# 0.1 — the suite's budget is configuration, and it has to REACH the Pod
+# ---------------------------------------------------------------------------
+
+
+def test_the_configured_budgets_are_the_ones_that_reach_the_pod(monkeypatch, audits):
+    """Configuration that never reaches the shell is not configuration. This is
+    the item: 180s was a module constant, the 180-600s band used to pass before
+    it existed, and the exit criterion needs a real suite of 10 to 15 minutes."""
+    monkeypatch.setenv("DSE_TESTER_SUITE_TIMEOUT_SECONDS", "840")
+    monkeypatch.setenv("DSE_TESTER_INSTALL_TIMEOUT_SECONDS", "240")
+    seen: list[tuple[list[str], dict]] = []
+    _run_bridge(monkeypatch, suite=_done([], 0), seen=seen)
+    argv, kwargs = _suite_call(seen)
+
+    assert "timeout -k 10 840 npm test" in argv[-1]
+    assert "timeout -k 10 240 npm install" in argv[-1]
+    assert "timeout -k 10 180" not in argv[-1], "the old constant must be gone"
+    # And the exec that wraps them is strictly outside both, or the overrun
+    # would be reported as the worker's deadline instead of the suite's.
+    assert kwargs["timeout"] > 840 + 240
+
+
+def test_the_pytest_branch_gets_the_same_configured_budget(monkeypatch, audits):
+    """The Python path hangs the same way and is the one a fix like this
+    forgets — the acceptance repo for the SAST gate is Python."""
+    monkeypatch.setenv("DSE_TESTER_SUITE_TIMEOUT_SECONDS", "840")
+    seen: list[tuple[list[str], dict]] = []
+    _run_bridge(monkeypatch, suite=_done([], 0), seen=seen)
+    script = _suite_call(seen)[0][-1]
+
+    assert "timeout -k 10 840 python3 -m pytest" in script
 
 
 # ---------------------------------------------------------------------------
