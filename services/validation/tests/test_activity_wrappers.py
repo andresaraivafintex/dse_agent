@@ -20,5 +20,6 @@ def test_l1_wrapper_matches_core_signature():
         base_sha="a" * 8,
         head_sha="b" * 8,
         target_dir=".",
-
+        # the heartbeat's progress hook (item 1.2) crosses the same boundary
+        on_step=lambda _stage: None,
     )

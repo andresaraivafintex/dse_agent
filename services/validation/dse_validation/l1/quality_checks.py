@@ -43,12 +43,16 @@ def _not_configured(check: str, cfg: L1Config) -> L1Finding:
 def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if not cfg.lint_cmd:
         return _not_configured("lint", cfg)
-    result = _run(executor, cfg.lint_cmd, cfg.timeout_seconds)
+    # `timeout_for`, not `timeout_seconds`: the manifest's per-stage `timeouts`
+    # block is the clock that was validated against the activity's budget, and
+    # the number in the message below has to be the one that actually ran.
+    timeout = cfg.timeout_for("lint")
+    result = _run(executor, cfg.lint_cmd, timeout)
     # ruff/flake8: 1 line per issue, formatted as "path:line:col: CODE msg".
     issue_lines = [ln for ln in result.stdout.splitlines() if re.match(r"^\S+:\d+:\d+:\s", ln)]
     passed = result.ok and len(issue_lines) == 0
     if result.timed_out:
-        detail = f"timed out after {cfg.timeout_seconds}s running {' '.join(cfg.lint_cmd)}"
+        detail = f"timed out after {timeout}s running {' '.join(cfg.lint_cmd)}"
         status = GateStatus.ERROR
     elif result.returncode == 127:
         detail = f"lint command not found: {' '.join(cfg.lint_cmd)} ({result.stderr.strip()})"
@@ -65,7 +69,8 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
 def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if not cfg.typecheck_cmd:
         return _not_configured("typecheck", cfg)
-    result = _run(executor, cfg.typecheck_cmd, cfg.timeout_seconds)
+    timeout = cfg.timeout_for("typecheck")
+    result = _run(executor, cfg.typecheck_cmd, timeout)
     error_lines = [ln for ln in result.stdout.splitlines() if ": error:" in ln]
     if result.returncode == 127:
         return L1Finding(
@@ -78,7 +83,7 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     n = len(error_lines)
     detail = f"{n} type error(s)" if n else "no type errors"
     if result.timed_out:
-        detail = f"timed out after {cfg.timeout_seconds}s"
+        detail = f"timed out after {timeout}s"
         passed = False
         status = GateStatus.ERROR
     else:
@@ -97,7 +102,8 @@ _PYTEST_SUMMARY_RE = re.compile(
 def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if not cfg.test_cmd:
         return _not_configured("test", cfg)
-    result = _run(executor, cfg.test_cmd, cfg.timeout_seconds)
+    timeout = cfg.timeout_for("test")
+    result = _run(executor, cfg.test_cmd, timeout)
     if result.returncode == 127:
         return L1Finding(
             check="test",
@@ -109,7 +115,7 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     summary = m.group(0) if m else None
     passed = result.ok
     if result.timed_out:
-        detail = f"timed out after {cfg.timeout_seconds}s running tests — L1 fails clean (P6), no truncation"
+        detail = f"timed out after {timeout}s running tests — L1 fails clean (P6), no truncation"
         status = GateStatus.ERROR
     elif summary:
         detail = f"summary: {summary}"
@@ -124,7 +130,8 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
 def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if not cfg.build_cmd:
         return _not_configured("build", cfg)
-    result = _run(executor, cfg.build_cmd, cfg.timeout_seconds)
+    timeout = cfg.timeout_for("build")
+    result = _run(executor, cfg.build_cmd, timeout)
     if result.returncode == 127:
         return L1Finding(
             check="build",
@@ -135,7 +142,7 @@ def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     passed = result.ok
     detail = "build ok" if passed else f"build failed (exit={result.returncode})"
     if result.timed_out:
-        detail = f"timed out after {cfg.timeout_seconds}s"
+        detail = f"timed out after {timeout}s"
         status = GateStatus.ERROR
     else:
         status = GateStatus.PASS if passed else GateStatus.FAIL

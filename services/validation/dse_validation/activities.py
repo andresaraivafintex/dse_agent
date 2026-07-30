@@ -17,6 +17,9 @@ not depend on the `@activity.defn` decorator).
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
+from collections.abc import Callable
 
 from dse_contracts import (
     ACTIVITY_CONSUME_CI_STATUS,
@@ -228,7 +231,67 @@ class RecordReviewEpisodeInput(BaseModel):
     accepted: bool = True
 
 
-def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
+logger = logging.getLogger("dse_validation.activities")
+
+
+class _L1Cancelled(Exception):
+    """Raised inside the L1 thread at the first stage boundary after the Activity
+    was cancelled — see `_run_l1_pipeline_with_heartbeat`."""
+
+
+class _L1Progress:
+    """Which L1 stage the worker thread is on, readable from the event loop.
+
+    The pipeline thread writes and the Activity's loop reads. Both sides touch a
+    SINGLE attribute holding the `(stage, started_at)` pair: rebinding one
+    attribute is atomic under the GIL, so the loop can never publish a new stage
+    name carrying the previous stage's clock. No lock, because the loop must
+    never block on the thread it is heartbeating for.
+    """
+
+    def __init__(self, work_item_id: str) -> None:
+        self._work_item_id = work_item_id
+        self._started_at = time.monotonic()
+        self._stage: tuple[str, float] = ("starting", self._started_at)
+        self._cancelled = False
+
+    def enter(self, stage: str) -> None:
+        """`on_step` for the pipeline core — called from the worker thread."""
+        if self._cancelled:
+            raise _L1Cancelled(f"L1 activity cancelled before stage {stage}")
+        self._stage = (stage, time.monotonic())
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def current(self) -> tuple[str, float]:
+        stage, since = self._stage
+        return stage, max(0.0, time.monotonic() - since)
+
+    def details(self, *, state: str, sequence: int) -> dict:
+        """The heartbeat payload. Deliberately small and free of repository
+        content: it is operational data, and on a timeout it is the ONLY thing
+        the server hands back (`lastHeartbeatDetails`). Keeping the same shape as
+        `sandbox_runtime.activity_heartbeat` so both workers read alike.
+        `elapsed_seconds` is the age of `operation`; `total_elapsed_seconds` is
+        the whole L1 — the pair is what sizes the per-command timeouts."""
+        stage, stage_elapsed = self.current()
+        return {
+            "schema_version": 1,
+            "component": "validation",
+            "stage": "l1",
+            "work_item_id": self._work_item_id,
+            "operation": stage,
+            "state": state,
+            "sequence": sequence,
+            "elapsed_seconds": round(stage_elapsed, 3),
+            "total_elapsed_seconds": round(max(0.0, time.monotonic() - self._started_at), 3),
+        }
+
+
+def _run_l1_pipeline(
+    inp: RunL1PipelineInput, on_step: Callable[[str], None] | None = None
+) -> L1Result:
     # Boundary bug fixed during the real run (2026-07-22): the core moved to
     # base_sha/head_sha (sha-bound-validation-inputs-v1) and this wrapper kept
     # passing base_branch — the tests call the CORE directly and never saw the
@@ -246,6 +309,7 @@ def _run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
         base_sha=inp.base_sha,
         head_sha=inp.head_sha,
         target_dir=inp.target_dir,
+        on_step=on_step,
     )
 
 
@@ -586,9 +650,89 @@ def _publish_evidence(inp: PublishEvidenceInput) -> dict:
 # `await asyncio.to_thread(_impl, inp)` — never `_impl(inp)` directly.
 if _HAS_TEMPORAL:
 
+    # L1 is the longest synchronous body in this worker: it runs the target
+    # repository's OWN suite inside the sandbox. `await asyncio.to_thread(...)`
+    # keeps the loop free but emits nothing, so the server saw no heartbeat and
+    # killed the Activity at `activity_heartbeat_seconds` — 600 s on the
+    # dispatcher path, 60 s for any caller that goes through `apply_to_input`
+    # without DSE_ACTIVITY_HEARTBEAT_SECONDS in the environment — with
+    # ACTIVITY_TASK_TIMED_OUT. The `test` finding was then neither PASS nor
+    # FAIL, it simply never existed. The loop beats while the thread works, which
+    # is the shape sandbox-runtime already uses for the agent turns
+    # (`sandbox_runtime.activity_heartbeat.run_sync_with_heartbeat`).
+    #
+    # That helper is NOT imported here on purpose, for two reasons: its heartbeat
+    # details are frozen at call time (they could not name the stage that is
+    # running), and `dse-validation` does not depend on `sandbox-runtime` — the
+    # import resolves today only because both packages happen to live in the same
+    # image, and would break the moment the images are split.
+    _HEARTBEAT_INTERVAL_CAP_SECONDS = 20.0
+    _MIN_HEARTBEAT_INTERVAL_SECONDS = 0.01
+
+    def _l1_heartbeat_interval() -> float:
+        """Beat at a third of the heartbeat timeout, capped at 20 s.
+
+        Chosen against the timeout, not in the absolute: a third leaves two
+        missed beats of slack before the server gives up, and it follows
+        automatically when the timeout is retuned. The cap is what keeps the
+        payload FRESH — the details are a black box recorder, and at 600 s of
+        timeout a third would be 200 s, long enough to report `typecheck` for a
+        pipeline that moved on to `test` three minutes ago. Beating more often
+        is free: the SDK coalesces heartbeats and only ever ships the last
+        details (at most one call per `max_heartbeat_throttle_interval`, 60 s by
+        default), and heartbeats are not workflow-history events.
+        """
+        timeout = activity.info().heartbeat_timeout
+        if timeout is None or timeout.total_seconds() <= 0:
+            return _HEARTBEAT_INTERVAL_CAP_SECONDS
+        return max(
+            _MIN_HEARTBEAT_INTERVAL_SECONDS,
+            min(_HEARTBEAT_INTERVAL_CAP_SECONDS, timeout.total_seconds() / 3.0),
+        )
+
+    def _drain_abandoned(task: asyncio.Task) -> None:
+        """A cancelled Activity leaves the L1 task running. Retrieve its outcome
+        so asyncio does not log `exception was never retrieved` when it is
+        finally collected."""
+        if not task.cancelled():
+            task.exception()
+
+    async def _run_l1_pipeline_with_heartbeat(inp: RunL1PipelineInput) -> L1Result:
+        progress = _L1Progress(inp.work_item_id)
+        interval = _l1_heartbeat_interval()
+        sequence = 0
+        activity.heartbeat(progress.details(state="started", sequence=sequence))
+        call = asyncio.create_task(asyncio.to_thread(_run_l1_pipeline, inp, progress.enter))
+        call.add_done_callback(_drain_abandoned)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({call}, timeout=interval)
+                if call in done:
+                    break
+                sequence += 1
+                activity.heartbeat(progress.details(state="running", sequence=sequence))
+            result = await call
+        except asyncio.CancelledError:
+            # The thread survives the cancellation — `asyncio.to_thread` has no
+            # way to interrupt it, and neither has `subprocess.run` inside the
+            # executor. Asking the pipeline to stop at its next stage boundary
+            # bounds the waste to the command already in flight instead of the
+            # whole remaining pipeline, and skips the validation_runs/audit rows
+            # of a run nobody will read.
+            stage, stage_elapsed = progress.current()
+            progress.cancel()
+            logger.warning(
+                "L1 activity cancelled for %s during stage=%s after %.1fs; the "
+                "in-flight sandbox command keeps running until it returns",
+                inp.work_item_id, stage, stage_elapsed,
+            )
+            raise
+        activity.heartbeat(progress.details(state="completed", sequence=sequence + 1))
+        return result
+
     @activity.defn(name=ACTIVITY_RUN_L1_PIPELINE)
     async def run_l1_pipeline(inp: RunL1PipelineInput) -> L1Result:
-        return await asyncio.to_thread(_run_l1_pipeline, inp)
+        return await _run_l1_pipeline_with_heartbeat(inp)
 
     @activity.defn(name=ACTIVITY_FINALIZE_PR)
     async def finalize_pr(inp: FinalizePrInput) -> PrRef:
