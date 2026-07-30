@@ -426,6 +426,50 @@ async def github_webhook(request: Request) -> dict:
         conv_event = build_event_from_pr_merged(payload, resolved_principal=principal, merge_sha=merge_sha)
         return _handle_merge_event(conv_event, principal=principal, tenant_id=tenant_id, pr_number=pr_number)
 
+    if event_type in ("installation", "installation_repositories"):
+        # Marking a repository on the App's installation page leaves NO other
+        # trace: nothing here writes a row for it, and GitHub's own delivery log
+        # only reaches back ~7 days, so after a week the click is unrecoverable.
+        # An allowlist of exactly these two, never an emit on the fallthrough
+        # below: `pull_request/edited` is fired by the DSE's own PATCH on the PR
+        # body, so a catch-all would fill `audit_log` with the DSE auditing
+        # itself and bury the one row this exists for.
+        installation = payload.get("installation") or {}
+        # Neither event carries `payload["repository"]` — the whole payload is
+        # read through `.get()` chains for that reason.
+        repository_selection = payload.get("repository_selection") or installation.get("repository_selection")
+        audited = 0
+        for key in ("repositories_added", "repositories_removed", "repositories"):
+            # The delivery's `action` is NOT the direction of the individual row:
+            # both arrays always ship in the payload and the loop reads both on
+            # purpose, so an `action: "added"` delivery that also carries
+            # `repositories_removed` would stamp "added" on a repo that was
+            # unmarked — backwards, in the one row this branch exists to write.
+            # The array a repo came from is the direction; for the `installation`
+            # event's single `repositories` list the action IS it (created/deleted).
+            change = {"repositories_added": "added", "repositories_removed": "removed"}.get(key) or action
+            for repo in payload.get(key) or []:
+                try:
+                    audit_emit(
+                        actor="system:adapter-github",
+                        action="github_installation_repositories",
+                        tenant_id=tenant_id,
+                        details={
+                            "installation_id": installation.get("id"),
+                            "full_name": (repo or {}).get("full_name"),
+                            "private": (repo or {}).get("private"),
+                            "action": action,
+                            "change": change,
+                            "repository_selection": repository_selection,
+                        },
+                    )
+                    audited += 1
+                except Exception:  # noqa: BLE001 — `emit` re-raises; a lost trace must not become a 500
+                    logger.exception(
+                        "installation webhook: could not audit %s", (repo or {}).get("full_name")
+                    )
+        return {"ok": True, "path": "installation_repositories_audited", "audited": audited}
+
     return {"ok": True, "path": "ignored_unhandled_event_type"}
 
 
