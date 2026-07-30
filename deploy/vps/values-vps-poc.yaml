@@ -48,7 +48,7 @@ global:
 
 # --- DSE release images (GHCR, by rc tag). Stock ones (postgres/temporal/redis/
 #     vault/otel) stay in the public repositories, with no prefix. ---
-_ghcrTag: &ghcrTag "v0.1.0-rc.10"
+_ghcrTag: &ghcrTag "v0.1.0-rc.11"
 
 # --- CPU requests right-sized against MEASURED usage (2026-07-25) ------------
 # The node sat at 97% CPU *reserved* while using 9%: 1843m of the 2000m was
@@ -181,14 +181,18 @@ consoleProjector:
 console:
   enabled: true
   ui:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.5" }
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-ui, tag: "v0.1.0-rc.6" }
   api:
-    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.5" }
-    # OFF until this tag is bumped to an image that carries
-    # /app/vendor/dse_skills. rc.5 predates the vendoring, so leaving the chart
-    # default (true) here would put console-api in Init:Error and take the panel
-    # down. Flip to true in the SAME commit that bumps the tag above — that is
-    # the change that makes the 21 skills reach the agent on this cluster.
+    image: { repository: ghcr.io/fintexinc/dse_console_pane/console-api, tag: "v0.1.0-rc.6" }
+    # OFF, and NOT tied to the tag above. The instruction this comment used to
+    # carry — "flip to true in the same commit that bumps the tag" — was wrong:
+    # console-api has never vendored the skills. Its Dockerfile copies no
+    # dse_skills tree at any tag (grep for vendor/dse_skills in
+    # control-plane/api/Dockerfile returns nothing), and skillsSync.ts exits 1
+    # when the directory is missing, which is an init container — so flipping
+    # this puts console-api in Init:Error and takes the panel down. It stays
+    # off until the console-api image actually ships the tree; the 21 skills
+    # reach the agent through the sandbox runtime, not through this job.
     skillsSync:
       enabled: false
   ingress:
