@@ -70,6 +70,17 @@ AUDIT_EVENT_MAP: dict[str, str] = {
     # this is the word next to the message an on-call reader sees.
     "work_item_escalated_stranded": "error",
     "cancelled_by_operator": "error",
+    # The Tester turn ended by something the runtime imposed (OOM kill, a suite
+    # that never terminated, the worker's own exec deadline) rather than by an
+    # assertion. It either escalates the item to a human or spends the one paid
+    # Coder turn a hang is allowed — both are errors, and the whole point of the
+    # row is that a person reads it. Unmapped it fell through to `note`, the
+    # bucket for actions nobody classified, which the console labels as a remark.
+    "tester_infra_outcome": "error",
+    # A Coder turn that burned tokens and THEN failed. Temporal may still retry
+    # it, so the item is not necessarily lost — but real money was spent with
+    # nothing to show, which is the definition of an error on this timeline.
+    "coder_turn_failed_after_spend": "error",
     "coder_retry_cap_exhausted": "error",
     "activity_retries_exhausted": "error",
     "model_path_fail_closed": "error",

@@ -13,16 +13,19 @@ Proves (against real sandbox/git):
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 
 import pytest
 from temporalio.testing import ActivityEnvironment
 
 from dse_contracts import ACTIVITY_RUN_TESTER_TURN
+from sandbox_runtime import activities, git_checkpoint
 from sandbox_runtime.activities import (
     ProvisionSandboxInput,
     RunTesterTurnInput,
     TeardownSandboxInput,
+    _default_branch,
     _paths_for,
     _run_tester_turn_impl,
     provision_sandbox,
@@ -104,6 +107,42 @@ def test_tester_reports_real_failure_when_written_test_fails(work_item_id, state
         assert result.returncode != 0
     finally:
         asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant)))
+
+
+def test_tester_reports_the_cost_of_the_authoring_call(work_item_id, state_dir, monkeypatch):
+    """`TesterTurnResult.cost_usd` was the literal 0.0, so the $25 per-work-item
+    ceiling counted only the Coder and the ledger had nothing to reconcile
+    against. The money is real: the authoring call goes through the gateway
+    client, which bills and records it. No Docker here — the local path needs a
+    git workspace, not a container."""
+    tenant = "tenant-t"
+    workspace_dir, bare = _paths_for(work_item_id)
+    branch = _default_branch(work_item_id)
+    git_checkpoint.provision_checkpoint_repo(bare, branch)
+    git_checkpoint.init_task_workspace(workspace_dir, bare, branch)
+
+    monkeypatch.setenv("DSE_CODER_SUBSTRATE", "claude-agent")  # anything but `fake` authors
+    monkeypatch.setattr(activities, "audit_emit", lambda **kw: None)
+    from model_gateway_client import gateway_call
+
+    class _Completion:
+        content = json.dumps(
+            {"files": [{"path": "tests/test_authored_dse.py", "content": _PASSING_TEST}]}
+        )
+        cost_usd = 0.0311
+
+    monkeypatch.setattr(gateway_call, "chat_completion", lambda **kw: _Completion())
+
+    result = asyncio.run(
+        _run_tester_turn_impl(
+            RunTesterTurnInput(work_item_id=work_item_id, tenant_id=tenant, instruction="cover the handler"),
+            push=False,
+        )
+    )
+
+    assert result.test_files == ["tests/test_authored_dse.py"]
+    assert result.tests_passed is True
+    assert result.cost_usd == pytest.approx(0.0311)
 
 
 def test_tester_runs_through_real_temporal_activity_environment(work_item_id, state_dir):

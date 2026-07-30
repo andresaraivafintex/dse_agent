@@ -58,6 +58,7 @@ from dse_contracts import (
     ACTIVITY_TEARDOWN_SANDBOX,
     CheckpointRef,
     CoderTurnResult,
+    GateStatus,
     GatewayCallHeaders,
     L2Verdict,
     PlanArtifact,
@@ -549,6 +550,147 @@ _prune_disposable_artifacts = workspace_hygiene.prune_disposable_artifacts
 _revert_coder_test_edits = workspace_hygiene.revert_test_edits
 
 
+# Key the spend of a FAILED turn travels under, inside the `details` of the
+# ApplicationError raised to the workflow. A failed Activity produces no result,
+# and `cost_usd` ON THE RESULT is the only way the workflow's per-work-item
+# ceiling ever learns about money (`_consume_cost`) — so `details` is the one
+# channel left. Nested under a single key so a reader can identify THIS payload
+# among any other details a raiser might add.
+FAILED_TURN_SPEND_KEY = "dse_failed_turn_spend"
+
+
+def _is_scripted_substrate(agent: Any) -> bool:
+    """Whether this turn spent PLAY money. The discriminator is the SUBSTRATE
+    NAME, not the cost: FakeSubstrate reports $0.01 per step, so a cost-based
+    guard would start writing ledger rows from existing scripted tests into a
+    table nothing is allowed to delete from."""
+    return getattr(agent, "substrate_name", "") == "fake" or type(agent).__name__ == "FakeSubstrate"
+
+
+def _meter_coder_spend(
+    inp: RunCoderTurnInput, artifacts: CoderTurnResult, *, agent: Any, outcome: str
+) -> int | None:
+    """Write this turn's spend into model_call_ledger; return the row id, or
+    None when no row was written.
+
+    Every other stage lands there through the gateway client, but the coder
+    drives the bundled CLI with the gateway configured by env, so its cost only
+    ever existed on this result — which is why the console's rollup, computed
+    from the ledger alone, reported $0.50 against $27.91 of real spend.
+
+    NEVER raises. On the success path the commit and push already happened, so
+    raising would burn a Temporal retry and re-spend real money to fix a
+    bookkeeping miss; on the failure path it would replace the turn's real error
+    with a Postgres one. Fail loud and fall back to the legacy audit-derived
+    path.
+    """
+    if not artifacts.cost_usd or _is_scripted_substrate(agent):
+        return None
+    try:
+        from model_gateway_client.ledger import record_call
+
+        return record_call(
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            stage=inp.stage,
+            task_class=inp.task_class,
+            model=os.environ.get("DSE_CODER_MODEL", "anthropic/claude"),
+            cost_usd=artifacts.cost_usd,
+            tokens_in=artifacts.tokens_in,
+            tokens_out=artifacts.tokens_out,
+        )
+    except Exception as exc:  # noqa: BLE001 — never re-raise here
+        logger.error(
+            "coder cost ledger write FAILED (%s: %s); $%.4f falls back to the audit path",
+            type(exc).__name__, str(exc)[:200], artifacts.cost_usd,
+        )
+        with contextlib.suppress(Exception):
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="coder_cost_ledger_write_failed",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"error": type(exc).__name__, "cost_usd": artifacts.cost_usd,
+                         "stage": inp.stage, "outcome": outcome},
+            )
+        return None
+
+
+def _meter_failed_coder_turn(
+    exc: Exception, *, inp: RunCoderTurnInput, agent: Any
+) -> dict[str, Any] | None:
+    """Book what a turn spent BEFORE it failed, and return the payload that has
+    to ride on the propagated error. None = there was nothing to book.
+
+    `remote_substrate.run_turn` accumulates the cost before raising, so by the
+    time we are here the money is real and known — but the turn never reaches
+    `collect_artifacts()` below, so it used to land NOWHERE: no ledger row (the
+    console under-reports), no `cost_usd` on any result (the $25 ceiling never
+    counts it). Under `RetryPolicy(maximum_attempts=0)` the same turn can fail
+    over and over, each attempt spending and each one disappearing.
+
+    Both ends or neither: a ledger row on a path the workflow cannot count would
+    only build the OPPOSITE asymmetry — money the ledger sees and the ceiling
+    never does. So the same numbers are also returned, to travel on the error.
+
+    Exactly once per attempt: the substrate is rebuilt on every Activity attempt
+    (`_build_substrate`), so the accumulated cost covers THIS attempt alone, and
+    the `raise` that follows guarantees the success-path metering never runs for
+    the same turn. A retry re-spends real money and legitimately gets a new row.
+
+    Nothing in here may mask the turn's own error, so every step is defensive.
+    """
+    try:
+        artifacts = agent.collect_artifacts()
+    except Exception:  # noqa: BLE001 — a bookkeeping failure never wins over the turn's
+        logger.exception("could not collect the artifacts of the failed coder turn")
+        return None
+    if not artifacts.cost_usd:
+        # Failed BEFORE spending anything (the exec never ran, the result did
+        # not decode): a ledger row here would be an invented charge.
+        return None
+
+    spend: dict[str, Any] = {
+        "cost_usd": artifacts.cost_usd,
+        "tokens_in": artifacts.tokens_in,
+        "tokens_out": artifacts.tokens_out,
+        "ledger_id": _meter_coder_spend(inp, artifacts, agent=agent, outcome="failed"),
+        "stage": inp.stage,
+        "work_item_id": inp.work_item_id,
+    }
+    with contextlib.suppress(Exception):  # audit_emit talks to Postgres
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="coder_turn_failed_after_spend",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={**spend, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+        )
+    return {FAILED_TURN_SPEND_KEY: spend}
+
+
+def _error_carrying_spend(exc: Exception, spend: dict[str, Any]) -> Exception:
+    """The same failure, re-shaped so the money it already spent rides along.
+
+    A plain `raise` cannot carry it: Temporal converts a non-ApplicationError
+    into an ApplicationError with EMPTY details, and `details` is the only slot
+    on a failed Activity the workflow can read. Everything the workflow
+    classifies on is therefore copied VERBATIM — the `type` (Temporal itself
+    uses the exception's class name; a structured raiser uses the dse.failure.*
+    vocabulary), `non_retryable`, and the message that the legacy substring
+    fallback still reads. Only `details` changes.
+    """
+    from temporalio.exceptions import ApplicationError
+
+    if isinstance(exc, ApplicationError):
+        return ApplicationError(
+            exc.message, *exc.details, spend, type=exc.type, non_retryable=exc.non_retryable
+        )
+    return ApplicationError(
+        str(exc) or type(exc).__name__, spend, type=type(exc).__name__, non_retryable=False
+    )
+
+
 @activity.defn(name=ACTIVITY_RUN_CODER_TURN)
 async def run_coder_turn(inp: RunCoderTurnInput) -> CoderTurnResult:
     """Thin wrapper registered as the actual Activity — Temporal does not accept
@@ -647,8 +789,15 @@ async def _run_coder_turn_impl(
                 operation=f"substrate_turn_{turns + 1}",
             )
         except Exception as exc:  # noqa: BLE001 — classification, not swallowing
-            _raise_if_permanent_provider_error(exc)
-            raise
+            # It is this `raise` that skips the metering at the end of the
+            # function: a turn that burned tokens and THEN failed reported its
+            # spend to nobody. Book it, and hand it to the workflow on the error
+            # itself — the only channel a failed Activity has.
+            spend = _meter_failed_coder_turn(exc, inp=inp, agent=agent)
+            _raise_if_permanent_provider_error(exc, spend=spend)
+            if spend is None:
+                raise  # nothing was measured: the error travels exactly as before
+            raise _error_carrying_spend(exc, spend) from exc
         done = log.done
         turns += 1
 
@@ -748,50 +897,9 @@ async def _run_coder_turn_impl(
 
         files_changed = git_session.files_changed_against(base_sha) if base_sha != git_session.current_sha() else []
 
-    # Meter the coder into model_call_ledger. Every other stage lands there
-    # through the gateway client, but the coder drives the bundled CLI with the
-    # gateway configured by env, so its cost only ever existed on this result —
-    # which is why the console's rollup, computed from the ledger alone,
-    # reported $0.50 against $27.91 of real spend.
-    #
-    # The guard is the SUBSTRATE NAME, not the cost: FakeSubstrate reports
-    # $0.01 per step, so a cost-based guard would start writing ledger rows from
-    # four existing scripted tests into a table nothing is allowed to delete
-    # from.
-    ledger_id: int | None = None
-    _scripted = getattr(agent, "substrate_name", "") == "fake" or type(agent).__name__ == "FakeSubstrate"
-    if artifacts.cost_usd and not _scripted:
-        try:
-            from model_gateway_client.ledger import record_call
-
-            ledger_id = record_call(
-                tenant_id=inp.tenant_id,
-                work_item_id=inp.work_item_id,
-                stage=inp.stage,
-                task_class=inp.task_class,
-                model=os.environ.get("DSE_CODER_MODEL", "anthropic/claude"),
-                cost_usd=artifacts.cost_usd,
-                tokens_in=artifacts.tokens_in,
-                tokens_out=artifacts.tokens_out,
-            )
-        except Exception as exc:  # noqa: BLE001 — never re-raise here
-            # The commit and push above ALREADY happened. Raising would burn a
-            # Temporal retry and re-spend real money to fix a bookkeeping miss.
-            # Fail loud and fall back to the legacy audit-derived path.
-            ledger_id = None
-            logger.error(
-                "coder cost ledger write FAILED (%s: %s); $%.4f falls back to the audit path",
-                type(exc).__name__, str(exc)[:200], artifacts.cost_usd,
-            )
-            with contextlib.suppress(Exception):
-                audit_emit(
-                    actor="system:sandbox-runtime",
-                    action="coder_cost_ledger_write_failed",
-                    tenant_id=inp.tenant_id,
-                    work_item_id=inp.work_item_id,
-                    details={"error": type(exc).__name__, "cost_usd": artifacts.cost_usd,
-                             "stage": inp.stage},
-                )
+    # Meter the coder into model_call_ledger — the same call the failure path
+    # above makes, so a turn is booked once whichever way it ends.
+    ledger_id = _meter_coder_spend(inp, artifacts, agent=agent, outcome="completed")
 
     audit_emit(
         actor="system:sandbox-runtime",
@@ -1137,7 +1245,11 @@ _PERMANENT_PROVIDER_MARKERS = (
 )
 
 
-def _raise_if_permanent_provider_error(exc: Exception) -> None:
+def _raise_if_permanent_provider_error(exc: Exception, *, spend: dict[str, Any] | None = None) -> None:
+    """`spend`: what the failing turn had ALREADY paid for, when the caller
+    measured it (see FAILED_TURN_SPEND_KEY). Exhausted credits are the one
+    failure that is certain to arrive AFTER money was spent, so dropping it here
+    would lose exactly the money the ceiling most needs to know about."""
     blob = f"{type(exc).__name__}:{exc}".lower()
     if any(m in blob for m in _PERMANENT_PROVIDER_MARKERS):
         from dse_contracts.failure import FailureClass, failure_type
@@ -1149,6 +1261,7 @@ def _raise_if_permanent_provider_error(exc: Exception) -> None:
         # replay.)
         raise ApplicationError(
             f"provider_billing_or_auth: {str(exc)[:200]}",
+            *((spend,) if spend is not None else ()),
             type=failure_type(FailureClass.provider_billing),
             non_retryable=True,
         ) from exc
@@ -1229,7 +1342,7 @@ def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
 def _model_authored_test_script(
     inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str,
     *, error_feedback: str = "",
-) -> list[dict[str, Any]] | None:
+) -> tuple[list[dict[str, Any]] | None, float]:
     """Test authoring by the REAL MODEL (same pattern as the planner): 1
     stage=tester call through the gateway → test files → deterministic script
     [write_file..., run_tests]. Deterministic guard-rails (P1):
@@ -1239,12 +1352,17 @@ def _model_authored_test_script(
         rejected (overwriting a repo test would destroy the suite);
       - `error_feedback` re-injects the infra error from the 1st attempt (1
         retry).
-    Any failure → None → tests_ran=False → WS-B's gate stops cleanly."""
+    Any failure → None → tests_ran=False → WS-B's gate stops cleanly.
+
+    Returns (script, cost_usd). The COST is returned separately, and on the
+    failure paths too: the call was billed the moment the gateway answered, so a
+    response that does not parse costs exactly as much as one that does — and
+    that money used to disappear, because the caller only ever saw the script."""
     try:
         from model_gateway_client.gateway_call import chat_completion
     except ImportError:
         logger.warning("model_gateway_client unavailable — tester without real authoring")
-        return None
+        return None, 0.0
     from dse_contracts.paths import is_test_path
 
     diff = ""
@@ -1284,8 +1402,9 @@ def _model_authored_test_script(
     except Exception as exc:  # noqa: BLE001
         _raise_if_permanent_provider_error(exc)  # billing/auth: the right message on the issue
         logger.warning("tester via model failed (%s: %s)", type(exc).__name__, str(exc)[:200])
-        return None
+        return None, 0.0
 
+    cost_usd = float(getattr(result, "cost_usd", 0.0) or 0.0)
     text = (result.content or "").strip()
     if text.startswith("```"):
         text = text.strip("`\n")
@@ -1295,7 +1414,7 @@ def _model_authored_test_script(
         files = parsed.get("files") or []
     except json.JSONDecodeError as exc:
         logger.warning("test authoring did not parse (%s); response: %.200s", exc, text)
-        return None
+        return None, cost_usd
 
     script: list[dict[str, Any]] = []
     for f in files[:3]:
@@ -1312,9 +1431,9 @@ def _model_authored_test_script(
             path = renamed
         script.append({"tool": "write_file", "path": path, "content": content})
     if not script:
-        return None
+        return None, cost_usd
     script.append({"tool": "run_tests"})
-    return script
+    return script, cost_usd
 
 
 def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
@@ -1436,6 +1555,101 @@ async def run_tester_turn(inp: RunTesterTurnInput) -> TesterTurnResult:
     return await _run_tester_turn_impl(inp)
 
 
+# A kubectl call the WORKER's own clock killed. Outside the 0-255 range a shell
+# can return, so it can never be confused with something the suite said.
+_RC_POD_EXEC_TIMEOUT = -1001
+
+# What ENDED the suite. Only `tests_failed` is a verdict about the code under
+# test; the rest are infra facts the Coder cannot act on — and it was being
+# handed all of them as failing assertions.
+_SUITE_OUTCOME_INFRA = frozenset({"suite_hung", "resource_kill", "exec_timeout"})
+
+
+def _suite_outcome(*, tests_ran: bool, returncode: int) -> str:
+    """Name what ended the suite. The infra codes are read FIRST: they are facts
+    about the process, true whether or not any test was ever authored."""
+    if returncode == 124:
+        # coreutils `timeout`: the suite outlived the budget it was given.
+        return "suite_hung"
+    if returncode == 137:
+        # 128+9 = SIGKILL, and NOT the suite's own clock — `timeout` reports its
+        # kill as 124 even after `-k` escalates to SIGKILL. A SIGKILL from
+        # outside the process means, on this runtime, the cgroup OOM killer.
+        # Seen in production on 2026-07-29 and handed to the Coder as a failing
+        # assertion, which is why it gets its own branch: a clock and a memory
+        # limit are not fixed the same way.
+        return "resource_kill"
+    if returncode == _RC_POD_EXEC_TIMEOUT:
+        return "exec_timeout"
+    if not tests_ran:
+        return "no_tests"
+    return "passed" if returncode == 0 else "tests_failed"
+
+
+def _infra_outcome_note(outcome: str, returncode: int) -> str:
+    """The first thing the Coder reads about a suite that produced no verdict.
+    It says what was MEASURED and nothing more: the old timeout text asserted an
+    open http server or a pending timer as fact, while a timeout cannot tell
+    stuck from slow — so the Coder spent paid turns hunting a handle that may
+    never have existed."""
+    if outcome == "suite_hung":
+        return (
+            f"THE SUITE DID NOT TERMINATE within {_SUITE_TIMEOUT_SECONDS}s and was killed.\n"
+            "That is all that was measured. It may have been STUCK (nothing left to run and "
+            "the process still up) or merely SLOW (still working when the clock ran out) — "
+            "this cannot tell them apart, and no assertion failed here.\n"
+            "If it is stuck, the usual cause is a resource a test opened and never closed: an "
+            "http server with no after() that closes it, a pending timer, an open connection. "
+            "If it is slow, make the suite cheaper — fewer cases, smaller fixtures.\n\n"
+        )
+    if outcome == "resource_kill":
+        limit = os.environ.get("DSE_SANDBOX_MEM_LIMIT") or "(DSE_SANDBOX_MEM_LIMIT unset)"
+        return (
+            f"THE SUITE WAS KILLED FROM OUTSIDE (rc={returncode}, SIGKILL). THIS IS NOT A TEST "
+            "FAILURE: the process died mid-run, no assertion was evaluated, and nothing below "
+            "is a verdict on the code.\n"
+            f"On this runtime that kill is the sandbox going over its MEMORY LIMIT of {limit}. "
+            "The suite's own clock reports itself as rc=124, never 137, so time is not what "
+            "ended this run.\n"
+            "What helps: run less at once (smaller fixtures, fewer workers), or have an "
+            "operator raise DSE_SANDBOX_MEM_LIMIT. Editing an assertion will not.\n\n"
+        )
+    if outcome == "exec_timeout":
+        return (
+            "THE POD EXEC WAS KILLED BY THE WORKER'S OWN TIMEOUT — the suite never reported a "
+            "result. This is not a test failure; what follows is whatever had been printed "
+            "before the kill, and the command and the limit that blew are at the end of it.\n\n"
+        )
+    return ""
+
+
+def _timed_out_process(argv: list[str], exc: Any, limit: int) -> Any:
+    """`subprocess.TimeoutExpired` → a CompletedProcess the caller can read.
+
+    Uncaught, it leaves the activity with NO result at all: Temporal retries the
+    whole Tester turn from zero — cold `npm install` included — and nothing
+    durable says why. So the timeout becomes information instead: a returncode
+    nobody else produces, the command, the limit that blew, and whatever the
+    process had already printed."""
+    import subprocess as _sp
+
+    def _text(chunk: Any) -> str:
+        # TimeoutExpired carries what was read before the kill: bytes when the
+        # pipe was binary, None when nothing was read at all.
+        if chunk is None:
+            return ""
+        return chunk.decode("utf-8", "replace") if isinstance(chunk, bytes) else str(chunk)
+
+    # At the END of stderr on purpose: the caller keeps the TAIL of the output.
+    note = f"\nTIMEOUT after {limit}s running: {' '.join(argv)[:200]}\n"
+    return _sp.CompletedProcess(
+        args=argv,
+        returncode=_RC_POD_EXEC_TIMEOUT,
+        stdout=_text(getattr(exc, "stdout", None)),
+        stderr=_text(getattr(exc, "stderr", None)) + note,
+    )
+
+
 def _tester_pod_sync(
     inp: "RunTesterTurnInput",
     sandbox_id: str,
@@ -1464,10 +1678,13 @@ def _tester_pod_sync(
     kbase = [kubectl] + (["--context", kctx] if kctx else [])
 
     def _pod_sh(script: str, *, timeout: int = 600, input_text: str | None = None) -> "_sp.CompletedProcess":
-        return _sp.run(
-            kbase + ["exec", "-i", sandbox_id, "-n", ns, "--", "sh", "-c", script],
-            capture_output=True, text=True, timeout=timeout, input=input_text,
-        )
+        argv = kbase + ["exec", "-i", sandbox_id, "-n", ns, "--", "sh", "-c", script]
+        try:
+            return _sp.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text)
+        except _sp.TimeoutExpired as exc:
+            # Every caller below reads a returncode; none of them survives an
+            # exception (see _timed_out_process).
+            return _timed_out_process(argv, exc, timeout)
 
     # git identity IN THE POD (where the repo actually is — the local path's
     # "git config exit 128" was exactly this running in the worker, which does
@@ -1490,6 +1707,11 @@ def _tester_pod_sync(
 
     test_files: list[str] = []
     authored_new = False
+    # The Tester's own spend. Its authoring call goes through the gateway client,
+    # which already writes it to model_call_ledger — but the RESULT reported a
+    # hardcoded 0.0, so the workflow's per-work-item ceiling counted only the
+    # Coder and the ledger had nothing to reconcile against.
+    authoring_cost_usd = 0.0
     if reused:
         test_files = reused
         logger.info("tester k8s: reusing %d test(s) authored in a previous round", len(reused))
@@ -1500,15 +1722,29 @@ def _tester_pod_sync(
         tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
         try:
             local_ws = os.path.join(tmp, "ws")
-            cp = _sp.run(
-                kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws],
-                capture_output=True, text=True, timeout=180,
-            )
+            cp_argv = kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws]
+            try:
+                cp = _sp.run(cp_argv, capture_output=True, text=True, timeout=180)
+            except _sp.TimeoutExpired as exc:
+                # 180s is not much for a real node_modules, and uncaught this
+                # loses the entire turn instead of one authoring pass.
+                cp = _timed_out_process(cp_argv, exc, 180)
             if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
-                authoring_script = _model_authored_test_script(inp, local_ws, headers, virtual_key)
+                authoring_script, authoring_cost_usd = _model_authored_test_script(
+                    inp, local_ws, headers, virtual_key
+                )
             else:
                 logger.warning("tester k8s: kubectl cp of the workspace failed (rc=%s): %.200s",
                                cp.returncode, (cp.stderr or "")[:200])
+                # The turn ends as "no tests authored" either way; without this
+                # row nothing durable says the copy is the reason.
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="tester_workspace_copy_failed",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"returncode": cp.returncode, "stderr": (cp.stderr or "")[-500:]},
+                )
         finally:
             _shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1551,7 +1787,16 @@ def _tester_pod_sync(
     run = _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
-        'npm install --no-audit --no-fund >/dev/null 2>&1 || true; '
+        # The install's output used to go to /dev/null under `|| true`. A
+        # half-installed node_modules then broke the suite with
+        # MODULE_NOT_FOUND, and the Coder was sent to fix an import the runner
+        # had broken. Still non-fatal (a failed install can leave a usable
+        # tree), but no longer invisible — and on stderr, which the tail below
+        # keeps.
+        'npm install --no-audit --no-fund >/tmp/dse-npm-install.log 2>&1 || '
+        'echo "DSE: npm install FAILED (rc=$?). The suite ran against an INCOMPLETE '
+        'node_modules — this is an install problem, not a test problem. '
+        'install tail: $(tail -c 800 /tmp/dse-npm-install.log)" >&2; '
         f'timeout -k 10 {_SUITE_TIMEOUT_SECONDS} npm test --silent; '
         f'else timeout -k 10 {_SUITE_TIMEOUT_SECONDS} python3 -m pytest -q; fi',
         timeout=600,
@@ -1559,32 +1804,25 @@ def _tester_pod_sync(
     tests_ran = bool(test_files)
     tests_passed = tests_ran and run.returncode == 0
     returncode = run.returncode
-    # 124 is `timeout`'s signal that the suite never terminated. That is an
-    # INFRA defect in the authored test, not a failing assertion, and it has to
-    # be reported as such — the Coder cannot fix an assertion that never ran.
-    suite_hung = returncode == 124
+    outcome = _suite_outcome(tests_ran=tests_ran, returncode=returncode)
+    suite_hung = outcome == "suite_hung"
     # Kept, not just logged. The workflow feeds this back to the Coder on the
     # next attempt; without it the retry repeats the original instruction
     # verbatim and the same test fails again. Tail, because the useful part of a
     # test runner's output is the end.
     failure_output = ""
-    if tests_ran and not tests_passed:
+    # An infra kill is reported even with no authored test: it is the process
+    # that died, and "no tests ran" on its own would read like the model simply
+    # produced nothing.
+    if not tests_passed and (tests_ran or outcome in _SUITE_OUTCOME_INFRA):
         failure_output = ((run.stdout or "") + (run.stderr or ""))[-_FAILURE_OUTPUT_CHARS:]
-        if suite_hung:
-            # Say it in words the next authoring round will actually act on. The
-            # raw output ends mid-run and reads like a pass, which is precisely
-            # how six non-terminating files got authored in a row.
-            failure_output = (
-                f"THE SUITE DID NOT TERMINATE within {_SUITE_TIMEOUT_SECONDS}s and was killed.\n"
-                "The tests themselves may well pass — the process never exits. Something is "
-                "holding the event loop open: an http server started in the test and not closed "
-                "in after(), a pending timer, or an open handle in a before() hook. Close every "
-                "resource you open, in an after() that runs even when a test fails.\n\n"
-            ) + failure_output
+        # Say it in words the next round will act on. The raw output of a killed
+        # suite ends mid-run and reads like a pass, which is precisely how six
+        # non-terminating files got authored in a row.
+        failure_output = _infra_outcome_note(outcome, returncode) + failure_output
         # 1200, not 300: at 300 the cut landed mid-token ("e: 'suite'") and the
         # actual assertion never appeared.
-        logger.warning("tester k8s: suite %s (rc=%s): %s",
-                       "DID NOT TERMINATE" if suite_hung else "failed", returncode,
+        logger.warning("tester k8s: suite %s (rc=%s): %s", outcome, returncode,
                        failure_output[-_FAILURE_OUTPUT_AUDIT_CHARS:])
 
     # commit the test files IN THE POD (current branch; the post-tester checkpoint
@@ -1611,6 +1849,11 @@ def _tester_pod_sync(
             # WHY it failed, not just THAT it failed. Empty on success.
             "failure_output": failure_output[-_FAILURE_OUTPUT_AUDIT_CHARS:],
             "suite_hung": suite_hung,
+            # The class of the ending, queryable: `WHERE details->>'outcome' =
+            # 'resource_kill'` is how an OOM is told from a broken assertion
+            # without reading 4 KB of runner output.
+            "outcome": outcome,
+            "cost_usd": authoring_cost_usd,
         },
     )
     return TesterTurnResult(
@@ -1620,8 +1863,12 @@ def _tester_pod_sync(
         tests_passed=tests_passed,
         returncode=returncode,
         head_sha=head_sha,
-        cost_usd=0.0,
+        cost_usd=authoring_cost_usd,
         failure_output=failure_output,
+        # An infra ending is ERROR, not FAIL: FAIL is a verdict on the code under
+        # test, and it is what makes the failure read as an assertion to fix.
+        # The contract's validator derives the rest (PASS/NOT_CONFIGURED).
+        status=GateStatus.ERROR if outcome in _SUITE_OUTCOME_INFRA else None,
     )
 
 
@@ -1693,6 +1940,12 @@ async def _run_tester_turn_impl(
     # ONCE with the error in the prompt; if it persists → remove the files and
     # return tests_ran=False (the gate stops cleanly instead of burning Coder
     # turns).
+    #
+    # The Tester's own spend, summed over BOTH authoring attempts: the gateway
+    # client already wrote each call to model_call_ledger, but the result
+    # reported a hardcoded 0.0, so the workflow's per-work-item ceiling counted
+    # only the Coder.
+    authoring_cost_usd = 0.0
     if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
         # Tester idempotency (2nd real run): tests already authored in a previous
         # cycle are RE-RUN, never re-authored — the fix cycle needs a fixed target
@@ -1710,7 +1963,7 @@ async def _run_tester_turn_impl(
     if authoring_script is None and os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
         error_feedback = ""
         for attempt in (1, 2):
-            authoring_script = await run_sync_with_heartbeat(
+            authoring_script, attempt_cost_usd = await run_sync_with_heartbeat(
                 lambda _c: _model_authored_test_script(
                     inp, workspace_dir, headers, vk.virtual_key, error_feedback=error_feedback,
                 ),
@@ -1719,6 +1972,9 @@ async def _run_tester_turn_impl(
                 work_item_id=inp.work_item_id,
                 operation=f"tester_authoring_{attempt}",
             )
+            # Before the break: an attempt that produced nothing usable was
+            # still billed.
+            authoring_cost_usd += attempt_cost_usd
             if not authoring_script:
                 break
             new_paths = [s["path"] for s in authoring_script if s.get("tool") == "write_file"]
@@ -1830,6 +2086,7 @@ async def _run_tester_turn_impl(
             "virtual_key_fixture": vk.fixture,
             # WHY it failed, not just THAT it failed. Empty on success.
             "failure_output": (failure_output or "")[-_FAILURE_OUTPUT_AUDIT_CHARS:],
+            "cost_usd": authoring_cost_usd,
         },
     )
     return TesterTurnResult(
@@ -1838,7 +2095,7 @@ async def _run_tester_turn_impl(
         tests_ran=tests_ran,
         tests_passed=tests_passed,
         returncode=returncode,
-        cost_usd=0.0,
+        cost_usd=authoring_cost_usd,
         failure_output=failure_output,
     )
 
