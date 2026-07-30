@@ -5,7 +5,8 @@ Postgres, audit — lives in an Activity, never directly in the `@workflow.run`
 body):
 
 - `update_work_item_status`: WS-B's only write path into the shared
-  `work_items` table (`status`/`pr_number` columns). The workflow is the
+  `work_items` table (`status`/`repo`/`pr_number` and the other operational
+  columns — nothing else in this service UPDATEs it). The workflow is the
   legitimate owner of the state machine (P1), so it is the one that writes the
   transition — other services (adapters, admin UI) read the same row.
 - `check_clarification_completeness`: a pure checklist (repo? acceptance
@@ -78,6 +79,20 @@ def _get_connection():
     return psycopg2.connect(_DSN)
 
 
+def _none_if_blank(value: Any) -> str | None:
+    """A blank string means "the caller has nothing", never "erase the column".
+
+    `COALESCE(%s, col)` only defends the column against NULL. A caller that
+    renders an unset field as `""` (or as whitespace) would therefore blank a
+    value that is already good. Normalizing here, at the single write path,
+    keeps that guarantee no matter what any caller sends.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @activity.defn(name=LOCAL_ACTIVITY_UPDATE_STATUS)
 async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
     """Projects the workflow state into ``work_items`` idempotently.
@@ -117,6 +132,15 @@ async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
     attempts_json = (
         json.dumps(inp.validation_attempts) if inp.validation_attempts is not None else None
     )
+    # A work item born on Slack/Jira has no repo/base_branch; both are resolved
+    # LATER, from the human's clarification answer, and this Activity is the only
+    # thing that can put them on the row. They are read off the raw payload and
+    # not off `inp` because PersistWorkItemStateInput does not declare them yet
+    # and the model DROPS unknown keys silently — going through it would throw
+    # the resolved repo away and leave the column NULL forever (which is what the
+    # cost-per-repo rollup has been reading as "(unknown)").
+    repo = _none_if_blank(payload.get("repo"))
+    base_branch = _none_if_blank(payload.get("base_branch"))
     try:
         conn = _get_connection()
     except Exception as exc:  # pragma: no cover - only happens without Postgres up
@@ -128,6 +152,8 @@ async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
                 """
                 UPDATE work_items SET
                     status = COALESCE(%s, status),
+                    repo = COALESCE(%s, repo),
+                    base_branch = COALESCE(%s, base_branch),
                     pr_number = COALESCE(%s, pr_number),
                     pr_url = COALESCE(%s, pr_url),
                     plan = COALESCE(%s::jsonb, plan),
@@ -155,6 +181,8 @@ async def update_work_item_status(payload: dict[str, Any]) -> dict[str, Any]:
                 """,
                 (
                     inp.status,
+                    repo,
+                    base_branch,
                     inp.pr_number,
                     inp.pr_url,
                     plan_json,

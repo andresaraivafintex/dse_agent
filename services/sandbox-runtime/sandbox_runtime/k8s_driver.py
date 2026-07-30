@@ -74,6 +74,14 @@ def _ttl_seconds_from_env(default: int = DEFAULT_SANDBOX_TTL_SECONDS) -> int:
     return value if value >= 0 else default
 
 
+def _quantity_from_env(name: str, default: str) -> str:
+    """Same import-time hazard as _ttl_seconds_from_env, different blast radius:
+    a Helm value rendering as "" would put an EMPTY quantity in the manifest and
+    make every `kubectl apply` fail with an invalid resource — one bad chart
+    value would take provisioning down entirely, not just one Pod."""
+    return (os.environ.get(name) or "").strip() or default
+
+
 @dataclass
 class K8sSandboxConfig:
     namespace: str = os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
@@ -88,6 +96,31 @@ class K8sSandboxConfig:
     egress_proxy_url: str = os.environ.get("DSE_EGRESS_PROXY_URL", "http://egress-proxy.dse.svc.cluster.local:8806")
     cpu_limit: str = os.environ.get("DSE_SANDBOX_CPU_LIMIT", "1")
     mem_limit: str = os.environ.get("DSE_SANDBOX_MEM_LIMIT", "2Gi")
+    # Local ephemeral storage. A clone + `npm install` fills the /workspace and
+    # /tmp emptyDirs — the image sets HOME=/tmp, so the npm cache lands in the
+    # SECOND one — and the kubelet bills their sum, plus /checkpoint.git,
+    # against this limit. Undeclared (the state before this) no Pod can ever
+    # exceed a limit of its own: the kubelet waits for node-level disk pressure
+    # and then evicts a victim of its choosing, and a Pod requesting 0 is the
+    # first one chosen.
+    # The 2Gi, measured on the node this runs on: 29 GB rootfs at 76% = 6.8 GB
+    # free, minus evictionHard nodefs.available=5% (~1.45 GB) = ~5.35 GB a
+    # sandbox may actually spend. 5.35 / 2Gi ~ 2 concurrent sandboxes, which is
+    # the honest disk cap; 3Gi drops that cap to 1, and >= 4Gi reproduces
+    # today's failure (the node trips its own threshold before any Pod trips
+    # its limit). A real large repo needs ~2-2.9 GB (clone 0.3-0.5 +
+    # node_modules >= 1 + npm cache 0.3-0.5 + /checkpoint.git 0.2-0.4), so 2Gi
+    # is deliberately tight and the env knob is the escape hatch until a real
+    # workspace is measured inside the Pod.
+    # The request buys eviction ORDER (a Pod under its request is reclaimed
+    # last), not admission: the node advertises 26.6 GiB allocatable while only
+    # 6.8 GB is free, so the scheduler would still admit a dozen sandboxes —
+    # bounding how many exist at once is a separate control.
+    # No emptyDir carries a sizeLimit yet; when one does, the three together
+    # must fit inside this limit, or the Pod dies of the sum before any single
+    # volume reaches its own cap.
+    ephemeral_storage_limit: str = _quantity_from_env("DSE_SANDBOX_EPHEMERAL_STORAGE_LIMIT", "2Gi")
+    ephemeral_storage_request: str = _quantity_from_env("DSE_SANDBOX_EPHEMERAL_STORAGE_REQUEST", "1Gi")
     kubectl: str = os.environ.get("DSE_KUBECTL", "kubectl")
     kube_context: str = os.environ.get("DSE_SANDBOX_KUBE_CONTEXT", "")
     # PVC for the git checkpoint (/checkpoint.git). Empty = emptyDir (ephemeral —
@@ -129,7 +162,7 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
       - NO hostPath/Docker socket, NO hostNetwork/PID/IPC;
       - egress only through the proxy (HTTP(S)_PROXY) — the default-deny
         NetworkPolicy is cluster-side (documented);
-      - restartPolicy=Never (ephemeral); CPU/mem limits."""
+      - restartPolicy=Never (ephemeral); CPU/mem/ephemeral-storage limits."""
     cfg = cfg or K8sSandboxConfig()
     name = pod_name_for(request.work_item_id)
     container_sec = {
@@ -163,8 +196,16 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
                 "imagePullPolicy": "IfNotPresent",
                 "securityContext": container_sec,
                 "resources": {
-                    "limits": {"cpu": cfg.cpu_limit, "memory": cfg.mem_limit},
-                    "requests": {"cpu": "250m", "memory": "512Mi"},
+                    "limits": {
+                        "cpu": cfg.cpu_limit,
+                        "memory": cfg.mem_limit,
+                        "ephemeral-storage": cfg.ephemeral_storage_limit,
+                    },
+                    "requests": {
+                        "cpu": "250m",
+                        "memory": "512Mi",
+                        "ephemeral-storage": cfg.ephemeral_storage_request,
+                    },
                 },
                 "env": [
                     {"name": "HTTP_PROXY", "value": cfg.egress_proxy_url},

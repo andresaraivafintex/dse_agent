@@ -7,8 +7,11 @@ nobody can loosen the spec without breaking here.
 """
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
+from sandbox_runtime import k8s_driver
 from sandbox_runtime.driver import (
     IsolatedStageExecutionUnavailable,
     SandboxProvisionRequest,
@@ -32,6 +35,31 @@ def _req():
 def _pod(**cfg_over):
     cfg = K8sSandboxConfig(**cfg_over)
     return build_pod_manifest(_req(), cfg)
+
+
+def _pod_from_env(monkeypatch, **env):
+    """K8sSandboxConfig resolves env in dataclass field defaults, i.e. at IMPORT
+    time — so setting the variable and calling the config does nothing. The only
+    honest way to prove an env knob reaches the manifest is to re-import with
+    the env set, which is what the worker process does on startup."""
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    reloaded = importlib.reload(k8s_driver)
+    try:
+        return reloaded.build_pod_manifest(_req(), reloaded.K8sSandboxConfig())
+    finally:
+        monkeypatch.undo()
+        importlib.reload(k8s_driver)
+
+
+_QUANTITY_UNITS = {"Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3}
+
+
+def _as_bytes(quantity: str) -> int:
+    for unit, factor in _QUANTITY_UNITS.items():
+        if quantity.endswith(unit):
+            return int(quantity[: -len(unit)]) * factor
+    return int(quantity)
 
 
 def test_pod_and_container_run_as_nonroot_uid():
@@ -104,8 +132,62 @@ def test_ephemeral_pod_never_restarts():
 
 
 def test_resource_limits_present():
-    limits = _pod()["spec"]["containers"][0]["resources"]["limits"]
-    assert "cpu" in limits and "memory" in limits
+    resources = _pod()["spec"]["containers"][0]["resources"]
+    # ephemeral-storage belongs here with cpu/memory: a sandbox that fills the
+    # node's disk must be evicted by ITS OWN limit, not by node-level pressure
+    # picking a victim — and a Pod that requests 0 disk is the first victim.
+    assert {"cpu", "memory", "ephemeral-storage"} <= set(resources["limits"])
+    assert {"cpu", "memory", "ephemeral-storage"} <= set(resources["requests"])
+
+
+def test_ephemeral_storage_request_fits_under_its_limit():
+    # k8s rejects a Pod whose request exceeds its limit; the defaults must be a
+    # spec that actually applies.
+    resources = _pod()["spec"]["containers"][0]["resources"]
+    request = _as_bytes(resources["requests"]["ephemeral-storage"])
+    limit = _as_bytes(resources["limits"]["ephemeral-storage"])
+    assert 0 < request <= limit
+
+
+def test_emptydir_size_limits_stay_within_the_pod_ephemeral_budget():
+    """The two caps must tell the same story. The kubelet bills the SUM of the
+    emptyDirs against the container's ephemeral-storage limit, so emptyDirs
+    whose sizeLimits add up to more than that limit would let the Pod die of the
+    total while every single volume still looks healthy. No sizeLimit is set
+    yet; this holds the invariant for whoever sets the first one."""
+    pod = _pod()
+    limit = _as_bytes(pod["spec"]["containers"][0]["resources"]["limits"]["ephemeral-storage"])
+    declared = sum(
+        _as_bytes(v["emptyDir"]["sizeLimit"])
+        for v in pod["spec"]["volumes"]
+        if "sizeLimit" in v.get("emptyDir", {})
+    )
+    assert declared <= limit
+
+
+def test_ephemeral_storage_read_from_env(monkeypatch):
+    pod = _pod_from_env(
+        monkeypatch,
+        DSE_SANDBOX_EPHEMERAL_STORAGE_LIMIT="7Gi",
+        DSE_SANDBOX_EPHEMERAL_STORAGE_REQUEST="3Gi",
+    )
+    resources = pod["spec"]["containers"][0]["resources"]
+    assert resources["limits"]["ephemeral-storage"] == "7Gi"
+    assert resources["requests"]["ephemeral-storage"] == "3Gi"
+
+
+def test_blank_ephemeral_storage_env_falls_back_to_the_default(monkeypatch):
+    # A chart value rendering as "" is trivially produced; an empty quantity
+    # makes `kubectl apply` reject the Pod, so it must degrade to the default
+    # rather than emit a manifest that cannot be applied at all.
+    pod = _pod_from_env(
+        monkeypatch,
+        DSE_SANDBOX_EPHEMERAL_STORAGE_LIMIT="  ",
+        DSE_SANDBOX_EPHEMERAL_STORAGE_REQUEST="",
+    )
+    resources = pod["spec"]["containers"][0]["resources"]
+    assert _as_bytes(resources["limits"]["ephemeral-storage"]) > 0
+    assert _as_bytes(resources["requests"]["ephemeral-storage"]) > 0
 
 
 def test_driver_advertises_isolated_execution():

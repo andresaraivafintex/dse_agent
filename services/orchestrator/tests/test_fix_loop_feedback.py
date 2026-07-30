@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dse_contracts import GateStatus
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow as WF
 
 
@@ -58,6 +59,63 @@ def test_missing_output_is_reported_as_missing_not_as_silence():
     joined = "\n".join(WF._tester_failure_context(_tester(returncode=7, failure_output="")))
     assert "not captured" in joined
     assert "7" in joined
+
+
+def test_a_run_the_runtime_killed_is_not_announced_as_a_failing_suite():
+    """Real incident (audit_log 23474, 2026-07-29): rc=137, the cgroup OOM
+    killer, went to the Coder as a failing assertion. The runtime now names that
+    ending and says it is not a test failure — and this context is prepended to
+    that very text, so it must not open by contradicting it."""
+    killed = _tester(returncode=137, failure_output="THIS IS NOT A TEST FAILURE: ...")
+    killed.status = GateStatus.ERROR
+    joined = "\n".join(WF._tester_failure_context(killed))
+    assert "FAILING" not in joined
+    assert "did NOT produce a verdict" in joined
+    assert "THIS IS NOT A TEST FAILURE" in joined, "the runtime's explanation still travels"
+    assert "137" in joined
+
+
+def test_a_real_failing_assertion_is_still_announced_as_one():
+    """The guard above must not blunt the ordinary case."""
+    failed = _tester(returncode=1, failure_output="AssertionError: 3 != 2")
+    failed.status = GateStatus.FAIL
+    joined = "\n".join(WF._tester_failure_context(failed))
+    assert "is FAILING" in joined
+    assert "do not weaken or delete the tests" in joined.lower()
+
+
+def test_the_message_and_the_escalation_agree_on_what_ended_the_run():
+    """The two must never disagree about the same result.
+
+    `_tester_infra_outcome` keys on the RETURNCODE first precisely because the
+    incident came from a worker that reported rc=137 with no ERROR status, and
+    the runtime that sets ERROR ships in this same change — so every rolling
+    deploy reproduces that shape. Whenever the workflow treats a result as an
+    infra ending, THIS text (the one the Coder actually reads) has to say the
+    same thing.
+    """
+    for status in (None, GateStatus.FAIL, GateStatus.NOT_CONFIGURED):
+        for rc in (137, 124, -1001):
+            result = _tester(returncode=rc, failure_output="ok so far\n...")
+            if status is not None:
+                result.status = status
+            assert WF._tester_infra_outcome(result) is not None, "premise of the test"
+            joined = "\n".join(WF._tester_failure_context(result))
+            assert "FAILING" not in joined, f"rc={rc} status={status} read as an assertion"
+            assert "did NOT produce a verdict" in joined
+            assert str(rc) in joined
+
+
+def test_a_killed_run_that_captured_nothing_is_not_sent_hunting_for_a_mismatch():
+    """A hang reported by an older worker arrives with an EMPTY failure_output.
+    "look for the mismatch" is an instruction for a failing assertion, and there
+    was none — the process was killed."""
+    hung = _tester(returncode=124, failure_output="")
+    joined = "\n".join(WF._tester_failure_context(hung))
+    assert "look for the mismatch" not in joined
+    assert "did NOT produce a verdict" in joined
+    assert "no output" in joined.lower()
+    assert "124" in joined
 
 
 def test_only_the_failing_l1_checks_are_reported():

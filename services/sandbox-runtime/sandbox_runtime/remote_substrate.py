@@ -131,12 +131,20 @@ class RemoteSubstrate:
             )
         )
         result = AgentTurnResult.model_validate(exec_result.output_payload)
-        if result.failed:
-            raise RemoteTurnError(result.error_kind or "substrate_error", result.error or "")
-
+        # Meter BEFORE the failure check: a turn that burned tokens and THEN
+        # failed still spent real money, and both surfaces that count it (the
+        # ledger row and the budget_consumed audit) are fed from
+        # collect_artifacts(). Dropping it here made a failed turn invisible to
+        # the reconciliation — under an unbounded activity retry, once per
+        # attempt. Metering happens exactly once, on the only path where a
+        # result exists: anything that raises above (exec, decode) never
+        # produced a cost to attribute.
         self._cost_usd += result.cost_usd
         self._tokens_in += result.tokens_in
         self._tokens_out += result.tokens_out
+        if result.failed:
+            raise RemoteTurnError(result.error_kind or "substrate_error", result.error or "")
+
         log = TurnLog(
             instruction=instruction,
             thoughts=list(result.thoughts),

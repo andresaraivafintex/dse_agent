@@ -127,6 +127,62 @@ _FAIL_CLOSED_MARKERS = (
 )
 
 
+# The exit codes the SANDBOX RUNTIME assigns to an ending IT imposed, as opposed
+# to a verdict on the code under test (`sandbox_runtime.activities._suite_outcome`
+# is where they are produced and named). Duplicated here as literals because the
+# orchestrator cannot import the runtime — separate service, and the workflow
+# sandbox forbids it — and because `TesterTurnResult` carries no `outcome`
+# field: the name the runtime computed reaches the audit ledger and stops there.
+# Adding `outcome: str = ""` to that contract would delete this map; until then
+# the returncode is the only part of the classification that crosses the wire.
+_TESTER_INFRA_RETURNCODES: dict[int, str] = {
+    # 128+9 = SIGKILL from OUTSIDE the process. On this runtime that is the
+    # cgroup OOM killer: `timeout` reports its own kill as 124, never 137.
+    137: "resource_kill",
+    # coreutils `timeout` inside the Pod: the suite outlived its budget.
+    124: "suite_hung",
+    # the runtime's private sentinel for its own kubectl-exec deadline.
+    -1001: "exec_timeout",
+}
+
+# The reason an infra ending escalates with. `tester_infra_<outcome>` is the
+# prefix a query groups on; the sentence after it names WHO can act, because the
+# only reader of an escalated item is a human deciding whether to touch the
+# code, the platform, or nothing at all.
+_TESTER_INFRA_REASONS: dict[str, str] = {
+    "resource_kill": (
+        "the test Pod was killed from outside (rc={rc}) — the cgroup OOM killer. No "
+        "assertion was evaluated, so there is nothing in the code to fix. The memory "
+        "ceiling is worker configuration (DSE_SANDBOX_MEM_LIMIT, read by the "
+        "sandbox-runtime process when it builds the Pod), not a property of this work "
+        "item: re-provisioning would rebuild the same Pod with the same limit. An "
+        "operator raises it, or this repo's suite has to run lighter."
+    ),
+    "suite_hung": (
+        "the suite never terminated and the runtime's own timeout killed it (rc={rc}). "
+        "Stuck (a test holding a handle open, which a Coder turn can close) and merely "
+        "slow (a suite larger than the runtime's budget, which it cannot) end "
+        "identically here, so this ending buys ONE Coder turn and never the retry cap."
+    ),
+    "exec_timeout": (
+        "the worker's exec into the sandbox hit its own deadline before the suite "
+        "reported anything (rc={rc}). That deadline belongs to the worker, not to the "
+        "code under test, and no Coder turn moves it."
+    ),
+    "infra_error": (
+        "the Tester reported ERROR (rc={rc}): the run produced no verdict at all. "
+        "Whatever ended it was the runtime and not an assertion, and no Coder turn can "
+        "turn that into a verdict."
+    ),
+}
+
+# How much of the runtime's own explanation travels inside the reason. It is the
+# only text that knows the DEPLOYED numbers (the memory limit, the suite's time
+# budget), and it ends up in `work_items.last_error` and in the comment posted on
+# the originating issue.
+_TESTER_INFRA_NOTE_CHARS = 320
+
+
 # Where the reminder lands when the configured one does not fit inside the
 # deadline. Half the window is the least surprising reading of two numbers that
 # contradict each other: the ping keeps real lead time and the deadline itself is
@@ -280,6 +336,15 @@ class WorkItemLifecycleWorkflow:
         # Activities' results during replay); it does not need to cross
         # continue_as_new because the intake loop completes within one run.
         self._clarification_missing_union: set[str] = set()
+
+        # How many Coder turns this run has already spent on a suite that did
+        # not terminate. Instance state for the same reason as the set above:
+        # replay rebuilds it from the same Tester results, and the Coder loop it
+        # bounds lives entirely inside ONE run — nothing between two Tester
+        # turns calls continue_as_new. A re_plan does close the run, and losing
+        # the count there is right: it provisions a NEW sandbox, so a hang on
+        # the old one says nothing about the new one.
+        self._suite_hung_retries = 0
 
     # ------------------------------------------------------------------
     # Signals — WSB-E2-T4, WSB-E3-T1, WSB-E3-T4, WSB-E5-T2
@@ -503,19 +568,40 @@ class WorkItemLifecycleWorkflow:
             f"WorkItemLifecycleWorkflow.run got an unsupported input type: {type(raw_input)!r}"
         )
 
-    # Both helpers are pure string formatting over values already in hand — no
-    # Activity, no clock, no randomness — so they are safe to call from inside
-    # the workflow and deterministic on replay (P1).
+    # These helpers are pure comparison/string formatting over values already in
+    # hand — no Activity, no clock, no randomness — so they are safe to call
+    # from inside the workflow and deterministic on replay (P1).
     @staticmethod
     def _tester_failure_context(tester_result) -> list[str]:
         """What the Coder needs to know about a suite that just failed."""
         output = (getattr(tester_result, "failure_output", "") or "").strip()
+        rc = getattr(tester_result, "returncode", "?")
+        # The SAME classification the escalation branch keys on, and checked
+        # FIRST. Reading only `status == ERROR` here let the two disagree in
+        # precisely the case the classifier exists for: a worker that reports
+        # rc=137 with no ERROR status — the incident itself, and every
+        # mixed-version rollout, since the runtime that sets ERROR ships in this
+        # same changeset — was escalated (or given its one hang retry) as an
+        # infra ending while THIS message, the one the Coder actually reads,
+        # opened with "the suite is FAILING, fix the code".
+        # Ahead of the missing-output branch for the same reason: an older
+        # worker reports a killed suite with no output at all, and "look for the
+        # mismatch" is the wrong instruction for a process that never ran an
+        # assertion.
+        if WorkItemLifecycleWorkflow._tester_infra_outcome(tester_result) is not None:
+            return [
+                "The test run did NOT produce a verdict — it was ended by the runtime, not by a "
+                "failing assertion. Read the explanation below before changing anything, and do "
+                "not rewrite tests to satisfy it.\n"
+                f"Exit code: {rc}\n"
+                + (f"Output:\n{output}" if output else "The runtime captured no output.")
+            ]
         if not output:
             # An older worker returns no output. Say so plainly rather than
             # implying the suite was silent — the two call for different fixes.
             return [
                 "The test suite failed (exit code "
-                f"{getattr(tester_result, 'returncode', '?')}) and its output was not captured. "
+                f"{rc}) and its output was not captured. "
                 "Re-read the tests and the code under test, and look for the mismatch."
             ]
         return [
@@ -524,6 +610,49 @@ class WorkItemLifecycleWorkflow:
             f"Exit code: {getattr(tester_result, 'returncode', '?')}\n"
             f"Output:\n{output}"
         ]
+
+    @staticmethod
+    def _tester_infra_outcome(tester_result) -> str | None:
+        """Name the ending the RUNTIME imposed on a Tester turn, or None when the
+        suite produced a real verdict (passed or failed).
+
+        Keyed on the RETURNCODE first and on `status` second, deliberately. The
+        production incident this exists for (audit_log 23474, 2026-07-29) came
+        from a worker that reported rc=137 with no ERROR status at all, and a
+        mixed-version rollout is exactly when the next one arrives; the
+        returncode is a fact about the process that every worker version
+        reports. `status == ERROR` is then the catch-all: it means the run
+        produced no verdict, and no Coder turn can manufacture one, whatever
+        code a future runtime uses to say so."""
+        rc = getattr(tester_result, "returncode", None)
+        outcome = _TESTER_INFRA_RETURNCODES.get(rc) if isinstance(rc, int) else None
+        if outcome is not None:
+            return outcome
+        status = getattr(tester_result, "status", None)
+        # Reads an enum member or the bare string a decoded payload can carry.
+        if getattr(status, "value", status) == GateStatus.ERROR.value:
+            return "infra_error"
+        return None
+
+    @staticmethod
+    def _tester_infra_reason(outcome: str, tester_result) -> str:
+        """The escalation reason for an infra ending: a prefix a query can group
+        on, the sentence that says who can act, and the runtime's own words.
+
+        The runtime is the only side that knows the DEPLOYED numbers — the
+        memory limit, the suite's time budget — and it already wrote them into
+        `failure_output`. They are carried from there instead of being restated
+        here: the workflow cannot read the sandbox's environment, and a limit
+        retyped in a second place is a limit that goes stale. Whitespace is
+        collapsed because the note is three paragraphs and this lands in one
+        TEXT column and one issue comment."""
+        rc = getattr(tester_result, "returncode", "?")
+        head = _TESTER_INFRA_REASONS.get(outcome, _TESTER_INFRA_REASONS["infra_error"])
+        reason = f"tester_infra_{outcome}: " + head.format(rc=rc)
+        note = " ".join((getattr(tester_result, "failure_output", "") or "").split())
+        if note:
+            reason += f" runtime said: {note[:_TESTER_INFRA_NOTE_CHARS]}"
+        return reason
 
     @staticmethod
     def _l1_failure_context(failed_checks) -> list[str]:
@@ -628,6 +757,13 @@ class WorkItemLifecycleWorkflow:
             payload = {
                 "work_item_id": self._input.work_item_id,
                 "status": self._input.status,
+                # An item born on Slack/Jira has no repo on the row: it is
+                # resolved mid-flight from the clarification answer and lived
+                # only in this input, so `work_items.repo` stayed NULL for the
+                # whole run and the cost-per-repo rollup read it as "(unknown)".
+                # The writer COALESCEs, so a None here never erases what is there.
+                "repo": self._input.repo,
+                "base_branch": self._input.base_branch,
                 "pr_number": self._input.pr_number,
                 "pr_url": self._input.pr_url,
                 "plan": self._input.plan_json or None,
@@ -1543,6 +1679,64 @@ class WorkItemLifecycleWorkflow:
             )
 
             if workflow.patched("enforce-tester-result-v1"):
+                # An ending the RUNTIME imposed is not a verdict on the code, and
+                # until now this gate could not tell the two apart: an OOM-killed
+                # Pod took the same branch as a failing assertion and bought up to
+                # three more Coder turns at a measured US$1.03 each, after which
+                # the item died with a reason that never named the cause.
+                #
+                # Classified BEFORE the `tests_ran` contract check below because
+                # an OOM or an exec deadline can land with no test file authored
+                # at all, and `tester_contract_failed:tests_ran=false` blames the
+                # model for a Pod that died. The classification itself is pure, so
+                # `workflow.patched` is only reached when there IS an infra ending
+                # to decide about — a passing turn records no marker.
+                infra_outcome = self._tester_infra_outcome(tester_result)
+                if infra_outcome and workflow.patched("tester-infra-outcome-escalates-v1"):
+                    # None of these endings is something a Coder turn can act on
+                    # — EXCEPT a suite that hangs, which may be a handle a test
+                    # the Tester itself just authored left open (observed live:
+                    # six non-terminating files in a row). That one gets ONE turn
+                    # to close it. Not three: the second attempt would face the
+                    # identical input, and a suite that is merely slower than the
+                    # runtime's budget cannot be fixed from inside the repo at
+                    # all, so the remaining turns would buy nothing.
+                    retry_the_hang = (
+                        infra_outcome == "suite_hung"
+                        and self._suite_hung_retries == 0
+                        and input.coder_retry_count < input.coder_retry_cap
+                    )
+                    reason = self._tester_infra_reason(infra_outcome, tester_result)
+                    await self._audit(
+                        "tester_infra_outcome",
+                        # `reason` is the one details key the console renders
+                        # (console_projector.mappers._DETAIL_KEYS); `outcome` is
+                        # the one a query groups by, matching the key the
+                        # runtime's own `tester_turn_completed` row writes.
+                        {"reason": reason,
+                         "outcome": infra_outcome,
+                         "returncode": tester_result.returncode,
+                         "decision": "retry_once" if retry_the_hang else "escalate",
+                         "attempt": input.coder_retry_count},
+                    )
+                    if not retry_the_hang:
+                        raise _EscalateNow(reason)
+                    self._suite_hung_retries += 1
+                    # This retry buys a Coder turn like any other, so it counts
+                    # against the same cap and carries the runtime's explanation
+                    # of the hang into the next instruction. No second guard on
+                    # `fix_context`: no closed history reaches this branch at all.
+                    input.coder_retry_count += 1
+                    input.fix_context = self._tester_failure_context(tester_result)
+                    await self._set_status(
+                        WorkItemStatus.implementing,
+                        audit_action="tester_failed_retrying",
+                        details={"attempt": input.coder_retry_count,
+                                 "returncode": tester_result.returncode,
+                                 "outcome": infra_outcome},
+                    )
+                    continue
+
                 if not tester_result.tests_ran:
                     return await self._finish_failed(
                         "tester_contract_failed:tests_ran=false",

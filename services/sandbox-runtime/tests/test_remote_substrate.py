@@ -4,7 +4,7 @@ Proves, without docker/k8s (StubDriver), the boundary's properties:
   - no host path crosses over (the request's workspace is /workspace);
   - only the ephemeral virtual key travels (never the master key);
   - a runner failure becomes a RemoteTurnError with a closed kind (no substring
-    matching);
+    matching), WITHOUT losing what that turn already spent;
   - the in-process ↔ isolated selection is deployment config
     (`DSE_SANDBOX_INPROCESS`), with no workflow code change;
   - the Coder's full deterministic pipeline (prune → revert test edits → scoped
@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 from dse_contracts import AgentTurnResult, RunCoderTurnInput, Stage
+from pydantic import ValidationError
 
 from sandbox_runtime.activities import (
     ProvisionSandboxInput,
@@ -44,6 +45,9 @@ class StubDriver:
     write_into: str | None = None
     write_files: dict[str, str] = field(default_factory=dict)
     requests: list[StageExecutionRequest] = field(default_factory=list)
+    # exec that blows up without ever producing a result (no such container,
+    # kubectl exec refused): nothing was measured, nothing to meter.
+    fail_with: Exception | None = None
 
     @property
     def supports_isolated_stage_execution(self) -> bool:
@@ -54,6 +58,8 @@ class StubDriver:
 
     def execute_stage(self, request: StageExecutionRequest) -> StageExecutionResult:
         self.requests.append(request)
+        if self.fail_with:
+            raise self.fail_with
         if self.write_into:
             import os
 
@@ -137,6 +143,76 @@ def test_runner_failure_raises_typed_error_no_substring(tmp_path):
     with pytest.raises(RemoteTurnError) as exc:
         sub.run_turn("x")
     assert exc.value.kind == "timeout"
+
+
+def test_failed_turn_still_reports_what_it_spent(tmp_path):
+    """The turn burned tokens and THEN failed. Both surfaces that count money
+    (the ledger row and the budget_consumed audit) are fed from
+    collect_artifacts(), so a spend dropped on the failure path disappears from
+    the reconciliation on BOTH — once per attempt, and the Activity retries
+    without a count cap."""
+    driver = StubDriver(
+        result=AgentTurnResult(
+            done=False, cost_usd=0.75, tokens_in=300, tokens_out=90,
+            error="the CLI died mid-turn", error_kind="substrate_error",
+        ).model_dump()
+    )
+    sub = RemoteSubstrate(driver=driver, substrate_name="claude-agent")
+    _session(sub, workspace=str(tmp_path))
+
+    with pytest.raises(RemoteTurnError) as exc:
+        sub.run_turn("x")
+    assert exc.value.kind == "substrate_error"
+
+    artifacts = sub.collect_artifacts()
+    assert artifacts.cost_usd == pytest.approx(0.75)
+    assert artifacts.tokens_in == 300 and artifacts.tokens_out == 90
+
+
+@pytest.mark.parametrize(
+    "driver_kwargs, expected_error",
+    [
+        ({"fail_with": RuntimeError("docker exec: no such container")}, RuntimeError),
+        # a payload the contract rejects (no `done`) is not evidence of a spend,
+        # even carrying a cost field: nothing was validated, nothing is booked.
+        ({"result": {"cost_usd": 9.99}}, ValidationError),
+    ],
+    ids=["exec_never_ran", "undecodable_result"],
+)
+def test_turn_that_fails_before_spending_reports_nothing(driver_kwargs, expected_error, tmp_path):
+    sub = RemoteSubstrate(driver=StubDriver(**driver_kwargs), substrate_name="claude-agent")
+    _session(sub, workspace=str(tmp_path))
+
+    with pytest.raises(expected_error):
+        sub.run_turn("x")
+
+    artifacts = sub.collect_artifacts()
+    assert artifacts.cost_usd == 0.0
+    assert artifacts.tokens_in == 0 and artifacts.tokens_out == 0
+
+
+def test_each_turn_is_metered_exactly_once_across_a_failure(tmp_path):
+    """The other half of the fix: metering before the raise must not book the
+    same turn twice."""
+    driver = StubDriver(
+        result=AgentTurnResult(done=True, cost_usd=0.50, tokens_in=100, tokens_out=40).model_dump()
+    )
+    sub = RemoteSubstrate(driver=driver, substrate_name="claude-agent")
+    _session(sub, workspace=str(tmp_path))
+
+    sub.run_turn("a")
+    assert sub.collect_artifacts().cost_usd == pytest.approx(0.50)
+
+    driver.result = AgentTurnResult(
+        done=False, cost_usd=0.25, tokens_in=50, tokens_out=20,
+        error="boom", error_kind="substrate_error",
+    ).model_dump()
+    with pytest.raises(RemoteTurnError):
+        sub.run_turn("b")
+
+    artifacts = sub.collect_artifacts()
+    assert artifacts.cost_usd == pytest.approx(0.75)
+    assert artifacts.tokens_in == 150 and artifacts.tokens_out == 60
 
 
 def test_build_substrate_mode_is_deployment_config(monkeypatch):

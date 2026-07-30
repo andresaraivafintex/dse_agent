@@ -48,12 +48,12 @@ def test_the_authoring_prompt_demands_a_process_that_exits():
 
 def test_a_hung_suite_is_named_as_such_not_reported_as_a_failed_assertion():
     """rc=124 is `timeout`'s verdict. The Coder cannot fix an assertion that
-    never ran, so the message has to say the process did not exit."""
-    import inspect
-
-    body = inspect.getsource(activities._tester_pod_sync)
-    assert "suite_hung = returncode == 124" in body
-    assert "DID NOT TERMINATE" in body
+    never ran, so the outcome has to say the process did not exit — and stay
+    distinct from rc=137, which is a kill from outside (see
+    test_tester_pod_outcomes.py for the end-to-end reporting)."""
+    assert activities._suite_outcome(tests_ran=True, returncode=124) == "suite_hung"
+    assert activities._suite_outcome(tests_ran=True, returncode=1) == "tests_failed"
+    assert "DID NOT TERMINATE" in activities._infra_outcome_note("suite_hung", 124)
 
 
 # ---------------------------------------------------------------------------
