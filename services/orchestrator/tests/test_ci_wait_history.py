@@ -377,6 +377,11 @@ async def test_continue_as_new_at_the_threshold_carries_the_whole_wait(time_skip
     # it really continued as new from inside the wait (1 is the pre-existing
     # intake -> implementation transition).
     assert final["continue_as_new_count"] > 1
+    # Bounded on purpose. With threshold=1 every poll continues as new, so the
+    # chain length is the poll count plus the intake transition; anything beyond
+    # that means the wait is not converging, and an unbounded chain shows up as a
+    # dead job with a stack dump rather than a failed assertion.
+    assert final["continue_as_new_count"] <= len(state.ci_sequence) + 13
     # ... and nothing the loop needs was left behind in instance state.
     assert final["ci_pending_polls"] == 10
     assert final["ci_wait_started_at_epoch"] == epoch
