@@ -9,7 +9,9 @@ from __future__ import annotations
 import re
 
 from dse_contracts import GateStatus, L1Finding, PlanArtifact
+from dse_contracts.paths import is_test_path
 
+from dse_validation.config import _env_int  # config.py owns every env read in this service
 from dse_validation.sandbox_exec import SandboxExecutor
 
 
@@ -21,11 +23,28 @@ class DiffSummary:
         *,
         base_sha: str,
         head_sha: str,
+        lines_by_file: dict[str, int] | None = None,
     ):
         self.files_changed = files_changed
         self.total_lines_changed = total_lines_changed
         self.base_sha = base_sha
         self.head_sha = head_sha
+        # Per-file breakdown, so the budget can charge each line to whoever
+        # wrote it. A caller that does not supply it gets an empty map and
+        # therefore pays for EVERY line: the budget errs strict, never loose.
+        self.lines_by_file = dict(lines_by_file or {})
+
+    @property
+    def non_test_lines_changed(self) -> int:
+        """Lines of the diff that live outside test paths.
+
+        `is_test_path` is the same predicate the TesterToolset enforces on
+        `write_file` (`toolsets.py`), so it is not a suffix heuristic invented
+        here: it is exactly the set of paths the Tester was allowed to write.
+        """
+        return self.total_lines_changed - sum(
+            n for path, n in self.lines_by_file.items() if is_test_path(path)
+        )
 
 
 class DiffComputationError(RuntimeError):
@@ -65,6 +84,7 @@ def compute_diff_summary(
             f"git diff --numstat failed (exit={result.returncode}): {result.stderr.strip()}"
         )
     files: list[str] = []
+    lines_by_file: dict[str, int] = {}
     total = 0
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -74,24 +94,77 @@ def compute_diff_summary(
         if len(parts) != 3:
             continue
         added, removed, path = parts
-        files.append(path)
+        changed = 0
         if added.isdigit():
-            total += int(added)
+            changed += int(added)
         if removed.isdigit():
-            total += int(removed)
+            changed += int(removed)
+        files.append(path)
+        lines_by_file[path] = changed
+        total += changed
     return DiffSummary(
         files_changed=files,
         total_lines_changed=total,
         base_sha=base_sha,
         head_sha=head_sha,
+        lines_by_file=lines_by_file,
     )
 
 
 def _is_forbidden(path: str, forbidden_paths: list[str]) -> str | None:
+    """The first pattern in `forbidden_paths` covering `path`, or None.
+
+    Two properties, both of them bug fixes and not features:
+
+    - it matches at ANY DEPTH. The old rule was a bare `startswith`, i.e. pinned
+      to the repository root, so `packages/web/.github/workflows/ci.yml` did not
+      match `.github/workflows/`. In a monorepo the shipped defaults matched
+      nothing, and this is the ONLY hard path gate that sees the real diff
+      (`policy.py` classifies risk from `expected_files`, which stopped gating
+      the diff on 2026-07-22).
+    - it matches whole path SEGMENTS. `startswith` also let `migrations/` cover
+      `migrations_backup/0001.sql`; widening the reach without fixing that
+      would have swapped a false negative for a false positive.
+
+    Both fall out of wrapping path and pattern in "/" before comparing. A
+    pattern that STARTS with "/" is pinned to the root — .gitignore's own
+    convention, and the entire extent of the syntax: no globs, no wildcards.
+    """
+    haystack = "/" + path.replace("\\", "/").strip("/") + "/"
     for forbidden in forbidden_paths:
-        if path == forbidden or path.startswith(forbidden):
+        pattern = forbidden.replace("\\", "/")
+        needle = "/" + pattern.strip("/") + "/"
+        if needle == "//":  # blank entry: a typo in the config, never "everything"
+            continue
+        hit = haystack.startswith(needle) if pattern.startswith("/") else needle in haystack
+        if hit:
             return forbidden
     return None
+
+
+_DIFF_BUDGET_ENV = "DSE_L1_DIFF_BUDGET_LINES"
+
+
+def _effective_diff_budget(plan: PlanArtifact) -> tuple[int, str]:
+    """The line budget in force, and where it came from.
+
+    `PlanArtifact.diff_budget_lines` is a compile-time constant in practice:
+    the workflow never sends the field, so every plan ever produced carries the
+    contract's 400 and a large repository has no way to say its PRs are
+    legitimately bigger. A line budget is an operational THRESHOLD — it does not
+    choose which code runs — so the platform may set it from the environment,
+    the same line `config.py` draws for the stage timeouts, and `_env_int` is
+    what keeps a typo in the deployment from taking the whole activity down.
+
+    The repo-scoped home for this number is `.dse/validation.json`, which is
+    already loaded immutably from the base SHA; putting it there needs
+    `config.py` to accept the field and the pipeline to hand it over, and both
+    are outside this change.
+    """
+    budget = _env_int(_DIFF_BUDGET_ENV, plan.diff_budget_lines)
+    if budget != plan.diff_budget_lines:
+        return budget, _DIFF_BUDGET_ENV
+    return budget, "PlanArtifact.diff_budget_lines"
 
 
 def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
@@ -123,14 +196,25 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
     #     (patch reject-empty-expected-files-v1), before L1.
     # expected_files is still used to CLASSIFY RISK in the workflow — it just
     # stopped being an equality gate on the diff.
-    over_budget = diff.total_lines_changed > plan.diff_budget_lines
+    #
+    # Test paths are NOT charged. This gate exists to contain the CODER's
+    # sprawl, and it was being blown by another agent: measured on a real run,
+    # 379 of the 400 lines, of which 218 (57.5% of the budget) were the two test
+    # files the TESTER wrote one activity earlier — the Coder paid, with a
+    # retry, for a diff it did not write. The exemption is not an escape hatch
+    # for the Coder either: any change it makes under a test path is reverted to
+    # the turn-start SHA before the commit (`workspace_hygiene.revert_test_edits`).
+    budget, budget_source = _effective_diff_budget(plan)
+    charged = diff.non_test_lines_changed
+    over_budget = charged > budget
     if not over_budget:
         return L1Finding(
             check="diff_budget",
             passed=True,
             detail=(
-                f"diff within budget: {diff.total_lines_changed}/{plan.diff_budget_lines} "
-                f"lines, {len(diff.files_changed)} file(s) "
+                f"diff within budget: {charged}/{budget} lines outside test paths "
+                f"(budget from {budget_source}), {diff.total_lines_changed} lines "
+                f"total across {len(diff.files_changed)} file(s) "
                 "(expected_files is advisory; forbidden_paths validates the paths)"
             ),
         )
@@ -138,8 +222,9 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
         check="diff_budget",
         passed=False,
         detail=(
-            f"diff of {diff.total_lines_changed} lines exceeds the PlanArtifact's "
-            f"diff_budget_lines={plan.diff_budget_lines}"
+            f"diff of {charged} lines outside test paths "
+            f"({diff.total_lines_changed} total across {len(diff.files_changed)} file(s)) "
+            f"exceeds diff_budget_lines={budget}, from {budget_source}"
         ),
     )
 

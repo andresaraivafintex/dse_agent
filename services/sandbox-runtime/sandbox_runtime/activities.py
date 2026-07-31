@@ -20,9 +20,11 @@ keeps state in process memory across calls. All state lives:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -960,7 +962,12 @@ Based on the task below, produce a MINIMAL, verifiable implementation plan.
 Respond ONLY with a valid JSON object (no markdown, no comments), in the format:
 {{"steps": ["step 1", "step 2", ...],
   "expected_files": ["relative/path/1", "path/2", ...],
-  "test_plan": "how to verify the change"}}
+  "test_plan": "how to verify the change",
+  "needs_paths": ["directory/you/could/not/see/", ...]}}
+
+"needs_paths" is OPTIONAL and exists only for the case below where the
+repository listing says PARTIAL: it is how you declare the areas you could not
+see. Omit the key entirely when the listing is complete.
 
 Rules:
 - "expected_files": the files that will be CREATED/EDITED (relative to the root).
@@ -981,25 +988,406 @@ Rules:
 {tree_section}"""
 
 
-def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
-    """The REAL repo tree on the base branch (best-effort, via the control
-    plane's GitHub API) — without it the Planner guesses paths and
-    plan_compliance rejects the real diff (found in the real run). On failure →
-    empty list (the prompt degrades to 'likely paths')."""
-    try:
-        from dse_validation.config import GitHubConfig
-        from dse_validation.github.client import build_github_client
+# ---------------------------------------------------------------------------
+# What the Planner is allowed to SEE before it decides (plan items 0.4/3.1/3.3)
+# ---------------------------------------------------------------------------
+# There used to be ONE number, 8000, applied twice as a blind prefix cut: once
+# on the rendered context and once on the repo tree. A blind prefix is the worst
+# way to spend a budget — it cuts in the middle of a title, it lets one section
+# evict another, and nothing anywhere records what was lost.
+#
+# Context budget: measured 2026-07-30 against the live fintex-poc registry (21
+# skills), `ctx.render(skill_body_chars=0)` is 10.351 chars, so the 8.000 cut
+# dropped 2.351 and 5 skills never reached the model — among them
+# `redacting-pii-and-secrets`, in a regulated fintech tenant — while the ledger
+# recorded all 21 as hydrated. 16.000 holds today's registry with ~55% headroom,
+# but the headroom is not what makes this safe: overflow now drops WHOLE skills,
+# least relevant first, and names them on the ledger.
+_PLANNER_CONTEXT_BUDGET_CHARS = 16_000
 
-        client = build_github_client(GitHubConfig())
-        return client.get_tree_paths(repo, base_branch or "main")
-    except Exception as exc:  # noqa: BLE001 — the tree is context, not a requirement
-        logger.warning("repo tree unavailable for the planner (%s: %s)",
-                       type(exc).__name__, str(exc)[:120])
-        return []
+# Tree budget: derived from the requirement, not rounded by taste. Assertion A1
+# wants coverage 1.0 for the directories the final diff touches, so the selected
+# directories of the acceptance repo have to fit COMPLETE — django/tests alone is
+# 2.577 paths at a measured 44,76 chars/path ≈ 116 KB, and a selection of two
+# needs room for the second. Under this budget django's whole tree (7.079 paths ≈
+# 317 KB) still does not fit and takes the two-pass route, while dse_agent (1.045
+# paths ≈ 47 KB) and fintex-wallet (12 paths) are delivered whole in one call.
+# The bill: ~40k input tokens on a django-sized repo, ~$0.12 a plan, against a
+# Coder turn measured at $1,0343 and up to 8 of them per work item.
+_PLANNER_TREE_BUDGET_CHARS = 160_000
+
+# The client's default (300) was tuned for a single blind prefix. The directory
+# summary is a count over the WHOLE tree, and a summary computed from a 300-path
+# prefix would misreport the repo's shape — which is the exact failure being
+# fixed here. torvalds/linux, the worst case measured, is 71.798 blobs ≈ 7 MB of
+# strings against a 1Gi pod.
+_PLANNER_TREE_FETCH_LIMIT = 200_000
+
+_TREE_MAX_SELECTED_DIRS = 3
+# Caps on the summary itself, so a repo with thousands of entries at one level
+# cannot eat the budget it is supposed to be a cheap index of. Whatever they cut
+# is stated in the summary — a silent cap here would be the same bug one level up.
+_TREE_SUMMARY_MAX_DIRS = 1000
+_TREE_SUMMARY_MAX_FILES = 1000
+
+_TREE_SELECT_PROMPT = """You are the Planner of Fintex DSE, deciding WHERE to look before planning.
+
+This repository has {total} files — too many to list. Below is its top level.
+Name the 1 to {max_dirs} directories whose COMPLETE file list you need in order
+to plan the task: where the change will land, and where its tests live. A
+narrower path ("pkg/db") is better than a broad one when you are sure of it.
+
+Respond ONLY with a valid JSON object (no markdown, no comments):
+{{"directories": ["dir1", "dir2"]}}
+
+## Task
+{instruction}
+
+## Repository top level (counts cover the whole subtree)
+{summary}"""
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _strip_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`\n")
+        text = text[4:] if text.startswith("json") else text
+    return text.strip()
+
+
+def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
+    """The REAL repo tree on the base branch, via the control plane's GitHub API
+    — without it the Planner guesses paths and plan_compliance rejects the real
+    diff (found in the real run).
+
+    RAISES on failure instead of returning []: the caller degrades AND records
+    it. An empty return used to be indistinguishable from a repo with no files,
+    on the log and on the ledger alike, so a Planner running blind looked exactly
+    like a Planner running on a tiny repo."""
+    from dse_validation.config import GitHubConfig
+    from dse_validation.github.client import build_github_client
+
+    client = build_github_client(GitHubConfig())
+    return client.get_tree_paths(repo, base_branch or "main", limit=_PLANNER_TREE_FETCH_LIMIT)
+
+
+def _split_by_dir(paths: list[str], prefix: str = "") -> tuple[list[str], dict[str, int]]:
+    """Files sitting DIRECTLY under `prefix`, and {subdirectory: files in its
+    whole subtree}. Every path is assumed to start with `prefix`."""
+    start = len(prefix)
+    files: list[str] = []
+    dirs: dict[str, int] = {}
+    for path in paths:
+        head, sep, _rest = path[start:].partition("/")
+        if sep:
+            dirs[head] = dirs.get(head, 0) + 1
+        else:
+            files.append(path)
+    return files, dirs
+
+
+def _dir_summary_block(paths: list[str], prefix: str = "") -> tuple[str, list[str]]:
+    """Depth-1 summary under `prefix`, plus the files it lists VERBATIM.
+
+    Depth 1 and not 2 because this block is what pass 1 pays for: measured,
+    depth 1 is 207 chars on django and depth 2 is 8.655 — 40x the prompt to
+    answer a question ("which 2-3 directories?") that the top level already
+    answers. Depth 2 is bought back for free by the expansion below, and only
+    where the model said it was needed."""
+    files, dirs = _split_by_dir(paths, prefix)
+    ranked = sorted(dirs.items(), key=lambda kv: (-kv[1], kv[0]))
+    lines = [f"{prefix}{name}/ — {count} files" for name, count in ranked[:_TREE_SUMMARY_MAX_DIRS]]
+    if len(ranked) > _TREE_SUMMARY_MAX_DIRS:
+        lines.append(f"… and {len(ranked) - _TREE_SUMMARY_MAX_DIRS} more directories, not listed")
+    listed = files[:_TREE_SUMMARY_MAX_FILES]
+    lines.extend(listed)
+    if len(files) > _TREE_SUMMARY_MAX_FILES:
+        lines.append(f"… and {len(files) - _TREE_SUMMARY_MAX_FILES} more files here, not listed")
+    return "\n".join(lines), listed
+
+
+def _complete_dirs(delivered: list[str], tree: list[str]) -> list[str]:
+    """Top-level directories delivered COMPLETE. This is what makes assertion A1
+    ("coverage of the directories the final diff touches is 1.0") answerable by
+    a query instead of by re-deriving the prompt."""
+    _, total_by_dir = _split_by_dir(tree)
+    _, got_by_dir = _split_by_dir(delivered)
+    return sorted(name for name, count in total_by_dir.items() if got_by_dir.get(name, 0) == count)
+
+
+def _validate_selected_dirs(wanted: list[Any], tree: list[str]) -> list[str]:
+    """Keep only names that are REAL directories of this tree, in the order the
+    model asked for them, without nesting (a chosen parent already delivers its
+    children). A hallucinated directory is dropped here, not expanded."""
+    out: list[str] = []
+    for raw in wanted:
+        name = str(raw).strip().removeprefix("./").strip("/")
+        if not name or any(name == kept or name.startswith(kept + "/") or kept.startswith(name + "/")
+                           for kept in out):
+            continue
+        if not any(path.startswith(name + "/") for path in tree):
+            continue
+        out.append(name)
+        if len(out) >= _TREE_MAX_SELECTED_DIRS:
+            break
+    return out
+
+
+def _expand_into(name: str, subtree: list[str], budget_left: int) -> tuple[str, list[str], list[str], list[str]]:
+    """Deliver `name/` COMPLETE if it fits; otherwise one more level of shape
+    plus whatever of its subdirectories fits whole.
+
+    Smallest subdirectory first, deliberately: django/conf/locale is 2.500 of
+    django's 3.000 files, and largest-first would spend the entire budget on
+    locale catalogues and starve django/db and django/forms — which is the
+    window the old prefix produced and the reason this route exists.
+
+    Returns (block, delivered paths, directories delivered whole, directories
+    given as shape only)."""
+    listing = f"\n### {name}/ — all {len(subtree)} files\n" + "\n".join(subtree)
+    if len(listing) <= budget_left:
+        return listing, list(subtree), [name], []
+
+    inner, inner_files = _dir_summary_block(subtree, name + "/")
+    header = f"\n### {name}/ — {len(subtree)} files, too many to list; its own top level:\n{inner}"
+    if len(header) > budget_left:
+        return "", [], [], []
+    blocks = [header]
+    delivered = list(inner_files)
+    expanded: list[str] = []
+    used = len(header)
+    _, subdirs = _split_by_dir(subtree, name + "/")
+    for child, count in sorted(subdirs.items(), key=lambda kv: (kv[1], kv[0])):
+        child_dir = f"{name}/{child}"
+        child_tree = [path for path in subtree if path.startswith(child_dir + "/")]
+        child_listing = f"\n#### {child_dir}/ — all {count} files\n" + "\n".join(child_tree)
+        if used + len(child_listing) > budget_left:
+            break  # sorted ascending: nothing after this one fits either
+        blocks.append(child_listing)
+        used += len(child_listing)
+        delivered.extend(child_tree)
+        expanded.append(child_dir)
+    return "".join(blocks), delivered, expanded, [name]
+
+
+def _partial_files_rule(delivered: int, total: int) -> str:
+    return (
+        f"The listing below is PARTIAL — {delivered} of {total} files. Prefer paths from it. "
+        "Directories shown only as a file count DO exist and are NOT listed one by one, so if "
+        "the change must touch one of them, name your best path for it AND add "
+        '"needs_paths": ["<directory>/", ...] to the JSON, naming the areas you could not see. '
+        "Do not plan as if the listing were complete."
+    )
+
+
+def _select_tree_directories(
+    *, instruction: str, summary: str, total: int, headers: Any, virtual_key: str,
+    model: str, chat_completion: Any,
+) -> list[Any]:
+    """Pass 1 of the two-pass tree view: the model names the directories it needs
+    expanded. Deliberately cheap — the ONLY things it carries are the task and
+    the depth-1 summary (207 chars on django). It does not re-render the skills
+    context and it does not re-fetch the tree; pass 2 reuses both."""
+    result = chat_completion(
+        headers=headers,
+        virtual_key=virtual_key,
+        model=model,
+        messages=[{"role": "user", "content": _TREE_SELECT_PROMPT.format(
+            total=total, max_dirs=_TREE_MAX_SELECTED_DIRS,
+            instruction=instruction, summary=summary,
+        )}],
+        timeout=60.0,
+        max_tokens=300,
+        temperature=0,
+    )
+    payload, _ = json.JSONDecoder().raw_decode(_strip_json_fence(result.content or ""))
+    dirs = [d for d in payload.get("directories", []) if str(d).strip()]
+    if not dirs:
+        raise ValueError("the model named no directory")
+    return dirs
+
+
+class _TreeView(NamedTuple):
+    section: str
+    files_rule: str
+    telemetry: dict[str, Any]
+
+
+def _build_tree_view(tree: list[str], *, choose_dirs=None, fetch_error: str | None = None) -> _TreeView:
+    """The Planner's view of the repository, AND the truth about how partial it
+    is.
+
+    The old view was `tree[:250]` then `[:8000]` chars: 219 of 7.079 blobs on
+    django (3,09%), a window ending inside Croatian locale files, with nothing
+    from django/db/, django/forms/ or tests/ — while the prompt told the model
+    the window was authoritative. A model that knows it is seeing 3% behaves
+    differently from one that believes it saw everything.
+
+    Now: if the whole tree fits the budget it is delivered whole and this costs
+    ONE model call, which is what small repos get (fintex-wallet's 12 files must
+    not pay for two round trips). Otherwise the model is asked once, cheaply,
+    which directories it needs, and those are delivered COMPLETE. Whatever does
+    not make it is counted, named and put on the ledger."""
+    total = len(tree)
+    tel: dict[str, Any] = {
+        "tree_total": total,
+        "tree_delivered": 0,
+        "tree_coverage": 0.0,
+        "tree_mode": "unavailable",
+        "tree_selection_calls": 0,
+        "tree_dirs_expanded": [],
+        "tree_dirs_summarized": [],
+        "tree_degraded_reason": fetch_error,
+    }
+    if not tree:
+        return _TreeView("", "Propose the most likely paths per the ecosystem's conventions.", tel)
+
+    whole = "\n".join(tree)
+    if len(whole) <= _PLANNER_TREE_BUDGET_CHARS:
+        tel.update(tree_delivered=total, tree_coverage=1.0, tree_mode="full",
+                   tree_dirs_expanded=_complete_dirs(tree, tree))
+        return _TreeView(
+            f"\n## Repo tree (base branch) — all {total} files\n{whole}",
+            "Use ONLY paths from the tree below (or new ones consistent with it).",
+            tel,
+        )
+
+    summary, root_files = _dir_summary_block(tree)
+    selected: list[str] = []
+    degraded: str | None = None
+    if choose_dirs is None:
+        degraded = "selection_unavailable"
+    else:
+        tel["tree_selection_calls"] = 1
+        try:
+            selected = _validate_selected_dirs(choose_dirs(summary, total), tree)
+        except Exception as exc:  # noqa: BLE001 — a bad pass 1 degrades, it does not fail the plan
+            degraded = f"selection_failed: {type(exc).__name__}: {str(exc)[:120]}"
+        else:
+            if not selected:
+                degraded = "selection_named_no_real_directory"
+    if degraded:
+        logger.warning("planner tree selection degraded (%s) — falling back to the tree-order prefix", degraded)
+        kept: list[str] = []
+        used = 0
+        for path in tree:
+            if used + len(path) + 1 > _PLANNER_TREE_BUDGET_CHARS:
+                break
+            kept.append(path)
+            used += len(path) + 1
+        tel.update(tree_delivered=len(kept), tree_coverage=round(len(kept) / total, 4),
+                   tree_mode="prefix_fallback", tree_degraded_reason=degraded,
+                   tree_dirs_expanded=_complete_dirs(kept, tree))
+        return _TreeView(
+            f"\n## Repo tree (base branch) — PARTIAL: the first {len(kept)} of {total} files, "
+            f"in tree order\n" + "\n".join(kept),
+            _partial_files_rule(len(kept), total),
+            tel,
+        )
+
+    blocks: list[str] = []
+    delivered: list[str] = list(root_files)
+    expanded: list[str] = []
+    summarized: list[str] = []
+    dropped: list[str] = []
+    used = len(summary)
+    for name in selected:
+        subtree = [path for path in tree if path.startswith(name + "/")]
+        # Whole, or shape plus whole children — never an arbitrary slice: half a
+        # directory listing reads exactly like a complete one, which is the
+        # failure this whole function exists to end.
+        block, got, whole_dirs, shape_only = _expand_into(name, subtree, _PLANNER_TREE_BUDGET_CHARS - used)
+        if not block:
+            dropped.append(name)
+            continue
+        blocks.append(block)
+        used += len(block)
+        delivered.extend(got)
+        expanded.extend(whole_dirs)
+        summarized.extend(shape_only)
+
+    tel.update(
+        tree_delivered=len(delivered),
+        tree_coverage=round(len(delivered) / total, 4),
+        tree_mode="expanded",
+        tree_dirs_expanded=expanded,
+        tree_dirs_summarized=summarized,
+        tree_degraded_reason=(f"budget_exhausted: {','.join(dropped)}" if dropped else None),
+    )
+    section = (
+        f"\n## Repo tree (base branch) — PARTIAL VIEW: {len(delivered)} of {total} files listed\n"
+        "Directories shown only as a file count are REAL and are NOT listed file by file.\n"
+        f"{summary}" + "".join(blocks)
+    )
+    return _TreeView(section, _partial_files_rule(len(delivered), total), tel)
+
+
+def _skills_by_relevance(skills: list[Any], instruction: str) -> list[int]:
+    """Skill indices, most relevant to THIS work item first; ties keep registry
+    order, so two identical runs drop the same skills. Relevance decides only
+    the ORDER of eviction — which skill is worth keeping when the registry
+    outgrows the budget is a registry decision (there is no priority column
+    today), and inventing one here would put policy in the wrong file."""
+    words = set(_WORD_RE.findall((instruction or "").lower()))
+    scored: list[tuple[int, int]] = []
+    for index, skill in enumerate(skills):
+        haystack = " ".join([
+            skill.skill_key, skill.title, skill.category, *(skill.applies_to or []),
+        ]).lower()
+        scored.append((-len(words & set(_WORD_RE.findall(haystack))), index))
+    return [index for _score, index in sorted(scored)]
+
+
+def _fit_planner_context(
+    ctx: PlannerContext, *, instruction: str, budget: int = _PLANNER_CONTEXT_BUDGET_CHARS
+) -> tuple[str, dict[str, Any]]:
+    """Fit the context into `budget` by dropping WHOLE skills, never by cutting
+    the string.
+
+    skill_body_chars=0 renders the skills as an INDEX (key, category, title,
+    path) instead of inlining ~100 KB of bodies; the Coder still reads the full
+    text from .claude/skills/<key>/SKILL.md. What is new is that the index is
+    fitted by UNIT: a skill either arrives whole or is dropped by name onto the
+    ledger. The old `[:8000]` truncated inside a title and evicted everything
+    render() places after the skills — the repo map included."""
+    skills = list(getattr(ctx, "skills", None) or [])
+    rendered = ctx.render(skill_body_chars=0)
+    tel: dict[str, Any] = {
+        "skills_resolved": len(skills),
+        "skills_delivered": [s.skill_key for s in skills],
+        "skills_dropped": [],
+        "context_budget_chars": budget,
+        "context_rendered_chars": len(rendered),
+        "context_truncated_chars": 0,
+    }
+    if len(rendered) > budget and skills and dataclasses.is_dataclass(ctx):
+        rendered = dataclasses.replace(ctx, skills=[]).render(skill_body_chars=0)
+        keep: set[int] = set()
+        for index in _skills_by_relevance(skills, instruction):
+            candidate = sorted(keep | {index})
+            text = dataclasses.replace(ctx, skills=[skills[i] for i in candidate]).render(skill_body_chars=0)
+            if len(text) <= budget:
+                keep = set(candidate)
+                rendered = text
+        tel["skills_delivered"] = [skills[i].skill_key for i in sorted(keep)]
+        tel["skills_dropped"] = [s.skill_key for i, s in enumerate(skills) if i not in keep]
+    if len(rendered) > budget:
+        # Backstop for what skills cannot buy back (a monorepo CODEOWNERS, a
+        # repo map). Still never mid-line, and still counted.
+        marker = "\n[context truncated to the planner budget]"
+        cut = rendered[: max(0, budget - len(marker))]
+        cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
+        tel["context_truncated_chars"] = len(rendered) - len(cut)
+        rendered = cut + marker
+    tel["context_chars"] = len(rendered)
+    return rendered, tel
 
 
 def _model_plan_proposer(
-    ctx: PlannerContext, inp: "RunPlannerTurnInput", headers: Any, virtual_key: str
+    ctx: PlannerContext, inp: "RunPlannerTurnInput", headers: Any, virtual_key: str,
+    *, telemetry: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Plan proposed by the REAL MODEL through the gateway (stage=planner,
     virtual key, enforcement + cost ledger on the path — WSD). Returns None on
@@ -1008,7 +1396,13 @@ def _model_plan_proposer(
     invented plan.
 
     P1 preserved: the model only PROPOSES steps/expected_files/test_plan; risk
-    and gates remain derived deterministically (classify_risk_class)."""
+    and gates remain derived deterministically (classify_risk_class).
+
+    `telemetry` is filled IN PLACE rather than returned, because the caller has
+    to be able to record WHAT THE PLANNER SAW even on the paths where this
+    returns None — a plan that failed with 3% of the tree in front of it is
+    exactly the case the ledger has to be able to explain."""
+    tel = telemetry if telemetry is not None else {}
     try:
         from model_gateway_client.gateway_call import chat_completion
     except ImportError:
@@ -1016,29 +1410,37 @@ def _model_plan_proposer(
         return None
 
     model = os.environ.get("DSE_PLANNER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
-    tree = _repo_tree_for_planner(inp.repo, inp.base_branch or "main")
-    if tree:
-        files_rule = "Use ONLY paths from the tree below (or new ones consistent with it)."
-        tree_section = "\n## Repo tree (base branch)\n" + "\n".join(tree[:250])
-    else:
-        files_rule = "Propose the most likely paths per the ecosystem's conventions."
-        tree_section = ""
     # The INSTRUCTION goes straight into the prompt (3rd real run: PlannerContext
     # does not carry the instruction — render() only has AGENTS.md/skills/repo
     # map, all empty for this tenant — and the model, never having SEEN the
     # issue, planned a generic wallet feature instead of the DELETE bug).
+    instruction = (inp.instruction or "").strip()[:6000] or "(instruction missing)"
+    try:
+        tree = _repo_tree_for_planner(inp.repo, inp.base_branch or "main")
+        fetch_error = None
+    except Exception as exc:  # noqa: BLE001 — the tree is context, not a requirement
+        logger.warning("repo tree unavailable for the planner (%s: %s)",
+                       type(exc).__name__, str(exc)[:120])
+        tree, fetch_error = [], f"tree_fetch_failed: {type(exc).__name__}"
+
+    view = _build_tree_view(
+        tree,
+        choose_dirs=lambda summary, total: _select_tree_directories(
+            instruction=instruction, summary=summary, total=total, headers=headers,
+            virtual_key=virtual_key, model=model, chat_completion=chat_completion,
+        ),
+        fetch_error=fetch_error,
+    )
+    context, context_tel = _fit_planner_context(ctx, instruction=instruction)
+    tel.update(view.telemetry)
+    tel.update(context_tel)
+    tel["planner_model_calls"] = 1 + int(view.telemetry["tree_selection_calls"])
+
     prompt = _PLAN_PROMPT.format(
-        instruction=(inp.instruction or "").strip()[:6000] or "(instruction missing)",
-        # skill_body_chars=0 renders the skills as an INDEX (key, category,
-        # title, path) instead of inlining their bodies. The Planner is a single
-        # gateway chat_completion with a fixed 8 KB context budget, and render()
-        # puts skills BEFORE the repo map and the untrusted block — so inlining
-        # 21 real skills (~100 KB of body) delivered about one and a half of
-        # them and silently evicted everything after. The Coder still gets the
-        # full text: it reads .claude/skills/<key>/SKILL.md as files.
-        context=ctx.render(skill_body_chars=0)[:8000],
-        files_rule=files_rule,
-        tree_section=tree_section[:8000],
+        instruction=instruction,
+        context=context,
+        files_rule=view.files_rule,
+        tree_section=view.section,
     )
     try:
         result = chat_completion(
@@ -1055,16 +1457,20 @@ def _model_plan_proposer(
         logger.warning("planner via model failed (%s: %s) — fixture", type(exc).__name__, str(exc)[:200])
         return None
 
-    text = (result.content or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`\n")
-        text = text[4:] if text.startswith("json") else text
+    text = _strip_json_fence(result.content or "")
     try:
-        proposal, _ = json.JSONDecoder().raw_decode(text.strip())
+        proposal, _ = json.JSONDecoder().raw_decode(text)
         steps = [str(s) for s in proposal.get("steps", []) if str(s).strip()]
         files = [str(f) for f in proposal.get("expected_files", []) if str(f).strip()]
         if not steps or not files:
             raise ValueError("steps/expected_files are empty")
+        # What the model says it could NOT see. It only exists because the
+        # prompt stopped claiming the window was authoritative, and it is the
+        # only signal that distinguishes "planned with everything in view" from
+        # "planned around a gap it was honest about".
+        unseen = [str(p) for p in proposal.get("needs_paths", []) if str(p).strip()][:20]
+        if unseen:
+            tel["planner_unseen_paths_requested"] = unseen
         return {
             "steps": steps[:10],
             "expected_files": files[:30],
@@ -1172,12 +1578,16 @@ async def _run_planner_turn_impl(
     #   explicit proposer (tests) > real model (substrate != fake) with a
     #   fallback to the fixture > fixture. The fixture has empty expected_files
     #   and WS-B's guard escalates — deliberate when there is no model.
+    # What the Planner actually SAW, filled in by the model proposer and read
+    # after the call — including on its failure paths, which is where the
+    # question "what was in front of it?" matters most.
+    context_telemetry: dict[str, Any] = {}
     if proposer is not None:
         proposal_fn = proposer
     elif os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
         def proposal_fn(c):  # noqa: ANN001 — run_sync_with_heartbeat's signature
             return (
-                _model_plan_proposer(c, inp, headers, vk.virtual_key)
+                _model_plan_proposer(c, inp, headers, vk.virtual_key, telemetry=context_telemetry)
                 or _default_plan_proposer(c, inp)
             )
     else:
@@ -1203,6 +1613,50 @@ async def _run_planner_turn_impl(
         forbidden_paths=forbidden,
     )
 
+    # Both events below are QUERYABLE actions, not fields buried in details —
+    # the same reason `skills_resolved_empty` exists above. A number nobody can
+    # find with `WHERE action = …` is a number nobody investigates.
+    # The backstop cut counts as a truncation too: a context with NO skills (or
+    # one whose CODEOWNERS alone overflows) loses text without a single skill
+    # being dropped, and firing only on `skills_dropped` would leave exactly
+    # that case findable only by reading a field.
+    if context_telemetry.get("skills_dropped") or context_telemetry.get("context_truncated_chars"):
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="planner_context_truncated",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={
+                "stage": "planner",
+                "skills_resolved": context_telemetry.get("skills_resolved"),
+                "skills_delivered": context_telemetry.get("skills_delivered"),
+                "skills_dropped": context_telemetry.get("skills_dropped"),
+                "context_chars": context_telemetry.get("context_chars"),
+                "context_budget_chars": context_telemetry.get("context_budget_chars"),
+                "context_truncated_chars": context_telemetry.get("context_truncated_chars"),
+            },
+        )
+    # `budget_exhausted: <dirs>` happens with tree_mode="expanded" — the model
+    # named a directory and it did not fit. That is a degradation like any
+    # other, so it gets the same queryable action instead of a field.
+    if (context_telemetry.get("tree_mode") in {"prefix_fallback", "unavailable"}
+            or context_telemetry.get("tree_degraded_reason")):
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="planner_tree_degraded",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={
+                "stage": "planner",
+                "repo": inp.repo,
+                "tree_mode": context_telemetry.get("tree_mode"),
+                "reason": context_telemetry.get("tree_degraded_reason"),
+                "tree_total": context_telemetry.get("tree_total"),
+                "tree_delivered": context_telemetry.get("tree_delivered"),
+                "tree_coverage": context_telemetry.get("tree_coverage"),
+            },
+        )
+
     audit_emit(
         actor="system:sandbox-runtime",
         action="planner_turn_completed",
@@ -1214,10 +1668,15 @@ async def _run_planner_turn_impl(
             "expected_files": plan.expected_files,
             "risk_class": plan.risk_class,
             "diff_budget_lines": plan.diff_budget_lines,
+            # `skills_hydrated` keeps its meaning (RESOLVED into the context)
+            # and stops implying delivery: `skills_delivered`/`skills_dropped`
+            # carry that, by name. It used to record 21 while 16 reached the
+            # model, and the console had no way to know.
             "skills_hydrated": [s.skill_key for s in ctx.skills],
             "skills_materialized": skills_materialized,
             "retrieval_hits": [f"{h.repo}/{h.path}" for h in ctx.retrieval_hits],
             "virtual_key_fixture": vk.fixture,
+            **context_telemetry,
         },
     )
     return plan

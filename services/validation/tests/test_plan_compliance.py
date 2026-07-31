@@ -78,6 +78,82 @@ def test_diff_not_touching_forbidden_path_passes(sandbox, feature_branch, git_sh
     assert finding.passed is True
 
 
+def test_forbidden_path_nested_in_a_monorepo_is_blocked(sandbox, feature_branch, git_sha):
+    """Exit-criterion assertion A4. The matcher used to be a root-anchored
+    prefix, so in a monorepo the SHIPPED defaults matched nothing and a PR
+    touching a package's own CI workflow walked through L1."""
+    feature_branch("packages/web/.github/workflows/ci.yml", "on: push\njobs: {}\n")
+    plan = PlanArtifact(work_item_id="wi-monorepo")  # shipped forbidden_paths
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    finding = forbidden_paths_finding(diff, plan)
+    assert finding.passed is False, finding.detail
+    assert ".github/workflows/" in finding.detail
+
+
+def test_directory_named_like_a_forbidden_one_is_not_blocked(sandbox, feature_branch, git_sha):
+    """`migrations_backup/` is not `migrations/`: matching at any depth must not
+    trade the old false negative for a false positive (the old `startswith` had
+    this bug already, at the root)."""
+    feature_branch("services/api/migrations_backup/0001.sql", "SELECT 1;\n")
+    plan = PlanArtifact(work_item_id="wi-backup")  # shipped forbidden_paths
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    assert forbidden_paths_finding(diff, plan).passed is True
+
+
+def _lines(prefix: str, count: int) -> str:
+    return "\n".join(f"{prefix}_{i} = {i}" for i in range(count)) + "\n"
+
+
+def test_tests_written_by_the_tester_do_not_spend_the_coder_s_budget(
+    sandbox, feature_branch, git_sha
+):
+    """Measured on a real run: 379 of the 400 lines, and 218 of them (57.5% of
+    the budget) were the two test files the TESTER wrote. The gate exists to
+    contain the Coder, and another agent was blowing it."""
+    feature_branch("app.py", _lines("prod", 40))
+    feature_branch("tests/test_generated.py", _lines("assert_x", 200))
+    plan = PlanArtifact(work_item_id="wi-tester", diff_budget_lines=50, forbidden_paths=[])
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    finding = diff_budget_finding(diff, plan)
+
+    assert diff.total_lines_changed > 50  # the raw diff IS over the budget
+    assert finding.passed is True, finding.detail
+    assert f"{diff.total_lines_changed} lines total" in finding.detail  # still reported
+
+
+def test_production_sprawl_still_fails_when_test_paths_are_exempt(
+    sandbox, feature_branch, git_sha
+):
+    """The exemption must not become a hole: what the Coder writes outside test
+    paths is charged exactly as before."""
+    feature_branch("app.py", _lines("prod", 120))
+    feature_branch("tests/test_generated.py", "def test_ok():\n    assert True\n")
+    plan = PlanArtifact(work_item_id="wi-sprawl", diff_budget_lines=50, forbidden_paths=[])
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    finding = diff_budget_finding(diff, plan)
+
+    assert finding.passed is False
+    assert "diff_budget_lines=50" in finding.detail
+
+
+def test_diff_budget_comes_from_the_platform_configuration(
+    sandbox, feature_branch, git_sha, monkeypatch
+):
+    """A big repository has PRs that are legitimately bigger, and nothing ever
+    sets `PlanArtifact.diff_budget_lines` — it is the contract's constant on
+    every plan the cluster has produced."""
+    feature_branch("app.py", _lines("prod", 300))
+    plan = PlanArtifact(work_item_id="wi-cfg", diff_budget_lines=50, forbidden_paths=[])
+    diff = compute_diff_summary(sandbox, git_sha("main"), git_sha())
+    assert diff_budget_finding(diff, plan).passed is False
+
+    monkeypatch.setenv("DSE_L1_DIFF_BUDGET_LINES", "1000")
+    finding = diff_budget_finding(diff, plan)
+
+    assert finding.passed is True, finding.detail
+    assert "DSE_L1_DIFF_BUDGET_LINES" in finding.detail
+
+
 def test_plan_compliance_findings_returns_exactly_two_findings(
     sandbox, feature_branch, git_sha
 ):
@@ -170,6 +246,15 @@ def test_over_budget_still_fails_regardless_of_files():
     finding = diff_budget_finding(diff, plan)
     assert finding.passed is False
     assert "diff_budget_lines=100" in finding.detail
+
+
+def test_root_anchored_pattern_matches_only_at_the_root():
+    """The escape hatch for a name that is sensitive only at the top: a leading
+    "/" pins the pattern to the repo root (.gitignore's own convention). Without
+    it, `docs/` would now also cover `packages/web/docs/`."""
+    plan = PlanArtifact(work_item_id="wi_rooted", forbidden_paths=["/docs/"])
+    assert forbidden_paths_finding(_mk_diff(["packages/web/docs/index.md"]), plan).passed is True
+    assert forbidden_paths_finding(_mk_diff(["docs/index.md"]), plan).passed is False
 
 
 def test_lockfile_churn_passes_like_any_other_file():
