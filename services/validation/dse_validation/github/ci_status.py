@@ -112,18 +112,26 @@ def consume_ci_status_core(
             "contexts": [s.get("context") for s in (combined.get("statuses") or [])],
         }
     )
-    db.save_ci_status(
+    previous_status = db.save_ci_status(
         work_item_id, pr_number, status,
         {"check_runs": summary, "combined_status": combined_summary},
     )
 
-    if audit_emit is not None:
+    # The row above is current state and is rewritten on every poll; the ledger
+    # records facts, and "pending is still pending" is not one. A 45-minute wait
+    # wrote 46 identical rows here, which is how `ci_status_consumed` reached 27%
+    # of `audit_log` on the cluster. What is kept is every real change — including
+    # the first observation, where there is nothing to compare against. A retry of
+    # an observation whose write already committed sees no change and stays
+    # silent, so the transition is recorded once, not once per attempt.
+    if audit_emit is not None and previous_status != status:
         audit_emit(
             actor=actor,
             action="ci_status_consumed",
             tenant_id=tenant_id,
             work_item_id=work_item_id,
             details={"repo": repo, "pr_number": pr_number, "status": status,
+                     "from_status": previous_status,
                      "check_runs": summary, "combined_status": combined_summary},
         )
 

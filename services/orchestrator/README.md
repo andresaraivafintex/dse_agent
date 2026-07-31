@@ -592,6 +592,30 @@ documented inline in the code (`# We do NOT continue_as_new here`) and is the
 reason `test_chaos.py` also serves as a regression test for that class of
 bug (history replay of a longer execution).
 
+**The one exception, and why it is not a reversal.** "Trading a bit of history"
+turned out to have no upper bound in exactly one place: the CI pending wait.
+`ci_pending_poll_cap` bounds a count of polls, not of events, so at ~41 events
+per poll the run hit Temporal's 51_200-event ceiling at poll ~1237 and was
+TERMINATED by the server — before the 1440-poll cap, with no audit row, no
+escalation and no sandbox teardown. Losing an occasional signal is a bad trade
+against losing the whole work item, so `_ci_wait_needs_continue_as_new`
+(`ci-wait-continue-as-new-v1`) closes the run at the top of a pass once
+`workflow.info().get_current_history_length()` reaches
+`history_continue_as_new_threshold` (40_000). The race is guarded rather than
+accepted: the predicate refuses to close a run while any signal is still parked
+in instance state (`review_comment`, `merged_by_human`, `refresh_evidence`,
+`raise_budget`, `retry_from_checkpoint`, `pause`), so it can only DELAY the
+switch, never drop a signal. Everything the loop needs to resume — poll counter,
+wait epoch, Coder retries, review round, last audited CI status — lives in
+`WorkItemLifecycleInput` and is carried by `continue_as_new`; instance state is
+per-run by design.
+
+Two things do NOT survive `continue_as_new` today, at this site and at the three
+that predate it: the operator overrides `_model_override`/`_runtime_override`
+and the `_operator_log` query buffer. That is a pre-existing gap, not one this
+site introduces, and the fix belongs in `run()` (rehydrate from the input),
+not in the review loop.
+
 ## Files
 
 ```
