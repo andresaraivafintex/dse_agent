@@ -346,6 +346,15 @@ class WorkItemLifecycleWorkflow:
         # the old one says nothing about the new one.
         self._suite_hung_retries = 0
 
+        # Whether THIS run has already consumed a CI status that came back
+        # pending. Deliberately per-run state (it must NOT cross
+        # continue_as_new): it is what makes the CI wait's continue_as_new
+        # incapable of looping. A fresh run cannot close itself before it has
+        # done at least one poll, so a threshold misconfigured below the size of
+        # a newborn history costs one poll per run instead of spinning a chain
+        # of empty executions.
+        self._ci_polled_this_run = False
+
     # ------------------------------------------------------------------
     # Signals — WSB-E2-T4, WSB-E3-T1, WSB-E3-T4, WSB-E5-T2
     # ------------------------------------------------------------------
@@ -527,14 +536,56 @@ class WorkItemLifecycleWorkflow:
         worker): whoever starts the workflow may call `StartWorkflow` with just
         the `work_item_id` (string) instead of the full
         `WorkItemLifecycleInput` — e.g. `client.start_workflow(WORKFLOW_TYPE,
-        work_item_id, id=work_item_id, task_queue=...)`. The internal
-        continue_as_new ALWAYS passes the full dataclass, so this branch only
-        runs on the FIRST `run()` of an externally started execution. See the
-        README, section "Assumed start_workflow contract"."""
+        work_item_id, id=work_item_id, task_queue=...)`. It is the `str` branch
+        that only runs on the FIRST `run()` of an externally started execution:
+        the internal continue_as_new always passes the full dataclass, and
+        because `run()` is typed `Any` that dataclass comes back HERE, as a
+        dict. See the README, section "Assumed start_workflow contract"."""
         if isinstance(raw_input, WorkItemLifecycleInput):
             return raw_input
         if isinstance(raw_input, dict):
-            return WorkItemLifecycleInput(**raw_input)
+            # A KEY THIS VERSION DOES NOT KNOW IS DROPPED, NOT RAISED. The old
+            # `WorkItemLifecycleInput(**raw_input)` answered an unknown key with
+            # `TypeError: __init__() got an unexpected keyword argument`, which
+            # no `except` in `run()` catches: the workflow task fails, Temporal
+            # retries it forever, and the item is wedged with no audit row and no
+            # terminal state — nobody is paged for a workflow task that keeps
+            # failing. That is precisely what a ROLLBACK does, old code decoding
+            # an input a newer worker wrote, and per the docstring above this is
+            # the branch EVERY continue_as_new lands on. Every field ever added
+            # to that dataclass has been arming this; it is about the next one as
+            # much as about this changeset's three.
+            #
+            # WHAT IT DOES NOT FIX: the rollback of THIS deploy. The version in
+            # production does not have this tolerance, so rolling back past this
+            # commit still wedges any item whose input already carries
+            # `ci_last_audited_status`, `ci_wait_persist_every_n_polls` or
+            # `history_continue_as_new_threshold`. Those items have to be drained
+            # or reset by hand. This buys the NEXT rollback, nothing earlier.
+            #
+            # DROPPING IS NOT FREE EITHER. A field the old code never knew is a
+            # field its behaviour never depended on, so dropping it lands on the
+            # old default — which is what rolling back means. A RENAMED field is
+            # the opposite: `budget_max_usd` re-spelled would be dropped here and
+            # the ceiling would silently become None, i.e. no ceiling at all.
+            # Nothing here can tell the two apart, so it names every key it drops
+            # at WARNING, and a rename must keep reading the old name for at
+            # least one release rather than lean on this.
+            #
+            # No patch marker: dict/set arithmetic and a log line issue no
+            # Temporal command, so no recorded history changes shape.
+            known = {f.name for f in dataclasses.fields(WorkItemLifecycleInput)}
+            dropped = sorted(set(raw_input) - known)
+            if dropped:
+                logger.warning(
+                    "work item %s: %d input field(s) unknown to this worker were "
+                    "DROPPED (a newer worker wrote them, or one was renamed and "
+                    "its value is now the local default): %s",
+                    raw_input.get("work_item_id"), len(dropped), ", ".join(dropped),
+                )
+            return WorkItemLifecycleInput(
+                **{k: v for k, v in raw_input.items() if k in known}
+            )
         if isinstance(raw_input, str):
             row = await workflow.execute_activity(
                 LOCAL_ACTIVITY_LOAD_WORK_ITEM,
@@ -1275,6 +1326,69 @@ class WorkItemLifecycleWorkflow:
         input.continue_as_new_count += 1
         await self._emit_history_metric("continue_as_new")
         return workflow.continue_as_new(input)
+
+    def _ci_wait_needs_continue_as_new(self) -> bool:
+        """The CI wait is the only loop in this workflow whose history is
+        unbounded, and it was killing work items: `ci_pending_poll_cap` bounds a
+        count of POLLS, and the server's 51_200-event ceiling arrived first —
+        four items stopped at exactly 1242 polls, terminated by the server with
+        no audit row, no escalation and no teardown.
+
+        IT IS NOT WHAT SAVES THOSE FOUR, and saying so here would repeat the
+        original mistake of crediting a bound that does not bind. What saves
+        them is the per-poll cost above: measured against a real server, a
+        pending pass went from 6 Activities / 41 events to 2 / 17, so the
+        1440-poll cap now costs ~25_700 events and FITS under the ceiling for
+        the first time — it used to want ~59_000 and the server always won at
+        poll ~1249 (observed: 1242). With the shipped caps THIS predicate is
+        unreachable from a single wait: 40_000 events is ~2_240 polls, while
+        `ci_pending_poll_cap` (1440) and `ci_wait_deadline_hours` (6h ≈ 360
+        polls at the default interval) both end the wait far below it. It is the
+        backstop for the history a run accumulates ELSEWHERE — earlier phases,
+        plus up to `review_round_cap` fix cycles each followed by another wait —
+        which nothing else bounds, and for any deployment that raises those two
+        caps. Keep it, and expect it to fire rarely.
+
+        MEASURE. `get_current_history_length()` is the real number and is
+        replay-safe (the SDK serves the length recorded at the current workflow
+        task, which is why `_emit_history_metric` already reads it). A poll
+        counter would be a proxy calibrated against the per-poll event cost —
+        the very number the two changes above just cut, from six Activities per
+        pending poll to two — so it would fall out of calibration on the next
+        edit to the loop, silently and in the dangerous direction, which is how
+        `ci_pending_poll_cap` came to bound something it no longer measured.
+        `is_continue_as_new_suggested()` is replay-safe too
+        but its threshold is server-side config we do not own; the ceiling we
+        measured is a count, so we compare against a count we control.
+
+        WHAT SURVIVES. `continue_as_new` restarts the run with `self._input` and
+        nothing else, so this refuses to close a run while a signal is still
+        parked in instance state — a `review_comment` can arrive at any point of
+        a CI wait and is only drained after CI resolves. The guard can only
+        DELAY the switch, never drop a comment, a merge, a budget raise or a
+        pause; an item that keeps a signal parked keeps today's behaviour."""
+        if not self._ci_polled_this_run:
+            return False
+        if (workflow.info().get_current_history_length()
+                < self._input.history_continue_as_new_threshold):
+            return False
+        # every signal reachable in the review phase whose only record is an
+        # instance attribute. The operator ones matter as much as the business
+        # ones: `_cancelled` is consumed by `_boundary_gate` at the TOP of a
+        # pass, and `_emit_history_metric` yields between that check and this
+        # one, so a cancel that lands in that window would be closed away.
+        return not (
+            self._review_received
+            or self._review_comments
+            or self._merged
+            or self._refresh_evidence_requested
+            or self._budget_raise_requested
+            or self._retry_from_checkpoint_requested
+            or self._paused
+            or self._cancelled
+            or self._operator_escalate_requested
+            or self._force_clarification_requested
+        )
 
     async def _emit_history_metric(self, checkpoint: str) -> None:
         """Phase 3 — feeds the history alert (WS-F enables rule §3).
@@ -2556,14 +2670,20 @@ class WorkItemLifecycleWorkflow:
         return True, f"api_unavailable:{v.reason}"
 
     async def _run_review_phase(self) -> WorkItemLifecycleResult:
-        """`while True` loop (NOT `continue_as_new` per iteration — see the
-        comment in `_run_implementation_phase` about the signal race): each pass
-        re-queries CI, waits for the human verdict, and if it is
-        `changes_requested` (or CI red) applies the fix cycle on the SAME
-        branch/PR and goes back to the top, all in the SAME workflow execution.
-        Phase 3 (WSB-E4-T2): rounds capped by `review_round_cap`; comments
-        consumed in a BATCH with a debounce window (ADR-26) — N comments in one
-        window become ONE fix cycle + ONE evidence refresh."""
+        """`while True` loop: each pass re-queries CI, waits for the human
+        verdict, and if it is `changes_requested` (or CI red) applies the fix
+        cycle on the SAME branch/PR and goes back to the top, all in the SAME
+        workflow execution. Phase 3 (WSB-E4-T2): rounds capped by
+        `review_round_cap`; comments consumed in a BATCH with a debounce window
+        (ADR-26) — N comments in one window become ONE fix cycle + ONE evidence
+        refresh.
+
+        It does NOT `continue_as_new` per pass — see the comment in
+        `_run_implementation_phase` about the signal race. The ONE exception is
+        `_ci_wait_needs_continue_as_new`: a CI wait long enough to reach the
+        history ceiling is terminated by the server, which loses the item
+        outright, so there the race (guarded against, in that predicate) is the
+        cheaper risk."""
         input = self._input
 
         while True:
@@ -2579,13 +2699,54 @@ class WorkItemLifecycleWorkflow:
             # skipped, and the old command sequence is reproduced one for one;
             # only live execution records it.
             ci_deadline = fine_states and workflow.patched("ci-wait-deadline-v1")
+            # REPLAY GUARD, same discipline as the marker above and the reason
+            # both new markers are read HERE rather than earlier in the pass:
+            # `patched()` records its marker in the workflow task that first
+            # evaluates it live, so moving an existing call across an `await`
+            # would move the marker to a different workflow task and desync
+            # every history that already recorded it. An in-flight execution
+            # replays thousands of passes with neither marker in its history —
+            # both read False and reproduce the old command sequence one for one
+            # (test_ci_wait_replay_guard.py replays a manufactured pre-patch CI
+            # wait against this definition, and fails if either guard is
+            # deleted).
+            #
+            # WHICH EXECUTIONS THIS REACHES, because it is not "all of them" and
+            # the runbook depends on the difference: `patched()` MEMOIZES its
+            # first answer for the whole execution (temporalio
+            # `_workflow_instance.workflow_patch`), so a run that already
+            # replayed one pass of this loop keeps False even after it catches
+            # up to live — it stays on the old per-poll cost and still dies at
+            # the ceiling. Only a run that reaches this wait for the FIRST time
+            # after the deploy is covered; one already waiting has to be RESET,
+            # to a point before it entered the wait. That is the price of the
+            # guard and it is the right one: without it, a history that already
+            # crossed the threshold inside this loop would issue the
+            # continue_as_new during replay, where it recorded an Activity, and
+            # wedge the item on nondeterminism instead of saving it.
+            quiet_ci_poll = fine_states and workflow.patched("ci-poll-writes-only-on-change-v1")
+            if (fine_states and workflow.patched("ci-wait-continue-as-new-v1")
+                    and self._ci_wait_needs_continue_as_new()):
+                # The top of a pass is the only stable place for this: the
+                # previous pass ended at `workflow.sleep`, so no Activity is in
+                # flight, no exception path is half-applied, and everything the
+                # loop needs is already in `input`.
+                return await self._continue_as_new(input)
             if fine_states:
                 input.ci_status = "pending"
-                await self._set_status(
-                    WorkItemStatus.ci_pending,
-                    audit_action="ci_pending",
-                    details={"head_sha": input.head_sha},
-                )
+                # A CI wait is ONE fact — "waiting for CI on this sha" — not one
+                # fact per minute. The row is written when the wait STARTS and
+                # (below) on every real transition. `ci_last_audited_status` is
+                # the edge detector rather than `ci_pending_polls` because the
+                # counter is not reset on the changes_requested path: it cannot
+                # tell "still waiting" from "waiting again, on a new commit".
+                if not quiet_ci_poll or input.ci_last_audited_status != "pending":
+                    await self._set_status(
+                        WorkItemStatus.ci_pending,
+                        audit_action="ci_pending",
+                        details={"head_sha": input.head_sha},
+                    )
+                    input.ci_last_audited_status = "pending"
             ci_payload = {
                 "work_item_id": input.work_item_id,
                 "tenant_id": input.tenant_id,
@@ -2611,10 +2772,27 @@ class WorkItemLifecycleWorkflow:
                     ACTIVITY_CONSUME_CI_STATUS, str(exc.cause or exc)[:300]
                 )
             input.ci_status = ci.status
-            await self._audit("ci_status_observed", {"status": ci.status})
+            if not quiet_ci_poll:
+                await self._audit("ci_status_observed", {"status": ci.status})
+            elif ci.status != input.ci_last_audited_status:
+                # The transition is the fact; the 44 identical rows that used to
+                # precede it were telemetry. This row carries what a per-poll row
+                # never could: how long the state it replaces actually lasted.
+                await self._audit("ci_status_observed", {
+                    "status": ci.status,
+                    "from_status": input.ci_last_audited_status,
+                    "polls": input.ci_pending_polls,
+                    "waited_seconds": (
+                        0 if input.ci_wait_started_at_epoch is None
+                        else int(workflow.now().timestamp() - input.ci_wait_started_at_epoch)
+                    ),
+                    "head_sha": input.head_sha,
+                })
+            input.ci_last_audited_status = ci.status
 
             if fine_states and ci.status == "pending":
                 input.ci_pending_polls += 1
+                self._ci_polled_this_run = True
                 # NOT gated on the patch: assigning a dataclass field emits no
                 # Temporal command, so it is replay-safe unconditionally — and
                 # gating it would give every item already stuck for days a FRESH
@@ -2622,7 +2800,45 @@ class WorkItemLifecycleWorkflow:
                 # recorded history.
                 if input.ci_wait_started_at_epoch is None:
                     input.ci_wait_started_at_epoch = workflow.now().timestamp()
-                await self._persist_status()
+                # A pending poll changes nothing durable EXCEPT the poll counter
+                # — and that counter is the one number that separates a wait
+                # that just started from one about to give up. Writing it every
+                # minute is what this loop was cut for; writing it only at the
+                # two edges, which is what cutting it left, made the row assert
+                # `ci_pending: 0` for the whole of a 45-minute wait. Every
+                # `ci_wait_persist_every_n_polls` polls is the middle: the row
+                # is never more than that many polls behind, and no reader has to
+                # know that the LIVE number was only ever on the `get_state`
+                # query.
+                #
+                # THE COST, since this whole change is one piece of arithmetic:
+                # `update_work_item_status` is ONE Activity = 6 history events (a
+                # workflow task's 3 plus the Activity's 3) against the 17 a whole
+                # pending pass costs, so at the shipped period of 10 it is +0.6
+                # per poll — 17.6, +3.5% — and the passes that fit under the
+                # 51_200-event ceiling go from 3_011 to 2_909. The relation the
+                # change exists to repair is untouched: the shipped 1440-poll cap
+                # wants ~25_300 events, still under half the ceiling.
+                # test_ci_wait_event_budget.py MEASURES both against a real
+                # server, so neither depends on this comment staying true.
+                #
+                # PATCH GUARD: it reuses `quiet_ci_poll` and records no marker of
+                # its own. That is only correct because this write is reachable
+                # ONLY on the quiet branch and ships in the SAME release as that
+                # marker — no history anywhere records
+                # `ci-poll-writes-only-on-change-v1` without it, so there is no
+                # history that could replay past this point expecting silence. A
+                # history from before the marker takes the `not quiet_ci_poll`
+                # branch and re-issues the per-poll write it recorded, one for
+                # one, and never evaluates the period at all.
+                #
+                # The counter is incremented above, so the first poll of a wait is
+                # poll 1 and never writes: the entry has just written the row.
+                persist_every = input.ci_wait_persist_every_n_polls
+                if not quiet_ci_poll:
+                    await self._persist_status()
+                elif persist_every > 0 and input.ci_pending_polls % persist_every == 0:
+                    await self._persist_status()
                 if input.ci_pending_polls >= input.ci_pending_poll_cap:
                     if ci_deadline:
                         await self._exhaust_ci_wait("poll_cap")

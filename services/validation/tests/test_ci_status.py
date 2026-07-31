@@ -168,3 +168,131 @@ def test_legacy_statuses_alone_are_enough_to_avoid_no_ci(work_item_id, tenant_id
         ref="sha-legacy",
     )
     assert result.status == "green"
+
+
+# --------------------------------------------------------------------------
+# What a WAIT costs the ledger. Measured on the cluster: `ci_status_consumed`
+# was 6494 rows — one per poll — for the same handful of work items, because
+# every look wrote a row whether or not anything had changed.
+# --------------------------------------------------------------------------
+
+
+def _consumed(work_item_id: str) -> list[dict]:
+    conn = db.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT details FROM audit_log "
+                "WHERE work_item_id = %s AND action = 'ci_status_consumed' ORDER BY id",
+                (work_item_id,),
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _poll(github: FakeGitHubClient, work_item_id: str, tenant_id: str, ref: str = "sha-wait") -> str:
+    return consume_ci_status_core(
+        github_client=github,
+        work_item_id=work_item_id,
+        tenant_id=tenant_id,
+        repo="acme/repo",
+        pr_number=77,
+        ref=ref,
+    ).status
+
+
+def test_a_45_poll_wait_writes_one_audit_row_not_forty_five(work_item_id, tenant_id):
+    """The cost of waiting has to be the number of things that CHANGED, not the
+    number of times we looked. The first observation is a fact and is written;
+    the 44 that restate it are not."""
+    github = FakeGitHubClient()
+    github.set_check_runs("acme/repo", "sha-wait", [{"name": "tests", "status": "in_progress"}])
+    for _ in range(45):
+        assert _poll(github, work_item_id, tenant_id) == "pending"
+
+    rows = _consumed(work_item_id)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "pending"
+    # nothing preceded it — the first observation of a work item is a transition
+    # out of "never looked", which is exactly what an auditor needs to see.
+    assert rows[0]["from_status"] is None
+
+    # the CURRENT state is still refreshed on every poll — what stopped being
+    # written is the ledger row, not the row the rest of the system reads.
+    assert db.get_ci_status(work_item_id)["status"] == "pending"
+
+
+def test_the_transition_row_names_the_status_it_replaced(work_item_id, tenant_id):
+    """The row that replaces 44 identical ones must let the audit query rebuild
+    the sequence on its own, so it carries where it came from."""
+    github = FakeGitHubClient()
+    github.set_check_runs("acme/repo", "sha-wait", [{"name": "tests", "status": "in_progress"}])
+    for _ in range(45):
+        _poll(github, work_item_id, tenant_id)
+    github.set_check_runs(
+        "acme/repo", "sha-wait",
+        [{"name": "tests", "status": "completed", "conclusion": "success"}],
+    )
+    assert _poll(github, work_item_id, tenant_id) == "green"
+
+    rows = _consumed(work_item_id)
+    assert len(rows) == 2
+    assert rows[1]["status"] == "green"
+    assert rows[1]["from_status"] == "pending"
+    # and the evidence for the transition travels with it
+    assert rows[1]["check_runs"] == [
+        {"name": "tests", "status": "completed", "conclusion": "success"}
+    ]
+
+
+def test_a_retried_activity_does_not_write_the_transition_twice(work_item_id, tenant_id):
+    """Temporal retries this Activity on any failure, including one raised after
+    the status write already committed. The second attempt observes the same
+    GitHub state, finds the row already holding it, and writes nothing — the
+    transition is recorded once per transition, not once per attempt."""
+    github = FakeGitHubClient()
+    github.set_check_runs("acme/repo", "sha-wait", [{"name": "tests", "status": "in_progress"}])
+    _poll(github, work_item_id, tenant_id)
+    github.set_check_runs(
+        "acme/repo", "sha-wait",
+        [{"name": "tests", "status": "completed", "conclusion": "success"}],
+    )
+    _poll(github, work_item_id, tenant_id)
+    _poll(github, work_item_id, tenant_id)  # the retry: identical input, identical GitHub
+
+    rows = _consumed(work_item_id)
+    assert [r["status"] for r in rows] == ["pending", "green"]
+
+
+def test_every_real_transition_survives(work_item_id, tenant_id):
+    """What leaves is `pending -> pending`. A PR that GitHub has not registered
+    any check for yet, then runs, then fails, then passes is four facts and must
+    still read as four rows."""
+    github = FakeGitHubClient()
+    assert _poll(github, work_item_id, tenant_id, ref="sha-a") == CI_NO_CI
+    github.set_check_runs("acme/repo", "sha-a", [{"name": "tests", "status": "in_progress"}])
+    assert _poll(github, work_item_id, tenant_id, ref="sha-a") == "pending"
+    github.set_check_runs(
+        "acme/repo", "sha-a", [{"name": "tests", "status": "completed", "conclusion": "failure"}]
+    )
+    assert _poll(github, work_item_id, tenant_id, ref="sha-a") == "red"
+    github.set_check_runs(
+        "acme/repo", "sha-b", [{"name": "tests", "status": "completed", "conclusion": "success"}]
+    )
+    assert _poll(github, work_item_id, tenant_id, ref="sha-b") == "green"
+
+    rows = _consumed(work_item_id)
+    assert [r["status"] for r in rows] == [CI_NO_CI, "pending", "red", "green"]
+    assert [r["from_status"] for r in rows] == [None, CI_NO_CI, "pending", "red"]
+
+
+def test_save_ci_status_returns_the_status_it_replaced(work_item_id):
+    """The edge detector is the write itself. This is what makes a retry of an
+    already-applied write indistinguishable from "nothing changed" — the property
+    the audit rule above rests on."""
+    assert db.save_ci_status(work_item_id, 7, "pending", {}) is None
+    assert db.save_ci_status(work_item_id, 7, "pending", {}) == "pending"
+    assert db.save_ci_status(work_item_id, 7, "green", {}) == "pending"
+    assert db.save_ci_status(work_item_id, 7, "green", {}) == "green"
+    assert db.get_ci_status(work_item_id)["status"] == "green"

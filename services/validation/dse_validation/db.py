@@ -164,21 +164,36 @@ class PostgresCommentStateStore:
 # ---------------------------------------------------------------------------
 # wse_ci_status (WSE-E4-T9a).
 # ---------------------------------------------------------------------------
-def save_ci_status(work_item_id: str, pr_number: int, status: str, detail: dict[str, Any]) -> None:
+def save_ci_status(work_item_id: str, pr_number: int, status: str, detail: dict[str, Any]) -> str | None:
+    """Upserts the row and returns the status it held BEFORE this write — None the
+    first time the work item is observed.
+
+    The previous value comes from the same statement instead of a SELECT before
+    it, because callers use it to decide whether the observation deserves an audit
+    row: the question is "what did THIS write replace", and only the writing
+    statement answers it. A separate SELECT answers "what was there a moment ago",
+    which a concurrent attempt of the same retryable Activity can invalidate
+    between the two round trips. The CTE is evaluated on the statement's snapshot,
+    so it still reads the row as it was before the upsert.
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
+                WITH prev AS (SELECT status FROM wse_ci_status WHERE work_item_id = %s)
                 INSERT INTO wse_ci_status (work_item_id, pr_number, status, detail)
                 VALUES (%s, %s, %s, %s::jsonb)
                 ON CONFLICT (work_item_id) DO UPDATE SET
                     pr_number = EXCLUDED.pr_number, status = EXCLUDED.status,
                     detail = EXCLUDED.detail, updated_at = now()
+                RETURNING (SELECT status FROM prev)
                 """,
-                (work_item_id, pr_number, status, json.dumps(detail)),
+                (work_item_id, work_item_id, pr_number, status, json.dumps(detail)),
             )
+            previous_status = cur.fetchone()[0]
         conn.commit()
+        return previous_status
     finally:
         conn.close()
 

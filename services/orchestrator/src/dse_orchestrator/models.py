@@ -182,6 +182,49 @@ class WorkItemLifecycleInput:
     # <= 0 disables the deadline.
     ci_wait_started_at_epoch: float | None = None
     ci_wait_deadline_hours: float = 6.0
+    # Last CI status the workflow wrote an audit row for. Edge detector for the
+    # CI wait: the row is written when the wait STARTS and on every real
+    # transition, never once per poll. It has to be here rather than in an
+    # instance attribute because the wait now survives `continue_as_new` — an
+    # instance attribute would restart every chained run announcing the entry
+    # into a wait it never left.
+    ci_last_audited_status: str | None = None
+    # How often the CI wait re-writes the work_items row while nothing changes.
+    # Stopping the per-poll write was right — 45 identical rows to move one
+    # integer — but stopping it ENTIRELY left `validation_attempts.ci_pending`
+    # reading 0 for the whole wait, so a panel opened at minute 30 of a
+    # 45-minute wait showed a wait that had just started. That is not a stale
+    # number, it is a wrong one. One write per 10 polls is the middle: an
+    # `update_work_item_status` costs 6 history events against the 17 a whole
+    # pending pass costs, so this adds 0.6 events per poll (17.0 -> 17.6, +3.5%)
+    # and takes the passes that fit under Temporal's 51_200-event ceiling from
+    # 3_011 to 2_909, while `ci_pending_poll_cap` (1440) still wants only
+    # ~25_300. The per-poll cost and that last relation are MEASURED by
+    # test_ci_wait_event_budget.py rather than trusted from here. In exchange the
+    # row is never more than 10 polls behind — 10 MINUTES only because
+    # `ci_poll_interval_seconds` is 60 and, like every knob here, has no live
+    # env path; the two defaults are what the promise is made of, so
+    # test_ci_wait_periodic_persist.py asserts their product.
+    # In the INPUT rather than a module constant for the reason the caps above
+    # are: it decides how many commands the loop issues, so an execution must
+    # keep the value it started with. A constant edited later would change the
+    # command stream of a wait that is REPLAYING and desync it.
+    # <= 0 disables the periodic write (back to writing only at the edges).
+    ci_wait_persist_every_n_polls: int = 10
+    # Event count at which the CI wait closes the run with `continue_as_new`.
+    # Temporal terminates an execution at 51_200 events with no audit row and no
+    # escalation, and `ci_pending_poll_cap` bounds a count of POLLS, not of
+    # events — at ~41 events per poll the ceiling arrived at poll ~1237, before
+    # the 1440-poll cap could ever fire. 40_000 sits deliberately inside the band
+    # infra/ALERTING-RULES.md §3 already defines: above the warning at 35_840
+    # (70%), below the critical at 46_080 (90%). That is the behaviour the rule
+    # was written for — "leaving time for the workflow to Continue-As-New before
+    # hitting the hard limit" — so a long wait trips the warning and heals
+    # itself, and a CRITICAL now means the mitigation did not fire (a signal
+    # parked in instance state, or history growing outside this loop). It also
+    # leaves ~11_000 events for the fix cycle + evidence refresh + merge that may
+    # follow the wait, which costs a few hundred.
+    history_continue_as_new_threshold: int = 40_000
 
     # Phase 2 (WSB-E3-T2/E3-T3/E4) — new caps/policy. `require_approval_risk_classes`
     # is the POLICY of which risk classes require human approval; it lives in the

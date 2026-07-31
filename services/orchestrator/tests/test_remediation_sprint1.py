@@ -119,7 +119,10 @@ async def test_ci_pending_polls_until_green_before_review(time_skipping_env):
 
     assert result.status == WorkItemStatus.done.value
     actions = read_audit_actions(work_item_id)
-    assert actions.count("ci_pending") == 3
+    # ONE row per wait, not one per poll (`ci-poll-writes-only-on-change-v1`):
+    # the three polls above are still three `consume_ci_status` calls, they just
+    # stopped narrating themselves into the audit log. See test_ci_wait_history.
+    assert actions.count("ci_pending") == 1
     assert actions.index("awaiting_human_review") > actions.index("ci_pending")
 
 
