@@ -70,7 +70,18 @@ SUITE_COVERAGE_TARGETS: dict[str, str] = {
 # time-skipping + chaos are the slowest, but no healthy test should exceed ~2min.
 # A hang becomes a NAMED failure instead of a dead job with no diagnosis.
 DEFAULT_TEST_TIMEOUT_S = 180
-SUITE_TIMEOUTS: dict[str, int] = {}
+SUITE_TIMEOUTS: dict[str, int] = {
+    # The orchestrator suite is the only one that starts a real Temporal
+    # environment per test, and the CI wait tests chain continue_as_new
+    # executions inside one. Measured on this laptop with the exact CI command
+    # (`--coverage`, Postgres and Temporal from compose): 149 tests in 239s,
+    # slowest single test 27.8s. The CI runner has two cores shared with
+    # Postgres, Temporal and coverage instrumentation, and there the same tests
+    # crossed 180s and the job died with a stack dump instead of a test name.
+    # Raised rather than removed: the ceiling exists so a hang is a NAMED
+    # failure, and 27.8s of headroom to 420s still catches one.
+    "services/orchestrator": 420,
+}
 
 SUITE_COVERAGE_FLOORS: dict[str, int] = {
     "packages/contracts": 90,

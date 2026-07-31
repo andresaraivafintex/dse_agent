@@ -61,14 +61,12 @@ def slack_item(postgres):
         source="slack",
         source_ref={"channel": "C0BKA7TMMEY"},
     )
+    # No teardown, which is the convention every other suite here follows: the
+    # id is unique per run and CI runs against a disposable schema it drops.
+    # Deleting needed a second connection as the DSN role, and that role has
+    # DELETE revoked on work_items in CI — the fixture passed locally, where the
+    # DSN is the owner, and failed the pipeline on teardown for three releases.
     yield work_item_id
-    conn = psycopg2.connect(DSN)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM work_items WHERE id = %s", (work_item_id,))
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def read_repo(work_item_id: str):
