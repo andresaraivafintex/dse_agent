@@ -3,8 +3,10 @@
 Proves (against real sandbox/git/Postgres, the real Temporal SDK harness):
   - the `run_planner_turn` Activity is a genuine Temporal Activity named after
     the contract and emits a structured `PlanArtifact`;
-  - the context is hydrated with AGENTS.md + CODEOWNERS (from the workspace) +
-    the tenant's approved skills (registry) + tickets + retrieval/index;
+  - the context is hydrated with AGENTS.md + CODEOWNERS (read at the base ref
+    through the GitHub App — NOT from the workspace, which does not exist yet
+    when the Planner runs and never exists on the worker under k8s) + the
+    tenant's approved skills (registry) + tickets + retrieval/index;
   - `risk_class` is DERIVED deterministically from the blast radius (P1), not
     from the proposer's word;
   - CONFORMANCE: any WRITE tool in the Planner FAILS (`ToolPermissionError`) —
@@ -43,12 +45,41 @@ def _cleanup_retrieval(dsn, tenant):
     conn.close()
 
 
+_AGENTS_MD = "# AGENTS\nUse camelCase. Run the tests before the PR.\n"
+_CODEOWNERS = "src/payments/ @payments-team\n"
+
+
+class _DocsClient:
+    """The base ref's view of the repo. Writing these files into the workspace —
+    which is what this file used to do — could never prove anything: the Planner
+    runs before `provision_sandbox` clones, and under `sandboxDriver: k8s` the
+    host workspace is never created at all."""
+
+    def __init__(self, files):
+        self.files = files
+
+    def get_file_text(self, repo, path, ref):
+        return self.files.get(path)
+
+
+def _seed_repo_docs(monkeypatch, files=None):
+    """Serve AGENTS.md/CODEOWNERS the way production does — at the base ref,
+    through the GitHub App."""
+    import dse_validation.config as cfg
+    import sandbox_runtime.activities as acts
+
+    files = {"AGENTS.md": _AGENTS_MD, "CODEOWNERS": _CODEOWNERS} if files is None else files
+    monkeypatch.setattr(acts, "_planner_github_client", lambda: _DocsClient(files), raising=True)
+    monkeypatch.setattr(
+        cfg, "GitHubConfig", lambda: type("_C", (), {"is_configured": True})(), raising=True
+    )
+
+
 def _seed_workspace(work_item_id, tenant, dsn, repo="app"):
-    """Provisions the sandbox and seeds AGENTS.md/CODEOWNERS + the retrieval index."""
+    """Provisions the sandbox and seeds the retrieval index. The repo docs are
+    NOT seeded here — see `_seed_repo_docs`."""
     asyncio.run(provision_sandbox(ProvisionSandboxInput(work_item_id=work_item_id, tenant_id=tenant)))
     workspace_dir, _ = _paths_for(work_item_id)
-    (Path(workspace_dir) / "AGENTS.md").write_text("# AGENTS\nUse camelCase. Run the tests before the PR.\n")
-    (Path(workspace_dir) / "CODEOWNERS").write_text("src/payments/ @payments-team\n")
     svc = RetrievalService(dsn=dsn)
     svc.index_repo(
         tenant,
@@ -65,7 +96,9 @@ def test_activity_name_matches_contract():
     assert run_planner_turn.__temporal_activity_definition.name == ACTIVITY_RUN_PLANNER_TURN
 
 
-def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state_dir, pg_dsn):
+def test_planner_emits_structured_plan_with_hydrated_context(
+    work_item_id, state_dir, pg_dsn, monkeypatch
+):
     tenant = f"plan-{uuid.uuid4().hex[:8]}"
     # seed an approved skill for this tenant, to prove hydration
     import psycopg2
@@ -80,11 +113,13 @@ def test_planner_emits_structured_plan_with_hydrated_context(work_item_id, state
         )
     conn.close()
 
+    _seed_repo_docs(monkeypatch)
     workspace_dir, svc = _seed_workspace(work_item_id, tenant, pg_dsn)
     try:
         def proposer(ctx):
             # the 'LLM' proposer sees the hydrated context
             assert "AGENTS" in ctx.agents_md
+            assert "@payments-team" in ctx.codeowners
             assert any(s.skill_key == "no-plaintext-secrets" for s in ctx.skills)
             return {
                 "steps": ["Add validation to the login"],
