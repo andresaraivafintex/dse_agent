@@ -29,6 +29,11 @@ from dse_validation.github.app_auth import fetch_installation_token
 
 logger = logging.getLogger("dse_validation.github")
 
+# A single repo file we pull into the worker's memory. AGENTS.md is the only
+# caller today and the Planner caps it far lower; this is the outer bound that
+# keeps a hostile or accidental 100 MB file from reaching a 1Gi pod at all.
+_MAX_FILE_BYTES = 1_000_000
+
 
 class GitHubClient(Protocol):
     def get_open_pr_for_branch(self, repo: str, branch: str) -> dict | None: ...
@@ -44,6 +49,18 @@ class GitHubClient(Protocol):
     def edit_issue_comment(self, repo: str, comment_id: str, body: str) -> None: ...
 
     def list_check_runs(self, repo: str, ref: str) -> list[dict]: ...
+
+    def get_tree_paths(self, repo: str, ref: str, *, limit: int = 300) -> list[str]: ...
+
+    def get_file_text(self, repo: str, path: str, ref: str) -> str | None:
+        """One file's text at `ref`, or None when it does not exist there.
+
+        The None/raise split is the contract: None is a FACT about the repo (no
+        such file on this branch), an exception is a failure to ask. The Planner
+        renders nothing for the first and records a degradation for the second —
+        conflating them is how a doc that could not be fetched becomes
+        indistinguishable from a repo that never had one."""
+        ...
 
     def get_combined_status(self, repo: str, ref: str) -> dict:
         """`GET /repos/{repo}/commits/{ref}/status` — the LEGACY commit-status
@@ -164,6 +181,30 @@ class RealGitHubClient:
         resp.raise_for_status()
         tree = resp.json().get("tree", [])
         return [t["path"] for t in tree if t.get("type") == "blob"][:limit]
+
+    def get_file_text(self, repo: str, path: str, ref: str) -> str | None:
+        """One file's text at `ref`. See the Protocol for the None/raise split.
+
+        `Accept: vnd.github.raw` returns the bytes rather than the base64 JSON
+        envelope. The size guard is not paranoia about GitHub: `path` comes from
+        the target repository, and the worker pod that runs the Planner has a
+        1Gi limit — a repo can legally hold a 100 MB file at a name we ask for."""
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/contents/{path}",
+            headers={**self._headers(), "Accept": "application/vnd.github.raw"},
+            params={"ref": ref},
+            timeout=20.0,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        if len(resp.content) > _MAX_FILE_BYTES:
+            logger.warning(
+                "github: %s@%s:%s is %d bytes, over the %d cap — treated as unreadable",
+                repo, ref, path, len(resp.content), _MAX_FILE_BYTES,
+            )
+            raise ValueError(f"{path} exceeds {_MAX_FILE_BYTES} bytes")
+        return resp.text
 
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:
         resp = httpx.post(

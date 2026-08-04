@@ -1023,6 +1023,15 @@ _PLANNER_TREE_BUDGET_CHARS = 160_000
 # strings against a 1Gi pod.
 _PLANNER_TREE_FETCH_LIMIT = 200_000
 
+# Per-doc caps for the trusted repo docs. Sized against the measured specimen —
+# a real client AGENTS.md is 564 tokens ≈ 2.256 chars — with room for a longer
+# one, and low enough that both docs together (4.000 chars) cannot push the
+# render past the 16.000-char budget and start evicting skills. A tenant whose
+# doc is genuinely larger gets it cut on a line boundary, with the dropped char
+# count on the ledger, rather than the whole block silently disappearing.
+_PLANNER_AGENTS_MD_MAX_CHARS = 2_800
+_PLANNER_CODEOWNERS_MAX_CHARS = 1_200
+
 _TREE_MAX_SELECTED_DIRS = 3
 # Caps on the summary itself, so a repo with thousands of entries at one level
 # cannot eat the budget it is supposed to be a cheap index of. Whatever they cut
@@ -1057,6 +1066,16 @@ def _strip_json_fence(text: str) -> str:
     return text.strip()
 
 
+def _planner_github_client():
+    """One GitHub client per call site, built the way the tree fetch has always
+    built it. Hoisted out of `_repo_tree_for_planner` so the tree and the repo
+    docs — same repo, same ref, same turn — go through one construction path."""
+    from dse_validation.config import GitHubConfig
+    from dse_validation.github.client import build_github_client
+
+    return build_github_client(GitHubConfig())
+
+
 def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
     """The REAL repo tree on the base branch, via the control plane's GitHub API
     — without it the Planner guesses paths and plan_compliance rejects the real
@@ -1066,11 +1085,72 @@ def _repo_tree_for_planner(repo: str, base_branch: str) -> list[str]:
     it. An empty return used to be indistinguishable from a repo with no files,
     on the log and on the ledger alike, so a Planner running blind looked exactly
     like a Planner running on a tiny repo."""
-    from dse_validation.config import GitHubConfig
-    from dse_validation.github.client import build_github_client
+    return _planner_github_client().get_tree_paths(
+        repo, base_branch or "main", limit=_PLANNER_TREE_FETCH_LIMIT
+    )
 
-    client = build_github_client(GitHubConfig())
-    return client.get_tree_paths(repo, base_branch or "main", limit=_PLANNER_TREE_FETCH_LIMIT)
+
+def _cap_doc(text: str, limit: int) -> tuple[str, int]:
+    """Cut to `limit` on a line boundary, and say how much was dropped. Never
+    mid-line — half a convention reads exactly like a whole one, the same reason
+    `_expand_into` refuses to slice a directory listing."""
+    if len(text) <= limit:
+        return text, 0
+    head = text[:limit].rsplit("\n", 1)[0]
+    return head + "\n[truncated to the planner doc budget]", len(text) - len(head)
+
+
+def _repo_docs_for_planner(
+    repo: str, base_branch: str, *, telemetry: dict[str, Any]
+) -> tuple[str | None, str | None]:
+    """AGENTS.md and CODEOWNERS at the base ref, through the same GitHub App the
+    tree comes from.
+
+    Returns '' when the file is genuinely absent at this ref and None when we
+    could not ask. The caller records only the second: a repo without an
+    AGENTS.md is a fact about that repo, not a degradation of ours, and an
+    `absent` that cannot be told apart from an `unavailable` is how the workspace
+    read stayed broken for as long as it did.
+
+    At most four small GETs per turn, most of them 404s on a repo that curates
+    neither file. Gating them on the tree would remove that, but the tree is
+    fetched inside the proposer — after this runs — and hoisting it to save four
+    1 KB requests at sandbox concurrency 1 is not a trade worth making yet."""
+    from dse_validation.config import GitHubConfig
+
+    if not GitHubConfig().is_configured:
+        telemetry["repo_doc_unavailable_reason"] = "github_app_not_configured"
+        return None, None
+
+    ref = base_branch or "main"
+    try:
+        client = _planner_github_client()
+        agents_md = client.get_file_text(repo, "AGENTS.md", ref) or ""
+        codeowners = ""
+        codeowners_path = ""
+        # GitHub's own precedence: .github/ wins over the root, docs/ last.
+        for candidate in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+            found = client.get_file_text(repo, candidate, ref)
+            if found:
+                codeowners, codeowners_path = found, candidate
+                break
+    except Exception as exc:  # noqa: BLE001 — the docs are context, not a requirement
+        telemetry["repo_doc_unavailable_reason"] = type(exc).__name__
+        logger.warning("planner: repo docs unavailable for %s: %s", repo, exc)
+        return None, None
+
+    agents_md, agents_cut = _cap_doc(agents_md, _PLANNER_AGENTS_MD_MAX_CHARS)
+    codeowners, owners_cut = _cap_doc(codeowners, _PLANNER_CODEOWNERS_MAX_CHARS)
+    telemetry.update(
+        agents_md_source="repo" if agents_md else "absent",
+        agents_md_chars=len(agents_md),
+        agents_md_truncated_chars=agents_cut,
+        codeowners_source="repo" if codeowners else "absent",
+        codeowners_path=codeowners_path,
+        codeowners_chars=len(codeowners),
+        codeowners_truncated_chars=owners_cut,
+    )
+    return agents_md, codeowners
 
 
 def _split_by_dir(paths: list[str], prefix: str = "") -> tuple[list[str], dict[str, int]]:
@@ -1519,18 +1599,43 @@ async def _run_planner_turn_impl(
     )
     vk = mint_virtual_key(headers)
 
+    # Declared HERE, not beside the proposer: doc provenance is resolved before
+    # any model runs, so it has to reach `planner_turn_completed` on the fixture
+    # path too — where no proposer ever writes into this dict.
+    context_telemetry: dict[str, Any] = {}
+    agents_md, codeowners = _repo_docs_for_planner(
+        inp.repo, inp.base_branch or "main", telemetry=context_telemetry
+    )
+
     retrieval = retrieval if retrieval is not None else RetrievalService()
     ctx = hydrate_planner_context(
         work_item_id=inp.work_item_id,
         tenant_id=inp.tenant_id,
-        workspace_dir=workspace_dir,
         repo=inp.repo,
         instruction=inp.instruction,
         task_class=inp.task_class,
         related_tickets=inp.related_tickets,
         retrieval=retrieval,
         skills_conn=skills_conn,
+        agents_md=agents_md,
+        codeowners=codeowners,
+        doc_ref=f"{inp.repo}@{inp.base_branch or 'main'}",
     )
+    if context_telemetry.get("repo_doc_unavailable_reason"):
+        # Not the same as "this repo has no AGENTS.md" — that is countable off
+        # planner_turn_completed.agents_md_source and needs no event. This one is
+        # us failing to ask, and it has to be findable with `WHERE action = …`.
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="planner_repo_doc_unavailable",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={
+                "repo": inp.repo,
+                "ref": inp.base_branch or "main",
+                "reason": context_telemetry["repo_doc_unavailable_reason"],
+            },
+        )
     if not ctx.skills:
         # The emptiness was already ON the ledger — planner_turn_completed
         # carries skills_hydrated=[] — but buried in a details field, so it
@@ -1578,10 +1683,10 @@ async def _run_planner_turn_impl(
     #   explicit proposer (tests) > real model (substrate != fake) with a
     #   fallback to the fixture > fixture. The fixture has empty expected_files
     #   and WS-B's guard escalates — deliberate when there is no model.
-    # What the Planner actually SAW, filled in by the model proposer and read
-    # after the call — including on its failure paths, which is where the
+    # What the Planner actually SAW: doc provenance is already in here from
+    # before the hydrate; the model proposer adds the tree/skill telemetry and is
+    # read after the call — including on its failure paths, which is where the
     # question "what was in front of it?" matters most.
-    context_telemetry: dict[str, Any] = {}
     if proposer is not None:
         proposal_fn = proposer
     elif os.environ.get(SUBSTRATE_ENV_VAR, "fake").strip().lower() != "fake":
