@@ -113,7 +113,7 @@ click==8.4.2
     #   uvicorn
 coverage==7.15.2
     # via pytest-cov
-cryptography==49.0.0
+cryptography==50.0.0
     # via
     #   dse-adapter-github
     #   dse-platform
