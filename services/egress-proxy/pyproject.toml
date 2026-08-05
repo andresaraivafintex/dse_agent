@@ -10,7 +10,13 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
     "httpx>=0.27",
-    "PyJWT>=2.8",
+    # `PyJWT[crypto]`, not bare PyJWT. RS256 — which is the only algorithm a
+    # GitHub App JWT can use — lives in `cryptography`, and without it PyJWT
+    # raises NotImplementedError at encode time. The broker catches that, falls
+    # back to a fixture token, and the relay then goes out anonymous: a private
+    # repo stays unclonable with nothing in the logs but a generic 401. Found by
+    # minting a token inside the running Pod, not by reading the manifest.
+    "PyJWT[crypto]>=2.8",
     "psycopg2-binary>=2.9",
     "dse-contracts",
     "dse-audit",
