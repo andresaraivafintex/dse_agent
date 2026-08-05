@@ -297,10 +297,17 @@ def _resolve_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dic
 class L1ManifestError(ValueError):
     """Missing or invalid manifest, carrying an explicit gate outcome."""
 
-    def __init__(self, status: GateStatus, detail: str):
+    def __init__(self, status: GateStatus, detail: str, summary: str | None = None):
         super().__init__(detail)
         self.status = status
         self.detail = detail
+        # `detail` is free to name the offending manifest keys — it only reaches
+        # validation_runs, which retention can clean. `summary` is what the
+        # append-only audit_log gets, so any message interpolating content the
+        # CUSTOMER chose (object keys, command argv, file paths) must pass an
+        # explicit one. The messages that interpolate only `source`, stage names
+        # from the fixed set, or integers are platform text and reuse `detail`.
+        self.summary = summary or detail
 
 
 def _validate_command(name: str, raw: Any) -> list[str]:
@@ -349,6 +356,10 @@ def _validate_timeouts(raw: Any, *, source: str) -> dict[str, int]:
             GateStatus.ERROR,
             f"manifest {source} has unknown timeouts: {unknown} "
             f"(valid stages: {list(_STAGE_NAMES)})",
+            summary=(
+                f"manifest has {len(unknown)} unknown timeout stage(s) "
+                f"(valid stages: {list(_STAGE_NAMES)})"
+            ),
         )
     ceiling = stage_timeout_ceiling_seconds()
     declared: dict[str, int] = {}
@@ -413,6 +424,7 @@ class L1Config:
         source: str = "not-configured",
         manifest_status: GateStatus = GateStatus.NOT_CONFIGURED,
         manifest_detail: str = "L1 manifest not loaded",
+        manifest_summary: str | None = None,
     ) -> None:
         self.lint_cmd = list(lint_cmd or [])
         self.typecheck_cmd = list(typecheck_cmd or [])
@@ -433,6 +445,7 @@ class L1Config:
         self.source = source
         self.manifest_status = manifest_status
         self.manifest_detail = manifest_detail
+        self.manifest_summary = manifest_summary or manifest_detail
 
     def timeout_for(self, stage: str) -> int:
         """Seconds allowed for one pipeline stage.
@@ -517,6 +530,7 @@ class L1Config:
                 source=source,
                 manifest_status=exc.status,
                 manifest_detail=exc.detail,
+                manifest_summary=exc.summary,
             )
 
     @classmethod
@@ -529,6 +543,10 @@ class L1Config:
             raise L1ManifestError(
                 GateStatus.ERROR,
                 f"manifest {source} has unknown fields: {unknown}",
+                summary=(
+                    f"manifest has {len(unknown)} unknown field(s) "
+                    f"(valid fields: {sorted(allowed)})"
+                ),
             )
         if payload.get("version") != 1:
             raise L1ManifestError(
@@ -546,6 +564,7 @@ class L1Config:
             raise L1ManifestError(
                 GateStatus.ERROR,
                 f"manifest {source} has unknown commands: {unknown_commands}",
+                summary=f"manifest has {len(unknown_commands)} unknown command(s)",
             )
 
         timeout = payload.get(

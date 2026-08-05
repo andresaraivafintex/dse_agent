@@ -105,6 +105,7 @@ def secret_scan_check(
             passed=False,
             status=GateStatus.ERROR,
             detail=f"python3 not found in the sandbox: {result.stderr.strip()}",
+            summary="python3 not found in the sandbox (exit 127)",
         )
     if result.returncode != 0:
         return L1Finding(
@@ -112,6 +113,7 @@ def secret_scan_check(
             passed=False,
             status=GateStatus.ERROR,
             detail=f"secret scanner failed (exit={result.returncode}): {result.stderr[:2000]}",
+            summary=f"secret scanner failed (exit={result.returncode})",
         )
     try:
         payload = json.loads(result.stdout.strip().splitlines()[-1]) if result.stdout.strip() else {"findings": []}
@@ -121,12 +123,25 @@ def secret_scan_check(
             passed=False,
             status=GateStatus.ERROR,
             detail=f"unexpected scanner output: {result.stdout[:2000]}",
+            # The scanner emits ONE json line holding every snippet, so this
+            # branch's FIRST line is the payload. Taking "the summary line"
+            # would have published the whole scan.
+            summary="the secret scanner produced output that could not be parsed",
         )
 
     findings = payload.get("findings", [])
     if not findings:
-        return L1Finding(check="secret_scan", passed=True, detail="no secret/token detected")
+        return L1Finding(
+            check="secret_scan",
+            passed=True,
+            detail="no secret/token detected",
+            summary="no secret/token detected",
+        )
 
     lines = [f"- [{f['kind']}] {f['file']}:{f['line']} — {f['snippet']}" for f in findings[:20]]
-    detail = f"{len(findings)} possible secret(s) detected:\n" + "\n".join(lines)
-    return L1Finding(check="secret_scan", passed=False, detail=detail)
+    summary = f"{len(findings)} possible secret(s) detected"
+    # `snippet` IS the matched source line. It stays in `detail` only.
+    detail = summary + ":\n" + "\n".join(lines)
+    return L1Finding(
+        check="secret_scan", passed=False, detail=detail, summary=summary
+    )

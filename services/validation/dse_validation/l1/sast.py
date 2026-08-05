@@ -34,6 +34,7 @@ def sast_check(
             passed=False,
             status=GateStatus.ERROR,
             detail=f"bandit not found: {result.stderr.strip()}",
+            summary="bandit not found (exit 127)",
         )
 
     # A killed bandit prints NOTHING, and `json.loads("{}")` below yields zero
@@ -50,6 +51,10 @@ def sast_check(
                 f"bandit timed out after {timeout}s — no SAST verdict was produced "
                 f"(scanning {target_dir}); raise the sast timeout or scan less"
             ),
+            summary=(
+                f"bandit timed out after {timeout}s — no SAST verdict was "
+                "produced; raise the sast timeout or scan less"
+            ),
         )
 
     # bandit exits with returncode 1 when it finds issues (not an execution error).
@@ -61,6 +66,7 @@ def sast_check(
             passed=False,
             status=GateStatus.ERROR,
             detail=f"bandit did not produce valid JSON (exit={result.returncode}): {result.stderr[:2000]}",
+            summary=f"bandit did not produce valid JSON (exit={result.returncode})",
         )
 
     findings = payload.get("results", [])
@@ -70,11 +76,15 @@ def sast_check(
 
     if not gating:
         detail = f"{len(findings)} SAST finding(s) in total, none >= {severity_gate}"
-        return L1Finding(check="sast", passed=True, detail=detail)
+        return L1Finding(check="sast", passed=True, detail=detail, summary=detail)
 
     lines = [
         f"- [{f.get('issue_severity')}] {f.get('test_id')} {f.get('filename')}:{f.get('line_number')} — {f.get('issue_text')}"
         for f in gating[:20]
     ]
-    detail = f"{len(gating)} SAST finding(s) >= {severity_gate}:\n" + "\n".join(lines)
-    return L1Finding(check="sast", passed=False, detail=detail)
+    summary = f"{len(gating)} SAST finding(s) >= {severity_gate}"
+    # `lines` holds bandit's issue_text, and B105/B106/B107 render that as
+    # "Possible hardcoded password: '<value>'" — the credential itself. It
+    # stays in `detail`, which only reaches validation_runs.
+    detail = summary + ":\n" + "\n".join(lines)
+    return L1Finding(check="sast", passed=False, detail=detail, summary=summary)

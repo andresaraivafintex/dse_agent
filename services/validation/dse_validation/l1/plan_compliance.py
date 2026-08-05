@@ -180,6 +180,10 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
                 "PlanArtifact.no_code_change=true, but the immutable diff "
                 f"{diff.base_sha[:12]}...{diff.head_sha[:12]} changed {diff.files_changed}"
             ),
+            summary=(
+                "PlanArtifact.no_code_change=true, but the immutable diff "
+                f"changed {len(diff.files_changed)} file(s)"
+            ),
         )
 
     # OPERATOR DECISION (2026-07-22, 3rd real occurrence): expected_files no
@@ -217,6 +221,7 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
                 f"total across {len(diff.files_changed)} file(s) "
                 "(expected_files is advisory; forbidden_paths validates the paths)"
             ),
+            summary=f"diff within budget: {charged}/{budget} lines outside test paths",
         )
     return L1Finding(
         check="diff_budget",
@@ -225,6 +230,10 @@ def diff_budget_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
             f"diff of {charged} lines outside test paths "
             f"({diff.total_lines_changed} total across {len(diff.files_changed)} file(s)) "
             f"exceeds diff_budget_lines={budget}, from {budget_source}"
+        ),
+        summary=(
+            f"diff of {charged} lines outside test paths exceeds "
+            f"diff_budget_lines={budget}"
         ),
     )
 
@@ -241,12 +250,20 @@ def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
             check="forbidden_paths",
             passed=True,
             detail=f"no file touched under the plan's forbidden_paths ({plan.forbidden_paths})",
+            summary="no file touched under the plan's forbidden_paths",
         )
 
     detail = "; ".join(
         f"{f} is under a path forbidden by PlanArtifact.forbidden_paths='{hit}'" for f, hit in violations
     )
-    return L1Finding(check="forbidden_paths", passed=False, detail=detail)
+    # The paths themselves are repository content and stay in `detail`; the
+    # count is the platform's own and is what the ledger gets.
+    return L1Finding(
+        check="forbidden_paths",
+        passed=False,
+        detail=detail,
+        summary=f"{len(violations)} file(s) under a path forbidden by the plan",
+    )
 
 
 def plan_compliance_findings(
@@ -264,6 +281,8 @@ def plan_compliance_findings(
                 passed=False,
                 status=GateStatus.ERROR,
                 detail=str(exc),
+                # `exc` wraps git's stderr — repository content.
+                summary="the diff between base and head could not be computed",
             )
         ]
     return [diff_budget_finding(diff, plan), forbidden_paths_finding(diff, plan)]
