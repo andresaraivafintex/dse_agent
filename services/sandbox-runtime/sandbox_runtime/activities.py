@@ -1961,6 +1961,33 @@ CRITICAL RULES:
 """
 
 
+def _safe_extract(tar, dest: str) -> None:
+    """Extract a tar STREAMED OUT OF THE SANDBOX into `dest`, and nowhere else.
+
+    The archive is untrusted input: it is produced inside the Pod that just ran
+    model-authored code against the customer's repository. A member named
+    `../../etc/cron.d/x`, or a symlink to `/`, would otherwise write outside the
+    temp directory as the worker's own uid. Python's `extractall` grew a
+    `filter=` argument for exactly this, but it defaults to the unsafe
+    behaviour on the interpreter this image ships, so the check is explicit.
+
+    Symlinks and hardlinks are dropped rather than resolved: nothing downstream
+    follows them (`_tester_repo_context` reads regular files), so there is no
+    reason to reconstruct a link that could point anywhere."""
+    root = os.path.realpath(dest)
+    for member in tar:
+        if member.issym() or member.islnk() or member.isdev():
+            continue
+        target = os.path.realpath(os.path.join(root, member.name))
+        if target != root and not target.startswith(root + os.sep):
+            logger.warning("tester k8s: refused tar member outside the destination: %.120s",
+                           member.name)
+            continue
+        # `filter="data"` is belt to the braces above, and it also pins the
+        # behaviour: without it the default flips in Python 3.14.
+        tar.extract(member, root, filter="data")
+
+
 def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
     """Deterministic context so authoring imitates the REAL repo (found in the
     real run: the model wrote Jest in a node:test repo with no deps and also
@@ -2519,6 +2546,8 @@ def _tester_pod_sync(
     import shlex as _shlex
     import shutil as _shutil
     import subprocess as _sp
+    import io as _io
+    import tarfile as _tarfile
     import tempfile as _tf
 
     ns = os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
@@ -2591,23 +2620,52 @@ def _tester_pod_sync(
         test_files = reused
         logger.info("tester k8s: reusing %d test(s) authored in a previous round", len(reused))
     else:
-        # REAL authoring: workspace context (git show HEAD + package.json + an
-        # example test). kubectl cp the Pod's /workspace → a read-only local clone.
+        # REAL authoring: workspace context (package.json + an example test).
+        # Streams the Pod's /workspace here as a tar, MINUS the two trees the
+        # consumer throws away anyway.
+        #
+        # `kubectl cp` has no exclude, so it dragged the whole workspace over —
+        # including node_modules. This orchestrator's /tmp is an emptyDir with
+        # `sizeLimit: 256Mi`, and an Angular repo's node_modules is several
+        # times that, so kubelet EVICTED the Pod mid-run and the worker died
+        # with "Worker is shutting down and this activity did not complete in
+        # time". Four evictions in five minutes on the testbed; the activity
+        # can never finish, because each replacement Pod refills the volume.
+        #
+        # Nothing downstream wanted those bytes: `_tester_repo_context` walks
+        # the tree and skips `/node_modules` and `/.git` explicitly. We were
+        # paying hundreds of MB, a 180s timeout and the Pod's life to ship two
+        # directories that are then filtered out.
         authoring_script: list[dict[str, Any]] | None = None
         tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
         try:
             local_ws = os.path.join(tmp, "ws")
-            cp_argv = kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws]
+            os.makedirs(local_ws, exist_ok=True)
+            cp_argv = kbase + [
+                "exec", "-n", ns, sandbox_id, "--",
+                "tar", "cf", "-", "-C", "/workspace",
+                "--exclude=./node_modules", "--exclude=./.git",
+                ".",
+            ]
             try:
-                cp = _sp.run(
-                    cp_argv, capture_output=True, text=True,
+                tar = _sp.run(
+                    cp_argv, capture_output=True,
                     timeout=_WORKSPACE_CP_TIMEOUT_SECONDS,
                 )
+                cp = _sp.CompletedProcess(
+                    cp_argv, tar.returncode, "", (tar.stderr or b"").decode(errors="replace")
+                )
+                if tar.returncode == 0:
+                    with _tarfile.open(fileobj=_io.BytesIO(tar.stdout), mode="r|") as tf:
+                        _safe_extract(tf, local_ws)
             except _sp.TimeoutExpired as exc:
                 # 180s is not much for a real node_modules, and uncaught this
                 # loses the entire turn instead of one authoring pass.
                 cp = _timed_out_process(cp_argv, exc, _WORKSPACE_CP_TIMEOUT_SECONDS)
-            if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
+            # `.git` is excluded now, so its presence can no longer stand in
+            # for "the copy worked". package.json or any file at all does the
+            # same job: an empty tree means the stream failed.
+            if cp.returncode == 0 and os.listdir(local_ws):
                 authoring_script, authoring_cost_usd = _model_authored_test_script(
                     inp, local_ws, headers, virtual_key
                 )

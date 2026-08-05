@@ -17,8 +17,9 @@ two surfaces the workflow and a human actually read.
 from __future__ import annotations
 
 import json
-import os
+import io as _io
 import subprocess
+import tarfile as _tarfile
 
 import pytest
 
@@ -47,14 +48,23 @@ def _fake_cluster(*, suite, reused=("tests/test_dse.py",), cp=None, seen=None):
             # overrun is named `exec_timeout` or `suite_hung`.
             seen.append((argv, kwargs))
         joined = " ".join(argv)
-        if "cp" in argv[:3]:
-            local_ws = argv[-1]
+        if "tar" in argv:
+            # The workspace now arrives as a tar on stdout (`kubectl exec -- tar
+            # cf -`) instead of `kubectl cp`, so the fake streams a real one.
             if isinstance(cp, BaseException):
                 raise cp
-            # A real `kubectl cp` leaves the workspace behind; the bridge checks
-            # for its .git before it bothers to author anything.
-            os.makedirs(os.path.join(local_ws, ".git"), exist_ok=True)
-            return cp if cp is not None else _done(argv, 0)
+            if cp is not None:
+                return cp
+            buf = _io.BytesIO()
+            with _tarfile.open(fileobj=buf, mode="w") as tf:
+                for name, data in (
+                    ("./package.json", b'{"name":"fixture"}'),
+                    ("./tests/test_dse.py", b"def test_x(): pass\n"),
+                ):
+                    info = _tarfile.TarInfo(name)
+                    info.size = len(data)
+                    tf.addfile(info, _io.BytesIO(data))
+            return subprocess.CompletedProcess(argv, 0, buf.getvalue(), b"")
         if _REUSE_MARKER in joined:
             return _done(argv, 0, stdout="".join(f"{f}\n" for f in reused))
         if any(m in joined for m in _SUITE_MARKERS):
@@ -327,3 +337,25 @@ def test_reusing_the_previous_round_costs_nothing(monkeypatch, audits):
 
     assert result.test_files == ["tests/test_dse.py"]
     assert result.cost_usd == 0.0
+
+
+def test_the_workspace_stream_leaves_node_modules_in_the_pod(monkeypatch, audits):
+    """The incident of 2026-08-05: `kubectl cp` of /workspace dragged the whole
+    node_modules into the worker's /tmp, an emptyDir capped at 256Mi, and
+    kubelet evicted the Pod mid-activity — five times in five minutes, each
+    replacement refilling it. `kubectl cp` has no exclude, so the copy is a tar
+    that skips the two trees `_tester_repo_context` discards anyway."""
+    _fake_gateway(monkeypatch, _AUTHORED, 0.01)
+    seen: list[tuple[list[str], dict]] = []
+    # `reused=()` forces the AUTHORING path — the only one that copies the
+    # workspace at all.
+    _run_bridge(monkeypatch, seen=seen, suite=_done([], 0), reused=())
+
+    stream = [argv for argv, _ in seen if "tar" in argv]
+    assert stream, "the workspace was never streamed"
+    argv = stream[0]
+    assert "--exclude=./node_modules" in argv, (
+        "node_modules is being copied into the worker's /tmp again"
+    )
+    assert "--exclude=./.git" in argv
+    assert "cp" not in argv[:3], "kubectl cp cannot exclude anything"
