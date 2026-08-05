@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import asyncio
 
-from dse_contracts.activities import RebuildSandboxInput
-
 import sandbox_runtime.activities as acts
+# Imported from the ACTIVITY module, not from dse_contracts: that is the type
+# Temporal decodes the payload into, and an earlier version of this test used
+# the contract type — so it passed while production raised AttributeError on a
+# field the activity's own model did not have.
+from sandbox_runtime.activities import RebuildSandboxInput
 
 
 class _Driver:

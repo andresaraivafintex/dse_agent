@@ -84,7 +84,11 @@ if __name__ == "__main__":
 """
 
 
-class GitScopeViolation(Exception):
+class GitCommandError(RuntimeError):
+    """A git command failed, carrying what git said about it."""
+
+
+class GitScopeViolation(GitCommandError):
     """Raised when a git operation tries to leave the task's scope."""
 
 
@@ -118,10 +122,6 @@ def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
     except OSError:
         pass  # best-effort — never fail the clone/checkpoint because of the exclude
     (ws / ".dse-task-branch").write_text(branch)
-
-
-class GitCommandError(RuntimeError):
-    """A git command failed, carrying what git said about it."""
 
 
 @dataclass
@@ -178,14 +178,17 @@ class ScopedGitSession:
     def push(self) -> None:
         """Push hardcoded to `HEAD:refs/heads/<branch>` on the configured remote
         — there is no way to pass `--force` or another refspec through this API.
-        Server-side `pre-receive` hook failures propagate as
-        `subprocess.CalledProcessError` (P6: clean failure, not swallowed)."""
+        Server-side `pre-receive` hook failures propagate as `GitScopeViolation`
+        (P6: clean failure, not swallowed)."""
         try:
             self._run(["push", self.remote_name, f"HEAD:refs/heads/{self.branch}"])
-        except subprocess.CalledProcessError as e:
-            raise GitScopeViolation(
-                f"push refused by the remote (scope): {e.stderr}"
-            ) from e
+        except GitCommandError as e:
+            # `_run` used to raise CalledProcessError and this caught that. When
+            # it started raising GitCommandError the conversion stopped matching,
+            # so a push REFUSED BY THE SCOPE HOOK would have escaped as a plain
+            # git failure instead of the scope violation callers act on — a
+            # security guarantee turned into a generic error by a refactor.
+            raise GitScopeViolation(f"push refused by the remote (scope): {e}") from e
 
     def current_sha(self) -> str:
         return self._run(["rev-parse", "HEAD"]).stdout.strip()

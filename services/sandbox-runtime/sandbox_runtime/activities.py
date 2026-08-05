@@ -368,13 +368,18 @@ async def checkpoint_sandbox(inp: CheckpointSandboxInput) -> CheckpointRef:
 # ---------------------------------------------------------------------------
 # rebuild_sandbox
 # ---------------------------------------------------------------------------
-class RebuildSandboxInput(BaseModel):
-    work_item_id: str
-    tenant_id: str
-    checkpoint_ref: CheckpointRef
-    branch: str | None = None
-    budget: dict[str, Any] = Field(default_factory=dict)
-    image: str | None = None
+# Imported, not redefined. There WAS a local copy of this model here, and it had
+# already drifted: it lacked `base_sha`, and when `repo`/`base_branch` were added
+# to the contract the activity kept receiving the old shape and raised
+# `AttributeError: 'RebuildSandboxInput' object has no attribute 'repo'`. A
+# duplicated cross-service contract that only one side updates is a trap that
+# fires at runtime, and it fired.
+#
+# `ProvisionSandboxInput`, `CheckpointSandboxInput` and `TeardownSandboxInput`
+# below are duplicated the same way. They are left alone here deliberately —
+# converting them is a separate change, not something to do mid-incident — but
+# they carry the same hazard.
+from dse_contracts.activities import RebuildSandboxInput  # noqa: E402
 
 
 @activity.defn(name=ACTIVITY_REBUILD_SANDBOX)
