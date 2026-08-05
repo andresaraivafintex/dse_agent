@@ -1963,11 +1963,46 @@ CRITICAL RULES:
 
 #: Every slice of the authoring prompt is bounded, and bounded AT THE SOURCE —
 #: the Pod truncates before the bytes ever cross into the worker.
+#: Directories a source tree keeps but nobody reads here. The list is NOT
+#: Node-only on purpose: on a Python repo a project-local `.venv` buries the
+#: repository's own tests under site-packages, and the listing's bound then
+#: truncates the real ones away — measured on this repo, 73% of matches came
+#: from `.venv` and only 246 of 2501 real test paths survived. `existing_tests`
+#: exists to stop the Tester authoring a duplicate; a listing full of
+#: `site-packages/aiohttp/test_utils.py` does the opposite.
+_PRUNED_DIRS = (
+    ".git", "node_modules", ".venv", "venv", "__pycache__", ".mypy_cache",
+    ".pytest_cache", ".tox", "dist", "build", "target", "vendor", "coverage",
+    ".angular", ".next", ".nuxt", ".gradle", ".cache",
+)
+_FIND_TESTS_SCRIPT = (
+    "find . \\( "
+    + " -o ".join(f"-name {d}" for d in _PRUNED_DIRS)
+    + " \\) -prune -o -type f -print | grep -Ei 'test|spec'"
+)
+
 _PKG_JSON_CHARS = 1_500
 _EXAMPLE_TEST_CHARS = 3_000
 _TEST_LISTING_CHARS = 64_000
 _TESTER_DIFF_CHARS = 8_000
 _SKILLS_NOTE_CHARS = 2_000
+
+
+def _run_pod_command(argv: list[str], *, timeout: int, input_text: str | None = None):
+    """Run one `kubectl exec` and decode its output TOLERANTLY.
+
+    `errors="replace"` is the whole reason this is a named function rather than
+    an inline call: every context read is bounded with `head -c`, which cuts
+    BYTES, so a truncated multibyte sequence is normal rather than exceptional.
+    Decoding it strictly raised `UnicodeDecodeError` out of the activity — past
+    every handler — so Temporal retried the Tester turn from a cold `npm ci`
+    and nothing durable said why. One em dash near a bound was enough."""
+    import subprocess as _sp
+
+    return _sp.run(
+        argv, capture_output=True, text=True, errors="replace",
+        timeout=timeout, input=input_text,
+    )
 
 
 def _sh_quote(path: str) -> str:
@@ -2012,7 +2047,8 @@ class _TesterContextUnavailable(RuntimeError):
 
 class _TesterContext(NamedTuple):
     """Everything the authoring prompt needs about the repository — and nothing
-    else. About 5 kB in total, which is the whole point.
+    else. Tens of kB at the very worst, against a workspace that is hundreds of
+    megabytes: that ratio is the whole point.
 
     The K8s path used to `kubectl cp` the entire /workspace here to produce it.
     After the L1 gate's `npm ci` that tree is an Angular install, and it landed
@@ -2046,6 +2082,13 @@ def _pod_tester_context(pod_sh) -> _TesterContext:
     from dse_contracts.paths import is_test_path
 
     def _read(script: str, limit: int, *, required: bool = False) -> str:
+        # `head -c` counts BYTES. Cutting inside a multibyte character leaves a
+        # truncated sequence, and `text=True` decodes strictly — so a
+        # package.json with an em dash near the bound raised UnicodeDecodeError
+        # OUT of the activity, Temporal retried the turn from a cold `npm ci`,
+        # and nothing durable said why. `_pod_sh` decodes with errors="replace"
+        # for exactly this; the byte bound stays (it is what caps the transfer)
+        # and Python re-truncates to characters below.
         proc = pod_sh(
             f"cd /workspace && {script} 2>/dev/null | head -c {limit}",
             timeout=_CONTEXT_READ_TIMEOUT_SECONDS,
@@ -2059,7 +2102,8 @@ def _pod_tester_context(pod_sh) -> _TesterContext:
                 f"reading the workspace failed (rc={proc.returncode}): "
                 f"{(proc.stderr or '')[-300:]}"
             )
-        return proc.stdout or ""
+        # A trailing U+FFFD is the byte cut, not repository content.
+        return (proc.stdout or "").rstrip("\ufffd")
 
     package_json = _read("cat package.json", _PKG_JSON_CHARS) or (
         "(no package.json — likely Python/pytest)"
@@ -2073,25 +2117,48 @@ def _pod_tester_context(pod_sh) -> _TesterContext:
     # this only keeps the listing small enough that its bound cannot truncate a
     # real repo's test files.
     listing = _read(
-        r"find . \( -name node_modules -o -name .git -o -name dist "
-        r"-o -name .angular \) -prune -o -type f -print | grep -Ei 'test|spec'",
+        # `git rev-parse` first, and its exit code is the one that matters: the
+        # pipeline's own rc is `head`'s, which is 0 even when `find` dies. This
+        # is the positive proof the old code got from checking for `.git` in the
+        # copied tree, and without it an EMPTY /workspace reads as a repository
+        # with no tests — a state this system has actually shipped
+        # ("A rebuilt sandbox came up empty", #43/#44) — and bills a whole
+        # authoring turn for tests written against nothing.
+        "git rev-parse --git-dir >/dev/null 2>&1 || exit 3; "
+        + _FIND_TESTS_SCRIPT,
         _TEST_LISTING_CHARS,
         required=True,
     )
+    lines = listing.splitlines()
+    if len(listing) >= _TEST_LISTING_CHARS and lines:
+        # The bound cut mid-path. `./tests/integration/very_long...` truncated
+        # to `tests/integr` still satisfies is_test_path and would enter the set
+        # as a file that does not exist.
+        lines.pop()
     existing = {
-        rel for rel in (ln.strip().removeprefix("./") for ln in listing.splitlines())
+        rel for rel in (ln.strip().removeprefix("./") for ln in lines)
         if rel and is_test_path(rel)
     }
     example = ""
-    if existing:
-        first = sorted(existing)[0]
-        body = _read(f"cat {_sh_quote(first)}", _EXAMPLE_TEST_CHARS)
-        if body:
-            example = f"# {first}\n{body}"
+    # `--` because `-` sorts before every other path character: a repository
+    # file called `-e.test.js` would otherwise reach `cat` as an OPTION, return
+    # rc 0 with empty output, and the prompt would say "no existing tests" while
+    # listing those same tests as forbidden. And more than one candidate,
+    # because the old local reader fell through to the next file when one could
+    # not be read.
+    for candidate in sorted(existing)[:3]:
+        body = _read(f"cat -- {_sh_quote(candidate)}", _EXAMPLE_TEST_CHARS)
+        if body.strip():
+            example = f"# {candidate}\n{body}"
+            break
     # The diff is read IN THE POD, which is where the repository is. Running it
     # against a local copy is what broke when the copy stopped carrying .git:
     # `git show` exits 128 and the prompt silently reads "(diff unavailable)".
-    diff = _read("git show --stat -p HEAD", _TESTER_DIFF_CHARS)
+    # `tail -c`, not `head -c`: the Docker path keeps the END of the diff
+    # (`proc.stdout[-8000:]`), which is where the actual hunks are — the head is
+    # the --stat summary. The two paths must show the model the same thing.
+    diff = _read("git show --stat -p HEAD | tail -c $((%d))" % _TESTER_DIFF_CHARS,
+                 _TESTER_DIFF_CHARS)
     # Same shape as `workspace_skills_note` on the Docker path, down to the
     # header: the directory is `.claude/skills`, each entry names the SKILL.md
     # and carries its `description:` line, and the framing tells the model the
@@ -2708,7 +2775,7 @@ def _tester_pod_sync(
     ) -> "_sp.CompletedProcess":
         argv = kbase + ["exec", "-i", sandbox_id, "-n", ns, "--", "sh", "-c", script]
         try:
-            return _sp.run(argv, capture_output=True, text=True, timeout=timeout, input=input_text)
+            return _run_pod_command(argv, timeout=timeout, input_text=input_text)
         except _sp.TimeoutExpired as exc:
             # Every caller below reads a returncode; none of them survives an
             # exception (see _timed_out_process).
