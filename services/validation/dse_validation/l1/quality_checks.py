@@ -32,11 +32,15 @@ def _run(executor: SandboxExecutor, argv: list[str], timeout: int) -> ExecResult
 
 
 def _not_configured(check: str, cfg: L1Config) -> L1Finding:
+    # `cfg.source` stays out of `summary`: it interpolates the manifest path and
+    # base sha, and `summary` is the one field that reaches the append-only
+    # ledger. The operator gets the same fact without them.
     return L1Finding(
         check=check,
         passed=False,
         status=GateStatus.NOT_CONFIGURED,
         detail=f"no {check} command in the trusted manifest {cfg.source}",
+        summary=f"no {check} command in the trusted manifest",
     )
 
 
@@ -53,17 +57,43 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     passed = result.ok and len(issue_lines) == 0
     if result.timed_out:
         detail = f"timed out after {timeout}s running {' '.join(cfg.lint_cmd)}"
+        summary = f"timed out after {timeout}s"
         status = GateStatus.ERROR
     elif result.returncode == 127:
         detail = f"lint command not found: {' '.join(cfg.lint_cmd)} ({result.stderr.strip()})"
+        # Neither the argv nor the stderr belongs in `summary`. Both come from
+        # the customer's own manifest: a repo can declare `lint: ["./ci/lint.sh"]`
+        # and have that script dump the sandbox's environment to stderr before
+        # exiting 127. That is the leak this field exists to close.
+        summary = "lint command not found (exit 127)"
         passed = False
         status = GateStatus.ERROR
     else:
         n = len(issue_lines)
-        detail = f"{n} lint issue(s)" if n else "no lint issues"
-        detail += "\n" + _tail(result.stdout or result.stderr)
+        if n:
+            summary = f"{n} lint issue(s)"
+        elif passed:
+            summary = "no lint issues"
+        else:
+            # The linter rejected the tree but printed nothing in the
+            # "path:line:col: CODE msg" shape this parser knows — eslint's
+            # default formatter is one such. Saying "no lint issues" on a gate
+            # that just FAILED is worse than saying nothing: it is the ledger
+            # asserting the opposite of the verdict beside it. Observed on the
+            # Angular testbed, where lint FAILED reading "no lint issues".
+            summary = (
+                f"lint failed (exit={result.returncode}); no issue line matched "
+                "the expected 'path:line:col: CODE msg' format — see the detail"
+            )
+        detail = summary + "\n" + _tail(result.stdout or result.stderr)
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    return L1Finding(check="lint", passed=passed, status=status, detail=detail)
+    return L1Finding(
+        check="lint", passed=passed, status=status, detail=detail, summary=summary
+    )
+
+
+#: `tsc` diagnostics: "src/a.ts(690,48): error TS2345: ...".
+_TSC_ERROR_RE = re.compile(r": error TS\d+:")
 
 
 def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
@@ -71,25 +101,44 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         return _not_configured("typecheck", cfg)
     timeout = cfg.timeout_for("typecheck")
     result = _run(executor, cfg.typecheck_cmd, timeout)
-    error_lines = [ln for ln in result.stdout.splitlines() if ": error:" in ln]
+    # `: error:` is mypy. `tsc` writes `path(line,col): error TS2345: ...`, so
+    # matching only mypy's shape counted zero errors on every TypeScript repo
+    # and the gate failed reporting "no type errors". This widening changes the
+    # COUNT only — `passed` is the command's exit code either way.
+    error_lines = [
+        ln
+        for ln in result.stdout.splitlines()
+        if ": error:" in ln or _TSC_ERROR_RE.search(ln)
+    ]
     if result.returncode == 127:
         return L1Finding(
             check="typecheck",
             passed=False,
             status=GateStatus.ERROR,
             detail=f"typecheck command not found: {' '.join(cfg.typecheck_cmd)}",
+            summary="typecheck command not found (exit 127)",
         )
     passed = result.ok
     n = len(error_lines)
-    detail = f"{n} type error(s)" if n else "no type errors"
+    if n:
+        summary = f"{n} type error(s)"
+    elif passed:
+        summary = "no type errors"
+    else:
+        summary = (
+            f"typecheck failed (exit={result.returncode}); no diagnostic line "
+            "was recognised — see the detail"
+        )
     if result.timed_out:
-        detail = f"timed out after {timeout}s"
+        summary = f"timed out after {timeout}s"
         passed = False
         status = GateStatus.ERROR
     else:
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    detail += "\n" + _tail(result.stdout or result.stderr)
-    return L1Finding(check="typecheck", passed=passed, status=status, detail=detail)
+    detail = summary + "\n" + _tail(result.stdout or result.stderr)
+    return L1Finding(
+        check="typecheck", passed=passed, status=status, detail=detail, summary=summary
+    )
 
 
 _PYTEST_SUMMARY_RE = re.compile(
@@ -110,21 +159,30 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
             passed=False,
             status=GateStatus.ERROR,
             detail=f"test command not found: {' '.join(cfg.test_cmd)}",
+            summary="test command not found (exit 127)",
         )
     m = _PYTEST_SUMMARY_RE.search(result.stdout) or _PYTEST_SUMMARY_RE.search(result.stderr)
-    summary = m.group(0) if m else None
+    # `m.group(0)` comes from the test output, but the pattern admits only
+    # digits and the fixed words "passed"/"failed"/"error" — it cannot carry
+    # arbitrary text out of the run, which is what makes it safe for `summary`.
+    counts = m.group(0) if m else None
     passed = result.ok
     if result.timed_out:
+        summary = f"timed out after {timeout}s running tests — L1 fails clean (P6)"
         detail = f"timed out after {timeout}s running tests — L1 fails clean (P6), no truncation"
         status = GateStatus.ERROR
-    elif summary:
-        detail = f"summary: {summary}"
+    elif counts:
+        summary = f"summary: {counts}"
+        detail = summary
         status = GateStatus.PASS if passed else GateStatus.FAIL
     else:
-        detail = "exit code " + str(result.returncode) + " (no pytest summary found in the output)"
+        summary = f"exit code {result.returncode} (no pytest summary found in the output)"
+        detail = summary
         status = GateStatus.PASS if passed else GateStatus.FAIL
     detail += "\n" + _tail(result.stdout or result.stderr)
-    return L1Finding(check="test", passed=passed, status=status, detail=detail)
+    return L1Finding(
+        check="test", passed=passed, status=status, detail=detail, summary=summary
+    )
 
 
 def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
@@ -138,13 +196,16 @@ def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
             passed=False,
             status=GateStatus.ERROR,
             detail=f"build command not found: {' '.join(cfg.build_cmd)}",
+            summary="build command not found (exit 127)",
         )
     passed = result.ok
-    detail = "build ok" if passed else f"build failed (exit={result.returncode})"
+    summary = "build ok" if passed else f"build failed (exit={result.returncode})"
     if result.timed_out:
-        detail = f"timed out after {timeout}s"
+        summary = f"timed out after {timeout}s"
         status = GateStatus.ERROR
     else:
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    detail += "\n" + _tail(result.stdout or result.stderr)
-    return L1Finding(check="build", passed=passed, status=status, detail=detail)
+    detail = summary + "\n" + _tail(result.stdout or result.stderr)
+    return L1Finding(
+        check="build", passed=passed, status=status, detail=detail, summary=summary
+    )

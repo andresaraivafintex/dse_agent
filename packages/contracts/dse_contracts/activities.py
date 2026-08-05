@@ -287,6 +287,25 @@ class L1Finding(BaseModel):
     passed: bool = False
     status: GateStatus | None = None
     detail: str = ""
+    #: A one-line reason written BY THE PLATFORM, holding no value the check
+    #: read out of the repository or out of a subprocess. `detail` is the
+    #: opposite: it carries scanner output, compiler output, matched source
+    #: lines — whatever the gate actually saw.
+    #:
+    #: The split exists because the two go to different places. `detail` may
+    #: only reach `validation_runs`, which retention can clean. `summary` is
+    #: the only thing allowed into `audit_log`, which is append-only (0028),
+    #: exempt from retention by design, and copied verbatim into the console
+    #: read model — a value written there can be rotated, never scrubbed.
+    #:
+    #: This is an ALLOWLIST, and it replaced a denylist of check names that was
+    #: wrong in both directions: it dropped `sast`'s ERROR reason (the very
+    #: incident this field exists for) while still letting `lint`'s exit-127
+    #: branch put raw sandbox stderr — from a command the customer's own
+    #: manifest chose — into the permanent ledger. Sensitivity is a property of
+    #: a BRANCH, not of a check name, so the branch declares it. A check that
+    #: sets nothing here says nothing to the ledger: fail-closed.
+    summary: str = ""
 
     @model_validator(mode="after")
     def _normalize_status(self) -> "L1Finding":

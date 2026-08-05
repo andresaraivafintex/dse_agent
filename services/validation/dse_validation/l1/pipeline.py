@@ -26,6 +26,23 @@ def _ignore_step(_name: str) -> None:
     tests and for any caller that has nothing to report progress to."""
 
 
+#: What an operator sees when a gate failed and its branch declared no summary.
+#: It is deliberately useless: silence here means a NEW branch forgot to author
+#: one, and the operator should read `validation_runs`, not be handed whatever
+#: that branch happened to interpolate.
+_NO_SUMMARY = "(the check reported no publishable reason — see validation_runs)"
+
+
+def _audit_safe_summary(summary: str | None) -> str:
+    """Bound and flatten a platform-authored summary for the ledger.
+
+    `summary` is already value-free by construction (see `L1Finding.summary`);
+    this only stops a malformed one from being unbounded or multi-line, because
+    `audit_log` is append-only and a bad write can never be amended."""
+    first = (summary or "").replace("\x00", "").splitlines()
+    return first[0][:600] if first else ""
+
+
 def run_l1_pipeline_core(
     executor: SandboxExecutor,
     work_item_id: str,
@@ -62,6 +79,7 @@ def run_l1_pipeline_core(
                 passed=False,
                 status=cfg.manifest_status,
                 detail=cfg.manifest_detail,
+                summary=cfg.manifest_summary,
             )
         )
     step("lint")
@@ -114,6 +132,35 @@ def run_l1_pipeline_core(
                 "head_sha": head_sha,
                 "checks": {
                     f.check: f.status.value if f.status else None for f in findings
+                },
+                # WHY, not just WHICH — from `summary` and never from `detail`.
+                #
+                # A gate reading ERROR with no reason anywhere is a gate nobody
+                # can debug; diagnosing one cost two wrong guesses before anyone
+                # noticed the reason was discarded at write time. But `detail`
+                # carries what the gate SAW — scanner output, compiler output,
+                # matched source lines — and audit_log is the one store that
+                # cannot take that: append-only (REVOKE plus the 0028 trigger),
+                # refused by retention.py by design, and copied verbatim into
+                # console_rm.timeline_events.data by the projector. A value
+                # written here can be rotated, never scrubbed.
+                #
+                # The first attempt published `detail`'s first line and skipped
+                # the checks named "secret_scan" and "sast". That was wrong in
+                # BOTH directions, which is why the rule now lives on the
+                # branch: it silenced sast's ERROR reason — the very incident
+                # this exists for — while still publishing lint's exit-127
+                # branch, whose first line is raw stderr from a command the
+                # customer's own manifest chose. A denylist of check names has
+                # to predict every future branch that forgets to prepend a
+                # summary; it had already missed four.
+                #
+                # `detail` keeps living in validation_runs, which is where
+                # debugging happens and which retention can still clean.
+                "failures": {
+                    f.check: _audit_safe_summary(f.summary) or _NO_SUMMARY
+                    for f in findings
+                    if not f.passed
                 },
             },
         )

@@ -19,6 +19,27 @@ def get_connection():
     return psycopg2.connect(_DSN)
 
 
+def _jsonb_safe(value: Any) -> Any:
+    """Strip NUL from anything on its way to a `::jsonb` column.
+
+    jsonb cannot represent U+0000. `json.dumps` happily encodes it as `\\u0000`
+    and Postgres then rejects the cast — so one NUL byte anywhere in a payload
+    fails the INSERT. L1 findings carry subprocess output captured with
+    `text=True`, and a compiler or linter that emits a NUL (a binary file read
+    as text, a crash dump) would wedge the whole L1 activity: the write raises,
+    the activity fails, the retry replays the same bytes and raises again.
+
+    The guard belongs here, at the boundary that cannot hold the value, rather
+    than in each of the dozen places a detail string is produced."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _jsonb_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonb_safe(v) for v in value]
+    return value
+
+
 # ---------------------------------------------------------------------------
 # validation_runs (WSE-E1) — 1 evidence row per L1 run.
 # ---------------------------------------------------------------------------
@@ -32,7 +53,7 @@ def record_validation_run(work_item_id: str, tenant_id: str, passed: bool, findi
                 VALUES (%s, %s, %s, %s::jsonb)
                 RETURNING id
                 """,
-                (work_item_id, tenant_id, passed, json.dumps(findings)),
+                (work_item_id, tenant_id, passed, json.dumps(_jsonb_safe(findings))),
             )
             run_id = cur.fetchone()[0]
         conn.commit()

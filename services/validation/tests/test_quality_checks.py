@@ -140,3 +140,70 @@ def test_a_timed_out_stage_names_the_budget_that_actually_ran():
 
     assert finding.status == GateStatus.ERROR
     assert "700s" in finding.detail
+
+
+# ---------------------------------------------------------------------------
+# A failing gate must never report the opposite of its own verdict.
+#
+# Both cases below are transcripts of a REAL L1 run on the Angular testbed
+# (wi_pr21, 2026-08-05): lint FAILED reading "no lint issues" and typecheck
+# FAILED reading "no type errors", because the parsers only knew ruff's and
+# mypy's output shapes. That reason is what the ledger publishes.
+# ---------------------------------------------------------------------------
+class _CannedSandbox:
+    """Replays one recorded ExecResult, whatever it is asked to run."""
+
+    def __init__(self, result: ExecResult):
+        self._result = result
+
+    def run(self, argv, timeout=None):  # noqa: ARG002 - signature parity
+        return self._result
+
+
+def _canned(stdout: str, returncode: int) -> _CannedSandbox:
+    return _CannedSandbox(
+        ExecResult(argv=["x"], returncode=returncode, stdout=stdout, stderr="")
+    )
+
+
+_ESLINT_OUTPUT = """
+> bmo-fee-estimator-fe@0.0.0 lint
+> ng lint
+
+/src/app/app.component.ts
+  12:7  error  'unused' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+1 problem (1 error, 0 warnings)
+"""
+
+
+def test_a_failed_lint_never_claims_there_were_no_issues():
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    finding = lint_check(_canned(_ESLINT_OUTPUT, 1), cfg)
+    assert finding.passed is False
+    assert "no lint issues" not in finding.summary
+    assert "exit=1" in finding.summary
+
+
+_TSC_OUTPUT = (
+    "src/app/shared/services/pdf-collect-data.service.spec.ts(690,48): "
+    "error TS2345: Argument of type '() => string' is not assignable\n"
+    "src/app/shared/services/pdf-data.service.spec.ts(57,5): "
+    "error TS2739: Type '{}' is missing the following properties\n"
+)
+
+
+def test_tsc_diagnostics_are_counted_not_just_mypy_ones():
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_canned(_TSC_OUTPUT, 2), cfg)
+    assert finding.passed is False
+    assert finding.summary == "2 type error(s)"
+
+
+def test_a_failed_typecheck_never_claims_there_were_no_errors():
+    """Unrecognised output must degrade to an honest line, not to a denial."""
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_canned("something nobody parses\n", 2), cfg)
+    assert finding.passed is False
+    assert "no type errors" not in finding.summary
+    assert "exit=2" in finding.summary
