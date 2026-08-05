@@ -882,6 +882,13 @@ async def _run_coder_turn_impl(
                     details={"kept_out_of_plan": kept_out_of_plan[:20]},
                 )
 
+        # BEFORE the hygiene block: `post-checkout` fires on path-limited
+        # checkouts too (measured), and the hygiene steps run
+        # `git checkout -- <lockfile>` moments after the turn's own `npm install`
+        # repointed core.hooksPath at `.husky/` — the same window the OOM loop
+        # came out of, one call earlier.
+        ScopedGitSession(workspace_dir=workspace_dir, branch=branch).ensure_identity()
+
         _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="coder")
 
         # The Coder does NOT own the tests — the Tester authors them in ISOLATED
@@ -2934,12 +2941,18 @@ async def _run_tester_turn_impl(
                 )
                 failure_output = str(raw)[-_FAILURE_OUTPUT_CHARS:]
 
+    # BEFORE the hygiene block: `post-checkout` fires on path-limited
+    # checkouts too (measured), and the hygiene steps run
+    # `git checkout -- <lockfile>` moments after the turn's own `npm install`
+    # repointed core.hooksPath at `.husky/` — the same window the OOM loop
+    # came out of, one call earlier.
+    git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
+    git_session.ensure_identity(name="dse-tester", email="tester@dse.local")
+
     _restore_lockfile_churn_audited(workspace_dir, inp.tenant_id, inp.work_item_id, stage="tester")
 
     # Deterministic commit/push of the test files (only test paths were written —
     # the toolset guaranteed it). Git escapes live in the code, never in the LLM.
-    git_session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
-    git_session.ensure_identity(name="dse-tester", email="tester@dse.local")
     if git_session.has_changes():
         git_session.commit(f"tester({inp.work_item_id}): {inp.instruction[:60]}")
         if push:

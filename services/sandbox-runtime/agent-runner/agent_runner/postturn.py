@@ -39,11 +39,16 @@ def run_post_turn(req: PostTurnRequest) -> PostTurnResult:
             pruned, kept = prune_disposable_artifacts(
                 req.workspace_dir, req.expected_files, req.work_item_id
             )
-        restored = restore_lockfile_churn(req.workspace_dir)
-        reverted = revert_test_edits(req.workspace_dir, req.turn_start_sha)
-
+        # BEFORE the hygiene block, not after. `post-checkout` fires on
+        # path-limited checkouts too (measured), and the hygiene steps run
+        # `git checkout -- <lockfile>` moments after the turn's own
+        # `npm install` repointed core.hooksPath at `.husky/` — that is the
+        # same window the OOM loop came out of, one call earlier.
         session = ScopedGitSession(workspace_dir=req.workspace_dir, branch=req.branch)
         session.ensure_identity()
+
+        restored = restore_lockfile_churn(req.workspace_dir)
+        reverted = revert_test_edits(req.workspace_dir, req.turn_start_sha)
         if session.has_changes():
             session.commit(req.commit_message)
         session.push()

@@ -16,6 +16,7 @@ to the task branch.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 
 import pytest
@@ -216,4 +217,33 @@ def test_disabling_repo_hooks_does_not_disarm_the_remote_scope_guard(tmp_path):
         cwd=ws, capture_output=True, text=True,
     )
     assert result.returncode != 0, "the scope guard must still refuse an out-of-scope ref"
+    assert "refused" in result.stderr or "rejected" in result.stderr.lower()
+
+
+def test_a_global_hooks_path_cannot_disarm_the_scope_guard(tmp_path):
+    """The sandbox runs the customer's `postinstall` under the same uid and HOME
+    as our git commands, so `git config --global core.hooksPath /tmp/x` in their
+    package.json is one line of untrusted input. `git-receive-pack` reads repo +
+    global config and repo-local wins, so the guard pins its own hooksPath."""
+    branch = "dse/wi_global"
+    ws = _workspace_with_hostile_hook(tmp_path, branch)
+    session = ScopedGitSession(workspace_dir=str(ws), branch=branch)
+    session.ensure_identity()
+    session.commit("c1")
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {**os.environ, "HOME": str(fake_home)}
+    subprocess.run(
+        ["git", "config", "--global", "core.hooksPath", str(tmp_path / "nowhere")],
+        cwd=ws, env=env, check=True, capture_output=True, text=True,
+    )
+
+    result = subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/attacker"],
+        cwd=ws, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, (
+        "a global core.hooksPath disarmed the scope guard — the push was accepted"
+    )
     assert "refused" in result.stderr or "rejected" in result.stderr.lower()

@@ -101,6 +101,23 @@ def install_pre_receive_guard(bare_repo_path: str, allowed_branch: str) -> None:
     hook_path = hooks_dir / "pre-receive"
     hook_path.write_text(PRE_RECEIVE_HOOK_TEMPLATE.format(branch=allowed_branch))
     hook_path.chmod(0o755)
+    # Pin where this repo looks for hooks, in the repo's OWN config.
+    #
+    # `git-receive-pack` reads repo + global + system config, and repo-local
+    # wins. Without this line the guard is disarmed by a single line of
+    # untrusted code: the sandbox runs the customer's `postinstall`/`prepare`
+    # under the same uid and HOME as our git commands, so
+    # `git config --global core.hooksPath /tmp/anything` in their package.json
+    # moves the lookup away from this directory and the push is accepted with
+    # the hook never running. Measured: an out-of-scope ref was created, rc=0.
+    #
+    # A security control that untrusted input can switch off is not a control.
+    subprocess.run(
+        ["git", "-C", bare_repo_path, "config", "core.hooksPath", str(hooks_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
 
 
 def write_task_branch_marker(workspace_dir: str, branch: str) -> None:
