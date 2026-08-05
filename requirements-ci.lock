@@ -119,6 +119,7 @@ cryptography==50.0.0
     #   dse-platform
     #   dse-sandbox-runtime
     #   dse-validation
+    #   pyjwt
 cyclonedx-python-lib==11.11.0
     # via pip-audit
 defusedxml==0.7.1
