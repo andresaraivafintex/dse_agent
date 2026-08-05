@@ -152,6 +152,12 @@ def test_core_reports_every_stage_in_order(sandbox, work_item_id, tenant_id, git
 
     assert seen == [
         "l1_manifest",
+        # The diff is computed BEFORE the per-file gates, because it is what
+        # scopes them to the change instead of to the customer's whole
+        # repository. It gets its own stage name for the same reason every
+        # other one does: an operator watching the heartbeat has to see where
+        # the time is going.
+        "diff",
         "lint",
         "typecheck",
         "test",

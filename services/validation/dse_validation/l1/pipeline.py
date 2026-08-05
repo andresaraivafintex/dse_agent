@@ -82,10 +82,22 @@ def run_l1_pipeline_core(
                 summary=cfg.manifest_summary,
             )
         )
+    # The diff is computed FIRST, because the per-file gates are scoped by it.
+    # A gate that judges the whole repository judges the customer's history:
+    # measured on the Angular testbed, `tsc --noEmit` reported 262 errors, all
+    # in `.spec.ts` files the DSE never opened, against a change that added one
+    # CONTRIBUTING.md. The work item failed for them, the fix loop spent paid
+    # Coder turns repairing someone else's specs, and no number of rounds could
+    # have passed. `None` on failure means "no diff available" and the gates
+    # fall back to judging everything — losing a real finding is worse than
+    # reporting one that is not ours.
+    step("diff")
+    changed_files = plan_compliance.changed_files_or_none(executor, base_sha, head_sha)
+
     step("lint")
-    findings.append(quality_checks.lint_check(executor, cfg))
+    findings.append(quality_checks.lint_check(executor, cfg, changed_files))
     step("typecheck")
-    findings.append(quality_checks.typecheck_check(executor, cfg))
+    findings.append(quality_checks.typecheck_check(executor, cfg, changed_files))
     step("test")
     findings.append(quality_checks.test_check(executor, cfg))
     step("build")

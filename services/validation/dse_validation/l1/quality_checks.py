@@ -31,6 +31,87 @@ def _run(executor: SandboxExecutor, argv: list[str], timeout: int) -> ExecResult
     return executor.run(argv, timeout=timeout)
 
 
+#: 128 + signal. 137 = SIGKILL (the cgroup's OOM killer inside a container),
+#: 139 = SIGSEGV, 143 = SIGTERM.
+#:
+#: 134 = SIGABRT, and it is the one that actually showed up: V8 does not get
+#: killed when it exhausts its heap, it prints "FATAL ERROR: ... JavaScript
+#: heap out of memory" and calls abort(). Observed on the Angular testbed —
+#: `ng lint` died with exit=134 after printing nothing but `Linting "..."`, and
+#: the first version of this classifier missed it, so the gate still read as a
+#: verdict on the customer's code. The marker text was on stderr and went with
+#: the process, which is why the return code has to carry the diagnosis.
+_KILLED_RETURNCODES = frozenset({134, 137, 139, 143})
+
+#: What a Node toolchain prints on its way out of memory. `ng lint` and
+#: `ng build` on a real Angular app are the two commands that reach it.
+_OOM_MARKERS = (
+    "javascript heap out of memory",
+    "allocation failure",
+    "fatal error: reached heap limit",
+    "killed",
+    "cannot allocate memory",
+    "enomem",
+)
+
+
+def _infra_failure(result: ExecResult) -> str | None:
+    """Names an INFRASTRUCTURE failure, or None if the tool merely disagreed
+    with the code.
+
+    Without this, a gate killed by the cgroup's OOM killer is scored
+    `GateStatus.FAIL` — a verdict on the customer's code — because the only
+    thing distinguishing it from real lint errors is a return code nobody
+    looked at. The workflow then spends a paid Coder turn "fixing" a lint run
+    that never produced a finding, three times, and the work item ends `failed`
+    with a reason that blames the diff.
+
+    The sandbox runs `ng lint` and `ng build` under a 1536Mi limit while V8
+    sizes its heap from the NODE's memory, so this is not hypothetical: it is
+    the same exhaustion that already killed this repository's checkpoint
+    commits when husky ran the linter on them.
+
+    The Tester path has had this distinction for a while
+    (`_tester_infra_outcome`); L1 had none."""
+    if result.returncode in _KILLED_RETURNCODES:
+        return f"the process was killed (exit={result.returncode})"
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    for marker in _OOM_MARKERS:
+        if marker in blob:
+            return "the process ran out of memory"
+    return None
+
+
+#: The two diagnostic shapes these gates parse:
+#:   ruff/eslint  src/a.py:12:5: F401 msg
+#:   tsc          src/a.ts(690,48): error TS2345: msg
+_DIAGNOSTIC_PATH_RE = re.compile(r"^\s*(?P<path>[^\s:(]+)\s*[(:]")
+
+
+def _path_of(line: str) -> str:
+    """The file a diagnostic line points at, or "" when it points at none."""
+    m = _DIAGNOSTIC_PATH_RE.match(line)
+    return m.group("path").lstrip("./") if m else ""
+
+
+def _only_in_changed_files(lines: list[str], changed_files: set[str] | None) -> list[str]:
+    """Keep the diagnostics that land in files THIS CHANGE touched.
+
+    The gate exists to judge the work item's diff, not the repository's history.
+    Measured on the Angular testbed: `tsc --noEmit` reported 262 errors, every
+    one of them in a `.spec.ts` the DSE never opened, against a change that
+    added a single CONTRIBUTING.md. A markdown file cannot introduce TS2345 —
+    but the gate failed the work item for them, the fix loop sent a paid Coder
+    turn to repair someone else's specs, and no number of rounds could ever
+    make a repository with pre-existing debt pass.
+
+    `changed_files` of None means "no diff available" and everything counts:
+    losing a real finding is worse than reporting one that is not ours."""
+    if changed_files is None:
+        return lines
+    return [ln for ln in lines if _path_of(ln) in changed_files]
+
+
 def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     # `cfg.source` stays out of `summary`: it interpolates the manifest path and
     # base sha, and `summary` is the one field that reaches the append-only
@@ -44,7 +125,9 @@ def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     )
 
 
-def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def lint_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.lint_cmd:
         return _not_configured("lint", cfg)
     # `timeout_for`, not `timeout_seconds`: the manifest's per-stage `timeouts`
@@ -54,10 +137,20 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     result = _run(executor, cfg.lint_cmd, timeout)
     # ruff/flake8: 1 line per issue, formatted as "path:line:col: CODE msg".
     issue_lines = [ln for ln in result.stdout.splitlines() if re.match(r"^\S+:\d+:\d+:\s", ln)]
-    passed = result.ok and len(issue_lines) == 0
+    all_issues = len(issue_lines)
+    issue_lines = _only_in_changed_files(issue_lines, changed_files)
+    # `result.ok` is dropped from the verdict ON PURPOSE when the diff is known:
+    # the command exits non-zero for the whole repository's issues, and this
+    # gate answers a narrower question — did OUR change introduce any?
+    passed = (result.ok or changed_files is not None) and len(issue_lines) == 0
     if result.timed_out:
         detail = f"timed out after {timeout}s running {' '.join(cfg.lint_cmd)}"
         summary = f"timed out after {timeout}s"
+        status = GateStatus.ERROR
+    elif (infra := _infra_failure(result)) is not None:
+        detail = f"lint: {infra}\n" + _tail(result.stdout or result.stderr)
+        summary = f"lint could not run: {infra}"
+        passed = False
         status = GateStatus.ERROR
     elif result.returncode == 127:
         detail = f"lint command not found: {' '.join(cfg.lint_cmd)} ({result.stderr.strip()})"
@@ -71,9 +164,18 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     else:
         n = len(issue_lines)
         if n:
-            summary = f"{n} lint issue(s)"
+            summary = (
+                f"{n} lint issue(s) in the files this change touched"
+                if changed_files is not None
+                else f"{n} lint issue(s)"
+            )
         elif passed:
-            summary = "no lint issues"
+            summary = (
+                f"no lint issues in the files this change touched "
+                f"({all_issues} elsewhere in the repository, not this change's)"
+                if changed_files is not None and all_issues
+                else "no lint issues"
+            )
         else:
             # The linter rejected the tree but printed nothing in the
             # "path:line:col: CODE msg" shape this parser knows — eslint's
@@ -96,7 +198,9 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
 _TSC_ERROR_RE = re.compile(r": error TS\d+:")
 
 
-def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def typecheck_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.typecheck_cmd:
         return _not_configured("typecheck", cfg)
     timeout = cfg.timeout_for("typecheck")
@@ -110,6 +214,14 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         for ln in result.stdout.splitlines()
         if ": error:" in ln or _TSC_ERROR_RE.search(ln)
     ]
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="typecheck",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"typecheck: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"typecheck could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="typecheck",
@@ -118,12 +230,25 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
             detail=f"typecheck command not found: {' '.join(cfg.typecheck_cmd)}",
             summary="typecheck command not found (exit 127)",
         )
-    passed = result.ok
+    all_errors = len(error_lines)
+    error_lines = _only_in_changed_files(error_lines, changed_files)
+    # Same reasoning as lint: with a diff in hand the question is not "does this
+    # repository typecheck" — it is "did this change break the typecheck".
+    passed = (result.ok or changed_files is not None) and not error_lines
     n = len(error_lines)
     if n:
-        summary = f"{n} type error(s)"
+        summary = (
+            f"{n} type error(s) in the files this change touched"
+            if changed_files is not None
+            else f"{n} type error(s)"
+        )
     elif passed:
-        summary = "no type errors"
+        summary = (
+            f"no type errors in the files this change touched "
+            f"({all_errors} elsewhere in the repository, not this change's)"
+            if changed_files is not None and all_errors
+            else "no type errors"
+        )
     else:
         summary = (
             f"typecheck failed (exit={result.returncode}); no diagnostic line "
@@ -153,6 +278,14 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         return _not_configured("test", cfg)
     timeout = cfg.timeout_for("test")
     result = _run(executor, cfg.test_cmd, timeout)
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="test",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"test: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"the test suite could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="test",
@@ -190,6 +323,14 @@ def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         return _not_configured("build", cfg)
     timeout = cfg.timeout_for("build")
     result = _run(executor, cfg.build_cmd, timeout)
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="build",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"build: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"the build could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="build",

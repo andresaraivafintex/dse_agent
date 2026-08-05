@@ -263,7 +263,13 @@ runtime:
   # vCPU with ~1.2 of them reserved, several fit — the 2-core node was what made
   # this read like "one task at a time".
   sandboxCpuLimit: "1"
-  sandboxMemLimit: "1536Mi"
+  # 1536Mi is under what an Angular `ng build --configuration production`
+  # needs, and V8 sizes its heap from the NODE (16 GB here), not the cgroup —
+  # so it happily allocates past the limit and the kernel kills it. The node
+  # has ~10 GB free with everything running, so this costs nothing real and
+  # removes the failure mode that already killed this repository's checkpoint
+  # commits once, when husky ran the same linter on them.
+  sandboxMemLimit: "3Gi"
 
 networkPolicy:
   kubeApiServer:

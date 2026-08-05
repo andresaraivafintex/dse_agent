@@ -6,6 +6,8 @@ regression where ``main...HEAD`` got the WorkItem stuck.
 """
 from __future__ import annotations
 
+import logging
+
 import re
 
 from dse_contracts import GateStatus, L1Finding, PlanArtifact
@@ -264,6 +266,30 @@ def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
         detail=detail,
         summary=f"{len(violations)} file(s) under a path forbidden by the plan",
     )
+
+
+logger = logging.getLogger(__name__)
+
+
+def changed_files_or_none(
+    executor: SandboxExecutor, base_sha: str, head_sha: str
+) -> set[str] | None:
+    """The paths this change touched, or None when the diff cannot be computed.
+
+    None is deliberately not an empty set: an empty set would scope every
+    per-file gate down to nothing and pass a broken change silently. None means
+    "scope unknown", and the gates then judge everything, as they did before."""
+    try:
+        diff = compute_diff_summary(executor, base_sha, head_sha)
+    except Exception:  # noqa: BLE001
+        # Deliberately every exception, not just DiffComputationError. This
+        # function only narrows the scope of other gates; it must never be the
+        # reason the L1 activity dies. Whatever went wrong, "scope unknown" is
+        # the safe answer and the gates go back to judging everything.
+        logger.warning("l1: the diff could not be computed — gates fall back to whole-repo scope",
+                       exc_info=True)
+        return None
+    return {f.lstrip("./") for f in diff.files_changed}
 
 
 def plan_compliance_findings(

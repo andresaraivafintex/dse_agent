@@ -98,8 +98,63 @@ merge.
 
 
 def push_branch(executor: SandboxExecutor, github_client: GitHubClient, repo: str, branch: str, timeout: int = 60):
+    """Push the task branch, refusing to clobber a commit we have not seen.
+
+    The lease has to name the sha EXPLICITLY. `--force-with-lease` on its own
+    leases against the remote-TRACKING ref, and there is none here: the remote
+    is a bare URL, built fresh for each call so the token never lands in a git
+    config. Git then treats the absent tracking ref as "the branch should not
+    exist" and rejects every push after the first with `stale info`.
+
+    Reproduced (git 2.50.1): first push to a new branch succeeds; the second,
+    to the same branch, fails `! [rejected] HEAD -> feat (stale info)`. That
+    breaks exactly the two paths this function exists for — re-finalizing after
+    a review fix, and the activity's own retry after a partial failure — and it
+    surfaces as a git error that hides whatever actually went wrong first.
+
+    So: read the remote tip, and lease against THAT. The safety property is
+    unchanged — a push still fails if someone moved the branch under us — and a
+    branch that does not exist yet is created with a plain push."""
     remote_url = github_client.authenticated_remote_url(repo)
-    result = executor.run(["git", "push", "--force-with-lease", remote_url, f"HEAD:refs/heads/{branch}"], timeout=timeout)
+    ref = f"refs/heads/{branch}"
+
+    ls = executor.run(["git", "ls-remote", remote_url, ref], timeout=timeout)
+    if ls.returncode != 0:
+        raise RuntimeError(
+            f"could not read the remote branch (exit={ls.returncode}): {ls.stderr.strip()[:300]}"
+        )
+    remote_sha = ls.stdout.split()[0] if ls.stdout.strip() else ""
+
+    if remote_sha:
+        # Leasing against the sha we just READ would be theatre: if someone else
+        # moved the branch, we would read THEIR commit and lease against it, and
+        # the push would sail through and discard their work. The property we
+        # actually want is that the remote tip is something we already have —
+        # i.e. this push fast-forwards.
+        fetched = executor.run(["git", "fetch", "-q", remote_url, ref], timeout=timeout)
+        if fetched.returncode != 0:
+            raise RuntimeError(
+                f"could not fetch the remote branch (exit={fetched.returncode}): "
+                f"{fetched.stderr.strip()[:300]}"
+            )
+        ancestry = executor.run(
+            ["git", "merge-base", "--is-ancestor", remote_sha, "HEAD"], timeout=timeout
+        )
+        if ancestry.returncode != 0:
+            raise RuntimeError(
+                f"git push failed (exit={ancestry.returncode}): refusing to overwrite "
+                f"{ref}@{remote_sha[:12]} — it carries commits this branch does not have"
+            )
+
+    # No force. The DSE only ever appends to its own branch (the scope hook on
+    # the checkpoint refuses non-fast-forwards), so a rejection here means the
+    # remote genuinely diverged and must not be discarded. This is also what
+    # makes the call idempotent: `--force-with-lease` with no argument leases
+    # against a remote-TRACKING ref, and a bare URL remote has none, so git read
+    # the absent ref as "this branch should not exist" and refused every push
+    # after the first with `stale info` — breaking the re-finalize path and the
+    # activity's own retry, with a git error that hid the original cause.
+    result = executor.run(["git", "push", remote_url, f"HEAD:{ref}"], timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"git push failed (exit={result.returncode}): {result.stderr.strip()}")
     return result
