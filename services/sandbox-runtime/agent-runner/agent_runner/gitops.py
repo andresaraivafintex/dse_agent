@@ -159,6 +159,17 @@ def bootstrap_workspace(req: WorkspaceBootstrapRequest) -> WorkspaceBootstrapRes
 
         if _checkpoint_has_branch(req.checkpoint_path, req.branch):
             _git(["clone", "--branch", req.branch, req.checkpoint_path, req.workspace_dir])
+            # The identity has to be re-established HERE. `git config user.*`
+            # lives in the workspace's own .git/config, and a rebuild throws
+            # that workspace away and clones a fresh one from the checkpoint —
+            # so the identity `_clone_target_repo` set on the first bootstrap is
+            # gone. Every commit after a rebuild then died on "Please tell me
+            # who you are", and because the fix loop rebuilds before retrying,
+            # the retry could never succeed: seen at attempt 14 on the VPS,
+            # failing `git commit --allow-empty` for the turn-start checkpoint.
+            ScopedGitSession(
+                workspace_dir=req.workspace_dir, branch=req.branch
+            ).ensure_identity()
             write_task_branch_marker(req.workspace_dir, req.branch)
             sha = _git(["rev-parse", "HEAD"], cwd=req.workspace_dir).stdout.strip()
             return WorkspaceBootstrapResult(sha=sha, created=False)

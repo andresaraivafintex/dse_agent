@@ -84,7 +84,11 @@ if __name__ == "__main__":
 """
 
 
-class GitScopeViolation(Exception):
+class GitCommandError(RuntimeError):
+    """A git command failed, carrying what git said about it."""
+
+
+class GitScopeViolation(GitCommandError):
     """Raised when a git operation tries to leave the task's scope."""
 
 
@@ -130,13 +134,27 @@ class ScopedGitSession:
     remote_name: str = "origin"
 
     def _run(self, args: list[str]) -> subprocess.CompletedProcess:
-        return subprocess.run(
+        """Raises with git's OWN message, not just the exit code.
+
+        `check=True` raises CalledProcessError, whose str() is
+        "Command '[...]' returned non-zero exit status 1." — the stderr is
+        captured and then thrown away. A real failure on the VPS surfaced as
+        exactly that string, fourteen times, and the diagnosis had to be guessed
+        from it. It was guessed wrong. Whatever git actually printed is the
+        cheapest evidence in the system and it was being discarded."""
+        proc = subprocess.run(
             ["git", *args],
             cwd=self.workspace_dir,
-            check=True,
             capture_output=True,
             text=True,
         )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:400]
+            raise GitCommandError(
+                f"git {' '.join(args)} failed (exit {proc.returncode}) in "
+                f"{self.workspace_dir}: {detail or '<no output>'}"
+            )
+        return proc
 
     def ensure_identity(self, name: str = "dse-coder", email: str = "coder@dse.local") -> None:
         self._run(["config", "user.name", name])
@@ -160,14 +178,17 @@ class ScopedGitSession:
     def push(self) -> None:
         """Push hardcoded to `HEAD:refs/heads/<branch>` on the configured remote
         — there is no way to pass `--force` or another refspec through this API.
-        Server-side `pre-receive` hook failures propagate as
-        `subprocess.CalledProcessError` (P6: clean failure, not swallowed)."""
+        Server-side `pre-receive` hook failures propagate as `GitScopeViolation`
+        (P6: clean failure, not swallowed)."""
         try:
             self._run(["push", self.remote_name, f"HEAD:refs/heads/{self.branch}"])
-        except subprocess.CalledProcessError as e:
-            raise GitScopeViolation(
-                f"push refused by the remote (scope): {e.stderr}"
-            ) from e
+        except GitCommandError as e:
+            # `_run` used to raise CalledProcessError and this caught that. When
+            # it started raising GitCommandError the conversion stopped matching,
+            # so a push REFUSED BY THE SCOPE HOOK would have escaped as a plain
+            # git failure instead of the scope violation callers act on — a
+            # security guarantee turned into a generic error by a refactor.
+            raise GitScopeViolation(f"push refused by the remote (scope): {e}") from e
 
     def current_sha(self) -> str:
         return self._run(["rev-parse", "HEAD"]).stdout.strip()

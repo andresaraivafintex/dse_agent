@@ -368,13 +368,18 @@ async def checkpoint_sandbox(inp: CheckpointSandboxInput) -> CheckpointRef:
 # ---------------------------------------------------------------------------
 # rebuild_sandbox
 # ---------------------------------------------------------------------------
-class RebuildSandboxInput(BaseModel):
-    work_item_id: str
-    tenant_id: str
-    checkpoint_ref: CheckpointRef
-    branch: str | None = None
-    budget: dict[str, Any] = Field(default_factory=dict)
-    image: str | None = None
+# Imported, not redefined. There WAS a local copy of this model here, and it had
+# already drifted: it lacked `base_sha`, and when `repo`/`base_branch` were added
+# to the contract the activity kept receiving the old shape and raised
+# `AttributeError: 'RebuildSandboxInput' object has no attribute 'repo'`. A
+# duplicated cross-service contract that only one side updates is a trap that
+# fires at runtime, and it fired.
+#
+# `ProvisionSandboxInput`, `CheckpointSandboxInput` and `TeardownSandboxInput`
+# below are duplicated the same way. They are left alone here deliberately —
+# converting them is a separate change, not something to do mid-incident — but
+# they carry the same hazard.
+from dse_contracts.activities import RebuildSandboxInput  # noqa: E402
 
 
 @activity.defn(name=ACTIVITY_REBUILD_SANDBOX)
@@ -386,15 +391,29 @@ async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
 
     if not driver.workspace_is_host_visible:
         # === K8s runtime: rebuild = a fresh Pod mounting the same checkpoint
-        # volume (PVC); the bootstrap recovers the branch from the checkpoint.
-        # With emptyDir (dev) the checkpoint dies with the Pod — the PVC is a
-        # fast-follow. ===
+        # volume; the bootstrap recovers the branch from the checkpoint. ===
+        #
+        # `repo`/`base_branch` are forwarded so the bootstrap has a FALLBACK
+        # when the checkpoint is gone. It usually is: the checkpoint volume is
+        # an emptyDir unless a PVC is configured, and the chart ships
+        # `checkpointPvc.enabled: false` — so a rebuild gets a fresh, empty
+        # volume, `_checkpoint_has_branch` is False, and without a repo to fall
+        # back on the bootstrap took its LAST branch and initialised an EMPTY
+        # git repo. The Coder then ran against a workspace with none of the
+        # customer's code in it, and every retry reproduced that state exactly:
+        # seen as fourteen identical failures on the VPS.
+        #
+        # Re-cloning is the honest recovery. It loses the turn's uncommitted
+        # work — which the emptyDir already lost — instead of silently
+        # continuing against an empty tree.
         rebuild_result = driver.rebuild(
             SandboxRebuildRequest(
                 provision=SandboxProvisionRequest(
                     work_item_id=inp.work_item_id,
                     tenant_id=inp.tenant_id,
                     branch=branch,
+                    repo=inp.repo,
+                    base_branch=inp.base_branch,
                     workspace_path=old_workspace_dir,
                     checkpoint_path=bare_repo_path,
                     budget=inp.budget or {},

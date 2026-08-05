@@ -1330,8 +1330,13 @@ class WorkItemLifecycleWorkflow:
             try:
                 handle: SandboxHandle = await workflow.execute_activity(
                     ACTIVITY_REBUILD_SANDBOX,
+                    # repo/base_branch: the fallback the bootstrap needs when the
+                    # checkpoint volume did not survive the Pod, which with an
+                    # emptyDir it does not. Without them it silently rebuilt an
+                    # EMPTY workspace and every retry failed identically.
                     {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
-                     "checkpoint_ref": self._input.last_checkpoint_ref},
+                     "checkpoint_ref": self._input.last_checkpoint_ref,
+                     "repo": self._input.repo, "base_branch": self._input.base_branch},
                     result_type=SandboxHandle,
                     start_to_close_timeout=timedelta(seconds=300),
                     retry_policy=RetryPolicy(maximum_attempts=1),
@@ -1459,7 +1464,8 @@ class WorkItemLifecycleWorkflow:
             handle: SandboxHandle = await workflow.execute_activity(
                 ACTIVITY_REBUILD_SANDBOX,
                 {"work_item_id": self._input.work_item_id, "tenant_id": self._input.tenant_id,
-                 "checkpoint_ref": self._input.last_checkpoint_ref},
+                 "checkpoint_ref": self._input.last_checkpoint_ref,
+                 "repo": self._input.repo, "base_branch": self._input.base_branch},
                 result_type=SandboxHandle,
                 start_to_close_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=2),
