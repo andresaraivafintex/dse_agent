@@ -16,6 +16,7 @@ to the task branch.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 
 import pytest
@@ -29,7 +30,12 @@ from sandbox_runtime.activities import (
     provision_sandbox,
     teardown_sandbox,
 )
-from sandbox_runtime.scoped_git import FORBIDDEN_METHOD_NAMES, GitScopeViolation, ScopedGitSession
+from sandbox_runtime.scoped_git import (
+    FORBIDDEN_METHOD_NAMES,
+    GitScopeViolation,
+    ScopedGitSession,
+    install_pre_receive_guard,
+)
 from sandbox_runtime.substrate import FakeSubstrate
 
 
@@ -143,3 +149,101 @@ def test_scoped_git_session_push_raises_git_scope_violation_on_conflict(work_ite
         session.push()
 
     asyncio.run(teardown_sandbox(TeardownSandboxInput(work_item_id=work_item_id, tenant_id=tenant_id)))
+
+
+# ---------------------------------------------------------------------------
+# The repository's own hooks must never run on a DSE commit — and neutralising
+# them must not weaken the scope guard, which is a different repo's hook.
+#
+# These build the two repos directly instead of going through
+# `provision_sandbox`, which needs Postgres for the skill registry. The
+# behaviour under test is git configuration, and it should be checkable without
+# the control plane up.
+# ---------------------------------------------------------------------------
+def _git(cwd, *args):
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    )
+
+
+def _workspace_with_hostile_hook(tmp_path, branch):
+    """Stands in for husky: the L1 gate's `npm ci` runs the repo's `prepare`
+    script, husky points core.hooksPath at `.husky/`, and every later commit
+    then runs the project's linter inside the sandbox. On the Angular testbed
+    that linter exhausted the V8 heap, so the checkpoint could never be
+    written — and the fix loop retried it forever."""
+    bare = tmp_path / "checkpoint.git"
+    _git(tmp_path, "init", "--bare", str(bare))
+    install_pre_receive_guard(str(bare), branch)
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    _git(ws, "init")
+    _git(ws, "checkout", "-b", branch)
+    _git(ws, "remote", "add", "origin", str(bare))
+
+    hooks = ws / ".husky"
+    hooks.mkdir()
+    hook = hooks / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'FATAL ERROR: JS heap out of memory' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    _git(ws, "config", "core.hooksPath", str(hooks))
+    return ws
+
+
+def test_a_repo_hook_cannot_block_the_checkpoint_commit(tmp_path):
+    branch = "dse/wi_hooks"
+    ws = _workspace_with_hostile_hook(tmp_path, branch)
+    session = ScopedGitSession(workspace_dir=str(ws), branch=branch)
+
+    # Without `_disable_repo_hooks` this raises: the hook exits 1, git aborts.
+    session.ensure_identity()
+    sha = session.commit("checkpoint(turn-start): a repo hook must not run")
+    assert len(sha) == 40
+
+
+def test_disabling_repo_hooks_does_not_disarm_the_remote_scope_guard(tmp_path):
+    """`core.hooksPath` is set on the WORKSPACE. The scope `pre-receive` lives in
+    the checkpoint bare repo and runs under `git-receive-pack`, which reads that
+    repo's own config — the two must stay independent."""
+    branch = "dse/wi_hooks"
+    ws = _workspace_with_hostile_hook(tmp_path, branch)
+    session = ScopedGitSession(workspace_dir=str(ws), branch=branch)
+    session.ensure_identity()
+    session.commit("c1")
+
+    result = subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/some-other-branch"],
+        cwd=ws, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, "the scope guard must still refuse an out-of-scope ref"
+    assert "refused" in result.stderr or "rejected" in result.stderr.lower()
+
+
+def test_a_global_hooks_path_cannot_disarm_the_scope_guard(tmp_path):
+    """The sandbox runs the customer's `postinstall` under the same uid and HOME
+    as our git commands, so `git config --global core.hooksPath /tmp/x` in their
+    package.json is one line of untrusted input. `git-receive-pack` reads repo +
+    global config and repo-local wins, so the guard pins its own hooksPath."""
+    branch = "dse/wi_global"
+    ws = _workspace_with_hostile_hook(tmp_path, branch)
+    session = ScopedGitSession(workspace_dir=str(ws), branch=branch)
+    session.ensure_identity()
+    session.commit("c1")
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    env = {**os.environ, "HOME": str(fake_home)}
+    subprocess.run(
+        ["git", "config", "--global", "core.hooksPath", str(tmp_path / "nowhere")],
+        cwd=ws, env=env, check=True, capture_output=True, text=True,
+    )
+
+    result = subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/attacker"],
+        cwd=ws, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode != 0, (
+        "a global core.hooksPath disarmed the scope guard — the push was accepted"
+    )
+    assert "refused" in result.stderr or "rejected" in result.stderr.lower()
