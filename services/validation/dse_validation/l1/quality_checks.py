@@ -31,9 +31,17 @@ def _run(executor: SandboxExecutor, argv: list[str], timeout: int) -> ExecResult
     return executor.run(argv, timeout=timeout)
 
 
-#: 137 = 128 + SIGKILL. Inside a container that is the cgroup's OOM killer
-#: almost every time; 139 is SIGSEGV, which a linter dying on memory also hits.
-_KILLED_RETURNCODES = frozenset({137, 139})
+#: 128 + signal. 137 = SIGKILL (the cgroup's OOM killer inside a container),
+#: 139 = SIGSEGV, 143 = SIGTERM.
+#:
+#: 134 = SIGABRT, and it is the one that actually showed up: V8 does not get
+#: killed when it exhausts its heap, it prints "FATAL ERROR: ... JavaScript
+#: heap out of memory" and calls abort(). Observed on the Angular testbed —
+#: `ng lint` died with exit=134 after printing nothing but `Linting "..."`, and
+#: the first version of this classifier missed it, so the gate still read as a
+#: verdict on the customer's code. The marker text was on stderr and went with
+#: the process, which is why the return code has to carry the diagnosis.
+_KILLED_RETURNCODES = frozenset({134, 137, 139, 143})
 
 #: What a Node toolchain prints on its way out of memory. `ng lint` and
 #: `ng build` on a real Angular app are the two commands that reach it.

@@ -239,6 +239,18 @@ def test_a_lint_killed_by_the_oom_killer_is_not_a_lint_error():
     assert "could not run" in finding.summary
 
 
+def test_the_abort_v8_uses_for_an_exhausted_heap_is_infra():
+    """V8 does not get killed when it runs out of heap — it prints FATAL ERROR
+    and calls abort(), which is 134. The first version of this classifier only
+    knew 137/139 and missed the one code the Angular testbed actually produced:
+    `ng lint` died with exit=134 after printing nothing but `Linting "..."`, so
+    the marker text went with the process and only the code was left."""
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    finding = lint_check(_killed(134, stdout='Linting "bmo-fee-estimator-fe"...\n'), cfg)
+    assert finding.status is GateStatus.ERROR
+    assert "could not run" in finding.summary
+
+
 def test_a_build_that_exhausted_the_heap_says_so():
     cfg = L1Config(build_cmd=["npm", "run", "build"])
     finding = build_check(_killed(1, stderr=_HEAP_DEATH), cfg)
