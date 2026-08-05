@@ -140,6 +140,13 @@ class RebuildSandboxInput(BaseModel):
     budget: dict[str, Any] = Field(default_factory=dict)
     image: str | None = None
     base_sha: str | None = None
+    #: Where to re-clone from when the checkpoint did not survive. The checkpoint
+    #: volume is an emptyDir unless a PVC is configured, so on a rebuild it
+    #: usually has NOT survived — and without these the bootstrap fell through to
+    #: initialising an empty git repo, handing the Coder a workspace with none of
+    #: the customer's code. Optional so an older history replays unchanged.
+    repo: str | None = None
+    base_branch: str | None = None
 
 
 class TeardownSandboxInput(BaseModel):

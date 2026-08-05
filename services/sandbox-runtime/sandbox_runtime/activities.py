@@ -386,15 +386,29 @@ async def rebuild_sandbox(inp: RebuildSandboxInput) -> SandboxHandle:
 
     if not driver.workspace_is_host_visible:
         # === K8s runtime: rebuild = a fresh Pod mounting the same checkpoint
-        # volume (PVC); the bootstrap recovers the branch from the checkpoint.
-        # With emptyDir (dev) the checkpoint dies with the Pod — the PVC is a
-        # fast-follow. ===
+        # volume; the bootstrap recovers the branch from the checkpoint. ===
+        #
+        # `repo`/`base_branch` are forwarded so the bootstrap has a FALLBACK
+        # when the checkpoint is gone. It usually is: the checkpoint volume is
+        # an emptyDir unless a PVC is configured, and the chart ships
+        # `checkpointPvc.enabled: false` — so a rebuild gets a fresh, empty
+        # volume, `_checkpoint_has_branch` is False, and without a repo to fall
+        # back on the bootstrap took its LAST branch and initialised an EMPTY
+        # git repo. The Coder then ran against a workspace with none of the
+        # customer's code in it, and every retry reproduced that state exactly:
+        # seen as fourteen identical failures on the VPS.
+        #
+        # Re-cloning is the honest recovery. It loses the turn's uncommitted
+        # work — which the emptyDir already lost — instead of silently
+        # continuing against an empty tree.
         rebuild_result = driver.rebuild(
             SandboxRebuildRequest(
                 provision=SandboxProvisionRequest(
                     work_item_id=inp.work_item_id,
                     tenant_id=inp.tenant_id,
                     branch=branch,
+                    repo=inp.repo,
+                    base_branch=inp.base_branch,
                     workspace_path=old_workspace_dir,
                     checkpoint_path=bare_repo_path,
                     budget=inp.budget or {},
