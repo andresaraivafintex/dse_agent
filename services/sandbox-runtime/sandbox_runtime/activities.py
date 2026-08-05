@@ -2092,12 +2092,24 @@ def _pod_tester_context(pod_sh) -> _TesterContext:
     # against a local copy is what broke when the copy stopped carrying .git:
     # `git show` exits 128 and the prompt silently reads "(diff unavailable)".
     diff = _read("git show --stat -p HEAD", _TESTER_DIFF_CHARS)
+    # Same shape as `workspace_skills_note` on the Docker path, down to the
+    # header: the directory is `.claude/skills`, each entry names the SKILL.md
+    # and carries its `description:` line, and the framing tells the model the
+    # guidance is mandatory. Getting any of that wrong does not fail — it
+    # quietly weakens the prompt, which is the hardest kind of bug to notice.
     skills = _read(
-        "for d in .dse/skills/*/; do [ -f \"$d/SKILL.md\" ] && echo \"- ${d%/}\"; done",
+        'for d in .claude/skills/*/; do [ -f "$d/SKILL.md" ] || continue; '
+        'desc=$(grep -m1 "^description:" "$d/SKILL.md" | cut -d: -f2- | '
+        "sed 's/^ *//'); n=$(basename \"$d\"); "
+        'echo "- .claude/skills/$n/SKILL.md — ${desc:-$n}"; done',
         _SKILLS_NOTE_CHARS,
     )
     skills_note = (
-        "\n\n## Skills available in this repository\n" + skills if skills.strip() else ""
+        "\n\n## Repository skills (MANDATORY guidance)\n"
+        "Before writing code, read each SKILL.md below and follow its rules:\n"
+        + skills.rstrip("\n")
+        if skills.strip()
+        else ""
     )
     return _TesterContext(
         package_json=package_json,
