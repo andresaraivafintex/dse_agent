@@ -26,6 +26,18 @@ def _ignore_step(_name: str) -> None:
     tests and for any caller that has nothing to report progress to."""
 
 
+#: Their findings ARE the sensitive value: secret_scan renders the matched source
+#: line, and bandit's B105/B106/B107 issue_text is "Possible hardcoded password:
+#: '<value>'". Their status still reaches the ledger; their detail must not.
+_SECRET_BEARING_CHECKS = frozenset({"secret_scan", "sast"})
+
+
+def _audit_safe_detail(detail: str | None) -> str:
+    """The summary line only, NUL-stripped, bounded."""
+    first = (detail or "").replace("\x00", "").splitlines()
+    return first[0][:600] if first else ""
+
+
 def run_l1_pipeline_core(
     executor: SandboxExecutor,
     work_item_id: str,
@@ -115,18 +127,35 @@ def run_l1_pipeline_core(
                 "checks": {
                     f.check: f.status.value if f.status else None for f in findings
                 },
-                # WHY, not just WHICH. Every finding carries a `detail` — "bandit
-                # timed out after 60s", "no lint command in the trusted
-                # manifest", the failing assertion — and the ledger recorded only
-                # the status word. A gate reading ERROR with no reason anywhere
-                # is a gate nobody can debug: diagnosing one cost two wrong
-                # guesses before anyone noticed the reason had been discarded at
-                # write time. Only failures are carried, so a green run stays
-                # small; capped so a verbose tool cannot bloat the row.
+                # WHY, not just WHICH — but only the SUMMARY LINE, and never
+                # from the two checks whose findings are the secret itself.
+                #
+                # A gate reading ERROR with no reason anywhere is a gate nobody
+                # can debug; diagnosing one cost two wrong guesses before anyone
+                # noticed the reason was discarded at write time. The first line
+                # is the whole diagnostic ("12 type error(s)", "bandit timed out
+                # after 60s", "no lint command in the trusted manifest abc123").
+                # What follows it is the payload: the last 40 lines of build
+                # output, or — for secret_scan and sast — the matched source line
+                # and bandit's "Possible hardcoded password: '<value>'".
+                #
+                # audit_log is the one store that cannot take that. It is
+                # append-only (REVOKE UPDATE/DELETE plus the trigger in 0028),
+                # retention.py refuses any audit_log target by design, and the
+                # console projector copies details verbatim into
+                # console_rm.timeline_events.data. A credential written here
+                # could only be rotated, never scrubbed. The full detail keeps
+                # living in validation_runs, which is where debugging happens
+                # and which can still be cleaned.
+                #
+                # NUL is stripped because jsonb cannot represent it: tool output
+                # is captured with text=True, so a \x00 reaches json.dumps and
+                # the ::jsonb cast raises — wedging the ledger write, and with it
+                # the L1 activity, deterministically on every retry.
                 "failures": {
-                    f.check: (f.detail or "")[:600]
+                    f.check: _audit_safe_detail(f.detail)
                     for f in findings
-                    if not f.passed and f.detail
+                    if not f.passed and f.detail and f.check not in _SECRET_BEARING_CHECKS
                 },
             },
         )
