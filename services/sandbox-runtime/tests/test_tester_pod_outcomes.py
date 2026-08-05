@@ -17,9 +17,7 @@ two surfaces the workflow and a human actually read.
 from __future__ import annotations
 
 import json
-import io as _io
 import subprocess
-import tarfile as _tarfile
 
 import pytest
 
@@ -37,10 +35,10 @@ def _done(argv, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
-def _fake_cluster(*, suite, reused=("tests/test_dse.py",), cp=None, seen=None):
+def _fake_cluster(*, suite, reused=("tests/test_dse.py",), listing=None, seen=None):
     """Stands in for every `kubectl` the bridge shells out to. `suite` is what
-    the suite run returns (a CompletedProcess) or raises (an exception); `cp`
-    does the same for the `kubectl cp` of the workspace."""
+    the suite run returns (a CompletedProcess) or raises (an exception);
+    `listing` does the same for the `find` that proves /workspace is readable."""
 
     def fake_run(argv, **kwargs):
         if seen is not None:
@@ -48,23 +46,18 @@ def _fake_cluster(*, suite, reused=("tests/test_dse.py",), cp=None, seen=None):
             # overrun is named `exec_timeout` or `suite_hung`.
             seen.append((argv, kwargs))
         joined = " ".join(argv)
-        if "tar" in argv:
-            # The workspace now arrives as a tar on stdout (`kubectl exec -- tar
-            # cf -`) instead of `kubectl cp`, so the fake streams a real one.
-            if isinstance(cp, BaseException):
-                raise cp
-            if cp is not None:
-                return cp
-            buf = _io.BytesIO()
-            with _tarfile.open(fileobj=buf, mode="w") as tf:
-                for name, data in (
-                    ("./package.json", b'{"name":"fixture"}'),
-                    ("./tests/test_dse.py", b"def test_x(): pass\n"),
-                ):
-                    info = _tarfile.TarInfo(name)
-                    info.size = len(data)
-                    tf.addfile(info, _io.BytesIO(data))
-            return subprocess.CompletedProcess(argv, 0, buf.getvalue(), b"")
+        # The authoring context is READ from the Pod now — five bounded commands
+        # instead of a copy of the tree.
+        if "head -c" in joined:
+            if "find ." in joined:
+                if isinstance(listing, BaseException):
+                    raise listing
+                return _done(argv, 0, stdout="./src/app.spec.ts\n./tests/test_dse.py\n")
+            if "cat package.json" in joined:
+                return _done(argv, 0, stdout='{"name":"fixture"}')
+            if "git show" in joined:
+                return _done(argv, 0, stdout="diff --git a/x b/x\n")
+            return _done(argv, 0, stdout="")
         if _REUSE_MARKER in joined:
             return _done(argv, 0, stdout="".join(f"{f}\n" for f in reused))
         if any(m in joined for m in _SUITE_MARKERS):
@@ -219,16 +212,34 @@ def test_a_timeout_with_no_output_at_all_is_still_readable(monkeypatch, audits):
     assert f"TIMEOUT after {activities._tester_clocks().pod_exec}s" in result.failure_output
 
 
-def test_the_workspace_copy_timing_out_does_not_lose_the_turn(monkeypatch, audits):
-    """`kubectl cp` of a real node_modules is what blows the 180s first. It used
-    to escape the same way, and it took the whole turn with it."""
-    boom = subprocess.TimeoutExpired(cmd=["kubectl", "cp"], timeout=180)
-    result = _run_bridge(monkeypatch, suite=_done([], 0), reused=(), cp=boom)
+def test_an_unreadable_workspace_does_not_lose_the_turn(monkeypatch, audits):
+    """The authoring context is now READ from the Pod instead of copied out of
+    it. When the read that proves /workspace is reachable fails, the turn must
+    end as "nothing authored" with a durable row — not blow up and be retried
+    from a cold install."""
+    boom = subprocess.TimeoutExpired(cmd=["kubectl", "exec"], timeout=30)
+    result = _run_bridge(monkeypatch, suite=_done([], 0), reused=(), listing=boom)
 
     assert result.tests_ran is False, "nothing could be authored without the workspace"
-    copy_failed = next(a for a in audits if a["action"] == "tester_workspace_copy_failed")
-    assert copy_failed["details"]["returncode"] == activities._RC_POD_EXEC_TIMEOUT
-    assert "180s" in copy_failed["details"]["stderr"]
+    failed = next(a for a in audits if a["action"] == "tester_workspace_context_failed")
+    assert "rc=" in failed["details"]["error"]
+
+
+def test_the_context_read_never_leaves_the_pod_with_the_repository(monkeypatch, audits):
+    """The incident of 2026-08-05: `kubectl cp` of /workspace put an Angular
+    node_modules in the worker's /tmp — a 256Mi emptyDir — and kubelet evicted
+    the Pod five times in five minutes. Nothing may copy the tree out again."""
+    _fake_gateway(monkeypatch, _AUTHORED, 0.01)
+    seen: list[tuple[list[str], dict]] = []
+    _run_bridge(monkeypatch, seen=seen, suite=_done([], 0), reused=())
+
+    assert not [a for a, _ in seen if "cp" in a[:3]], "the workspace was copied out again"
+    assert not [a for a, _ in seen if "tar" in a], "the workspace was streamed out again"
+    reads = [a for a, kw in seen if "exec" in a and "head -c" in " ".join(a)]
+    assert reads, "the context was never read"
+    for argv, kw in seen:
+        if "head -c" in " ".join(argv):
+            assert kw.get("timeout") == activities._CONTEXT_READ_TIMEOUT_SECONDS
 
 
 def test_a_broken_npm_install_says_so_instead_of_hiding_in_dev_null(monkeypatch, audits):
@@ -337,25 +348,3 @@ def test_reusing_the_previous_round_costs_nothing(monkeypatch, audits):
 
     assert result.test_files == ["tests/test_dse.py"]
     assert result.cost_usd == 0.0
-
-
-def test_the_workspace_stream_leaves_node_modules_in_the_pod(monkeypatch, audits):
-    """The incident of 2026-08-05: `kubectl cp` of /workspace dragged the whole
-    node_modules into the worker's /tmp, an emptyDir capped at 256Mi, and
-    kubelet evicted the Pod mid-activity — five times in five minutes, each
-    replacement refilling it. `kubectl cp` has no exclude, so the copy is a tar
-    that skips the two trees `_tester_repo_context` discards anyway."""
-    _fake_gateway(monkeypatch, _AUTHORED, 0.01)
-    seen: list[tuple[list[str], dict]] = []
-    # `reused=()` forces the AUTHORING path — the only one that copies the
-    # workspace at all.
-    _run_bridge(monkeypatch, seen=seen, suite=_done([], 0), reused=())
-
-    stream = [argv for argv, _ in seen if "tar" in argv]
-    assert stream, "the workspace was never streamed"
-    argv = stream[0]
-    assert "--exclude=./node_modules" in argv, (
-        "node_modules is being copied into the worker's /tmp again"
-    )
-    assert "--exclude=./.git" in argv
-    assert "cp" not in argv[:3], "kubectl cp cannot exclude anything"
