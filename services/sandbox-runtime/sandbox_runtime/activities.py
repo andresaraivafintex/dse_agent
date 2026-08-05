@@ -1961,6 +1961,22 @@ CRITICAL RULES:
 """
 
 
+#: Every slice of the authoring prompt is bounded, and bounded AT THE SOURCE —
+#: the Pod truncates before the bytes ever cross into the worker.
+_PKG_JSON_CHARS = 1_500
+_EXAMPLE_TEST_CHARS = 3_000
+_TEST_LISTING_CHARS = 64_000
+_TESTER_DIFF_CHARS = 8_000
+_SKILLS_NOTE_CHARS = 2_000
+
+
+def _sh_quote(path: str) -> str:
+    """Single-quote a repository path for `sh -c`. The path comes from `find`
+    inside the customer's repo, so a filename with a quote or a `;` in it is
+    input, not an accident."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
 def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
     """Deterministic context so authoring imitates the REAL repo (found in the
     real run: the model wrote Jest in a node:test repo with no deps and also
@@ -1990,8 +2006,132 @@ def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
     return pkg, example or "(no existing tests — use the ecosystem's default runner)", existing
 
 
+class _TesterContextUnavailable(RuntimeError):
+    """The sandbox's workspace could not be read at all."""
+
+
+class _TesterContext(NamedTuple):
+    """Everything the authoring prompt needs about the repository — and nothing
+    else. About 5 kB in total, which is the whole point.
+
+    The K8s path used to `kubectl cp` the entire /workspace here to produce it.
+    After the L1 gate's `npm ci` that tree is an Angular install, and it landed
+    in the worker's /tmp — an emptyDir capped at 256Mi — so kubelet evicted the
+    Pod mid-activity, five times in five minutes, each replacement refilling the
+    volume. Excluding node_modules only narrowed it: `.angular/cache` and
+    `dist/` are there too, `--exclude=./node_modules` does not match a nested
+    `packages/*/node_modules` under GNU tar, and buffering the archive to strip
+    it just moves an eviction into an OOMKill.
+
+    The consumer never wanted a filesystem. It wants package.json, one example
+    test, the list of test paths and the last diff, each already truncated. So
+    each is read with a bounded command instead."""
+
+    package_json: str
+    example_test: str
+    existing_tests: set[str]
+    diff: str
+    skills_note: str
+    #: The local copy of the repository, when one exists. `None` on K8s, where
+    #: the repository lives only in the Pod.
+    workspace_dir: str | None = None
+
+
+def _pod_tester_context(pod_sh) -> _TesterContext:
+    """Reads the authoring context out of the sandbox Pod, one bounded command
+    at a time. Nothing is copied, so nothing can overrun a disk or a heap.
+
+    Every read is truncated IN THE POD (`head -c`), so an enormous tracked file
+    costs one buffer of the size we asked for, not its own size."""
+    from dse_contracts.paths import is_test_path
+
+    def _read(script: str, limit: int, *, required: bool = False) -> str:
+        proc = pod_sh(
+            f"cd /workspace && {script} 2>/dev/null | head -c {limit}",
+            timeout=_CONTEXT_READ_TIMEOUT_SECONDS,
+        )
+        if required and proc.returncode != 0:
+            # A read marked `required` is one whose failure means the Pod or the
+            # workspace is not readable at all. Degrading quietly here would
+            # send the model an empty repository and bill a turn for tests
+            # written against nothing.
+            raise _TesterContextUnavailable(
+                f"reading the workspace failed (rc={proc.returncode}): "
+                f"{(proc.stderr or '')[-300:]}"
+            )
+        return proc.stdout or ""
+
+    package_json = _read("cat package.json", _PKG_JSON_CHARS) or (
+        "(no package.json — likely Python/pytest)"
+    )
+    # `-prune` stops find BEFORE it descends into the trees nobody reads; on an
+    # Angular install that is the difference between listing a handful of paths
+    # and walking 40k. The `grep` is a coarse pre-filter, and it is a strict
+    # SUPERSET of `is_test_path` — every pattern there contains "test" or
+    # "spec" (tests?/, __tests__/, test_*.py, *_test.py, conftest.py,
+    # *.test.ts, *.spec.ts, *_test.go). The exact rule is still applied below;
+    # this only keeps the listing small enough that its bound cannot truncate a
+    # real repo's test files.
+    listing = _read(
+        r"find . \( -name node_modules -o -name .git -o -name dist "
+        r"-o -name .angular \) -prune -o -type f -print | grep -Ei 'test|spec'",
+        _TEST_LISTING_CHARS,
+        required=True,
+    )
+    existing = {
+        rel for rel in (ln.strip().removeprefix("./") for ln in listing.splitlines())
+        if rel and is_test_path(rel)
+    }
+    example = ""
+    if existing:
+        first = sorted(existing)[0]
+        body = _read(f"cat {_sh_quote(first)}", _EXAMPLE_TEST_CHARS)
+        if body:
+            example = f"# {first}\n{body}"
+    # The diff is read IN THE POD, which is where the repository is. Running it
+    # against a local copy is what broke when the copy stopped carrying .git:
+    # `git show` exits 128 and the prompt silently reads "(diff unavailable)".
+    diff = _read("git show --stat -p HEAD", _TESTER_DIFF_CHARS)
+    skills = _read(
+        "for d in .dse/skills/*/; do [ -f \"$d/SKILL.md\" ] && echo \"- ${d%/}\"; done",
+        _SKILLS_NOTE_CHARS,
+    )
+    skills_note = (
+        "\n\n## Skills available in this repository\n" + skills if skills.strip() else ""
+    )
+    return _TesterContext(
+        package_json=package_json,
+        example_test=example or "(no existing tests — use the ecosystem's default runner)",
+        existing_tests=existing,
+        diff=diff,
+        skills_note=skills_note,
+    )
+
+
+def _local_tester_context(workspace_dir: str) -> _TesterContext:
+    """The Docker path, where the workspace really is a local directory."""
+    import subprocess as _sp
+
+    diff = ""
+    try:
+        proc = _sp.run(["git", "show", "--stat", "-p", "HEAD"],
+                       cwd=workspace_dir, capture_output=True, text=True, timeout=30)
+        diff = proc.stdout[-_TESTER_DIFF_CHARS:]
+    except Exception:  # noqa: BLE001 — the diff is context, not a requirement
+        pass
+    package_json, example_test, existing_tests = _tester_repo_context(workspace_dir)
+    return _TesterContext(
+        package_json=package_json,
+        example_test=example_test,
+        existing_tests=existing_tests,
+        diff=diff,
+        skills_note=workspace_skills_note(workspace_dir)[:_SKILLS_NOTE_CHARS],
+        workspace_dir=workspace_dir,
+    )
+
+
 def _model_authored_test_script(
-    inp: "RunTesterTurnInput", workspace_dir: str, headers: Any, virtual_key: str,
+    inp: "RunTesterTurnInput", ctx: _TesterContext, headers: Any, virtual_key: str,
     *, error_feedback: str = "",
 ) -> tuple[list[dict[str, Any]] | None, float]:
     """Test authoring by the REAL MODEL (same pattern as the planner): 1
@@ -2016,31 +2156,21 @@ def _model_authored_test_script(
         return None, 0.0
     from dse_contracts.paths import is_test_path
 
-    diff = ""
-    try:
-        import subprocess as _sp
-        proc = _sp.run(["git", "show", "--stat", "-p", "HEAD"],
-                       cwd=workspace_dir, capture_output=True, text=True, timeout=30)
-        diff = proc.stdout[-8000:]
-    except Exception:  # noqa: BLE001 — the diff is context, not a requirement
-        pass
-
-    package_json, example_test, existing_tests = _tester_repo_context(workspace_dir)
     model = os.environ.get("DSE_TESTER_MODEL") or os.environ.get("DSE_CODER_MODEL", "anthropic/claude")
     prompt = _TEST_AUTHOR_PROMPT.format(
         instruction=(inp.instruction or "")[:3000],
         plan=json.dumps(inp.plan or {}, ensure_ascii=False)[:1500],
-        package_json=package_json,
-        example_test=example_test,
-        existing_tests=", ".join(sorted(existing_tests)) or "(none)",
-        diff=diff or "(diff unavailable)",
+        package_json=ctx.package_json,
+        example_test=ctx.example_test,
+        existing_tests=", ".join(sorted(ctx.existing_tests)) or "(none)",
+        diff=ctx.diff or "(diff unavailable)",
         error_feedback=(
             f"\n## ERROR FROM THE PREVIOUS ATTEMPT (fix it!)\n{error_feedback}\n" if error_feedback else ""
         ),
     )
     # Repo skills (materialized by the Planner + committed in the target repo):
     # the Tester must follow the guidance too (test style, tenant conventions).
-    prompt += workspace_skills_note(workspace_dir)[:2000]
+    prompt += ctx.skills_note
     try:
         result = chat_completion(
             headers=headers, virtual_key=virtual_key, model=model,
@@ -2073,11 +2203,11 @@ def _model_authored_test_script(
         if not (path and content and is_test_path(path)):
             logger.warning("test path refused (outside the allowed test paths): %r", path)
             continue
-        if path in existing_tests:
+        if path in ctx.existing_tests:
             # Instead of discarding it (which left the script empty whenever the
             # model insisted on the existing test), RENAME deterministically to a
             # new file in the SAME directory — relative imports stay intact.
-            renamed = _dedupe_test_path(path, existing_tests, workspace_dir)
+            renamed = _dedupe_test_path(path, ctx.existing_tests, ctx.workspace_dir)
             logger.warning("test path ALREADY EXISTS — renamed %r → %r", path, renamed)
             path = renamed
         script.append({"tool": "write_file", "path": path, "content": content})
@@ -2087,7 +2217,7 @@ def _model_authored_test_script(
     return script, cost_usd
 
 
-def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
+def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str | None = None) -> str:
     """A new name in the same directory that still matches is_test_path:
     test/api.test.js → test/api-dse.test.js; tests/test_x.py → tests/test_x_dse.py."""
     base, name = os.path.split(path)
@@ -2100,7 +2230,14 @@ def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str) -> str:
         candidate = f"{stem}_dse{ext}"
     new_path = os.path.join(base, candidate) if base else candidate
     n = 2
-    while new_path in existing or os.path.exists(os.path.join(workspace_dir, new_path)):
+    # `workspace_dir` is None on the K8s path, where there is no local copy of
+    # the repository — and nothing is lost: `existing` is built from a `find`
+    # over the whole tree, so any file already sitting at a path that matches
+    # `is_test_path` is already in it. The disk check only ever mattered when
+    # `existing` came from a partial listing.
+    while new_path in existing or (
+        workspace_dir is not None and os.path.exists(os.path.join(workspace_dir, new_path))
+    ):
         new_path = new_path.replace("-dse.", f"-dse{n}.").replace("_dse.", f"_dse{n}.")
         n += 1
         if n > 5:
@@ -2264,11 +2401,17 @@ _POD_EXEC_MARGIN_SECONDS = 60
 # default was room the suite could not have.
 _POD_CONTROL_TIMEOUT_SECONDS = 120
 _HEAD_READ_TIMEOUT_SECONDS = 60
-_WORKSPACE_CP_TIMEOUT_SECONDS = 180
+#: The five reads that build the authoring context (package.json, the test
+#: listing, one example test, the diff, the skills note). Each is a `cat`,
+#: a pruned `find` or a `git show` — seconds, not minutes. This replaced a 180s
+#: `kubectl cp` of the whole workspace, so the turn's non-suite budget shrinks
+#: rather than grows.
+_CONTEXT_READ_TIMEOUT_SECONDS = 30
+_CONTEXT_READ_CALLS = 5
 _AUTHORING_CALL_TIMEOUT_SECONDS = 180.0
 
 # Everything one turn spends inside the SAME activity besides the suite's exec:
-# the authoring call, the kubectl cp of the workspace, at most six control
+# the authoring call, the five context reads, at most six control
 # commands (git config, the reuse probe, up to three file writes, the commit)
 # and the HEAD read. The suite's exec has to fit in what is LEFT of
 # start_to_close: an activity the server kills returns NO result, so the turn is
@@ -2276,7 +2419,7 @@ _AUTHORING_CALL_TIMEOUT_SECONDS = 180.0
 _MAX_POD_CONTROL_CALLS = 6
 _TESTER_NON_SUITE_BUDGET_SECONDS = (
     int(_AUTHORING_CALL_TIMEOUT_SECONDS)
-    + _WORKSPACE_CP_TIMEOUT_SECONDS
+    + _CONTEXT_READ_CALLS * _CONTEXT_READ_TIMEOUT_SECONDS
     + _MAX_POD_CONTROL_CALLS * _POD_CONTROL_TIMEOUT_SECONDS
     + _HEAD_READ_TIMEOUT_SECONDS
 )
@@ -2517,9 +2660,7 @@ def _tester_pod_sync(
     Docker/dev path: no infra-error loop and no re-run idempotency (1 authoring
     pass; empty authoring → tests_ran=False → the gate stops cleanly)."""
     import shlex as _shlex
-    import shutil as _shutil
     import subprocess as _sp
-    import tempfile as _tf
 
     ns = os.environ.get("DSE_SANDBOX_K8S_NAMESPACE", "dse-sandboxes")
     kubectl = os.environ.get("DSE_KUBECTL", "kubectl")
@@ -2591,40 +2732,31 @@ def _tester_pod_sync(
         test_files = reused
         logger.info("tester k8s: reusing %d test(s) authored in a previous round", len(reused))
     else:
-        # REAL authoring: workspace context (git show HEAD + package.json + an
-        # example test). kubectl cp the Pod's /workspace → a read-only local clone.
+        # REAL authoring. The context is READ from the Pod, never copied out of
+        # it: `kubectl cp` of /workspace dragged the post-`npm ci` tree into the
+        # worker's /tmp, a 256Mi emptyDir, and kubelet evicted the Pod five
+        # times in five minutes. Excluding node_modules would not have been
+        # enough either — `.angular/cache` and `dist/` are in there too. The
+        # prompt wants about 5 kB; `_pod_tester_context` reads exactly that,
+        # each piece truncated inside the Pod.
         authoring_script: list[dict[str, Any]] | None = None
-        tmp = _tf.mkdtemp(prefix="dse-tester-k8s-")
         try:
-            local_ws = os.path.join(tmp, "ws")
-            cp_argv = kbase + ["cp", f"{ns}/{sandbox_id}:/workspace", local_ws]
-            try:
-                cp = _sp.run(
-                    cp_argv, capture_output=True, text=True,
-                    timeout=_WORKSPACE_CP_TIMEOUT_SECONDS,
-                )
-            except _sp.TimeoutExpired as exc:
-                # 180s is not much for a real node_modules, and uncaught this
-                # loses the entire turn instead of one authoring pass.
-                cp = _timed_out_process(cp_argv, exc, _WORKSPACE_CP_TIMEOUT_SECONDS)
-            if cp.returncode == 0 and os.path.isdir(os.path.join(local_ws, ".git")):
-                authoring_script, authoring_cost_usd = _model_authored_test_script(
-                    inp, local_ws, headers, virtual_key
-                )
-            else:
-                logger.warning("tester k8s: kubectl cp of the workspace failed (rc=%s): %.200s",
-                               cp.returncode, (cp.stderr or "")[:200])
-                # The turn ends as "no tests authored" either way; without this
-                # row nothing durable says the copy is the reason.
-                audit_emit(
-                    actor="system:sandbox-runtime",
-                    action="tester_workspace_copy_failed",
-                    tenant_id=inp.tenant_id,
-                    work_item_id=inp.work_item_id,
-                    details={"returncode": cp.returncode, "stderr": (cp.stderr or "")[-500:]},
-                )
-        finally:
-            _shutil.rmtree(tmp, ignore_errors=True)
+            ctx = _pod_tester_context(_pod_sh)
+        except _TesterContextUnavailable as exc:
+            logger.warning("tester k8s: could not read the workspace context: %.200s", str(exc)[:200])
+            # The turn ends as "no tests authored" either way; without this row
+            # nothing durable says the context read is the reason.
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="tester_workspace_context_failed",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"error": f"{type(exc).__name__}: {str(exc)[:400]}"},
+            )
+        else:
+            authoring_script, authoring_cost_usd = _model_authored_test_script(
+                inp, ctx, headers, virtual_key
+            )
 
         # write the test files IN THE POD (content via stdin — no quoting of the content)
         for s in (authoring_script or []):
@@ -2855,7 +2987,8 @@ async def _run_tester_turn_impl(
         for attempt in (1, 2):
             authoring_script, attempt_cost_usd = await run_sync_with_heartbeat(
                 lambda _c: _model_authored_test_script(
-                    inp, workspace_dir, headers, vk.virtual_key, error_feedback=error_feedback,
+                    inp, _local_tester_context(workspace_dir), headers, vk.virtual_key,
+                    error_feedback=error_feedback,
                 ),
                 None,
                 stage=Stage.tester.value,
