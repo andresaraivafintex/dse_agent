@@ -78,11 +78,16 @@ def test_presigned_url_expires_and_is_denied(garage_ready, small_file, work_item
     ref = garage.publish_artifact_core(
         PublishArtifactInput(
             work_item_id=work_item_id, tenant_id=tenant_id, kind="test_report",
-            local_path=str(small_file), content_type="text/plain", ttl_seconds=1,
+            # 1 second raced the assertion below: publishing plus one HTTP
+            # round-trip can exceed the whole lifetime on a loaded runner, and
+            # then the "valid right now" check reads 400 from a URL that expired
+            # before it was ever used. Seen in CI. Three seconds keeps the test
+            # fast while giving the positive case a window it cannot lose.
+            local_path=str(small_file), content_type="text/plain", ttl_seconds=3,
         )
     )
     assert httpx.get(ref.presigned_url).status_code == 200  # valid right now
-    time.sleep(3)
+    time.sleep(5)
     resp = httpx.get(ref.presigned_url)
     # Garage denies an expired signature with 400 (AuthorizationHeaderMalformed/
     # expired); AWS S3 would use 403 — both mean DENIED, never the content.
