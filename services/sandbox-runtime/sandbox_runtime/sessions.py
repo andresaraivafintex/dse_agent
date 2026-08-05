@@ -111,6 +111,10 @@ class PlannerContext:
     tickets: list[str] = field(default_factory=list)
     retrieval_hits: list[RetrievalHit] = field(default_factory=list)
     repo_map: str = ""
+    #: `repo@ref` the trusted docs were read at, rendered into their header. The
+    #: model is told WHICH commit-ish it is being shown, because "the repo says"
+    #: and "the repo said on this branch at this moment" are different claims.
+    doc_ref: str = ""
 
     def render(self, *, skill_body_chars: int | None = None) -> str:
         """`skill_body_chars` is forwarded to each skill's context block — see
@@ -118,10 +122,11 @@ class PlannerContext:
         caller changes behaviour; the Planner passes 0 because its context is
         cut to a fixed budget and full bodies would evict everything below."""
         parts: list[str] = [f"# Planner context — work_item {self.work_item_id} (tenant {self.tenant_id})"]
+        at_ref = f" — {self.doc_ref}" if self.doc_ref else ""
         if self.agents_md:
-            parts.append("## AGENTS.md (trusted)\n" + self.agents_md)
+            parts.append(f"## AGENTS.md (trusted{at_ref})\n" + self.agents_md)
         if self.codeowners:
-            parts.append("## CODEOWNERS (trusted)\n" + self.codeowners)
+            parts.append(f"## CODEOWNERS (trusted{at_ref})\n" + self.codeowners)
         if self.skills:
             parts.append(
                 "## Approved tenant skills (trusted)\n"
@@ -152,20 +157,35 @@ def hydrate_planner_context(
     *,
     work_item_id: str,
     tenant_id: str,
-    workspace_dir: str,
     repo: str,
     instruction: str,
     task_class: str = "default",
     related_tickets: list[str] | None = None,
     retrieval: RetrievalService | None = None,
     skills_conn=None,
+    agents_md: str | None = None,
+    codeowners: str | None = None,
+    doc_ref: str = "",
 ) -> PlannerContext:
-    """Assemble the `PlannerContext`: AGENTS.md + CODEOWNERS (from the
-    workspace), the tenant's approved skills (skill_registry, E4), related
-    tickets, and the top-k snippets from the retrieval index (E5) relevant to the
-    instruction. The Planner is read-only — nothing here mutates the repo."""
-    agents_md = _read_repo_file(workspace_dir, "AGENTS.md")
-    codeowners = _read_repo_file(workspace_dir, "CODEOWNERS") or _read_repo_file(workspace_dir, ".github/CODEOWNERS")
+    """Assemble the `PlannerContext`: AGENTS.md + CODEOWNERS, the tenant's
+    approved skills (skill_registry, E4), related tickets, and the top-k snippets
+    from the retrieval index (E5) relevant to the instruction. The Planner is
+    read-only — nothing here mutates the repo.
+
+    `agents_md`/`codeowners` are supplied by the caller, read from the base ref
+    through the GitHub API. They used to be read off `workspace_dir` — which is
+    created by `provision_sandbox`, and the workflow runs the Planner BEFORE that
+    (workflows.py:1693 vs :1697), so on the docker profile the directory did not
+    exist yet and under `sandboxDriver: k8s` it is never created on the worker at
+    all. Both docs were therefore '' on every production turn since the block was
+    written. Reading at the ref also means an agent-authored file in a workspace
+    can never surface under a `(trusted)` header.
+
+    None means the caller could not ask (no GitHub App, transport failure); '' or
+    a value means it asked and this is the answer. The Planner distinguishes the
+    two on the ledger — see `_repo_docs_for_planner`."""
+    agents_md = agents_md or ""
+    codeowners = codeowners or ""
     # Per-repo checkboxes from the console (repo_scope, migration 0029): the
     # Planner only sees skills that are global or ticked for THIS repo.
     skills = read_approved_skills(tenant_id, task_class=task_class, repo=repo or None, conn=skills_conn)
@@ -185,6 +205,7 @@ def hydrate_planner_context(
         tickets=list(related_tickets or []),
         retrieval_hits=hits,
         repo_map=repo_map,
+        doc_ref=doc_ref,
     )
 
 

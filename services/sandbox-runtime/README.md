@@ -143,8 +143,10 @@ write).
 ### WSC-E3-T3 — Read-only Planner session (`run_planner_turn`, `sessions.py`, `toolsets.py`)
 
 Activity `run_planner_turn` (name `ACTIVITY_RUN_PLANNER_TURN`): read-ONLY
-toolset (`PlannerToolset`). It hydrates AGENTS.md + CODEOWNERS (from the
-workspace), the tenant's approved skill registry (E4), related tickets and the
+toolset (`PlannerToolset`). It hydrates AGENTS.md + CODEOWNERS (read at the base
+ref through the GitHub App, **not** from the workspace — the Planner runs before
+`provision_sandbox` clones, and under `sandboxDriver: k8s` no host workspace ever
+exists), the tenant's approved skill registry (E4), related tickets and the
 retrieval/index (E5), and emits a structured `PlanArtifact` (steps,
 expected_files, diff_budget_lines, test_plan, risk_class). **P1**: the
 `risk_class` — which drives the WS-B gate — is DERIVED by
