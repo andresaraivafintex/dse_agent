@@ -24,7 +24,11 @@ from egress_proxy.credentials import GitHubScopeError, REVOCATION_SLO_SECONDS
 def test_credential_broker_mints_scoped_token(credential_broker, work_item_id):
     cred = credential_broker.mint(work_item_id=work_item_id, repo="acme/widgets", branch="dse/task-1")
     assert cred.token
-    assert cred.allowed_actions == frozenset({"contents:write"})
+    # contents:READ. The relay exists to clone; the turn's commits go to the
+    # local bare checkpoint and the PR is opened by the control plane with its
+    # own client, so nothing on this path needs write. A write token would have
+    # let an LLM-driven sandbox push to any repo the App can see.
+    assert cred.allowed_actions == frozenset({"contents:read"})
     assert cred.fixture is True  # no GITHUB_APP_ID configured in this dev session
 
 

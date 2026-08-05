@@ -249,3 +249,96 @@ def test_the_token_is_sent_as_basic_not_as_the_rest_scheme():
     assert 'f"token {cred.token}"' not in src
     # and the encoding is the one GitHub expects
     assert b64.b64encode(b"x-access-token:T").decode() == "eC1hY2Nlc3MtdG9rZW46VA=="
+
+
+# ---------------------------------------------------------------------------
+# Second adversarial pass: two blockers the first fix set introduced
+# ---------------------------------------------------------------------------
+
+def test_a_public_repo_still_clones_when_no_token_can_be_minted():
+    """Refusing with 403 broke every PUBLIC repo in any environment without
+    GitHub App credentials — repos that clone fine without this branch at all.
+    An anonymous relay succeeds for a public repo and lets GitHub answer 401
+    for a private one, which is a message the operator can act on."""
+    class _NoCreds:
+        minted = 0
+        def mint(self, **_):
+            return type("C", (), {"token": "fixture-ghtoken-x", "credential_id": "c"})()
+
+    p = EgressProxy(
+        allowlist=Allowlist.for_work_item(), tenant_id="t",
+        work_item_id="wi", credential_broker=_NoCreds(),
+    )
+    w = _Writer()
+
+    async def boom(*_a, **_k):
+        raise OSError("no network in this test")
+
+    async def go(monkey):
+        monkey.setattr(asyncio, "open_connection", boom)
+        await p._handle_plain_http(
+            "GET", "http://github.com/psf/requests.git/info/refs",
+            {"x-dse-inject-credential": "github"}, _reader(b""), w,
+        )
+
+    mp = pytest.MonkeyPatch()
+    try:
+        asyncio.run(go(mp))
+    finally:
+        mp.undo()
+
+    # 502 means it got PAST the injection gate and tried to reach the upstream.
+    # Our refusal would have been a bare 403 with no attempt at all.
+    assert b"502" in w.buf
+    assert b"403" not in w.buf
+    assert b"fixture-ghtoken" not in w.buf
+
+
+def test_the_token_is_scoped_to_the_repo_actually_being_fetched():
+    """The scope used to come from `X-Dse-Repo`, a header the untrusted sandbox
+    writes — so it could hold a token for one repository while fetching another.
+    The request path is the authoritative statement of what is being fetched."""
+    from egress_proxy.proxy import _repo_from_git_path
+
+    assert _repo_from_git_path("/acme/api.git/info/refs?service=git-upload-pack") == "acme/api"
+    assert _repo_from_git_path("/acme/api/git-upload-pack") == "acme/api"
+    assert _repo_from_git_path("/not/a/git/path") is None
+
+
+def test_internal_headers_do_not_reach_the_upstream():
+    """Only the placeholder was stripped, so x-dse-repo, x-dse-branch and
+    x-dse-credential-id were shipped to GitHub alongside the token."""
+    import inspect
+    src = inspect.getsource(EgressProxy._handle_plain_http)
+    for h in ("x-dse-repo", "x-dse-branch", "x-dse-credential-id"):
+        assert f'"{h}"' in src.split("for internal in")[1].split(")")[0]
+
+
+def test_the_broker_kill_switch_is_actually_read():
+    """`DSE_EGRESS_CREDENTIAL_BROKER_ENABLED` is rendered into the chart's
+    ConfigMap and was read by nothing — a switch that did not switch."""
+    import os
+    from egress_proxy.credentials import CredentialBroker
+
+    prev = os.environ.get("DSE_EGRESS_CREDENTIAL_BROKER_ENABLED")
+    try:
+        os.environ["DSE_EGRESS_CREDENTIAL_BROKER_ENABLED"] = "false"
+        assert CredentialBroker.enabled() is False
+        os.environ["DSE_EGRESS_CREDENTIAL_BROKER_ENABLED"] = "true"
+        assert CredentialBroker.enabled() is True
+    finally:
+        if prev is None:
+            os.environ.pop("DSE_EGRESS_CREDENTIAL_BROKER_ENABLED", None)
+        else:
+            os.environ["DSE_EGRESS_CREDENTIAL_BROKER_ENABLED"] = prev
+
+
+def test_the_lease_records_the_permission_that_was_actually_requested():
+    """The mint asked for contents:read while the ledger recorded
+    contents:write — an audit trail that overstates what was handed out."""
+    import inspect
+    from egress_proxy import credentials
+
+    src = inspect.getsource(credentials)
+    assert '"contents": "read"' in src
+    assert 'frozenset({"contents:write"})' not in src

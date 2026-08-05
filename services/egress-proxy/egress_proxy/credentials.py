@@ -78,8 +78,28 @@ class ScopedCredential:
 class CredentialBroker:
     def __init__(self) -> None:
         self._issued: dict[str, ScopedCredential] = {}
+        #: repo -> (token, expires_at). A clone is THREE requests (info/refs plus
+        #: two upload-pack POSTs under protocol v2) and each was minting a fresh
+        #: 1-hour installation token that nothing ever revoked. Reusing one for
+        #: its lifetime turns 3 tokens per clone into 1 and removes two blocking
+        #: round-trips from the request path.
+        self._token_cache: dict[str, tuple[str, float]] = {}
+
+    @staticmethod
+    def enabled() -> bool:
+        """`DSE_EGRESS_CREDENTIAL_BROKER_ENABLED` is rendered into the chart's
+        ConfigMap and was read by nothing — a kill switch that did not switch
+        anything off. It does now."""
+        return os.environ.get("DSE_EGRESS_CREDENTIAL_BROKER_ENABLED", "true").lower() not in (
+            "0", "false", "no", "off",
+        )
 
     def _mint_real_github_app_token(self, *, repo: str) -> str | None:
+        if not self.enabled():
+            return None
+        cached = self._token_cache.get(repo)
+        if cached and cached[1] > time.time() + 300:
+            return cached[0]
         app_id = os.environ.get("GITHUB_APP_ID")
         installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID")
         # The PEM by CONTENT is the shape the rest of the platform uses
@@ -119,7 +139,10 @@ class CredentialBroker:
             timeout=5.0,
         )
         resp.raise_for_status()
-        return resp.json()["token"]
+        token = resp.json()["token"]
+        # GitHub installation tokens live one hour; cache just under that.
+        self._token_cache[repo] = (token, time.time() + 55 * 60)
+        return token
 
     def mint(self, *, work_item_id: str, repo: str, branch: str) -> ScopedCredential:
         real_token = None
@@ -137,7 +160,7 @@ class CredentialBroker:
             work_item_id=work_item_id,
             repo=repo,
             branch=branch,
-            allowed_actions=frozenset({"contents:write"}),  # never pull_requests:write, never force
+            allowed_actions=frozenset({"contents:read"}),  # never pull_requests:write, never force
             issued_at=time.time(),
             fixture=fixture,
         )

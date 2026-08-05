@@ -60,6 +60,14 @@ def _emit_audit(*, actor: str, action: str, tenant_id: str, work_item_id: str | 
 
 
 _ABSOLUTE_URI_RE = re.compile(r"^https?://([^/:]+)(:(\d+))?(/.*)?$")
+#: `/owner/repo.git/info/refs?...` -> `owner/repo`. The git smart-HTTP path is
+#: the authoritative statement of which repository is being fetched.
+_GIT_PATH_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?/(?:info/refs|git-upload-pack|git-receive-pack)")
+
+
+def _repo_from_git_path(path: str) -> str | None:
+    m = _GIT_PATH_RE.match(path)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
 @dataclass
@@ -304,14 +312,25 @@ class EgressProxy:
                 )
                 await writer.drain()
                 return
-            cred = self.credential_broker.mint(
+            # The repo comes from the REQUEST PATH, not from the sandbox's
+            # `X-Dse-Repo` header. Trusting the header let the sandbox mint a
+            # token for one repository while fetching another — a token
+            # decoupled from the thing it is being used for. Deriving it from
+            # the path makes the scope exactly the resource requested. (It does
+            # not stop a sandbox from cloning a different repo in the same
+            # installation; only a per-work-item proxy identity would, and this
+            # proxy is shared. Recorded as a residual in the PR.)
+            path_repo = _repo_from_git_path(path) or headers.get("x-dse-repo", "unknown/unknown")
+            cred = await asyncio.to_thread(
+                self.credential_broker.mint,
                 work_item_id=self.work_item_id or "unknown",
-                repo=headers.get("x-dse-repo", "unknown/unknown"),
+                repo=path_repo,
                 branch=headers.get("x-dse-branch", "unknown"),
             )
-            if not cred or not cred.token or (
+            usable = bool(cred and cred.token) and not (
                 str(cred.token).startswith("fixture-") and not outbound_local
-            ):
+            )
+            if not usable:
                 # A fixture token is WORSE than none against a REAL host:
                 # GitHub answers 401 to a bogus credential where it would have
                 # answered 200 to an anonymous read, so the fallback would break
@@ -327,20 +346,33 @@ class EgressProxy:
                     work_item_id=self.work_item_id,
                     details={"host": host, "reason": "no_real_installation_token"},
                 )
-                writer.write(
-                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                await writer.drain()
-                return
-            # BASIC, not `token <t>`. `Authorization: token …` is the REST API's
-            # scheme; github.com's git smart-HTTP endpoint answers 401 to it and
-            # 200 to Basic with the token as the password. Verified against a
-            # real private repo before this line was written.
-            basic = base64.b64encode(f"x-access-token:{cred.token}".encode()).decode()
-            headers["authorization"] = f"Basic {basic}"
-            headers["x-dse-credential-id"] = cred.credential_id
+                # RELAY ANONYMOUSLY rather than refusing. Answering 403 here
+                # broke every PUBLIC repo in any environment without GitHub App
+                # credentials — repos that clone fine without this branch. An
+                # anonymous fetch succeeds for a public repo and gets GitHub's
+                # own 401 for a private one, which is a truthful message; a 403
+                # from us is not. The audit event above records that the request
+                # went out uncredentialed.
+                cred = None
+            if cred:
+                # BASIC, not `token <t>`. `Authorization: token …` is the REST
+                # API's scheme; github.com's git smart-HTTP endpoint answers 401
+                # to it and 200 to Basic with the token as the password.
+                # Verified against a real private repo before this was written.
+                basic = base64.b64encode(f"x-access-token:{cred.token}".encode()).decode()
+                headers["authorization"] = f"Basic {basic}"
+                headers["x-dse-credential-id"] = cred.credential_id
 
-        body = await self._read_body(headers, reader)
+        try:
+            body = await self._read_body(headers, reader)
+        except ValueError:
+            # Was a bare socket close: the client saw a connection reset with no
+            # status, which is indistinguishable from a network fault.
+            writer.write(
+                b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+            return
 
         try:
             remote_reader, remote_writer = await asyncio.open_connection(
@@ -353,7 +385,12 @@ class EgressProxy:
 
         headers["host"] = host
         headers["connection"] = "close"
-        if body:
+        # Internal routing headers are ours, not GitHub's. Only the placeholder
+        # was being stripped, so x-dse-repo / x-dse-branch / x-dse-credential-id
+        # were shipped to the upstream along with the token.
+        for internal in ("x-dse-repo", "x-dse-branch", "x-dse-credential-id"):
+            headers.pop(internal, None)
+        if headers.get("transfer-encoding", "").lower() == "chunked" or body:
             # The body was de-chunked while reading, so the framing the upstream
             # is told must match what is actually sent. Leaving a stale
             # `transfer-encoding: chunked` here makes GitHub wait forever for a
