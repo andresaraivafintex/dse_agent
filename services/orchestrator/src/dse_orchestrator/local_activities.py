@@ -58,6 +58,13 @@ LOCAL_ACTIVITY_EMIT_HISTORY_METRIC = "emit_history_metric"
 # owned by WS-C; WS-B only INSERTS the input) and PR quality metric
 # (pilot gate "PR quality thresholds").
 LOCAL_ACTIVITY_RECORD_SKILL_EPISODE = "record_skill_episode"
+LOCAL_ACTIVITY_RECORD_RUN_EPISODE = "record_run_episode"
+
+# One diário entry, bounded at the source. The reader injects the newest few into
+# a Planner context whose entire budget is 16.000 chars, so an unbounded digest
+# here would become an unbounded prompt there — and the truncation would happen
+# at the far end, where nothing knows what it cut.
+_RUN_DIGEST_MAX_CHARS = 800
 LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
 # Plan 08 §D — resolves the repo's deploys_preview gate (repo_bindings) to
 # decide whether the preview environment applies (P1, deterministic, fail-safe).
@@ -592,6 +599,113 @@ async def record_skill_episode(payload: dict[str, Any]) -> dict[str, Any]:
         conn.close()
 
 
+def _render_run_digest(p: dict[str, Any]) -> str:
+    """The diário entry, rendered from fields the workflow already held.
+
+    Deterministic on purpose. A cheap-model summariser was the obvious design and
+    it buys nothing here: everything worth recording — what was planned, which
+    files it touched, where it stopped, why — is already structured data at the
+    terminal transition. Paying a model to turn structured data into prose, then
+    paying again to read that prose back, is cost with no information added. It
+    would also give the journal a way to be WRONG about a run that the run itself
+    could not be wrong about.
+
+    Kept short by construction: this text is destined for a prompt whose whole
+    context budget is 16.000 chars."""
+    outcome = p.get("outcome", "unknown")
+    lines = [f"[{outcome}] {p.get('title') or p.get('work_item_id')}"]
+
+    files = [f for f in (p.get("expected_files") or []) if f][:6]
+    if files:
+        lines.append(f"  planned: {', '.join(files)}")
+
+    if p.get("risk_class"):
+        lines.append(f"  risk: {p['risk_class']}")
+
+    # The failure detail is the load-bearing part for every non-`done` outcome:
+    # "what stopped this last time" is the thing a later run most wants and can
+    # least cheaply rediscover.
+    detail = (p.get("terminal_detail") or "").strip()
+    if detail and outcome != "done":
+        lines.append(f"  stopped at: {detail[:180]}")
+
+    fixes = [f for f in (p.get("fix_context") or []) if f][:2]
+    for fix in fixes:
+        lines.append(f"  had to fix: {str(fix).strip()[:160]}")
+
+    if p.get("plan_rounds"):
+        lines.append(f"  re-planned {p['plan_rounds']}x")
+    if outcome == "done" and p.get("pr_number"):
+        lines.append(f"  merged as #{p['pr_number']}")
+
+    return "\n".join(lines)[:_RUN_DIGEST_MAX_CHARS]
+
+
+@activity.defn(name=LOCAL_ACTIVITY_RECORD_RUN_EPISODE)
+async def record_run_episode(payload: dict[str, Any]) -> dict[str, Any]:
+    """The diário de bordo — one row per run that reached a terminal state.
+
+    Distinct from `record_skill_episode` in both table and meaning: that one is a
+    candidate for a promotion pipeline and must never carry a failed run, this
+    one is a record of what happened and is most useful precisely when the run
+    failed. See migrations/0036_wsb_run_episode.sql.
+
+    Best-effort by design — a work item must not fail because its journal entry
+    could not be written — but NOT silent: a skipped write is audited, because
+    "the diário is quietly empty" is exactly the failure mode this repository has
+    already hit three separate times (the Planner's AGENTS.md read, the skills
+    note under k8s, repo_map's '(not indexed)')."""
+    tenant_id = payload["tenant_id"]
+    work_item_id = payload["work_item_id"]
+    digest = _render_run_digest(payload)
+    try:
+        conn = _get_connection()
+    except Exception as exc:  # pragma: no cover - no Postgres
+        logger.warning("record_run_episode: no Postgres (%s); no journal entry for %s", exc, work_item_id)
+        return {"persisted": False, "reason": "no_database"}
+    try:
+        import json
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO run_episode
+                    (tenant_id, repo, work_item_id, outcome, base_sha, risk_class,
+                     data_class, digest, provenance)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (work_item_id, outcome) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    tenant_id,
+                    payload.get("repo"),
+                    work_item_id,
+                    payload["outcome"],
+                    payload.get("base_sha"),
+                    payload.get("risk_class"),
+                    payload.get("data_class"),
+                    digest,
+                    json.dumps(
+                        {
+                            k: payload.get(k)
+                            for k in (
+                                "expected_files", "terminal_detail", "fix_context",
+                                "plan_rounds", "pr_number", "base_branch", "title",
+                            )
+                            if payload.get(k) is not None
+                        }
+                    ),
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        # DO NOTHING returns no row: the entry already existed, which a reset or
+        # a replay reaches legitimately. Not an error, and not a new write.
+        return {"persisted": row is not None, "episode_id": row[0] if row else None}
+    finally:
+        conn.close()
+
+
 @activity.defn(name=LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC)
 async def emit_pr_quality_metric(payload: dict[str, Any]) -> None:
     """Phase 4 — emits the PR quality OTel metrics (pilot gate). The READ
@@ -916,6 +1030,7 @@ LOCAL_ACTIVITIES = [
     record_evidence_state,
     emit_history_metric,
     record_skill_episode,
+    record_run_episode,
     emit_pr_quality_metric,
     post_tracking_comment,
     preview_enabled_for_repo,

@@ -74,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_PREVIEW_ENABLED,
         LOCAL_ACTIVITY_RECORD_EVIDENCE,
         LOCAL_ACTIVITY_RECORD_GATE,
+        LOCAL_ACTIVITY_RECORD_RUN_EPISODE,
         LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
         LOCAL_ACTIVITY_RESOLVE_APPROVER,
         LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP,
@@ -89,6 +90,20 @@ with workflow.unsafe.imports_passed_through():
     )
 
 logger = logging.getLogger("dse_orchestrator.workflow")
+
+# The states a work item never leaves. Operator cancellation is deliberately not
+# a fifth member: `_finish_cancelled` resolves to `failed`, so this set is the
+# whole terminal surface. It gates the diário write in `_set_status`; a new
+# terminal state added to WorkItemStatus must be added here too, or its runs are
+# silently never journalled.
+_TERMINAL_STATUSES = frozenset(
+    {
+        WorkItemStatus.done,
+        WorkItemStatus.failed,
+        WorkItemStatus.escalated,
+        WorkItemStatus.blocked,
+    }
+)
 
 _SYSTEM_ACTOR = "system:orchestrator"
 _MAX_OPERATOR_EVENTS = 25
@@ -856,6 +871,20 @@ class WorkItemLifecycleWorkflow:
         await self._persist_status(clear_ci_status=clear_ci_status)
         if audit_action:
             await self._audit(audit_action, details)
+        # The diário is written HERE rather than in each of the five terminal
+        # paths (_finish_cancelled/_escalated/_failed/_blocked and the merge path
+        # at the end of the review phase), because every one of them already
+        # funnels through this method. A per-path call would be five call sites
+        # to keep in step, and the sixth terminal state someone adds later would
+        # silently not be journalled.
+        #
+        # PATCH GUARD (RUNBOOK §3): this schedules a NEW activity on a path that
+        # closed histories ran without one. Replaying a closed history — which
+        # Temporal does on a query against a closed workflow and on a reset —
+        # would be nondeterministic without the marker. Old histories skip; new
+        # executions journal.
+        if status in _TERMINAL_STATUSES and workflow.patched("run-episode-journal-v1"):
+            await self._record_run_episode(status.value)
 
     async def _set_raw_status(self, status: str, *, audit_action: str | None = None,
                               details: dict[str, Any] | None = None) -> None:
@@ -1635,6 +1664,50 @@ class WorkItemLifecycleWorkflow:
             return True
         except asyncio.TimeoutError:
             return False
+
+    async def _record_run_episode(self, outcome: str) -> None:
+        """The diário de bordo: one durable entry per run that reached a terminal
+        state, written from data this workflow already holds.
+
+        Costs no model tokens — the entry is a deterministic template rendered
+        Activity-side (`_render_run_digest`). Nothing reads it yet; the Planner
+        read path lands separately, so the journal has real entries by the time
+        anything depends on them.
+
+        Best-effort: a failure here must never change the work item's outcome. It
+        is the last thing a terminal transition does, and its own failure is
+        audited rather than swallowed."""
+        input = self._input
+        try:
+            await workflow.execute_activity(
+                LOCAL_ACTIVITY_RECORD_RUN_EPISODE,
+                {
+                    "tenant_id": input.tenant_id,
+                    "work_item_id": input.work_item_id,
+                    "repo": input.repo,
+                    "base_branch": input.base_branch,
+                    "outcome": outcome,
+                    "base_sha": input.base_sha,
+                    "risk_class": input.risk_class,
+                    "data_class": input.data_class,
+                    # `task_content` is the sanitized issue text, so the journal
+                    # takes only its first line as a label. The full body is the
+                    # requester's prose and belongs on the work item, not
+                    # duplicated into every future Planner's context.
+                    "title": (input.task_content or "").strip().splitlines()[0][:120]
+                    if input.task_content
+                    else None,
+                    "expected_files": list((input.plan_json or {}).get("expected_files") or []),
+                    "terminal_detail": input.terminal_detail,
+                    "fix_context": list(input.fix_context or []),
+                    "plan_rounds": input.plan_rounds,
+                    "pr_number": input.pr_number,
+                },
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        except ActivityError as exc:
+            await self._audit("run_episode_write_failed", {"outcome": outcome, "reason": str(exc)[:200]})
 
     async def _emit_clarification_episode(self, recurring: list[str], missing: list[str]) -> None:
         """Phase 4 (WSC-E4-T2) — writes ONE skill_episode (source=clarification)
