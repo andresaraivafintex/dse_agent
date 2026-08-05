@@ -69,17 +69,38 @@ def _checkpoint_has_branch(checkpoint_path: str, branch: str) -> bool:
 
 
 def _clone_target_repo(req: WorkspaceBootstrapRequest) -> str:
-    """Clones the customer's real repo INSIDE the Pod, through the egress-proxy
-    (HTTPS_PROXY is already in the runner's environment). The URL carries NO
-    credential — for a public repo the CONNECT is anonymous; for a private one
-    the proxy re-originates the TLS and injects the token (fast-follow). It then
-    re-points `origin` at the local checkpoint (the GitHub URL disappears from
-    the config), creates the task branch off the base and does the first scoped
-    push. Returns the sha of the task tip."""
-    url = f"https://{req.repo_host}/{req.repo}.git"
+    """Clones the customer's real repo INSIDE the Pod, through the egress-proxy.
+    The URL carries NO credential, and the Pod never holds one.
+
+    The scheme is `http://` on purpose, and it is the whole mechanism. Over
+    `https://` git asks the proxy for a CONNECT tunnel, and a tunnel is opaque:
+    the proxy can allow or deny it but cannot add an Authorization header, so a
+    private repo answered `could not read Username for 'https://github.com'`
+    after eight retries. Over `http://` the proxy TERMINATES the request, injects
+    the installation token, and re-originates to github.com:443 over TLS
+    (`tls_upgrade` on the allowlist entry). The plaintext hop is sandbox→proxy
+    inside the Pod network; nothing leaves the cluster unencrypted, and the token
+    exists only in the proxy's memory — never in this container's env, argv or
+    git config.
+
+    `http.extraHeader` is how the sandbox ASKS for injection without holding
+    anything: it is a placeholder the proxy swaps for the real token.
+
+    It then re-points `origin` at the local checkpoint (the GitHub URL disappears
+    from the config), creates the task branch off the base and does the first
+    scoped push. Returns the sha of the task tip."""
+    url = f"http://{req.repo_host}/{req.repo}.git"
     # --depth: shallow history is enough for the turn; pushing the tip to the
     # local checkpoint carries the objects that are needed.
-    _git(["clone", "--depth", "50", "--branch", req.base_branch, url, req.workspace_dir])
+    _git([
+        "-c", "http.extraHeader=X-Dse-Inject-Credential: github",
+        "-c", f"http.extraHeader=X-Dse-Repo: {req.repo}",
+        "-c", f"http.extraHeader=X-Dse-Branch: {req.branch}",
+        # git would otherwise follow GitHub's 301 to https:// and land back on a
+        # CONNECT tunnel with no credential — the exact failure being fixed.
+        "-c", "http.followRedirects=false",
+        "clone", "--depth", "50", "--branch", req.base_branch, url, req.workspace_dir,
+    ])
     session = ScopedGitSession(workspace_dir=req.workspace_dir, branch=req.branch)
     session.ensure_identity()
     _git(["checkout", "-b", req.branch], cwd=req.workspace_dir)
