@@ -78,19 +78,46 @@ class ScopedCredential:
 class CredentialBroker:
     def __init__(self) -> None:
         self._issued: dict[str, ScopedCredential] = {}
+        #: repo -> (token, expires_at). A clone is THREE requests (info/refs plus
+        #: two upload-pack POSTs under protocol v2) and each was minting a fresh
+        #: 1-hour installation token that nothing ever revoked. Reusing one for
+        #: its lifetime turns 3 tokens per clone into 1 and removes two blocking
+        #: round-trips from the request path.
+        self._token_cache: dict[str, tuple[str, float]] = {}
+
+    @staticmethod
+    def enabled() -> bool:
+        """`DSE_EGRESS_CREDENTIAL_BROKER_ENABLED` is rendered into the chart's
+        ConfigMap and was read by nothing — a kill switch that did not switch
+        anything off. It does now."""
+        return os.environ.get("DSE_EGRESS_CREDENTIAL_BROKER_ENABLED", "true").lower() not in (
+            "0", "false", "no", "off",
+        )
 
     def _mint_real_github_app_token(self, *, repo: str) -> str | None:
+        if not self.enabled():
+            return None
+        cached = self._token_cache.get(repo)
+        if cached and cached[1] > time.time() + 300:
+            return cached[0]
         app_id = os.environ.get("GITHUB_APP_ID")
-        private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH")
         installation_id = os.environ.get("GITHUB_APP_INSTALLATION_ID")
-        if not (app_id and private_key_path and installation_id):
+        # The PEM by CONTENT is the shape the rest of the platform uses
+        # (dse_validation.config.GitHubConfig, and the `dse-poc-secrets` key the
+        # chart mounts). Requiring a PATH here meant the broker could never be
+        # configured from the same secret as everything else, so it silently
+        # fell back to a fixture token forever.
+        private_key = os.environ.get("GITHUB_APP_PRIVATE_KEY")
+        private_key_path = os.environ.get("GITHUB_APP_PRIVATE_KEY_PATH")
+        if not (app_id and installation_id and (private_key or private_key_path)):
             return None
 
         import jwt  # PyJWT — only imported when actually configured
         import httpx
 
-        with open(private_key_path, "rb") as f:
-            private_key = f.read()
+        if not private_key:
+            with open(private_key_path, "rb") as f:
+                private_key = f.read()
         now = int(time.time())
         payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": app_id}
         encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
@@ -101,11 +128,21 @@ class CredentialBroker:
                 "Authorization": f"Bearer {encoded_jwt}",
                 "Accept": "application/vnd.github+json",
             },
-            json={"repositories": [repo.split("/")[-1]], "permissions": {"contents": "write"}},
+            # READ, not write. The relay exists to CLONE; the turn's commits go
+            # to the local bare checkpoint, never to GitHub, and the PR is opened
+            # by the control plane with its own client. The repo name here comes
+            # from a header the sandbox writes, so it chooses which repo in the
+            # installation the token covers — bounding the permission is what
+            # keeps that choice from mattering. A write token would have let an
+            # LLM-driven sandbox push to any repo the App can see.
+            json={"repositories": [repo.split("/")[-1]], "permissions": {"contents": "read"}},
             timeout=5.0,
         )
         resp.raise_for_status()
-        return resp.json()["token"]
+        token = resp.json()["token"]
+        # GitHub installation tokens live one hour; cache just under that.
+        self._token_cache[repo] = (token, time.time() + 55 * 60)
+        return token
 
     def mint(self, *, work_item_id: str, repo: str, branch: str) -> ScopedCredential:
         real_token = None
@@ -123,7 +160,7 @@ class CredentialBroker:
             work_item_id=work_item_id,
             repo=repo,
             branch=branch,
-            allowed_actions=frozenset({"contents:write"}),  # never pull_requests:write, never force
+            allowed_actions=frozenset({"contents:read"}),  # never pull_requests:write, never force
             issued_at=time.time(),
             fixture=fixture,
         )

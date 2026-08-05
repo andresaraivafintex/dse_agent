@@ -15,6 +15,15 @@ Two traffic forms are supported:
     credentials, because the proxy terminates the connection and builds the
     outbound request itself.
 
+    This is what makes a PRIVATE repo clonable. An allowlist entry marked
+    `tls_upgrade` accepts the request on :80 and re-originates it to :443 over
+    TLS, so the plaintext hop is sandbox→proxy inside the Pod network and the
+    injected token still reaches GitHub encrypted. A credential is injected ONLY
+    onto a TLS leg, or onto loopback (which never reaches an interface);
+    anything else is refused with 403 and audited as
+    `egress_credential_injection_refused`. Downgrading instead of refusing would
+    read like "the repo is public" and fail much later, much more confusingly.
+
 Every refusal (host off the allowlist) emits `dse_audit.emit(action=
 "egress_denied", ...)` — the import is optional (the proxy also runs in a "bare"
 container without `dse_audit` installed, in which case it falls back to logging
@@ -23,6 +32,7 @@ on stdout; production must install `dse-audit` in the egress-proxy image).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -50,6 +60,14 @@ def _emit_audit(*, actor: str, action: str, tenant_id: str, work_item_id: str | 
 
 
 _ABSOLUTE_URI_RE = re.compile(r"^https?://([^/:]+)(:(\d+))?(/.*)?$")
+#: `/owner/repo.git/info/refs?...` -> `owner/repo`. The git smart-HTTP path is
+#: the authoritative statement of which repository is being fetched.
+_GIT_PATH_RE = re.compile(r"^/([^/]+)/([^/]+?)(?:\.git)?/(?:info/refs|git-upload-pack|git-receive-pack)")
+
+
+def _repo_from_git_path(path: str) -> str | None:
+    m = _GIT_PATH_RE.match(path)
+    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
 @dataclass
@@ -67,7 +85,16 @@ class EgressProxy:
         tenant_id: str,
         work_item_id: str | None = None,
         credential_broker: CredentialBroker | None = None,
+        credential_hosts: frozenset[str] | None = None,
     ) -> None:
+        #: The ONLY destinations a GitHub credential may be injected towards.
+        #: Derived from the allowlist's `repo` category rather than hardcoded, so
+        #: a deployment that renames its repo host stays correct — and so that
+        #: adding an unrelated :443 host to the allowlist can never turn it into
+        #: a credential destination.
+        self.credential_hosts = credential_hosts or frozenset(
+            e.host.lower() for e in allowlist.entries if e.category == "repo"
+        )
         self.allowlist = allowlist
         self.tenant_id = tenant_id
         self.work_item_id = work_item_id
@@ -177,6 +204,40 @@ class EgressProxy:
 
         await asyncio.gather(pipe(reader, remote_writer), pipe(remote_reader, writer))
 
+    #: A git-upload-pack negotiation is a few KB of "want/have" lines; this is the
+    #: outer bound that stops a hostile or runaway client in the sandbox from
+    #: making the proxy buffer without limit. It bounds the REQUEST only — the
+    #: response (the packfile, which is the big one) is streamed straight through.
+    _MAX_RELAY_BODY_BYTES = 32 * 1024 * 1024
+
+    async def _read_body(self, headers: dict[str, str], reader: asyncio.StreamReader) -> bytes:
+        """Content-Length or chunked.
+
+        git speaks BOTH: a small negotiation arrives with a Content-Length, and
+        anything past libcurl's buffer arrives chunked. Reading only the former —
+        which is what this did — meant a chunked POST was forwarded with an empty
+        body, and `git-upload-pack` answered a protocol error that read like a
+        network fault."""
+        if headers.get("transfer-encoding", "").lower() == "chunked":
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                size_line = await reader.readline()
+                size = int(size_line.strip().split(b";")[0] or b"0", 16)
+                if size == 0:
+                    await reader.readline()  # the trailing CRLF after the last chunk
+                    break
+                total += size
+                if total > self._MAX_RELAY_BODY_BYTES:
+                    raise ValueError(f"relayed request body exceeds {self._MAX_RELAY_BODY_BYTES} bytes")
+                chunks.append(await reader.readexactly(size))
+                await reader.readexactly(2)  # CRLF terminating this chunk
+            return b"".join(chunks)
+        length = int(headers.get("content-length", "0") or 0)
+        if length > self._MAX_RELAY_BODY_BYTES:
+            raise ValueError(f"relayed request body exceeds {self._MAX_RELAY_BODY_BYTES} bytes")
+        return await reader.readexactly(length) if length else b""
+
     async def _handle_plain_http(
         self,
         method: str,
@@ -199,21 +260,124 @@ class EgressProxy:
             await writer.drain()
             return
 
+        # An entry marked `tls_upgrade` accepts a plain-HTTP request on the way in
+        # and is re-originated over TLS on 443 on the way out. That is the whole
+        # git smart-HTTP relay: terminating the request is what allows injecting a
+        # credential, and terminating requires the inbound leg to be plaintext.
+        entry = self.allowlist.entry_for(host, port)
+        upgrade = bool(entry and entry.tls_upgrade and port == 80)
+        outbound_port = 443 if upgrade else port
+        outbound_tls = upgrade or port == 443
+
+        # Loopback is the one cleartext leg a credential may take: the bytes
+        # never reach a network interface, and the proxy's own 127.0.0.1 is not
+        # reachable from the sandbox — it is a different Pod. Anything else must
+        # be TLS.
+        outbound_local = host in ("127.0.0.1", "::1", "localhost")
+
         inject = headers.pop("x-dse-inject-credential", None)
         if inject == "github":
-            cred = self.credential_broker.mint(
+            # DESTINATION, not just transport. Gating on TLS alone meant every
+            # allowlisted :443 host — api.anthropic.com, slack.com, the Jira
+            # site, login.microsoftonline.com — would receive a real GitHub
+            # installation token if the sandbox simply addressed it with the
+            # header set. The credential is scoped to one host; so is its use.
+            if host.lower() not in self.credential_hosts:
+                _emit_audit(
+                    actor="system:egress-proxy",
+                    action="egress_credential_injection_refused",
+                    tenant_id=self.tenant_id,
+                    work_item_id=self.work_item_id,
+                    details={"host": host, "port": port, "reason": "host_not_a_credential_destination"},
+                )
+                writer.write(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                return
+            if not (outbound_tls or outbound_local):
+                # The invariant the :443-only allowlist entry was written to
+                # protect: a token must never leave on a cleartext hop. Refusing
+                # is not a degradation — a silent anonymous retry would look like
+                # "the repo is public" and fail much later, much more confusingly.
+                _emit_audit(
+                    actor="system:egress-proxy",
+                    action="egress_credential_injection_refused",
+                    tenant_id=self.tenant_id,
+                    work_item_id=self.work_item_id,
+                    details={"host": host, "port": port, "reason": "outbound_leg_not_tls"},
+                )
+                writer.write(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                return
+            # The repo comes from the REQUEST PATH, not from the sandbox's
+            # `X-Dse-Repo` header. Trusting the header let the sandbox mint a
+            # token for one repository while fetching another — a token
+            # decoupled from the thing it is being used for. Deriving it from
+            # the path makes the scope exactly the resource requested. (It does
+            # not stop a sandbox from cloning a different repo in the same
+            # installation; only a per-work-item proxy identity would, and this
+            # proxy is shared. Recorded as a residual in the PR.)
+            path_repo = _repo_from_git_path(path) or headers.get("x-dse-repo", "unknown/unknown")
+            cred = await asyncio.to_thread(
+                self.credential_broker.mint,
                 work_item_id=self.work_item_id or "unknown",
-                repo=headers.get("x-dse-repo", "unknown/unknown"),
+                repo=path_repo,
                 branch=headers.get("x-dse-branch", "unknown"),
             )
-            headers["authorization"] = f"token {cred.token}"
-            headers["x-dse-credential-id"] = cred.credential_id
-
-        length = int(headers.get("content-length", "0") or 0)
-        body = await reader.readexactly(length) if length else b""
+            usable = bool(cred and cred.token) and not (
+                str(cred.token).startswith("fixture-") and not outbound_local
+            )
+            if not usable:
+                # A fixture token is WORSE than none against a REAL host:
+                # GitHub answers 401 to a bogus credential where it would have
+                # answered 200 to an anonymous read, so the fallback would break
+                # the public-repo clone that works today, and say nothing about
+                # why. The broker degrades silently by design; the relay must
+                # not. Loopback is exempt — the dev/test doubles that prove the
+                # placeholder swap have no real identity to authenticate to, and
+                # a fixture there is the point rather than a hazard.
+                _emit_audit(
+                    actor="system:egress-proxy",
+                    action="egress_credential_injection_refused",
+                    tenant_id=self.tenant_id,
+                    work_item_id=self.work_item_id,
+                    details={"host": host, "reason": "no_real_installation_token"},
+                )
+                # RELAY ANONYMOUSLY rather than refusing. Answering 403 here
+                # broke every PUBLIC repo in any environment without GitHub App
+                # credentials — repos that clone fine without this branch. An
+                # anonymous fetch succeeds for a public repo and gets GitHub's
+                # own 401 for a private one, which is a truthful message; a 403
+                # from us is not. The audit event above records that the request
+                # went out uncredentialed.
+                cred = None
+            if cred:
+                # BASIC, not `token <t>`. `Authorization: token …` is the REST
+                # API's scheme; github.com's git smart-HTTP endpoint answers 401
+                # to it and 200 to Basic with the token as the password.
+                # Verified against a real private repo before this was written.
+                basic = base64.b64encode(f"x-access-token:{cred.token}".encode()).decode()
+                headers["authorization"] = f"Basic {basic}"
+                headers["x-dse-credential-id"] = cred.credential_id
 
         try:
-            remote_reader, remote_writer = await asyncio.open_connection(host, port)
+            body = await self._read_body(headers, reader)
+        except ValueError:
+            # Was a bare socket close: the client saw a connection reset with no
+            # status, which is indistinguishable from a network fault.
+            writer.write(
+                b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            await writer.drain()
+            return
+
+        try:
+            remote_reader, remote_writer = await asyncio.open_connection(
+                host, outbound_port, ssl=outbound_tls, server_hostname=host if outbound_tls else None
+            )
         except OSError:
             writer.write(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
             await writer.drain()
@@ -221,6 +385,18 @@ class EgressProxy:
 
         headers["host"] = host
         headers["connection"] = "close"
+        # Internal routing headers are ours, not GitHub's. Only the placeholder
+        # was being stripped, so x-dse-repo / x-dse-branch / x-dse-credential-id
+        # were shipped to the upstream along with the token.
+        for internal in ("x-dse-repo", "x-dse-branch", "x-dse-credential-id"):
+            headers.pop(internal, None)
+        if headers.get("transfer-encoding", "").lower() == "chunked" or body:
+            # The body was de-chunked while reading, so the framing the upstream
+            # is told must match what is actually sent. Leaving a stale
+            # `transfer-encoding: chunked` here makes GitHub wait forever for a
+            # terminator that will never arrive.
+            headers.pop("transfer-encoding", None)
+            headers["content-length"] = str(len(body))
         request_lines = [f"{method} {path} HTTP/1.1"]
         request_lines += [f"{k}: {v}" for k, v in headers.items()]
         remote_writer.write(("\r\n".join(request_lines) + "\r\n\r\n").encode())

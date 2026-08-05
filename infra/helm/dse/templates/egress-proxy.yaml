@@ -33,6 +33,13 @@ spec:
                 name: {{ include "dse.fullname" . }}-config
             - secretRef:
                 name: {{ include "dse.postgresSecretName" . }}
+            {{- if .Values.extraEnvSecret }}
+            # GitHub App — the proxy MINTS the installation token for the git
+            # smart-HTTP relay, so the sandbox never holds one. Without this the
+            # broker degrades to a fixture token, which GitHub 401s.
+            - secretRef:
+                name: {{ .Values.extraEnvSecret }}
+            {{- end }}
           env:
             - name: VAULT_ADDR
               value: {{ .Values.secrets.vaultAddr | quote }}

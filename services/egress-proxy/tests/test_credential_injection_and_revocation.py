@@ -24,7 +24,11 @@ from egress_proxy.credentials import GitHubScopeError, REVOCATION_SLO_SECONDS
 def test_credential_broker_mints_scoped_token(credential_broker, work_item_id):
     cred = credential_broker.mint(work_item_id=work_item_id, repo="acme/widgets", branch="dse/task-1")
     assert cred.token
-    assert cred.allowed_actions == frozenset({"contents:write"})
+    # contents:READ. The relay exists to clone; the turn's commits go to the
+    # local bare checkpoint and the PR is opened by the control plane with its
+    # own client, so nothing on this path needs write. A write token would have
+    # let an LLM-driven sandbox push to any repo the App can see.
+    assert cred.allowed_actions == frozenset({"contents:read"})
     assert cred.fixture is True  # no GITHUB_APP_ID configured in this dev session
 
 
@@ -71,7 +75,11 @@ def test_credential_placeholder_header_is_replaced_before_egress(running_proxy_f
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
-    allowlist.entries.append(AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"]))
+    # category="repo": the credential destination gate only injects towards the
+    # repo host, and this server stands in for GitHub.
+    allowlist.entries.append(
+        AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"], category="repo")
+    )
     rp = running_proxy_factory(allowlist)
 
     conn = http.client.HTTPConnection("127.0.0.1", rp.port, timeout=5)
@@ -111,7 +119,11 @@ def test_no_token_reaches_sandbox_container_env_fs_or_proc(running_proxy_factory
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
-    allowlist.entries.append(AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"]))
+    # category="repo": the credential destination gate only injects towards the
+    # repo host, and this server stands in for GitHub.
+    allowlist.entries.append(
+        AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"], category="repo")
+    )
     rp = running_proxy_factory(allowlist)
 
     client = docker.from_env()
