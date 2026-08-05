@@ -1703,10 +1703,22 @@ class WorkItemLifecycleWorkflow:
                     "plan_rounds": input.plan_rounds,
                     "pr_number": input.pr_number,
                 },
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                # A journal entry must never cost a work item time. It is one
+                # INSERT on a connection the pool already has; if it cannot land
+                # in ten seconds it is not going to, and RETRYING it is actively
+                # harmful — this runs on the terminal path of every run, so 30s
+                # x 2 attempts per transition turned a green orchestrator suite
+                # into an eight-minute timeout the moment the write started
+                # failing. Advisory data does not get to extend a lifecycle.
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=1),
             )
-        except ActivityError as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Deliberately not just ActivityError. This is the last thing a
+            # terminal transition does, and anything escaping here would
+            # propagate out of _finish_* and fail the workflow task — which
+            # Temporal then retries forever, turning a missing journal row into
+            # a stuck work item.
             await self._audit("run_episode_write_failed", {"outcome": outcome, "reason": str(exc)[:200]})
 
     async def _emit_clarification_episode(self, recurring: list[str], missing: list[str]) -> None:
