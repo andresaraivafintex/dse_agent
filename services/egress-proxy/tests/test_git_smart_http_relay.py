@@ -342,3 +342,19 @@ def test_the_lease_records_the_permission_that_was_actually_requested():
     src = inspect.getsource(credentials)
     assert '"contents": "read"' in src
     assert 'frozenset({"contents:write"})' not in src
+
+
+def test_rs256_is_actually_available_to_the_broker():
+    """A GitHub App JWT can only be RS256, and RS256 lives in `cryptography` —
+    an EXTRA of PyJWT, not part of it. The image declared bare `PyJWT`, so
+    `jwt.encode(..., algorithm="RS256")` raised NotImplementedError inside the
+    running Pod, the broker swallowed it into a fixture token, and the relay
+    went out anonymous: a private repo stayed unclonable with nothing in the
+    logs but a generic 401.
+
+    Found by minting a token inside the deployed container. Nothing in the
+    source, the manifest or the unit suite could have shown it, because the
+    dev venv happens to have `cryptography` pulled in by something else."""
+    import jwt
+
+    jwt.get_algorithm_by_name("RS256")  # raises NotImplementedError if absent
