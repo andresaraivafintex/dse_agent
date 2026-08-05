@@ -1153,6 +1153,27 @@ def _repo_docs_for_planner(
     return agents_md, codeowners
 
 
+def _run_episodes_for_planner(
+    tenant_id: str, repo: str | None, base_sha: str | None, *, telemetry: dict[str, Any]
+) -> str:
+    """The diário de bordo for this repo, rendered for the prompt.
+
+    Fail-soft like the tree and the repo docs — a Planner without the journal is
+    a Planner that explores a bit more, not a failed work item — but the failure
+    is recorded rather than becoming an empty string nobody can distinguish from
+    a repository with no history."""
+    from .run_episodes import RunEpisodesUnavailable, read_recent_episodes, render_episodes_block
+
+    try:
+        episodes = read_recent_episodes(tenant_id, repo=repo)
+    except RunEpisodesUnavailable as exc:
+        telemetry["run_episodes_unavailable_reason"] = type(exc.__cause__ or exc).__name__
+        logger.warning("planner: run_episode journal unavailable for %s: %s", repo, exc)
+        return ""
+    telemetry["run_episodes_read"] = len(episodes)
+    return render_episodes_block(episodes, base_sha=base_sha)
+
+
 def _split_by_dir(paths: list[str], prefix: str = "") -> tuple[list[str], dict[str, int]]:
     """Files sitting DIRECTLY under `prefix`, and {subdirectory: files in its
     whole subtree}. Every path is assumed to start with `prefix`."""
@@ -1442,6 +1463,18 @@ def _fit_planner_context(
         "context_rendered_chars": len(rendered),
         "context_truncated_chars": 0,
     }
+    tel["run_episodes_chars"] = len(getattr(ctx, "run_episodes", "") or "")
+    tel["run_episodes_dropped"] = False
+    if len(rendered) > budget and tel["run_episodes_chars"] and dataclasses.is_dataclass(ctx):
+        # The journal goes BEFORE any skill does. A skill is curated by a human
+        # and approved by a named one; a journal entry is a machine's note about
+        # a past run. Evicting the human's guidance to keep the machine's memo
+        # inverts the whole point of the registry — and it would happen silently,
+        # because the skill-eviction loop below reports only which skills it
+        # dropped, never what it kept them out for.
+        ctx = dataclasses.replace(ctx, run_episodes="")
+        rendered = ctx.render(skill_body_chars=0)
+        tel["run_episodes_dropped"] = True
     if len(rendered) > budget and skills and dataclasses.is_dataclass(ctx):
         rendered = dataclasses.replace(ctx, skills=[]).render(skill_body_chars=0)
         keep: set[int] = set()
@@ -1606,6 +1639,9 @@ async def _run_planner_turn_impl(
     agents_md, codeowners = _repo_docs_for_planner(
         inp.repo, inp.base_branch or "main", telemetry=context_telemetry
     )
+    episodes_block = _run_episodes_for_planner(
+        inp.tenant_id, inp.repo, inp.base_sha, telemetry=context_telemetry
+    )
 
     retrieval = retrieval if retrieval is not None else RetrievalService()
     ctx = hydrate_planner_context(
@@ -1620,6 +1656,7 @@ async def _run_planner_turn_impl(
         agents_md=agents_md,
         codeowners=codeowners,
         doc_ref=f"{inp.repo}@{inp.base_branch or 'main'}",
+        run_episodes=episodes_block,
     )
     if context_telemetry.get("repo_doc_unavailable_reason"):
         # Not the same as "this repo has no AGENTS.md" — that is countable off

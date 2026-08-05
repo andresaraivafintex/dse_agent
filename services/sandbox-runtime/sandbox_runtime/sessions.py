@@ -111,6 +111,11 @@ class PlannerContext:
     tickets: list[str] = field(default_factory=list)
     retrieval_hits: list[RetrievalHit] = field(default_factory=list)
     repo_map: str = ""
+    #: The diário de bordo (migration 0036), pre-rendered. Machine-authored and
+    #: therefore NOT trusted the way AGENTS.md and the skills are: it is a record
+    #: of what happened, ranked below curated guidance, and the first block
+    #: `_fit_planner_context` drops when the budget binds.
+    run_episodes: str = ""
     #: `repo@ref` the trusted docs were read at, rendered into their header. The
     #: model is told WHICH commit-ish it is being shown, because "the repo says"
     #: and "the repo said on this branch at this moment" are different claims.
@@ -132,6 +137,10 @@ class PlannerContext:
                 "## Approved tenant skills (trusted)\n"
                 + "\n\n".join(s.as_context_block(body_chars=skill_body_chars) for s in self.skills)
             )
+        # After the curated blocks and before the repo map: it outranks a machine
+        # index of the code, and never outranks a human's conventions or skills.
+        if self.run_episodes:
+            parts.append(self.run_episodes)
         if self.repo_map:
             parts.append("## Repo map\n" + self.repo_map)
         # Untrusted last, clearly demarcated.
@@ -166,6 +175,7 @@ def hydrate_planner_context(
     agents_md: str | None = None,
     codeowners: str | None = None,
     doc_ref: str = "",
+    run_episodes: str = "",
 ) -> PlannerContext:
     """Assemble the `PlannerContext`: AGENTS.md + CODEOWNERS, the tenant's
     approved skills (skill_registry, E4), related tickets, and the top-k snippets
@@ -206,6 +216,7 @@ def hydrate_planner_context(
         retrieval_hits=hits,
         repo_map=repo_map,
         doc_ref=doc_ref,
+        run_episodes=run_episodes,
     )
 
 
