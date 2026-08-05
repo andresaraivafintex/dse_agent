@@ -157,8 +157,33 @@ class ScopedGitSession:
         return proc
 
     def ensure_identity(self, name: str = "dse-coder", email: str = "coder@dse.local") -> None:
+        """Make this workspace usable for DSE commits: an identity, and none of
+        the repository's own hooks."""
         self._run(["config", "user.name", name])
         self._run(["config", "user.email", email])
+        self._disable_repo_hooks()
+
+    def _disable_repo_hooks(self) -> None:
+        """Point `core.hooksPath` at an empty directory, so no hook the CUSTOMER
+        ships ever runs on a DSE commit.
+
+        A checkpoint commit is our infrastructure, not a developer's commit, and
+        it must not execute code from the repository being worked on. On the
+        Angular testbed this was not theoretical: the L1 gate runs `npm ci`, the
+        repo's `prepare` script is `husky`, and husky installs `.husky/` as the
+        hooks path — so every subsequent `git commit` ran the project's `ng lint`
+        INSIDE the sandbox, where it exhausted the V8 heap and died. The
+        turn-start checkpoint could then never be written, and since the fix loop
+        rebuilds and retries, every attempt re-ran the same OOM. Seen climbing
+        one retry per ~45s on wi_pr21.
+
+        This is set on the WORKSPACE repo only. The scope `pre-receive` guard
+        lives in the checkpoint bare repo and runs in `git-receive-pack`, which
+        reads that repo's own config — so this cannot weaken it. There is a test
+        that holds this apart."""
+        hooks_dir = Path(self.workspace_dir) / ".git" / "dse-empty-hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        self._run(["config", "core.hooksPath", str(hooks_dir)])
 
     def has_changes(self) -> bool:
         result = subprocess.run(
