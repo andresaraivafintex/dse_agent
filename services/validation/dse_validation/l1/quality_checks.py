@@ -31,6 +31,49 @@ def _run(executor: SandboxExecutor, argv: list[str], timeout: int) -> ExecResult
     return executor.run(argv, timeout=timeout)
 
 
+#: 137 = 128 + SIGKILL. Inside a container that is the cgroup's OOM killer
+#: almost every time; 139 is SIGSEGV, which a linter dying on memory also hits.
+_KILLED_RETURNCODES = frozenset({137, 139})
+
+#: What a Node toolchain prints on its way out of memory. `ng lint` and
+#: `ng build` on a real Angular app are the two commands that reach it.
+_OOM_MARKERS = (
+    "javascript heap out of memory",
+    "allocation failure",
+    "fatal error: reached heap limit",
+    "killed",
+    "cannot allocate memory",
+    "enomem",
+)
+
+
+def _infra_failure(result: ExecResult) -> str | None:
+    """Names an INFRASTRUCTURE failure, or None if the tool merely disagreed
+    with the code.
+
+    Without this, a gate killed by the cgroup's OOM killer is scored
+    `GateStatus.FAIL` — a verdict on the customer's code — because the only
+    thing distinguishing it from real lint errors is a return code nobody
+    looked at. The workflow then spends a paid Coder turn "fixing" a lint run
+    that never produced a finding, three times, and the work item ends `failed`
+    with a reason that blames the diff.
+
+    The sandbox runs `ng lint` and `ng build` under a 1536Mi limit while V8
+    sizes its heap from the NODE's memory, so this is not hypothetical: it is
+    the same exhaustion that already killed this repository's checkpoint
+    commits when husky ran the linter on them.
+
+    The Tester path has had this distinction for a while
+    (`_tester_infra_outcome`); L1 had none."""
+    if result.returncode in _KILLED_RETURNCODES:
+        return f"the process was killed (exit={result.returncode})"
+    blob = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
+    for marker in _OOM_MARKERS:
+        if marker in blob:
+            return "the process ran out of memory"
+    return None
+
+
 def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     # `cfg.source` stays out of `summary`: it interpolates the manifest path and
     # base sha, and `summary` is the one field that reaches the append-only
@@ -58,6 +101,11 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if result.timed_out:
         detail = f"timed out after {timeout}s running {' '.join(cfg.lint_cmd)}"
         summary = f"timed out after {timeout}s"
+        status = GateStatus.ERROR
+    elif (infra := _infra_failure(result)) is not None:
+        detail = f"lint: {infra}\n" + _tail(result.stdout or result.stderr)
+        summary = f"lint could not run: {infra}"
+        passed = False
         status = GateStatus.ERROR
     elif result.returncode == 127:
         detail = f"lint command not found: {' '.join(cfg.lint_cmd)} ({result.stderr.strip()})"
@@ -110,6 +158,14 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         for ln in result.stdout.splitlines()
         if ": error:" in ln or _TSC_ERROR_RE.search(ln)
     ]
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="typecheck",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"typecheck: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"typecheck could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="typecheck",
@@ -153,6 +209,14 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         return _not_configured("test", cfg)
     timeout = cfg.timeout_for("test")
     result = _run(executor, cfg.test_cmd, timeout)
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="test",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"test: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"the test suite could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="test",
@@ -190,6 +254,14 @@ def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         return _not_configured("build", cfg)
     timeout = cfg.timeout_for("build")
     result = _run(executor, cfg.build_cmd, timeout)
+    if (infra := _infra_failure(result)) is not None:
+        return L1Finding(
+            check="build",
+            passed=False,
+            status=GateStatus.ERROR,
+            detail=f"build: {infra}\n" + _tail(result.stdout or result.stderr),
+            summary=f"the build could not run: {infra}",
+        )
     if result.returncode == 127:
         return L1Finding(
             check="build",

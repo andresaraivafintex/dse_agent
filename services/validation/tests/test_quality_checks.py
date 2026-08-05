@@ -207,3 +207,63 @@ def test_a_failed_typecheck_never_claims_there_were_no_errors():
     assert finding.passed is False
     assert "no type errors" not in finding.summary
     assert "exit=2" in finding.summary
+
+
+# ---------------------------------------------------------------------------
+# An infrastructure failure is not a verdict on the customer's code.
+#
+# The sandbox runs `ng lint` and `ng build` under a 1536Mi limit while V8 sizes
+# its heap from the NODE's memory. Without this distinction the cgroup's OOM
+# killer reads as "your code has lint errors": the workflow spends a paid Coder
+# turn "fixing" a run that produced no finding, three times, and the work item
+# ends `failed` with a reason that blames the diff. The Tester path has had the
+# distinction for a while (`_tester_infra_outcome`); L1 had none.
+# ---------------------------------------------------------------------------
+def _killed(returncode=137, stdout="", stderr=""):
+    return _CannedSandbox(
+        ExecResult(argv=["x"], returncode=returncode, stdout=stdout, stderr=stderr)
+    )
+
+
+_HEAP_DEATH = (
+    "<--- Last few GCs --->\n"
+    "[851:0x6c3f000] 37968 ms: Mark-Compact 765.7 (783.1) -> 765.2 (784.8) MB\n"
+    "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n"
+)
+
+
+def test_a_lint_killed_by_the_oom_killer_is_not_a_lint_error():
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    finding = lint_check(_killed(137), cfg)
+    assert finding.status is GateStatus.ERROR, "an OOM was scored as a code failure"
+    assert "could not run" in finding.summary
+
+
+def test_a_build_that_exhausted_the_heap_says_so():
+    cfg = L1Config(build_cmd=["npm", "run", "build"])
+    finding = build_check(_killed(1, stderr=_HEAP_DEATH), cfg)
+    assert finding.status is GateStatus.ERROR
+    assert "out of memory" in finding.summary
+
+
+def test_a_typecheck_killed_is_not_a_type_error():
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_killed(137), cfg)
+    assert finding.status is GateStatus.ERROR
+    assert "type error" not in finding.summary
+
+
+def test_a_suite_killed_is_not_a_failing_test():
+    cfg = L1Config(test_cmd=["npm", "test"])
+    finding = run_test_check(_killed(137), cfg)
+    assert finding.status is GateStatus.ERROR
+    assert "could not run" in finding.summary
+
+
+def test_a_real_lint_error_is_still_a_code_failure():
+    """The classifier must not swallow genuine findings — that would turn every
+    failing gate into an infra excuse."""
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    finding = lint_check(_canned("src/a.py:1:1: F401 unused import\n", 1), cfg)
+    assert finding.status is GateStatus.FAIL
+    assert finding.summary == "1 lint issue(s)"
