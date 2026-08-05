@@ -32,6 +32,7 @@ on stdout; production must install `dse-audit` in the egress-proxy image).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import time
@@ -76,7 +77,16 @@ class EgressProxy:
         tenant_id: str,
         work_item_id: str | None = None,
         credential_broker: CredentialBroker | None = None,
+        credential_hosts: frozenset[str] | None = None,
     ) -> None:
+        #: The ONLY destinations a GitHub credential may be injected towards.
+        #: Derived from the allowlist's `repo` category rather than hardcoded, so
+        #: a deployment that renames its repo host stays correct — and so that
+        #: adding an unrelated :443 host to the allowlist can never turn it into
+        #: a credential destination.
+        self.credential_hosts = credential_hosts or frozenset(
+            e.host.lower() for e in allowlist.entries if e.category == "repo"
+        )
         self.allowlist = allowlist
         self.tenant_id = tenant_id
         self.work_item_id = work_item_id
@@ -259,6 +269,24 @@ class EgressProxy:
 
         inject = headers.pop("x-dse-inject-credential", None)
         if inject == "github":
+            # DESTINATION, not just transport. Gating on TLS alone meant every
+            # allowlisted :443 host — api.anthropic.com, slack.com, the Jira
+            # site, login.microsoftonline.com — would receive a real GitHub
+            # installation token if the sandbox simply addressed it with the
+            # header set. The credential is scoped to one host; so is its use.
+            if host.lower() not in self.credential_hosts:
+                _emit_audit(
+                    actor="system:egress-proxy",
+                    action="egress_credential_injection_refused",
+                    tenant_id=self.tenant_id,
+                    work_item_id=self.work_item_id,
+                    details={"host": host, "port": port, "reason": "host_not_a_credential_destination"},
+                )
+                writer.write(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                return
             if not (outbound_tls or outbound_local):
                 # The invariant the :443-only allowlist entry was written to
                 # protect: a token must never leave on a cleartext hop. Refusing
@@ -281,7 +309,35 @@ class EgressProxy:
                 repo=headers.get("x-dse-repo", "unknown/unknown"),
                 branch=headers.get("x-dse-branch", "unknown"),
             )
-            headers["authorization"] = f"token {cred.token}"
+            if not cred or not cred.token or (
+                str(cred.token).startswith("fixture-") and not outbound_local
+            ):
+                # A fixture token is WORSE than none against a REAL host:
+                # GitHub answers 401 to a bogus credential where it would have
+                # answered 200 to an anonymous read, so the fallback would break
+                # the public-repo clone that works today, and say nothing about
+                # why. The broker degrades silently by design; the relay must
+                # not. Loopback is exempt — the dev/test doubles that prove the
+                # placeholder swap have no real identity to authenticate to, and
+                # a fixture there is the point rather than a hazard.
+                _emit_audit(
+                    actor="system:egress-proxy",
+                    action="egress_credential_injection_refused",
+                    tenant_id=self.tenant_id,
+                    work_item_id=self.work_item_id,
+                    details={"host": host, "reason": "no_real_installation_token"},
+                )
+                writer.write(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                await writer.drain()
+                return
+            # BASIC, not `token <t>`. `Authorization: token …` is the REST API's
+            # scheme; github.com's git smart-HTTP endpoint answers 401 to it and
+            # 200 to Basic with the token as the password. Verified against a
+            # real private repo before this line was written.
+            basic = base64.b64encode(f"x-access-token:{cred.token}".encode()).decode()
+            headers["authorization"] = f"Basic {basic}"
             headers["x-dse-credential-id"] = cred.credential_id
 
         body = await self._read_body(headers, reader)

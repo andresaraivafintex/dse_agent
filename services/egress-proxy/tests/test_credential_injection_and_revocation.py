@@ -71,7 +71,11 @@ def test_credential_placeholder_header_is_replaced_before_egress(running_proxy_f
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
-    allowlist.entries.append(AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"]))
+    # category="repo": the credential destination gate only injects towards the
+    # repo host, and this server stands in for GitHub.
+    allowlist.entries.append(
+        AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"], category="repo")
+    )
     rp = running_proxy_factory(allowlist)
 
     conn = http.client.HTTPConnection("127.0.0.1", rp.port, timeout=5)
@@ -111,7 +115,11 @@ def test_no_token_reaches_sandbox_container_env_fs_or_proc(running_proxy_factory
     from egress_proxy.allowlist import AllowlistEntry
 
     allowlist = Allowlist.for_work_item(model_gateway_host="127.0.0.1", model_gateway_port=1)
-    allowlist.entries.append(AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"]))
+    # category="repo": the credential destination gate only injects towards the
+    # repo host, and this server stands in for GitHub.
+    allowlist.entries.append(
+        AllowlistEntry(host=upstream_server["host"], port=upstream_server["port"], category="repo")
+    )
     rp = running_proxy_factory(allowlist)
 
     client = docker.from_env()

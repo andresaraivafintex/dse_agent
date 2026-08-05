@@ -13,6 +13,7 @@ straight from the package installed in the venv.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -90,9 +91,25 @@ def _clone_target_repo(req: WorkspaceBootstrapRequest) -> str:
     from the config), creates the task branch off the base and does the first
     scoped push. Returns the sha of the task tip."""
     url = f"http://{req.repo_host}/{req.repo}.git"
+    # `http.proxy` is set EXPLICITLY rather than relying on the environment, and
+    # this is not belt-and-braces — it is load-bearing. libcurl reads only the
+    # LOWERCASE `http_proxy` for http:// URLs; the uppercase form it honours for
+    # every other scheme is deliberately ignored here, because an inbound
+    # `Proxy:` header would otherwise set it (httpoxy, CVE-2016-5385). The Pod
+    # exports HTTP_PROXY uppercase, so relying on the env sent this clone
+    # DIRECTLY to github.com:80 — no proxy, no credential, and GitHub's 301 to
+    # https turned into a hard failure by followRedirects=false. Verified by
+    # running git against a listener: uppercase 0 requests, lowercase 1.
+    proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or ""
+    if not proxy:
+        raise RuntimeError(
+            "no HTTP proxy configured in the sandbox: the clone would go direct "
+            "and no credential could be injected"
+        )
     # --depth: shallow history is enough for the turn; pushing the tip to the
     # local checkpoint carries the objects that are needed.
     _git([
+        "-c", f"http.proxy={proxy}",
         "-c", "http.extraHeader=X-Dse-Inject-Credential: github",
         "-c", f"http.extraHeader=X-Dse-Repo: {req.repo}",
         "-c", f"http.extraHeader=X-Dse-Branch: {req.branch}",

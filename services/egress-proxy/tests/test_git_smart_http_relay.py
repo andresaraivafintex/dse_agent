@@ -97,7 +97,9 @@ def test_injection_is_refused_when_the_outbound_leg_is_not_tls():
     """A host allowlisted on :80 WITHOUT tls_upgrade would send the token in the
     clear. It must be refused rather than downgraded — and refused loudly: a
     silent anonymous retry reads as 'the repo is public' and fails much later."""
-    allow = Allowlist(entries=[AllowlistEntry(host="plain.example", port=80, reason="test")])
+    allow = Allowlist(entries=[
+        AllowlistEntry(host="plain.example", port=80, reason="test", category="repo")
+    ])
     p = _proxy(allow)
     w = _Writer()
 
@@ -119,7 +121,9 @@ def test_loopback_is_the_one_cleartext_leg_a_credential_may_take():
     loopback is not reachable from the sandbox — it is a different Pod. Without
     this carve-out the rule would also forbid the local integration fixtures,
     which prove the swap end to end."""
-    allow = Allowlist(entries=[AllowlistEntry(host="127.0.0.1", port=9, reason="test")])
+    allow = Allowlist(entries=[
+        AllowlistEntry(host="127.0.0.1", port=9, reason="test", category="repo")
+    ])
     p = _proxy(allow)
     w = _Writer()
 
@@ -172,3 +176,76 @@ def test_chunked_body_is_bounded_too():
     n = (EgressProxy._MAX_RELAY_BODY_BYTES // len(chunk)) + 2
     with pytest.raises(ValueError, match="exceeds"):
         _body({"transfer-encoding": "chunked"}, frame * n)
+
+
+# ---------------------------------------------------------------------------
+# What the adversarial pass found: three ways this shipped inert or unsafe
+# ---------------------------------------------------------------------------
+
+def test_a_credential_only_goes_to_the_repo_host():
+    """Gating on transport alone meant EVERY allowlisted :443 host —
+    api.anthropic.com, slack.com, the Jira site, login.microsoftonline.com —
+    would receive a real GitHub installation token if the sandbox simply
+    addressed it with the header set. The token is scoped to one host; so is
+    its use."""
+    allow = Allowlist.for_work_item()
+    allow.entries.append(AllowlistEntry(host="api.anthropic.com", port=443, reason="x"))
+    p = _proxy(allow)
+    w = _Writer()
+
+    async def go():
+        await p._handle_plain_http(
+            "GET", "http://api.anthropic.com:443/v1", {"x-dse-inject-credential": "github"},
+            _reader(b""), w,
+        )
+
+    asyncio.run(go())
+
+    assert b"403" in w.buf
+    assert p.credential_broker.minted == 0
+    assert "api.anthropic.com" not in p.credential_hosts
+    assert "github.com" in p.credential_hosts
+
+
+def test_a_fixture_token_is_refused_rather_than_sent():
+    """The broker falls back to `fixture-ghtoken-…` when the App credentials are
+    absent, and GitHub answers 401 to a bogus credential where it answers 200 to
+    an anonymous read. Sending it would break the public-repo clone that works
+    today, and say nothing about why."""
+    class _Fixture:
+        def __init__(self): self.minted = 0
+        def mint(self, **_):
+            self.minted += 1
+            return type("C", (), {"token": "fixture-ghtoken-abc", "credential_id": "c"})()
+
+    p = EgressProxy(
+        allowlist=Allowlist.for_work_item(), tenant_id="t",
+        work_item_id="wi", credential_broker=_Fixture(),
+    )
+    w = _Writer()
+
+    async def go():
+        await p._handle_plain_http(
+            "GET", "http://github.com/a/b.git/info/refs",
+            {"x-dse-inject-credential": "github"}, _reader(b""), w,
+        )
+
+    asyncio.run(go())
+
+    assert b"403" in w.buf
+    assert b"fixture-ghtoken" not in w.buf
+
+
+def test_the_token_is_sent_as_basic_not_as_the_rest_scheme():
+    """`Authorization: token <t>` is the REST API's scheme; github.com's git
+    smart-HTTP endpoint answers 401 to it and 200 to Basic with the token as the
+    password. Pinned at the header level so a refactor cannot quietly revert to
+    the scheme that does not work."""
+    import base64 as b64
+    import inspect
+
+    src = inspect.getsource(EgressProxy._handle_plain_http)
+    assert 'f"Basic {basic}"' in src
+    assert 'f"token {cred.token}"' not in src
+    # and the encoding is the one GitHub expects
+    assert b64.b64encode(b"x-access-token:T").decode() == "eC1hY2Nlc3MtdG9rZW46VA=="

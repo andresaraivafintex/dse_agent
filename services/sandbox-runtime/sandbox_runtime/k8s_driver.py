@@ -211,6 +211,16 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
                     {"name": "HTTP_PROXY", "value": cfg.egress_proxy_url},
                     {"name": "HTTPS_PROXY", "value": cfg.egress_proxy_url},
                     {"name": "NO_PROXY", "value": "localhost,127.0.0.1,.svc,.cluster.local"},
+                    # Lowercase aliases are NOT redundant. libcurl — and so git,
+                    # npm, pip — reads only the lowercase `http_proxy` for
+                    # http:// URLs; the uppercase form is deliberately ignored
+                    # for that one scheme because an inbound `Proxy:` header
+                    # would otherwise set it (httpoxy, CVE-2016-5385). With only
+                    # the uppercase set, a plain-HTTP request from the sandbox
+                    # goes DIRECT, bypassing the allowlist entirely.
+                    {"name": "http_proxy", "value": cfg.egress_proxy_url},
+                    {"name": "https_proxy", "value": cfg.egress_proxy_url},
+                    {"name": "no_proxy", "value": "localhost,127.0.0.1,.svc,.cluster.local"},
                     {"name": "DSE_WORK_ITEM_ID", "value": request.work_item_id},
                     {"name": "DSE_TENANT_ID", "value": request.tenant_id},
                     {"name": "DSE_TASK_BRANCH", "value": request.branch},
