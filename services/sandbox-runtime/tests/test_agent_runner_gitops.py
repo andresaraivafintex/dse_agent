@@ -160,3 +160,72 @@ def test_bootstrap_clone_from_local_repo_repoints_origin_to_checkpoint(tmp_path)
                      capture_output=True, text=True).stdout.strip()
     assert remotes == str(tmp_path / "cp.git")
     assert str(upstream) not in remotes
+
+
+def test_a_rebuild_re_establishes_the_git_identity(tmp_path, monkeypatch):
+    """`git config user.*` lives in the workspace's own .git/config, and a
+    rebuild throws that workspace away and clones a fresh one from the
+    checkpoint. The identity set on the first bootstrap is gone, so every commit
+    after a rebuild died on "Please tell me who you are" — and because the fix
+    loop rebuilds before retrying, the retry could never succeed. Seen at
+    attempt 14 on the VPS, failing the turn-start checkpoint commit.
+    """
+    import subprocess
+    from agent_runner import gitops
+    from dse_contracts import WorkspaceBootstrapRequest
+
+    # The sandbox Pod has NO ambient git identity. A dev machine does, so
+    # without this isolation the commit below succeeds either way and the test
+    # proves nothing — it passed against the unfixed code before this was added.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.delenv("GIT_AUTHOR_NAME", raising=False)
+    monkeypatch.delenv("GIT_AUTHOR_EMAIL", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_NAME", raising=False)
+    monkeypatch.delenv("GIT_COMMITTER_EMAIL", raising=False)
+    monkeypatch.delenv("EMAIL", raising=False)
+
+    ckpt = tmp_path / "cp.git"
+    ws1, ws2 = tmp_path / "ws1", tmp_path / "ws2"
+    branch = "dse/task-1"
+
+    def git(args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    # A checkpoint that already carries the task branch — the rebuild's input.
+    git(["init", "--bare", str(ckpt)])
+    git(["init", "-b", branch, str(ws1)])
+    git(["config", "user.email", "a@b.c"], cwd=ws1)
+    git(["config", "user.name", "a"], cwd=ws1)
+    (ws1 / "f.txt").write_text("x")
+    git(["add", "-A"], cwd=ws1)
+    git(["commit", "-m", "seed"], cwd=ws1)
+    git(["push", str(ckpt), f"HEAD:refs/heads/{branch}"], cwd=ws1)
+
+    gitops.bootstrap_workspace(
+        WorkspaceBootstrapRequest(
+            work_item_id="wi-1", branch=branch,
+            workspace_dir=str(ws2), checkpoint_path=str(ckpt),
+        )
+    )
+
+    # The property, asserted directly rather than through a commit: git can
+    # auto-detect an identity from the host on a dev machine, so committing here
+    # succeeds either way and proves nothing. In the Pod there is nothing to
+    # auto-detect from, and the commit fails. What has to be true is that the
+    # rebuilt workspace CARRIES the identity.
+    def cfg(key):
+        return subprocess.run(
+            ["git", "config", "--local", key], cwd=ws2, capture_output=True, text=True
+        ).stdout.strip()
+
+    assert cfg("user.email") == "coder@dse.local", "the rebuild left no git identity"
+    assert cfg("user.name") == "dse-coder"
+
+    # And the commit the fix loop makes right after a rebuild now works.
+    r = subprocess.run(
+        ["git", "-c", "user.useConfigOnly=true", "commit",
+         "-m", "checkpoint(turn-start): wi-1", "--allow-empty"],
+        cwd=ws2, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, f"commit after rebuild failed: {r.stderr[:200]}"
