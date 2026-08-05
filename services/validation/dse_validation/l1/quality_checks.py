@@ -70,7 +70,21 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         status = GateStatus.ERROR
     else:
         n = len(issue_lines)
-        summary = f"{n} lint issue(s)" if n else "no lint issues"
+        if n:
+            summary = f"{n} lint issue(s)"
+        elif passed:
+            summary = "no lint issues"
+        else:
+            # The linter rejected the tree but printed nothing in the
+            # "path:line:col: CODE msg" shape this parser knows — eslint's
+            # default formatter is one such. Saying "no lint issues" on a gate
+            # that just FAILED is worse than saying nothing: it is the ledger
+            # asserting the opposite of the verdict beside it. Observed on the
+            # Angular testbed, where lint FAILED reading "no lint issues".
+            summary = (
+                f"lint failed (exit={result.returncode}); no issue line matched "
+                "the expected 'path:line:col: CODE msg' format — see the detail"
+            )
         detail = summary + "\n" + _tail(result.stdout or result.stderr)
         status = GateStatus.PASS if passed else GateStatus.FAIL
     return L1Finding(
@@ -78,12 +92,24 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     )
 
 
+#: `tsc` diagnostics: "src/a.ts(690,48): error TS2345: ...".
+_TSC_ERROR_RE = re.compile(r": error TS\d+:")
+
+
 def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     if not cfg.typecheck_cmd:
         return _not_configured("typecheck", cfg)
     timeout = cfg.timeout_for("typecheck")
     result = _run(executor, cfg.typecheck_cmd, timeout)
-    error_lines = [ln for ln in result.stdout.splitlines() if ": error:" in ln]
+    # `: error:` is mypy. `tsc` writes `path(line,col): error TS2345: ...`, so
+    # matching only mypy's shape counted zero errors on every TypeScript repo
+    # and the gate failed reporting "no type errors". This widening changes the
+    # COUNT only — `passed` is the command's exit code either way.
+    error_lines = [
+        ln
+        for ln in result.stdout.splitlines()
+        if ": error:" in ln or _TSC_ERROR_RE.search(ln)
+    ]
     if result.returncode == 127:
         return L1Finding(
             check="typecheck",
@@ -94,7 +120,15 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
         )
     passed = result.ok
     n = len(error_lines)
-    summary = f"{n} type error(s)" if n else "no type errors"
+    if n:
+        summary = f"{n} type error(s)"
+    elif passed:
+        summary = "no type errors"
+    else:
+        summary = (
+            f"typecheck failed (exit={result.returncode}); no diagnostic line "
+            "was recognised — see the detail"
+        )
     if result.timed_out:
         summary = f"timed out after {timeout}s"
         passed = False
