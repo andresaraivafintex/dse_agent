@@ -1762,6 +1762,26 @@ async def _run_planner_turn_impl(
     # one whose CODEOWNERS alone overflows) loses text without a single skill
     # being dropped, and firing only on `skills_dropped` would leave exactly
     # that case findable only by reading a field.
+    if context_telemetry.get("run_episodes_unavailable_reason") or context_telemetry.get(
+        "run_episodes_dropped"
+    ):
+        # The journal going missing is the fourth way this Planner can quietly
+        # see less than it should, after the AGENTS.md workspace read, the
+        # skills note under k8s, and repo_map's '(not indexed)'. It gets its own
+        # action rather than a field, so "how often does the journal actually
+        # reach the model?" is answerable.
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="planner_run_journal_absent",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={
+                "repo": inp.repo,
+                "reason": context_telemetry.get("run_episodes_unavailable_reason")
+                or "evicted_for_budget",
+                "episodes_read": context_telemetry.get("run_episodes_read"),
+            },
+        )
     if context_telemetry.get("skills_dropped") or context_telemetry.get("context_truncated_chars"):
         audit_emit(
             actor="system:sandbox-runtime",
@@ -1806,6 +1826,10 @@ async def _run_planner_turn_impl(
         work_item_id=inp.work_item_id,
         details={
             "stage": "planner",
+            # Without this the event cannot be grouped by repository, and
+            # "which repositories curate no AGENTS.md?" — the query that decides
+            # where to propose one — has nothing to group agents_md_source by.
+            "repo": inp.repo,
             "steps": plan.steps,
             "expected_files": plan.expected_files,
             "risk_class": plan.risk_class,

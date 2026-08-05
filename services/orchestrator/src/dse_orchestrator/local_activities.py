@@ -673,7 +673,13 @@ async def record_run_episode(payload: dict[str, Any]) -> dict[str, Any]:
                     (tenant_id, repo, work_item_id, outcome, base_sha, risk_class,
                      data_class, digest, provenance)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
-                ON CONFLICT (work_item_id, outcome) DO NOTHING
+                ON CONFLICT (work_item_id, outcome) DO UPDATE SET
+                    digest = EXCLUDED.digest,
+                    base_sha = EXCLUDED.base_sha,
+                    risk_class = EXCLUDED.risk_class,
+                    data_class = EXCLUDED.data_class,
+                    provenance = EXCLUDED.provenance,
+                    created_at = now()
                 RETURNING id
                 """,
                 (
@@ -699,9 +705,12 @@ async def record_run_episode(payload: dict[str, Any]) -> dict[str, Any]:
             )
             row = cur.fetchone()
         conn.commit()
-        # DO NOTHING returns no row: the entry already existed, which a reset or
-        # a replay reaches legitimately. Not an error, and not a new write.
-        return {"persisted": row is not None, "episode_id": row[0] if row else None}
+        # Last-writer-wins (migration 0037). DO NOTHING kept the FIRST attempt
+        # forever, and a work item can genuinely run twice: a comment on an
+        # `escalated` item starts a new execution under the same workflow id, so
+        # the second, more relevant account was the one being discarded. A replay
+        # re-renders a byte-identical digest, so the UPDATE is a content no-op.
+        return {"persisted": True, "episode_id": row[0] if row else None}
     finally:
         conn.close()
 

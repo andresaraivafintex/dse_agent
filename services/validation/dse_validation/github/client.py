@@ -189,22 +189,88 @@ class RealGitHubClient:
         envelope. The size guard is not paranoia about GitHub: `path` comes from
         the target repository, and the worker pod that runs the Planner has a
         1Gi limit — a repo can legally hold a 100 MB file at a name we ask for."""
-        resp = httpx.get(
+        # STREAMED, not buffered. A plain httpx.get reads the whole body before
+        # returning, so a size check on resp.content would run only after the
+        # bytes were already in this pod's memory — the guard would report the
+        # overrun it was supposed to prevent. Streaming lets it abort mid-body.
+        with httpx.stream(
+            "GET",
             f"{self._cfg.api_base_url}/repos/{repo}/contents/{path}",
             headers={**self._headers(), "Accept": "application/vnd.github.raw"},
             params={"ref": ref},
             timeout=20.0,
+        ) as resp:
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in resp.iter_bytes():
+                size += len(chunk)
+                if size > _MAX_FILE_BYTES:
+                    logger.warning(
+                        "github: %s@%s:%s exceeds the %d-byte cap — treated as unreadable",
+                        repo, ref, path, _MAX_FILE_BYTES,
+                    )
+                    raise ValueError(f"{path} exceeds {_MAX_FILE_BYTES} bytes")
+                chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    def get_ref_sha(self, repo: str, ref: str) -> str | None:
+        """The commit a branch points at, or None if the branch does not exist."""
+        resp = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/git/ref/heads/{ref}",
+            headers=self._headers(),
+            timeout=15.0,
         )
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        if len(resp.content) > _MAX_FILE_BYTES:
-            logger.warning(
-                "github: %s@%s:%s is %d bytes, over the %d cap — treated as unreadable",
-                repo, ref, path, len(resp.content), _MAX_FILE_BYTES,
-            )
-            raise ValueError(f"{path} exceeds {_MAX_FILE_BYTES} bytes")
-        return resp.text
+        return (resp.json().get("object") or {}).get("sha")
+
+    def create_branch(self, repo: str, branch: str, from_sha: str) -> None:
+        """Create `branch` at `from_sha`. A 422 means it already exists, which is
+        the idempotent-retry case, not a failure."""
+        resp = httpx.post(
+            f"{self._cfg.api_base_url}/repos/{repo}/git/refs",
+            headers=self._headers(),
+            json={"ref": f"refs/heads/{branch}", "sha": from_sha},
+            timeout=15.0,
+        )
+        if resp.status_code == 422:
+            return
+        resp.raise_for_status()
+
+    def put_file(self, repo: str, path: str, *, content: str, message: str, branch: str) -> None:
+        """Commit one file onto `branch` through the contents API.
+
+        Used to propose a document to a customer repository without a clone: the
+        Planner path has no sandbox and no working tree, and spinning one up to
+        write a single markdown file would cost a Pod for no reason."""
+        import base64
+
+        body: dict[str, object] = {
+            "message": message,
+            "content": base64.b64encode(content.encode()).decode(),
+            "branch": branch,
+        }
+        # Updating an existing file requires its blob sha; creating one must NOT
+        # send the field at all.
+        existing = httpx.get(
+            f"{self._cfg.api_base_url}/repos/{repo}/contents/{path}",
+            headers=self._headers(),
+            params={"ref": branch},
+            timeout=15.0,
+        )
+        if existing.status_code == 200:
+            body["sha"] = existing.json().get("sha")
+        resp = httpx.put(
+            f"{self._cfg.api_base_url}/repos/{repo}/contents/{path}",
+            headers=self._headers(),
+            json=body,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
 
     def create_pr(self, repo: str, head: str, base: str, title: str, body: str) -> dict:
         resp = httpx.post(
