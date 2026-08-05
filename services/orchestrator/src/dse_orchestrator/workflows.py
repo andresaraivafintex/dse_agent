@@ -2171,6 +2171,14 @@ class WorkItemLifecycleWorkflow:
                 "tenant_id": input.tenant_id,
                 "repo": input.repo,
                 "base_branch": input.base_branch,
+                # The commit the journal's staleness label is measured against.
+                # RunPlannerTurnInput has carried this field since it was
+                # written and no dispatch ever set it, so the Planner received
+                # None and could never tell a journal entry recorded against an
+                # older base from a current one. On the first plan it is still
+                # None (the clone has not happened), which is honest — the label
+                # only claims staleness when there is something to compare.
+                "base_sha": input.base_sha,
                 # S1: real instruction (issue content + acceptance + clarifications).
                 "instruction": self._agent_instruction(),
                 "model_override": self._model_override,
