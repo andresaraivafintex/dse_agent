@@ -115,6 +115,19 @@ def run_l1_pipeline_core(
                 "checks": {
                     f.check: f.status.value if f.status else None for f in findings
                 },
+                # WHY, not just WHICH. Every finding carries a `detail` — "bandit
+                # timed out after 60s", "no lint command in the trusted
+                # manifest", the failing assertion — and the ledger recorded only
+                # the status word. A gate reading ERROR with no reason anywhere
+                # is a gate nobody can debug: diagnosing one cost two wrong
+                # guesses before anyone noticed the reason had been discarded at
+                # write time. Only failures are carried, so a green run stays
+                # small; capped so a verbose tool cannot bloat the row.
+                "failures": {
+                    f.check: (f.detail or "")[:600]
+                    for f in findings
+                    if not f.passed and f.detail
+                },
             },
         )
     return result
