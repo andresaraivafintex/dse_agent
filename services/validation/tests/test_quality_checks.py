@@ -279,3 +279,69 @@ def test_a_real_lint_error_is_still_a_code_failure():
     finding = lint_check(_canned("src/a.py:1:1: F401 unused import\n", 1), cfg)
     assert finding.status is GateStatus.FAIL
     assert finding.summary == "1 lint issue(s)"
+
+
+# ---------------------------------------------------------------------------
+# The gate judges THIS CHANGE, not the repository's history.
+#
+# Measured on the Angular testbed: `tsc --noEmit` reported 262 errors, every
+# one in a `.spec.ts` the DSE never opened, against a change that added a
+# single CONTRIBUTING.md. A markdown file cannot introduce TS2345 — but the
+# work item failed for them, the fix loop spent paid Coder turns repairing
+# someone else's specs, and no number of rounds could ever have passed.
+# ---------------------------------------------------------------------------
+_TSC_262 = (
+    "src/app/shared/services/pdf-data.service.spec.ts(57,5): error TS2739: msg\n"
+    "src/app/shared/utils/deep-compare.utils.spec.ts(488,54): error TS2339: msg\n"
+    "src/app/store/features/fee-schedules/fee-schedules.effects.spec.ts(27,9): error TS2741: msg\n"
+)
+
+
+def test_pre_existing_type_errors_are_not_this_change_s_fault():
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_canned(_TSC_262, 2), cfg, {"CONTRIBUTING.md"})
+    assert finding.passed is True, "the customer's pre-existing debt failed the work item"
+    assert "3 elsewhere in the repository" in finding.summary
+
+
+def test_a_type_error_the_change_DID_introduce_still_fails():
+    """The scope must not become a blanket excuse."""
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    out = _TSC_262 + "src/app/fee.service.ts(12,3): error TS2345: ours\n"
+    finding = typecheck_check(_canned(out, 2), cfg, {"src/app/fee.service.ts"})
+    assert finding.passed is False
+    assert finding.summary == "1 type error(s) in the files this change touched"
+
+
+def test_pre_existing_lint_issues_are_not_this_change_s_fault():
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    out = "src/old/a.ts:1:1: no-unused-vars msg\nsrc/old/b.ts:2:2: eqeqeq msg\n"
+    finding = lint_check(_canned(out, 1), cfg, {"CONTRIBUTING.md"})
+    assert finding.passed is True
+    assert "2 elsewhere in the repository" in finding.summary
+
+
+def test_a_lint_issue_the_change_DID_introduce_still_fails():
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    out = "src/old/a.ts:1:1: no-unused-vars msg\nsrc/new/c.ts:9:9: eqeqeq ours\n"
+    finding = lint_check(_canned(out, 1), cfg, {"src/new/c.ts"})
+    assert finding.passed is False
+    assert finding.summary == "1 lint issue(s) in the files this change touched"
+
+
+def test_without_a_diff_the_gate_still_judges_everything():
+    """`None` means the scope is UNKNOWN, and losing a real finding is worse
+    than reporting one that is not ours."""
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_canned(_TSC_262, 2), cfg, None)
+    assert finding.passed is False
+    assert finding.summary == "3 type error(s)"
+
+
+def test_an_empty_diff_is_not_the_same_as_no_diff():
+    """An empty SET would scope every gate down to nothing and pass anything.
+    That is why `changed_files_or_none` returns None, never set()."""
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_canned(_TSC_262, 2), cfg, set())
+    assert finding.passed is True, "an empty diff genuinely touches no file"
+    assert "3 elsewhere" in finding.summary

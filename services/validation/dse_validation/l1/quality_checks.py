@@ -82,6 +82,36 @@ def _infra_failure(result: ExecResult) -> str | None:
     return None
 
 
+#: The two diagnostic shapes these gates parse:
+#:   ruff/eslint  src/a.py:12:5: F401 msg
+#:   tsc          src/a.ts(690,48): error TS2345: msg
+_DIAGNOSTIC_PATH_RE = re.compile(r"^\s*(?P<path>[^\s:(]+)\s*[(:]")
+
+
+def _path_of(line: str) -> str:
+    """The file a diagnostic line points at, or "" when it points at none."""
+    m = _DIAGNOSTIC_PATH_RE.match(line)
+    return m.group("path").lstrip("./") if m else ""
+
+
+def _only_in_changed_files(lines: list[str], changed_files: set[str] | None) -> list[str]:
+    """Keep the diagnostics that land in files THIS CHANGE touched.
+
+    The gate exists to judge the work item's diff, not the repository's history.
+    Measured on the Angular testbed: `tsc --noEmit` reported 262 errors, every
+    one of them in a `.spec.ts` the DSE never opened, against a change that
+    added a single CONTRIBUTING.md. A markdown file cannot introduce TS2345 —
+    but the gate failed the work item for them, the fix loop sent a paid Coder
+    turn to repair someone else's specs, and no number of rounds could ever
+    make a repository with pre-existing debt pass.
+
+    `changed_files` of None means "no diff available" and everything counts:
+    losing a real finding is worse than reporting one that is not ours."""
+    if changed_files is None:
+        return lines
+    return [ln for ln in lines if _path_of(ln) in changed_files]
+
+
 def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     # `cfg.source` stays out of `summary`: it interpolates the manifest path and
     # base sha, and `summary` is the one field that reaches the append-only
@@ -95,7 +125,9 @@ def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     )
 
 
-def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def lint_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.lint_cmd:
         return _not_configured("lint", cfg)
     # `timeout_for`, not `timeout_seconds`: the manifest's per-stage `timeouts`
@@ -105,7 +137,12 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     result = _run(executor, cfg.lint_cmd, timeout)
     # ruff/flake8: 1 line per issue, formatted as "path:line:col: CODE msg".
     issue_lines = [ln for ln in result.stdout.splitlines() if re.match(r"^\S+:\d+:\d+:\s", ln)]
-    passed = result.ok and len(issue_lines) == 0
+    all_issues = len(issue_lines)
+    issue_lines = _only_in_changed_files(issue_lines, changed_files)
+    # `result.ok` is dropped from the verdict ON PURPOSE when the diff is known:
+    # the command exits non-zero for the whole repository's issues, and this
+    # gate answers a narrower question — did OUR change introduce any?
+    passed = (result.ok or changed_files is not None) and len(issue_lines) == 0
     if result.timed_out:
         detail = f"timed out after {timeout}s running {' '.join(cfg.lint_cmd)}"
         summary = f"timed out after {timeout}s"
@@ -127,9 +164,18 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     else:
         n = len(issue_lines)
         if n:
-            summary = f"{n} lint issue(s)"
+            summary = (
+                f"{n} lint issue(s) in the files this change touched"
+                if changed_files is not None
+                else f"{n} lint issue(s)"
+            )
         elif passed:
-            summary = "no lint issues"
+            summary = (
+                f"no lint issues in the files this change touched "
+                f"({all_issues} elsewhere in the repository, not this change's)"
+                if changed_files is not None and all_issues
+                else "no lint issues"
+            )
         else:
             # The linter rejected the tree but printed nothing in the
             # "path:line:col: CODE msg" shape this parser knows — eslint's
@@ -152,7 +198,9 @@ def lint_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
 _TSC_ERROR_RE = re.compile(r": error TS\d+:")
 
 
-def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def typecheck_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.typecheck_cmd:
         return _not_configured("typecheck", cfg)
     timeout = cfg.timeout_for("typecheck")
@@ -182,12 +230,25 @@ def typecheck_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
             detail=f"typecheck command not found: {' '.join(cfg.typecheck_cmd)}",
             summary="typecheck command not found (exit 127)",
         )
-    passed = result.ok
+    all_errors = len(error_lines)
+    error_lines = _only_in_changed_files(error_lines, changed_files)
+    # Same reasoning as lint: with a diff in hand the question is not "does this
+    # repository typecheck" — it is "did this change break the typecheck".
+    passed = (result.ok or changed_files is not None) and not error_lines
     n = len(error_lines)
     if n:
-        summary = f"{n} type error(s)"
+        summary = (
+            f"{n} type error(s) in the files this change touched"
+            if changed_files is not None
+            else f"{n} type error(s)"
+        )
     elif passed:
-        summary = "no type errors"
+        summary = (
+            f"no type errors in the files this change touched "
+            f"({all_errors} elsewhere in the repository, not this change's)"
+            if changed_files is not None and all_errors
+            else "no type errors"
+        )
     else:
         summary = (
             f"typecheck failed (exit={result.returncode}); no diagnostic line "
