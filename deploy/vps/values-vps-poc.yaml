@@ -48,7 +48,7 @@ global:
 
 # --- DSE release images (GHCR, by rc tag). Stock ones (postgres/temporal/redis/
 #     vault/otel) stay in the public repositories, with no prefix. ---
-_ghcrTag: &ghcrTag "v0.1.0-rc.16"
+_ghcrTag: &ghcrTag "v0.1.0-rc.17"
 
 # --- CPU requests right-sized against MEASURED usage (2026-07-25) ------------
 # The node sat at 97% CPU *reserved* while using 9%: 1843m of the 2000m was
@@ -61,14 +61,14 @@ _ghcrTag: &ghcrTag "v0.1.0-rc.16"
 # scheduling promise, not a quota — sizing them for peak wastes the whole node.
 orchestrator:
   replicas: 1                  # POC: 1 replica on the 2-core node (HA out of scope; frees ~400m of CPU)
-  image: { repository: ghcr.io/andresaraivafintex/dse_agent/orchestrator, tag: *ghcrTag, digest: "" }
+  image: { repository: ghcr.io/fintexinc/dse_agent/orchestrator, tag: *ghcrTag, digest: "" }
   resources:
     # Measured 3m/80Mi idle. Runs validation activities in-process, so it bursts
     # well above idle — hence a request far above measured, and a 1-core limit.
     requests: { cpu: "150m", memory: "384Mi" }
     limits: { cpu: "1", memory: "1Gi" }
 egressProxy:
-  image: { repository: ghcr.io/andresaraivafintex/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
+  image: { repository: ghcr.io/fintexinc/dse_agent/egress-proxy, tag: *ghcrTag, digest: "" }
   replicas: 1                  # POC: 1 replica (the >=2 gate is strict-profile only)
   resources:
     # Measured 1m/15Mi — it only shuttles bytes; the allowlist check is trivial.
@@ -88,7 +88,7 @@ egressProxy:
     # rotation, so blocking it does not fail once — it fails forever.
     - { host: "login.microsoftonline.com", port: 443, purpose: "Entra ID OIDC (discovery + JWKS)" }
 modelGateway:
-  image: { repository: ghcr.io/andresaraivafintex/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
+  image: { repository: ghcr.io/fintexinc/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
   allowFixture: true           # POC: no real provider required
   resources:
     # LiteLLM is memory-hungry at boot (it loads the cost map + providers); 768Mi
@@ -107,13 +107,13 @@ adapters:
   # Slack stays off (the POC is GitHub only).
   slack:
     enabled: true
-    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
+    image: { repository: ghcr.io/fintexinc/dse_agent/adapter-slack, tag: *ghcrTag, digest: "" }
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
   github:
     enabled: true
-    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
+    image: { repository: ghcr.io/fintexinc/dse_agent/adapter-github, tag: *ghcrTag, digest: "" }
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
@@ -123,7 +123,7 @@ adapters:
     # needs base_url + email + api_token, all of which already exist. The poller
     # is required anyway — Jira webhooks are best-effort and expire.
     enabled: true
-    image: { repository: ghcr.io/andresaraivafintex/dse_agent/adapter-jira, tag: *ghcrTag, digest: "" }
+    image: { repository: ghcr.io/fintexinc/dse_agent/adapter-jira, tag: *ghcrTag, digest: "" }
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
@@ -131,7 +131,7 @@ adapters:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "300m", memory: "256Mi" }
   ingestGateway:
-    image: { repository: ghcr.io/andresaraivafintex/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
+    image: { repository: ghcr.io/fintexinc/dse_agent/ingest-gateway, tag: *ghcrTag, digest: "" }
     resources:
       requests: { cpu: "40m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "256Mi" }
@@ -162,7 +162,7 @@ replyReconciler:
 # empty next to 21 real work items.
 consoleProjector:
   enabled: true
-  image: { repository: ghcr.io/andresaraivafintex/dse_agent/console-projector, tag: *ghcrTag, digest: "" }
+  image: { repository: ghcr.io/fintexinc/dse_agent/console-projector, tag: *ghcrTag, digest: "" }
   resources:
     requests: { cpu: "50m", memory: "128Mi" }
     limits: { cpu: "400m", memory: "384Mi" }
@@ -208,7 +208,7 @@ console:
 # starts and ends, and the cookie it issues is what guards the panel.
 queueBoard:
   enabled: true
-  image: { repository: ghcr.io/andresaraivafintex/dse_agent/platform, tag: *ghcrTag, digest: "" }
+  image: { repository: ghcr.io/fintexinc/dse_agent/platform, tag: *ghcrTag, digest: "" }
   consoleUrl: "https://painel.notas.api.br"
   publicUrl: "https://admin.notas.api.br"
   # The parent of both hostnames, so one session covers admin and painel. Not
@@ -255,7 +255,7 @@ runtime:
   previewRbac:
     create: true
   agentRunnerImage:
-    repository: ghcr.io/andresaraivafintex/dse_agent/agent-runner
+    repository: ghcr.io/fintexinc/dse_agent/agent-runner
     tag: *ghcrTag
     digest: ""
   # Ceiling per sandbox, not a concurrency cap: each turn may burst to a full
