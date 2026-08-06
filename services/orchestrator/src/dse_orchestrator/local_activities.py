@@ -1033,9 +1033,9 @@ async def post_status_transition(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "target_status": target_status}
 
 
-_ROUTER_PROMPT = """You route one engineering request to the repositories it needs.
+_ROUTER_PROMPT = """You decide which repositories a change must be MADE IN.
 
-Repositories available:
+Repositories:
 {catalogue}
 
 The request:
@@ -1043,15 +1043,19 @@ The request:
 
 Reply with JSON only: {{"repos": ["owner/name", ...], "reason": "one sentence"}}
 
-Rules:
-- Choose only from the repositories listed above, by their exact full name.
-- Include a repository if the change PLAUSIBLY touches it. An unnecessary pull
-  request is cheap and a human closes it; a missed repository ships half a
-  feature that looks finished, and nobody notices until it is in front of a
-  customer. When the two are in tension, include.
-- A change to an API's response shape, a new field, a new endpoint, or anything
-  the other side must read or display, needs BOTH.
-- If you are not confident, return every repository rather than guessing one.
+How to decide. For each repository ask ONE question: does satisfying this
+request require EDITING A FILE in that repository?
+
+- Displaying, styling or laying out something the API already returns is a
+  frontend edit only. Do not add the backend because the data comes from it.
+- Fixing an endpoint, its response, or its behaviour is a backend edit only. Do
+  not add the frontend because a user will eventually see the result.
+- Add BOTH only when each side needs its own edit: a new or changed field, a new
+  endpoint the UI must call, a new parameter the server must honour. If you
+  cannot name the edit needed on a side, that side is not included.
+
+Between a needless repository and a missed one, prefer the needless one — but
+only when you genuinely cannot tell. Do not use it as a default.
 """
 
 
@@ -1120,8 +1124,28 @@ def _route_repos_sync(tenant_id: str, instruction: str) -> dict[str, Any]:
     try:
         import httpx
 
-        base = os.environ.get("DSE_MODEL_GATEWAY_URL", "http://dse-dse-model-gateway:4000")
-        key = os.environ.get("DSE_MODEL_GATEWAY_MASTER_KEY", "")
+        # The names the rest of the system already uses. The first version of
+        # this invented `DSE_MODEL_GATEWAY_MASTER_KEY`, which exists nowhere —
+        # so the header went out as `Bearer ` and httpx refused it with
+        # LocalProtocolError. The router then returned no repositories, every
+        # work item fell through to asking a human, and they sat in
+        # `clarification_requested` all night. The fallback behaved exactly as
+        # designed; the primary path had simply never run once.
+        #
+        # `sandbox_runtime.model_gateway_client` reads the same variable
+        # (`_MASTER_KEY`, model_gateway_client.py:34) and is the reason to check
+        # there rather than guess a name.
+        base = os.environ.get("DSE_MODEL_GATEWAY_BASE_URL") or os.environ.get(
+            "DSE_MODEL_GATEWAY_URL", "http://dse-dse-model-gateway:4000"
+        )
+        key = os.environ.get("DSE_LITELLM_MASTER_KEY") or os.environ.get(
+            "LITELLM_MASTER_KEY", ""
+        )
+        if not key:
+            raise RuntimeError(
+                "no gateway master key in the environment "
+                "(DSE_LITELLM_MASTER_KEY / LITELLM_MASTER_KEY)"
+            )
         resp = httpx.post(
             f"{base.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
