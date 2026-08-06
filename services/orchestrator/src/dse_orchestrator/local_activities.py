@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import time as _time
 from typing import Any
 
 from temporalio import activity
@@ -40,6 +41,12 @@ import dse_audit
 from dse_orchestrator import policy
 
 logger = logging.getLogger("dse_orchestrator.local_activities")
+
+#: How many times the router asks the gateway before giving up and falling
+#: through to the human repo picker. Three attempts over ~3s cover a pod restart
+#: or a momentary 502; longer than that is an outage a human should see.
+_ROUTER_ATTEMPTS = 3
+_ROUTER_BACKOFF_SECONDS = 1.0
 
 LOCAL_ACTIVITY_UPDATE_STATUS = "update_work_item_status"
 LOCAL_ACTIVITY_CHECK_CLARIFICATION = "check_clarification_completeness"
@@ -1124,17 +1131,45 @@ def _route_repos_sync(tenant_id: str, instruction: str) -> dict[str, Any]:
                 "no gateway master key in the environment "
                 "(DSE_LITELLM_MASTER_KEY / LITELLM_MASTER_KEY)"
             )
-        resp = httpx.post(
-            f"{base.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={
-                "model": os.environ.get("DSE_ROUTER_MODEL", "anthropic/claude-haiku"),
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 400,
-            },
-            timeout=30.0,
-        )
-        resp.raise_for_status()
+        # Retried, because giving up here does not fail the item — it parks it.
+        # A router that returns nothing falls through to the human repo picker,
+        # and in an unattended run there is no human: the work item sits in
+        # `awaiting_repo_selection` forever. Measured: one 502 lasting seconds
+        # (the gateway answered 200 on the same URL minutes later) stopped an
+        # item dead for the rest of the night.
+        #
+        # Only TRANSPORT and 5xx are retried. A 4xx is a wrong key or a wrong
+        # model name — configuration, not weather — and repeating it just burns
+        # the clock before the same human picker.
+        for attempt in range(_ROUTER_ATTEMPTS):
+            try:
+                resp = httpx.post(
+                    f"{base.rstrip('/')}/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={
+                        "model": os.environ.get("DSE_ROUTER_MODEL", "anthropic/claude-haiku"),
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 400,
+                    },
+                    timeout=30.0,
+                )
+                if resp.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"gateway {resp.status_code}", request=resp.request, response=resp
+                    )
+                resp.raise_for_status()
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and status < 500:
+                    raise
+                if attempt == _ROUTER_ATTEMPTS - 1:
+                    raise
+                _time.sleep(_ROUTER_BACKOFF_SECONDS * (2 ** attempt))
+                logger.warning(
+                    "route_repos: gateway attempt %d/%d failed (%s); retrying",
+                    attempt + 1, _ROUTER_ATTEMPTS, type(exc).__name__,
+                )
         content = resp.json()["choices"][0]["message"]["content"]
         start, end = content.find("{"), content.rfind("}")
         parsed = _json.loads(content[start : end + 1])

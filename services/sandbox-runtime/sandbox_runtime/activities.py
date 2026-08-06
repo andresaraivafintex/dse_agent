@@ -1930,9 +1930,13 @@ CRITICAL RULES:
   imports, same structure). Do NOT use jest/mocha/vitest/supertest or ANY
   package that is not in the dependencies of the package.json shown — the repo
   may have no dependencies at all (native runner).
-- Create ONLY NEW file(s) — NEVER rewrite an existing test.
-  FORBIDDEN PATHS (already exist): {existing_tests}
+- NEVER rewrite a test the REPOSITORY owns.
+  FORBIDDEN PATHS (the repository's own): {existing_tests}
   Use a new name, e.g.: test/<subject>-dse.test.js
+- You MAY rewrite a test YOU wrote on this branch. If the failure you were
+  given names a file you authored, FIX THAT FILE — same path, corrected
+  content. Writing a second copy under a new name leaves both broken and the
+  suite red forever: that has happened, and it is why the run above failed.
 - Paths MUST be test paths (tests/, __tests__/, *.test.js|ts, test_*.py…).
 - 1 file (2 at most); CONCISE (~40-80 lines). Truncated JSON = failure.
 - Do not modify production code — tests only.
@@ -2307,7 +2311,7 @@ def _model_authored_test_script(
         #
         # `_dse` in the stem is the platform's own marker (see below), so a
         # path carrying it is ours by construction and safe to replace.
-        if path in ctx.existing_tests and not _is_dse_authored(path):
+        if path in ctx.existing_tests and not _is_dse_authored(path, ctx.workspace_dir):
             # Instead of discarding it (which left the script empty whenever the
             # model insisted on the existing test), RENAME deterministically to a
             # new file in the SAME directory — relative imports stay intact.
@@ -2321,14 +2325,51 @@ def _model_authored_test_script(
     return script, cost_usd
 
 
-def _is_dse_authored(path: str) -> bool:
+#: Commit subjects the platform writes for its own turns (scoped_git.commit).
+_DSE_COMMIT_PREFIXES = ("tester(", "coder(", "checkpoint(", "chore(dse)")
+
+
+def _is_dse_authored(path: str, workspace_dir: str | None = None) -> bool:
     """True when this path is one the DSE itself created.
 
-    `_dedupe_test_path` marks its renames with `-dse`/`_dse` before the
-    extension, so the marker is the platform's signature. A customer file
-    cannot carry it unless they chose the same convention, and if they did,
-    overwriting it is still the lesser harm than stacking a broken copy beside
-    it every retry."""
+    ASK GIT FIRST. The naming marker below is a consequence of a rename, not a
+    cause: the FIRST spec the Tester writes has no marker, because nothing
+    collided with it yet. So on the next round its own file failed this test,
+    got renamed, and a second broken copy landed beside the first — measured on
+    the Angular testbed, where four failing specs accumulated over two rounds:
+
+        report-status-badge.component.spec.ts
+        report-status-badge.component-dse.spec.ts
+        dashboard-list.component.integration.spec.ts
+        dashboard-list.component.integration-dse.spec.ts
+
+    Each round the Tester was forbidden from repairing what it had written and
+    wrote another copy of the same mistake instead. The whole loop could not
+    converge, whatever the guidance.
+
+    Git knows the answer exactly: every commit the platform makes is subject-
+    prefixed by `scoped_git.commit`, so a file whose history contains only DSE
+    subjects is ours to rewrite. A customer file — even one touched by a DSE
+    commit — has a human commit somewhere in its history and stays protected.
+
+    The marker check remains as the fallback for the paths with no workspace in
+    hand (unit tests, the Docker driver's dry runs)."""
+    if workspace_dir:
+        import subprocess
+
+        try:
+            out = subprocess.run(
+                ["git", "log", "--format=%s", "--", path],
+                cwd=workspace_dir, capture_output=True, text=True, timeout=15,
+            )
+            subjects = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+            if subjects:
+                return all(s.startswith(_DSE_COMMIT_PREFIXES) for s in subjects)
+            # No history at all: the file is new in the working tree, so it is
+            # this turn's own output rather than anything the customer owns.
+            return True
+        except Exception:  # noqa: BLE001 — git unavailable: fall back to the marker
+            pass
     name = path.rsplit("/", 1)[-1]
     stem = name.split(".", 1)[0]
     return stem.endswith("-dse") or stem.endswith("_dse") or "-dse" in name or "_dse" in name

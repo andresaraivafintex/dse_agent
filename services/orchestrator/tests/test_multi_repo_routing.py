@@ -90,10 +90,24 @@ def test_the_candidate_query_reads_both_tables():
 
     from dse_orchestrator import local_activities
 
+    # The SQL moved into `dse_contracts.repos` when the ingest gateway turned
+    # out to carry a THIRD copy of this same question, and its copy — which runs
+    # FIRST — had not been fixed. Asserting the literal in this function's body
+    # pinned the spelling; what matters is the union, wherever it lives.
     src = inspect.getsource(local_activities._route_repos_sync)
-    assert "repo_profiles" in src, "the router cannot see a repo nobody bound"
-    assert "repo_bindings" in src, "a repo bound but unprofiled would vanish"
-    assert "UNION ALL" in src
+    assert "TENANT_REPO_CATALOGUE_SQL" in src, (
+        "the router stopped asking the shared question and grew its own copy again"
+    )
+
+    from dse_contracts.repos import TENANT_REPO_CATALOGUE_SQL
+
+    assert "repo_profiles" in TENANT_REPO_CATALOGUE_SQL, (
+        "the router cannot see a repo nobody bound"
+    )
+    assert "repo_bindings" in TENANT_REPO_CATALOGUE_SQL, (
+        "a repo bound but unprofiled would vanish"
+    )
+    assert "UNION ALL" in TENANT_REPO_CATALOGUE_SQL
 
 
 def test_a_single_repo_tenant_short_circuits():

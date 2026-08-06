@@ -374,6 +374,12 @@ class WorkItemLifecycleWorkflow:
         # plan say nothing about whether the old one was advancing.
         self._noop_coder_turns = 0
 
+        # The gate complaint the last L1 run produced, and how many Coder turns
+        # have failed to change it. Instance state: replay rebuilds it from the
+        # same L1Results, and the loop it bounds lives inside one run.
+        self._last_repair_fingerprint: str = ""
+        self._same_repair_count = 0
+
         # Whether THIS run has already consumed a CI status that came back
         # pending. Deliberately per-run state (it must NOT cross
         # continue_as_new): it is what makes the CI wait's continue_as_new
@@ -732,6 +738,37 @@ class WorkItemLifecycleWorkflow:
         if note:
             reason += f" runtime said: {note[:_TESTER_INFRA_NOTE_CHARS]}"
         return reason
+
+    @staticmethod
+    def _repair_fingerprint(failed_checks) -> str:
+        """What the gates are complaining about, independent of WHEN.
+
+        `plan §8.5` writes this as `hash(gate, command, normalized_error,
+        head_sha)`. The head_sha is deliberately left OUT here, because with it
+        the key can only repeat when the tree did not move — and that case is
+        already caught, one branch above, by the no-op guard. The loop this has
+        to break is the other one: the Coder DOES edit files, head_sha changes,
+        and the identical complaint comes back.
+
+        Measured: three consecutive rounds answered
+        `NG2: Type 'string' is not assignable to '"success" | ...'` on the same
+        template binding, each after a real edit, each costing a full
+        Coder+Tester+L1 round.
+
+        Digits are normalised away so a complaint that merely moved by a line —
+        or took 49.6s instead of 47.2s — still hashes the same. `detail` is used
+        rather than `summary` because `build failed (exit=1)` is identical for
+        every build failure there has ever been, and hashing that would escalate
+        a Coder that fixed one error and hit a different one.
+        """
+        import hashlib
+        import re as _re
+
+        parts = []
+        for f in sorted(failed_checks, key=lambda x: x.check):
+            text = (getattr(f, "detail", "") or getattr(f, "summary", "") or "")
+            parts.append(f"{f.check}:{_re.sub(r'[0-9]+', '#', text)[:2000]}")
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
     @staticmethod
     def _l1_failure_context(failed_checks) -> list[str]:
@@ -2206,6 +2243,35 @@ class WorkItemLifecycleWorkflow:
                         pr_number=input.pr_number,
                     )
                 failed_checks = [f for f in l1_result.findings if not f.passed]
+                # The same complaint, surviving Coder turns that DID edit files,
+                # is a Coder that cannot act on what it was told — and every
+                # further round costs a full Coder+Tester+L1 (~12 minutes and a
+                # paid model turn) to be told the same thing again.
+                #
+                # Measured: three consecutive rounds answered `NG2: Type
+                # 'string' is not assignable to '"success" | ...'` on the same
+                # template binding, each after a real edit. The no-op guard
+                # cannot see this one — the tree moves every time.
+                #
+                # Two repairs, then stop: `plan §8.5` sets the budget as two
+                # repairs in TOTAL rather than two per gate, so the third
+                # identical complaint escalates with the fingerprint in the
+                # reason. A DIFFERENT failure resets the counter, because that
+                # is progress even when it is not success.
+                if workflow.patched("escalate-on-unchanging-gate-failure-v1"):
+                    fingerprint = self._repair_fingerprint(failed_checks)
+                    if fingerprint == self._last_repair_fingerprint:
+                        self._same_repair_count += 1
+                    else:
+                        self._last_repair_fingerprint = fingerprint
+                        self._same_repair_count = 0
+                    if self._same_repair_count >= 2:
+                        raise _EscalateNow(
+                            "coder_not_converging: the same gate failure survived "
+                            f"{self._same_repair_count} repair turns "
+                            f"(fingerprint {fingerprint}, gates "
+                            f"{sorted(f.check for f in failed_checks)})"
+                        )
                 if workflow.patched("fix-loop-carries-the-failure-v1"):
                     input.fix_context = self._l1_failure_context(failed_checks)
                 await self._set_status(
