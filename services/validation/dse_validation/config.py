@@ -291,6 +291,23 @@ def _resolve_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dic
     resolved["test"] = _default_test_timeout_seconds(scalar)
     resolved.update({name: default_scan_timeout_seconds(name) for name in _SCAN_NAMES})
     resolved.update(declared or {})
+    # NOT clamped, and that is a known hole with a recommendation rather than a
+    # fix. The floor above `test` protects the ORDER of two clocks measuring one
+    # suite: the Tester's must fire first (cheap `suite_hung`, one Coder turn)
+    # rather than L1's (a `test` ERROR worth up to three paid turns hunting an
+    # assertion that never failed). A DECLARED value walks straight through it —
+    # the testbed's own manifest says `timeouts.test: 900` against the Tester's
+    # 1200.
+    #
+    # Raising the declared value to the floor was tried and reverted: it takes
+    # that manifest's stage sum from 3240s to 3840s against a 3330s budget, so
+    # the manifest is REFUSED and the work item escalates instantly — trading a
+    # rare mis-diagnosis for a certain outage.
+    #
+    # The order has to be restored from the other side: derive the Tester's
+    # suite clock as min(its default, this value minus a margin), so the Tester
+    # stays the tighter clock without inflating a budget it does not spend.
+    # That is a change in sandbox-runtime, not here.
     return resolved
 
 

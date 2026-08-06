@@ -142,6 +142,9 @@ def test_a_timed_out_stage_names_the_budget_that_actually_ran():
     assert "700s" in finding.detail
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # A failing gate must never report the opposite of its own verdict.
 #

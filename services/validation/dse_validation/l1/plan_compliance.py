@@ -271,6 +271,23 @@ def forbidden_paths_finding(diff: DiffSummary, plan: PlanArtifact) -> L1Finding:
 logger = logging.getLogger(__name__)
 
 
+def compute_diff_or_none(executor: SandboxExecutor, base_sha: str, head_sha: str):
+    """The diff, or None when it cannot be computed.
+
+    Computed ONCE per pipeline and handed to both consumers. It used to run
+    twice — once to scope the per-file gates, once inside
+    `plan_compliance_findings` — which is six `kubectl exec` round trips where
+    three suffice, and which also made `_PIPELINE_FIXED_COST_SECONDS` (sized for
+    three 60s git calls) understate the activity's fixed cost by 180s against
+    its own start_to_close."""
+    try:
+        return compute_diff_summary(executor, base_sha, head_sha)
+    except Exception:  # noqa: BLE001
+        logger.warning("l1: the diff could not be computed — gates fall back to whole-repo scope",
+                       exc_info=True)
+        return None
+
+
 def changed_files_or_none(
     executor: SandboxExecutor, base_sha: str, head_sha: str
 ) -> set[str] | None:
@@ -297,7 +314,12 @@ def plan_compliance_findings(
     plan: PlanArtifact,
     base_sha: str,
     head_sha: str,
+    diff=None,
 ) -> list[L1Finding]:
+    """`diff` is the one the pipeline already computed. Passing it avoids a
+    second round of `kubectl exec` calls for an answer we have."""
+    if diff is not None:
+        return [diff_budget_finding(diff, plan), forbidden_paths_finding(diff, plan)]
     try:
         diff = compute_diff_summary(executor, base_sha, head_sha)
     except DiffComputationError as exc:

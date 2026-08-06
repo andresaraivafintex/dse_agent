@@ -114,7 +114,8 @@ def run_l1_pipeline_core(
     # fall back to judging everything — losing a real finding is worse than
     # reporting one that is not ours.
     step("diff")
-    changed_files = plan_compliance.changed_files_or_none(executor, base_sha, head_sha)
+    diff = plan_compliance.compute_diff_or_none(executor, base_sha, head_sha)
+    changed_files = None if diff is None else {f.lstrip("./") for f in diff.files_changed}
 
     findings.append(_timed(step, "lint", lambda: quality_checks.lint_check(executor, cfg, changed_files)))
     findings.append(_timed(step, "typecheck", lambda: quality_checks.typecheck_check(executor, cfg, changed_files)))
@@ -127,7 +128,7 @@ def run_l1_pipeline_core(
         executor, target_dir, cfg.timeout_for("secret_scan")
     )))
     findings.extend(_timed(step, "plan_compliance", lambda: plan_compliance.plan_compliance_findings(
-        executor, plan, base_sha, head_sha
+        executor, plan, base_sha, head_sha, diff=diff
     )))
 
     passed = all(f.passed for f in findings)
