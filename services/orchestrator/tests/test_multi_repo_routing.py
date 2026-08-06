@@ -72,3 +72,38 @@ def test_the_same_request_always_derives_the_same_ids():
 
 def test_a_different_request_to_the_same_repo_is_a_different_item():
     assert sibling_work_item_id(EVENT, FE) != sibling_work_item_id("slack:C123:1700000000.0002", FE)
+
+
+# ---------------------------------------------------------------------------
+# The candidate set is every repository the tenant HAS.
+#
+# `repo_bindings` is not that: it has one row per BINDING, so a repository
+# nobody bound to a channel is invisible in it. Deleting one Slack channel
+# binding took the frontend out of the candidate list entirely, the router
+# answered "the tenant has a single repository", and every request went to the
+# backend — including the one that was supposed to demonstrate routing to both.
+# ---------------------------------------------------------------------------
+def test_the_candidate_query_reads_both_tables():
+    """Pins the union. A router that draws only from `repo_bindings` is one
+    deleted binding away from silently routing everything to one repo."""
+    import inspect
+
+    from dse_orchestrator import local_activities
+
+    src = inspect.getsource(local_activities._route_repos_sync)
+    assert "repo_profiles" in src, "the router cannot see a repo nobody bound"
+    assert "repo_bindings" in src, "a repo bound but unprofiled would vanish"
+    assert "UNION ALL" in src
+
+
+def test_a_single_repo_tenant_short_circuits():
+    """No decision to make, and a model call would be waste — but the reason
+    must say so, because 'single repository' appearing when the tenant has two
+    is exactly the symptom that hid this bug."""
+    import inspect
+
+    from dse_orchestrator import local_activities
+
+    src = inspect.getsource(local_activities._route_repos_sync)
+    assert "the tenant has a single repository" in src
+    assert "len(candidates) < 2" in src

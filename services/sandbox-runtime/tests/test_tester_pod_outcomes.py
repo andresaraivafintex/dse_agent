@@ -348,3 +348,23 @@ def test_reusing_the_previous_round_costs_nothing(monkeypatch, audits):
 
     assert result.test_files == ["tests/test_dse.py"]
     assert result.cost_usd == 0.0
+
+
+def test_a_maven_repository_runs_maven_not_pytest(monkeypatch, audits):
+    """A Java repo has no package.json, so the suite script fell through to
+    `python3 -m pytest` — which finds no tests, exits non-zero, and reports as
+    "the tests you wrote fail". Measured: two backend work items died at
+    `tester_retry_cap_exhausted` having never run a single Java test, and the
+    Coder was sent to fix an assertion that never existed."""
+    _fake_gateway(monkeypatch, _AUTHORED, 0.01)
+    seen: list[tuple[list[str], dict]] = []
+    _run_bridge(monkeypatch, seen=seen, suite=_done([], 0), reused=())
+
+    script = next(
+        " ".join(a) for a, _ in seen if any("npm test" in part for part in a)
+    )
+    assert "pom.xml" in script, "a Maven repository is not recognised at all"
+    assert "./mvnw" in script, "must prefer the repo's pinned wrapper"
+    assert script.index("pom.xml") < script.index("pytest"), (
+        "pytest must remain the LAST fallback, not the one a Java repo hits"
+    )
