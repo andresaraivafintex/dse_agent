@@ -77,6 +77,8 @@ from .driver import (
     SandboxRebuildRequest,
     select_sandbox_driver,
 )
+from shlex import quote as _shlex_quote
+
 from .model_gateway_client import mint_virtual_key
 from .remote_substrate import RemoteSubstrate
 from .retrieval import RetrievalService
@@ -2759,6 +2761,32 @@ def _timed_out_process(argv: list[str], exc: Any, limit: int) -> Any:
     )
 
 
+def _npm_suite_command(test_files: list[str]) -> str:
+    """The npm suite command for THIS turn — scoped to what the Tester authored.
+
+    The Tester's question is "do the tests I just wrote execute and pass?". The
+    repository-wide question is L1's, and L1 asks it minutes later over the
+    COMMITTED state, in the same Pod, with the same node_modules. Answering the
+    small question with the whole suite cost the Angular testbed ~400s of a
+    ~24-minute round, and then L1 spent another ~400s on the identical 4,975
+    tests.
+
+    `--coverage=false` is load-bearing, not a weakening. That repo sets
+    `collectCoverage: true` with global thresholds, so ANY subset misses them —
+    measured at 9.83% statements against a floor of 80% with every test
+    passing. Scoping without it turns a fast check into a guaranteed red one,
+    and the Coder gets sent after a failure that is arithmetic, not code. L1
+    still runs the whole suite with coverage on.
+
+    No authored files means nothing to scope to, and the full suite is the only
+    honest thing left to run.
+    """
+    if not test_files:
+        return "npm test --silent"
+    files = " ".join(_shlex_quote(p) for p in test_files)
+    return f"npm test --silent -- --coverage=false {files}"
+
+
 def _tester_pod_sync(
     inp: "RunTesterTurnInput",
     sandbox_id: str,
@@ -2911,6 +2939,23 @@ def _tester_pod_sync(
     # bound the tests, not whatever is holding the loop open around them.
     # `timeout` from coreutils does, and it turns a hang into rc=124 with the
     # output the runner already produced.
+    # The Tester's question is "do the tests I just wrote EXECUTE and pass?",
+    # not "is this whole repository green" — that is L1's question, and L1 asks
+    # it minutes later over the committed state (see the note below this exec).
+    # Running the full suite to answer the smaller question cost the Angular
+    # testbed ~400s of the ~24-minute round, and then L1 spent another ~400s
+    # running the identical 4,975 tests again.
+    #
+    # `--coverage=false` is not optional here and not a weakening: this repo
+    # sets `collectCoverage: true` with global thresholds, so ANY subset fails
+    # them — measured at 9.83% against a floor of 80% while every test passed.
+    # Scoping without it would turn a fast check into a guaranteed red one.
+    # L1 still runs the whole suite WITH coverage.
+    #
+    # Only the npm branch is scoped. Maven's `-Dtest=` takes class names rather
+    # than paths, and the Java testbed's whole suite runs in seconds, so the
+    # translation would add a failure mode to buy nothing.
+    npm_suite = _npm_suite_command(test_files)
     run = _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
@@ -2930,7 +2975,7 @@ def _tester_pod_sync(
         'node_modules — this is an install problem, not a test problem. '
         f'rc=124 means the install alone outlived its own {clocks.install}s budget. '
         'install tail: $(tail -c 800 /tmp/dse-npm-install.log)" >&2; '
-        f'timeout -k 10 {clocks.suite} npm test --silent; '
+        f'timeout -k 10 {clocks.suite} {npm_suite}; '
         # Maven, before falling through to pytest. Without this a Java
         # repository ran `python3 -m pytest` — which finds no tests, exits
         # non-zero, and reports as "the tests you wrote fail". Measured: the
