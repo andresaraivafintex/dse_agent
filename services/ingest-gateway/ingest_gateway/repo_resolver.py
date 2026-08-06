@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from dse_contracts.repos import TENANT_REPOS_SQL
+
 # explicit override in free text (same format as C4).
 _RE_REPO = re.compile(r"\brepo(?:sitory)?\s*[:=]\s*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)", re.I)
 _RE_BRANCH = re.compile(r"\b(?:base[_-]?)?branch\s*[:=]\s*([A-Za-z0-9._/-]+)", re.I)
@@ -74,18 +76,33 @@ def resolve_repo(
                 if row:
                     return row[0], row[1]
 
-    # Rung 4 — the tenant's single-repo default (binding_value '*'), any
-    # binding_type; if the tenant has EXACTLY one distinct repo, use it.
+    # Rung 4 — if the tenant has EXACTLY one repository, use it; there is
+    # nothing to be ambiguous about.
+    #
+    # "Has" is the whole question, and this asked it of `repo_bindings` alone —
+    # one row per BINDING, not per repository. A tenant with two repositories
+    # and a single Jira binding looked like a tenant with one repository, so
+    # "show a coloured badge on the reports dashboard" resolved to the BACKEND
+    # and started implementing there. The router that would have caught it is
+    # Rung 5's job and was never reached, so not even an audit row explains the
+    # choice. `TENANT_REPOS_SQL` is the union both this and the router now ask.
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT repo, base_branch FROM repo_bindings WHERE tenant_id = %s",
-            (tenant_id,),
-        )
-        rows = cur.fetchall()
-    distinct_repos = {r[0] for r in rows}
+        cur.execute(TENANT_REPOS_SQL, {"t": tenant_id})
+        distinct_repos = [r[0] for r in cur.fetchall()]
     if len(distinct_repos) == 1:
-        only = rows[0]
-        return only[0], only[1]
+        only = distinct_repos[0]
+        cur_branch = None
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT base_branch FROM repo_bindings "
+                "WHERE tenant_id = %s AND repo = %s AND base_branch IS NOT NULL LIMIT 1",
+                (tenant_id, only),
+            )
+            row = cur.fetchone()
+            cur_branch = row[0] if row else None
+        # A repo known only through `repo_profiles` has no binding to carry a
+        # branch; 'main' is Rung 1's convention for exactly that case.
+        return only, cur_branch or "main"
 
     # Rung 5 — ambiguous or empty: no trustworthy resolution, so ask (never
     # guesses among multiple repos).

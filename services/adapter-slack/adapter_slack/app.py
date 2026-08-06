@@ -21,6 +21,7 @@ import time
 
 from dse_audit import emit as audit_emit
 from dse_contracts import mutable_comment
+from dse_contracts.repos import TENANT_REPOS_SQL
 from dse_identity import resolve_principal
 from fastapi import FastAPI, HTTPException, Request
 from ingest_gateway import (
@@ -109,15 +110,14 @@ def _resolve_tenant_for(team_id: str | None) -> str:
 
 
 def _distinct_repos_for_tenant(conn, tenant_id: str) -> list[str]:
-    """Distinct repos of the tenant — mirrors the source that resolve_repo
-    Rung 4/5 deemed ambiguous (same WHERE, no platform filter). Ordered ->
-    deterministic Block Kit."""
+    """Distinct repos of the tenant, for the human picker.
+
+    This used to say it "mirrors the source that resolve_repo Rung 4/5 deemed
+    ambiguous" and carried its own copy of the query. It stopped mirroring
+    anything the day the router's copy was fixed to include `repo_profiles`,
+    and nothing could have noticed. It now asks the shared question."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT repo FROM repo_bindings "
-            "WHERE tenant_id = %s AND repo IS NOT NULL ORDER BY repo",
-            (tenant_id,),
-        )
+        cur.execute(TENANT_REPOS_SQL, {"t": tenant_id})
         return [r[0] for r in cur.fetchall()]
 
 
