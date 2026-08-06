@@ -2031,7 +2031,18 @@ class WorkItemLifecycleWorkflow:
                             "tester_contract_failed:tests_ran=false",
                             audit_action="tester_tests_not_run",
                         )
-                    if tester_result.status != GateStatus.PASS:
+                    # A deferred suite is not a verdict, so it cannot send the
+                    # Coder back. L1's `test` gate runs the same command over the
+                    # COMMITTED state and is the one gate that judges it.
+                    #
+                    # Both gates sharing `coder_retry_count` is what made this
+                    # matter: measured across four work items, every one
+                    # exhausted the budget in the Tester and `l1_completed` was
+                    # zero — the real gate never ran once.
+                    if (
+                        not getattr(tester_result, "suite_deferred", False)
+                        and tester_result.status != GateStatus.PASS
+                    ):
                         input.coder_retry_count += 1
                         if input.coder_retry_count > input.coder_retry_cap:
                             return await self._finish_failed(

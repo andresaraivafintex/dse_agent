@@ -137,14 +137,46 @@ def test_a_kill_and_a_timeout_are_kept_apart(monkeypatch, audits):
     assert "DID NOT TERMINATE" not in result.failure_output
 
 
-def test_a_failing_assertion_is_still_a_plain_test_failure(monkeypatch, audits):
-    """The whole point is the distinction — a real rc=1 must not acquire an
-    infra excuse."""
+def test_a_failing_assertion_is_classified_as_a_plain_test_failure(monkeypatch, audits):
+    """The distinction still holds — a real rc=1 must not acquire an infra
+    excuse — but the VERDICT is now L1's. The Tester records what happened and
+    defers; see test_a_failing_suite_no_longer_sends_the_coder_back."""
     result = _run_bridge(monkeypatch, suite=_done([], 1, stdout="AssertionError: 1 != 2\n"))
 
-    assert result.status is GateStatus.FAIL
     assert _completed_row(audits)["details"]["outcome"] == "tests_failed"
     assert result.failure_output.startswith("AssertionError")
+    assert result.returncode == 1, "the truth about the run is still recorded"
+
+
+def test_a_failing_suite_no_longer_sends_the_coder_back(monkeypatch, audits):
+    """L1's `test` gate runs the same command over the COMMITTED state minutes
+    later. Two gates over one suite is not twice the safety: both spend the same
+    `coder_retry_count`, so the first one firing means the second never runs.
+
+    Measured across four work items — every one died at
+    `tester_retry_cap_exhausted` with `l1_completed` = 0. The real gate never
+    saw the code once."""
+    result = _run_bridge(monkeypatch, suite=_done([], 1, stdout="AssertionError: 1 != 2\n"))
+    assert result.suite_deferred is True
+    assert result.status is GateStatus.PASS
+
+
+def test_an_infrastructure_ending_is_never_deferred(monkeypatch, audits):
+    """A hung or OOM-killed suite is the runtime dying, not the tests
+    disagreeing with the code — and the Tester's clock is the only one that
+    catches a hang before L1's much longer one."""
+    for rc in (124, 137):
+        result = _run_bridge(monkeypatch, suite=_done([], rc, stdout=""))
+        assert result.suite_deferred is False, f"rc={rc} was deferred"
+        assert result.tests_passed is False, f"rc={rc} reported as passing"
+
+
+def test_the_gate_can_be_turned_back_on(monkeypatch, audits):
+    """A repository that wants the Tester to gate its own suite says so."""
+    monkeypatch.setenv("DSE_TESTER_SUITE_IS_A_GATE", "1")
+    result = _run_bridge(monkeypatch, suite=_done([], 1, stdout="AssertionError\n"))
+    assert result.suite_deferred is False
+    assert result.status is GateStatus.FAIL
 
 
 def test_a_passing_suite_stays_a_pass(monkeypatch, audits):

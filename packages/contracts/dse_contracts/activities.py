@@ -500,6 +500,15 @@ class RunTesterTurnInput(BaseModel):
 
 
 class TesterTurnResult(BaseModel):
+    #: The Tester authored tests but did NOT run the suite — L1's `test` gate
+    #: is the verdict. `tests_passed` is then not an opinion about the code and
+    #: the workflow must not treat it as one.
+    #:
+    #: Why the field rather than just setting `tests_passed=True`: that would be
+    #: a false green, indistinguishable from a suite that really passed. This
+    #: says "no verdict was taken here", which is the truth.
+    suite_deferred: bool = False
+
     """Return of the Tester session. Superset compatible with `CoderTurnResult`
     (the workflow decodes the return as CoderTurnResult — `files_changed`
     mirrors `test_files`)."""
@@ -531,7 +540,11 @@ class TesterTurnResult(BaseModel):
         if self.status is None:
             if not self.tests_ran:
                 self.status = GateStatus.NOT_CONFIGURED
-            elif self.tests_passed and self.returncode == 0:
+            elif self.tests_passed and (self.suite_deferred or self.returncode == 0):
+                # `returncode` stays truthful in the payload — it is what the
+                # suite actually did — but it is not the VERDICT when the
+                # verdict was deferred to L1. Reading it as one here is what
+                # made a deferred run still come back FAIL.
                 self.status = GateStatus.PASS
             else:
                 self.status = GateStatus.FAIL
