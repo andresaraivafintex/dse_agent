@@ -134,8 +134,11 @@ def test_the_prompt_names_the_two_ways_of_over_including():
     result."""
     from dse_orchestrator.local_activities import _ROUTER_PROMPT
 
-    assert "Do not add the backend because the data comes from it" in _ROUTER_PROMPT
-    assert "Do not add the frontend because a user will eventually see" in _ROUTER_PROMPT
+    # Normalised: the prompt wraps, and a test that pins line breaks pins the
+    # formatting rather than the instruction.
+    flat = " ".join(_ROUTER_PROMPT.split())
+    assert "Do not add the backend because the data comes from it" in flat
+    assert "Do not add the frontend because a user will eventually see the result" in flat
 
 
 def test_the_bias_is_a_tiebreak_and_not_a_default():
