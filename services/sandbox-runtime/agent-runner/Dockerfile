@@ -47,8 +47,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 #
 # headless: no AWT, no fonts. Roughly half the size of the full JDK and nothing
 # here draws.
+#
+# 21, not 17, because the base is Debian trixie and trixie dropped the
+# openjdk-17 packages entirely ("E: Unable to locate package
+# openjdk-17-jdk-headless" — measured, this is what broke the rc.27 build).
+#
+# That is not a compromise. The repo's pom sets `maven.compiler.release=17`,
+# and `--release 17` compiles against the Java 17 API and emits Java 17
+# bytecode whichever JDK runs it — that is precisely what the flag exists for,
+# unlike `source`/`target`, which only set the language level and leave you
+# linking against the newer API. Spring Boot 3.4 supports 21.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openjdk-17-jdk-headless \
+    && apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
     && rm -rf /var/lib/apt/lists/* \
     && java -version && javac -version
 
