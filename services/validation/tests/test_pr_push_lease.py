@@ -118,3 +118,47 @@ def test_a_commit_we_never_saw_is_still_refused(repos):
     with pytest.raises(RuntimeError, match="push failed"):
         push_branch(ex, client, "owner/repo", "dse/wi-1")
     assert _remote_sha(bare) == theirs, "their commit was clobbered"
+
+
+# ---------------------------------------------------------------------------
+# The customer's hooks must not run on our push.
+#
+# Real incident, 2026-08-06: L1 passed, L2 passed, and `finalize_pr` then died
+# three times on `git push failed (exit=-1): - Finding files` — the target
+# repository's `.husky/pre-push` running `ng lint` on OUR push until the 60s
+# clock ran out. The pull request was never opened.
+#
+# `ScopedGitSession` already neutralises hooks in the workspace, but the L1
+# gate runs `npm ci` long after that, the repo's `prepare` script is `husky`,
+# and husky points core.hooksPath straight back at `.husky/`. This module never
+# goes through that session, so it disables hooks on the COMMAND LINE, where
+# `-c` outranks whatever npm wrote into the repo config.
+# ---------------------------------------------------------------------------
+def _install_hostile_pre_push(work):
+    hooks = work / ".husky"
+    hooks.mkdir(exist_ok=True)
+    hook = hooks / "pre-push"
+    hook.write_text("#!/bin/sh\necho '- Finding files' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    subprocess.run(
+        ["git", "-C", str(work), "config", "core.hooksPath", str(hooks)],
+        check=True, capture_output=True,
+    )
+
+
+def test_a_repo_pre_push_hook_cannot_block_the_pull_request(repos):
+    ex, client, work, bare = repos
+    _install_hostile_pre_push(work)
+    push_branch(ex, client, "owner/repo", "dse/wi-1")
+    assert _remote_sha(bare), "the customer's pre-push hook stopped our push"
+
+
+def test_the_hook_stays_disabled_on_the_second_push_too(repos):
+    """`npm ci` re-points hooksPath between runs, so the override cannot be a
+    one-off applied at clone time."""
+    ex, client, work, bare = repos
+    push_branch(ex, client, "owner/repo", "dse/wi-1")
+    _install_hostile_pre_push(work)          # husky comes back, as it does
+    _commit(work, "review fix")
+    push_branch(ex, client, "owner/repo", "dse/wi-1")
+    assert _remote_sha(bare)

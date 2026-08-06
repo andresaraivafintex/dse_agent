@@ -97,6 +97,25 @@ merge.
 """
 
 
+#: Every git command this module runs, with the repository's own hooks turned
+#: off ON THE COMMAND LINE.
+#:
+#: `-c` beats repo config, and that is the whole point. `ScopedGitSession`
+#: already writes `core.hooksPath` into the workspace, but the L1 gate runs
+#: `npm ci` long after that, the customer's `prepare` script is `husky`, and
+#: husky points hooksPath straight back at `.husky/`. This module then pushes
+#: without going through that session at all.
+#:
+#: Measured: `finalize_pr` died three times on
+#: `git push failed (exit=-1): - Finding files` — the repository's `pre-push`
+#: hook running `ng lint` on OUR push until the 60s clock ran out. L1 had
+#: passed, L2 had passed, and the pull request was never opened.
+#:
+#: A nonexistent hooksPath is a harmless no-op to git, so this needs nothing
+#: to exist on disk.
+_GIT = ("git", "-c", "core.hooksPath=/nonexistent/dse-no-hooks")
+
+
 def push_branch(executor: SandboxExecutor, github_client: GitHubClient, repo: str, branch: str, timeout: int = 60):
     """Push the task branch, refusing to clobber a commit we have not seen.
 
@@ -118,7 +137,7 @@ def push_branch(executor: SandboxExecutor, github_client: GitHubClient, repo: st
     remote_url = github_client.authenticated_remote_url(repo)
     ref = f"refs/heads/{branch}"
 
-    ls = executor.run(["git", "ls-remote", remote_url, ref], timeout=timeout)
+    ls = executor.run([*_GIT, "ls-remote", remote_url, ref], timeout=timeout)
     if ls.returncode != 0:
         raise RuntimeError(
             f"could not read the remote branch (exit={ls.returncode}): {ls.stderr.strip()[:300]}"
@@ -131,14 +150,14 @@ def push_branch(executor: SandboxExecutor, github_client: GitHubClient, repo: st
         # the push would sail through and discard their work. The property we
         # actually want is that the remote tip is something we already have —
         # i.e. this push fast-forwards.
-        fetched = executor.run(["git", "fetch", "-q", remote_url, ref], timeout=timeout)
+        fetched = executor.run([*_GIT, "fetch", "-q", remote_url, ref], timeout=timeout)
         if fetched.returncode != 0:
             raise RuntimeError(
                 f"could not fetch the remote branch (exit={fetched.returncode}): "
                 f"{fetched.stderr.strip()[:300]}"
             )
         ancestry = executor.run(
-            ["git", "merge-base", "--is-ancestor", remote_sha, "HEAD"], timeout=timeout
+            [*_GIT, "merge-base", "--is-ancestor", remote_sha, "HEAD"], timeout=timeout
         )
         if ancestry.returncode != 0:
             raise RuntimeError(
@@ -154,7 +173,7 @@ def push_branch(executor: SandboxExecutor, github_client: GitHubClient, repo: st
     # the absent ref as "this branch should not exist" and refused every push
     # after the first with `stale info` — breaking the re-finalize path and the
     # activity's own retry, with a git error that hid the original cause.
-    result = executor.run(["git", "push", remote_url, f"HEAD:{ref}"], timeout=timeout)
+    result = executor.run([*_GIT, "push", remote_url, f"HEAD:{ref}"], timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"git push failed (exit={result.returncode}): {result.stderr.strip()}")
     return result
