@@ -286,11 +286,76 @@ def _default_test_timeout_seconds(scalar: int) -> int:
     return min(max(scalar, _DEFAULT_TEST_TIMEOUT_SECONDS), stage_timeout_ceiling_seconds())
 
 
-def _resolve_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dict[str, int]:
+def _fit_to_budget(resolved: dict[str, int]) -> dict[str, int]:
+    """Shrink the stages to fit the activity instead of refusing the manifest.
+
+    "Clamped, never refused" is this module's rule for every other input — see
+    `timeout_seconds` in `L1Config.__init__` and `_legacy_command_cap`. Declared
+    per-stage values were the one exception, and the exception cost a work item.
+
+    `bmo-fee-calculator-be-dse` declared 900+900+900+900+120+120 = 3840s against
+    a 3330s budget. `_validate_timeout_budget` refused the whole manifest, so
+    every command read NOT_CONFIGURED and the item escalated with ZERO stages
+    run — after the Tester had already passed with a real Java test. The repo
+    was asking for 15 minutes per stage; it got none. Eight of those 510 excess
+    seconds were real: `typecheck` there runs a command byte-identical to
+    `lint`.
+
+    Scaling is proportional, so a manifest that says "test is the long one"
+    keeps saying it, just on a shorter clock. Each stage is floored at
+    `_MIN_STAGE_TIMEOUT_SECONDS`; if even the floors do not fit — which needs a
+    start_to_close far below anything the workflow schedules, since
+    `stage_budget_seconds()` never returns less than 2580 against a 360s
+    floor-sum — the dict is returned unchanged and `_validate_timeout_budget`
+    still refuses it. Refusal survives as the last resort, not the first.
+    """
+
+    budget = stage_budget_seconds()
+    total = sum(resolved.values())
+    floor = _MIN_STAGE_TIMEOUT_SECONDS
+    if total <= budget or budget < floor * len(resolved):
+        return resolved
+
+    fitted = {
+        name: max(floor, int(seconds * budget / total)) for name, seconds in resolved.items()
+    }
+    # Flooring and integer truncation can leave the sum above the budget again.
+    # Take the excess off the longest stages first, never below the floor.
+    excess = sum(fitted.values()) - budget
+    for name in sorted(fitted, key=lambda k: -fitted[k]):
+        if excess <= 0:
+            break
+        take = min(excess, fitted[name] - floor)
+        fitted[name] -= take
+        excess -= take
+    return fitted
+
+
+def _budget_fit_note(before: dict[str, int], after: dict[str, int]) -> str:
+    """What to tell the repository when its clocks were shortened."""
+
+    changed = ", ".join(
+        f"{name} {before[name]}s->{after[name]}s" for name in _STAGE_NAMES if before[name] != after[name]
+    )
+    return (
+        f"; the declared stage timeouts summed to {sum(before.values())}s, over the "
+        f"{stage_budget_seconds()}s available inside the L1 activity, so they were "
+        f"scaled to fit rather than refused ({changed})"
+    )
+
+
+def _requested_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dict[str, int]:
+    """What the repository asked for, before it is made to fit the activity."""
+
     resolved = {name: scalar for name in _COMMAND_NAMES}
     resolved["test"] = _default_test_timeout_seconds(scalar)
     resolved.update({name: default_scan_timeout_seconds(name) for name in _SCAN_NAMES})
     resolved.update(declared or {})
+    return resolved
+
+
+def _resolve_stage_timeouts(scalar: int, declared: dict[str, int] | None) -> dict[str, int]:
+    resolved = _fit_to_budget(_requested_stage_timeouts(scalar, declared))
     # NOT clamped, and that is a known hole with a recommendation rather than a
     # fix. The floor above `test` protects the ORDER of two clocks measuring one
     # suite: the Tester's must fire first (cheap `suite_hung`, one Coder turn)
@@ -600,10 +665,12 @@ class L1Config:
             )
         declared_timeouts = _validate_timeouts(payload.get("timeouts"), source=source)
         effective_scalar = min(timeout, _legacy_command_cap())
-        _validate_timeout_budget(
-            _resolve_stage_timeouts(effective_scalar, declared_timeouts), source=source
-        )
+        requested = _requested_stage_timeouts(effective_scalar, declared_timeouts)
+        fitted = _resolve_stage_timeouts(effective_scalar, declared_timeouts)
+        _validate_timeout_budget(fitted, source=source)
         detail = f"trusted manifest loaded from {source}"
+        if fitted != requested:
+            detail += _budget_fit_note(requested, fitted)
         if effective_scalar != timeout:
             detail += (
                 f"; timeout_seconds={timeout}s clamped to {effective_scalar}s per command, "

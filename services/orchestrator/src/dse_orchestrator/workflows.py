@@ -2107,9 +2107,26 @@ class WorkItemLifecycleWorkflow:
                          if f.check == "l1_manifest" and not f.passed), None,
                     )
                     if manifest_bad is not None:
+                        # Two different failures, two different sentences. This
+                        # said "the target repo needs .dse/validation.json on the
+                        # base branch" for BOTH, and `detail[:160]` cut the real
+                        # reason off mid-word. The backend testbed HAD its
+                        # manifest, at the base commit, twelve hours old: L1 read
+                        # it fine and then rejected its timeout budget. The
+                        # escalation said the file was missing, so hours went
+                        # into proving a file was present that had never been
+                        # absent — while the ledger three rows away carried the
+                        # true reason in full.
+                        missing = manifest_bad.status == GateStatus.NOT_CONFIGURED
                         raise _EscalateNow(
-                            "l1_manifest_not_configured: the target repo needs "
-                            f".dse/validation.json on the base branch ({manifest_bad.detail[:160]})"
+                            (
+                                "l1_manifest_not_configured: the target repo needs "
+                                ".dse/validation.json on the base branch"
+                                if missing
+                                else "l1_manifest_invalid: .dse/validation.json was found "
+                                "at the base commit but rejected"
+                            )
+                            + f" ({manifest_bad.detail[:400]})"
                         )
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
