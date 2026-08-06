@@ -299,7 +299,11 @@ _TSC_262 = (
 
 def test_pre_existing_type_errors_are_not_this_change_s_fault():
     cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
-    finding = typecheck_check(_canned(_TSC_262, 2), cfg, {"CONTRIBUTING.md"})
+    # A source file the diagnostics do not mention: the gate RUNS (this is not
+    # a documentation-only change) and then filters. Using a .md here would
+    # exercise the skip instead, which is a different property with its own
+    # test.
+    finding = typecheck_check(_canned(_TSC_262, 2), cfg, {"src/app/fee.service.ts"})
     assert finding.passed is True, "the customer's pre-existing debt failed the work item"
     assert "3 elsewhere in the repository" in finding.summary
 
@@ -316,7 +320,7 @@ def test_a_type_error_the_change_DID_introduce_still_fails():
 def test_pre_existing_lint_issues_are_not_this_change_s_fault():
     cfg = L1Config(lint_cmd=["npm", "run", "lint"])
     out = "src/old/a.ts:1:1: no-unused-vars msg\nsrc/old/b.ts:2:2: eqeqeq msg\n"
-    finding = lint_check(_canned(out, 1), cfg, {"CONTRIBUTING.md"})
+    finding = lint_check(_canned(out, 1), cfg, {"src/app/fee.service.ts"})
     assert finding.passed is True
     assert "2 elsewhere in the repository" in finding.summary
 
