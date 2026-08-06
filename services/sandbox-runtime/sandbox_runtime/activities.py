@@ -2911,6 +2911,26 @@ def _tester_pod_sync(
     # bound the tests, not whatever is holding the loop open around them.
     # `timeout` from coreutils does, and it turns a hang into rc=124 with the
     # output the runner already produced.
+    # The Tester's question is "do the tests I just wrote EXECUTE and pass?",
+    # not "is this whole repository green" — that is L1's question, and L1 asks
+    # it minutes later over the committed state (see the note below this exec).
+    # Running the full suite to answer the smaller question cost the Angular
+    # testbed ~400s of a ~24-minute round, and L1 then spent another ~400s on
+    # the identical 4,975 tests.
+    #
+    # `--coverage=false` is not optional and not a weakening: this repo sets
+    # `collectCoverage: true` with global thresholds, so ANY subset fails them —
+    # measured at 9.83% against a floor of 80% while every test passed. Scoping
+    # without it would turn a fast check into a guaranteed red one. L1 still
+    # runs the whole suite WITH coverage.
+    #
+    # Only the npm branch is scoped. Maven's `-Dtest=` takes class names rather
+    # than paths, and the Java testbed's whole suite runs in seconds, so the
+    # translation would add a failure mode to buy nothing.
+    scoped = " ".join(_shlex.quote(p) for p in test_files)
+    npm_suite = (
+        f"npm test --silent -- --coverage=false {scoped}" if scoped else "npm test --silent"
+    )
     run = _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
@@ -2930,7 +2950,7 @@ def _tester_pod_sync(
         'node_modules — this is an install problem, not a test problem. '
         f'rc=124 means the install alone outlived its own {clocks.install}s budget. '
         'install tail: $(tail -c 800 /tmp/dse-npm-install.log)" >&2; '
-        f'timeout -k 10 {clocks.suite} npm test --silent; '
+        f'timeout -k 10 {clocks.suite} {npm_suite}; '
         # Maven, before falling through to pytest. Without this a Java
         # repository ran `python3 -m pytest` — which finds no tests, exits
         # non-zero, and reports as "the tests you wrote fail". Measured: the

@@ -73,3 +73,81 @@ def test_cleanup_guard_rejects_remote_database_by_default(monkeypatch) -> None:
             "postgresql://dse:dev@db.example.test:5432/dse",
             "dse_test_abcdefgh",
         )
+
+
+# ---------------------------------------------------------------------------
+# Sharding — the matrix's wall clock was ONE job, and that job was ONE file.
+#
+# `control-plane` measured 375s while every other group finished under 290s, so
+# the whole CI run waited on it. Inside it, `services/orchestrator` is 270s of
+# 275s, and inside THAT, `test_plan_approval_timeout.py` alone is 119s: 16 tests
+# that each stand up a real Temporal time-skipping server and drive a full
+# work-item lifecycle. Nothing coarser than a file could split it.
+#
+# Splitting a suite is the one optimisation here that can silently DELETE
+# coverage, so these tests pin the two properties that make it safe: every test
+# still runs exactly once, and a file that moves fails the build loudly.
+# ---------------------------------------------------------------------------
+def test_every_shard_file_belongs_to_the_suite_its_group_declares():
+    from scripts.test_matrix import SUITE_GROUPS, SUITE_SHARDS
+
+    for group, (suite, files) in SUITE_SHARDS.items():
+        assert suite in SUITE_GROUPS[group], f"{group} does not run {suite}"
+        assert files, f"{group} declares a shard with no files"
+
+
+def test_a_sharded_file_that_moves_fails_the_manifest(tmp_path, monkeypatch):
+    """The silent-loss mode: rename a sharded file and the shard group runs
+    fewer tests while the parent ignores a path that no longer exists — both
+    green, both wrong. `_validate_shards` is what makes that impossible."""
+    from scripts import test_matrix
+
+    monkeypatch.setattr(
+        test_matrix,
+        "SUITE_SHARDS",
+        {"control-plane-slow": ("services/orchestrator", ("tests/nao_existe.py",))},
+    )
+    with pytest.raises(SystemExit) as exc:
+        test_matrix._validate_shards()
+    assert "nao_existe.py" in str(exc.value)
+
+
+def test_the_shard_and_its_complement_partition_the_suite():
+    """Together they must run the suite exactly once — no test lost, none twice.
+
+    The complement is derived with `--ignore`, never enumerated, so a test file
+    added tomorrow lands in the parent group by construction. This asserts the
+    partition through the real command builder rather than by re-deriving it."""
+    import subprocess
+    import sys
+
+    from scripts.test_matrix import ROOT, SUITE_SHARDS
+
+    suite, files = SUITE_SHARDS["control-plane-slow"]
+
+    def collected(*argv: str) -> int:
+        out = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", *argv],
+            cwd=ROOT, capture_output=True, text=True,
+        ).stdout
+        for line in out.splitlines():
+            if line.strip().endswith("tests collected") or " tests collected " in line:
+                return int(line.split()[0])
+        raise AssertionError(f"could not read a count from: {out[-400:]}")
+
+    # Both sides come from the REAL command builder, so deleting the
+    # exclusions makes this test fail instead of quietly double-counting.
+    from scripts.test_matrix import SUITE_SHARDS as _S, pytest_targets
+
+    shard_spec = _S["control-plane-slow"]
+    shard_targets, shard_carved = pytest_targets(shard_spec, suite)
+    rest_targets, rest_carved = pytest_targets(None, suite)
+
+    whole = collected(suite)
+    shard = collected(*shard_targets, *shard_carved)
+    rest = collected(*rest_targets, *rest_carved)
+
+    assert shard + rest == whole, (
+        f"the split changes what runs: {shard} + {rest} != {whole}"
+    )
+    assert shard > 0 and rest > 0, "one side of the split is empty"

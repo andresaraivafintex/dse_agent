@@ -367,6 +367,13 @@ class WorkItemLifecycleWorkflow:
         # the old one says nothing about the new one.
         self._suite_hung_retries = 0
 
+        # How many fix turns IN A ROW moved no file. Instance state for the same
+        # reason as the counter above: replay rebuilds it from the same
+        # CoderTurnResults, and the loop it bounds lives inside ONE run. A
+        # re_plan closing the run resets it, correctly — a new sandbox and a new
+        # plan say nothing about whether the old one was advancing.
+        self._noop_coder_turns = 0
+
         # Whether THIS run has already consumed a CI status that came back
         # pending. Deliberately per-run state (it must NOT cross
         # continue_as_new): it is what makes the CI wait's continue_as_new
@@ -1910,6 +1917,53 @@ class WorkItemLifecycleWorkflow:
                     "coder_turn_completed",
                     {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
                 )
+
+            # A fix turn that moved no file leaves the tree byte-identical, so
+            # the Tester and L1 can only return the verdict they already
+            # returned — for the price they already charged.
+            #
+            # Measured on `wi_t1-f0a824a0`: three consecutive turns reported
+            # `files_changed=[]`, the checkpoint after each wrote the SAME
+            # git_ref, and L1 answered `{typecheck, build}` all three times.
+            # Those three rounds spent 1041s + 1023s + 1014s of Tester and L1 —
+            # fifty-one minutes — re-deciding a tree nothing had touched.
+            #
+            # `files_changed` is not the model's claim about its own work: the
+            # Activity computes it from git against the turn's base_sha and only
+            # falls back to the agent's list when git found something. Empty
+            # means HEAD did not move, and `commit()` runs under `has_changes()`,
+            # so even an uncommitted edit would have moved it.
+            #
+            # Gated on a non-empty `fix_context`, because only then does a
+            # verdict for this exact tree already exist to reuse. A FIRST turn
+            # that writes nothing is a different failure and still goes through
+            # the gates.
+            if workflow.patched("skip-gates-on-noop-coder-turn-v1"):
+                noop = bool(input.fix_context) and not getattr(
+                    coder_result, "files_changed", None
+                )
+                if noop:
+                    self._noop_coder_turns += 1
+                    # Twice in a row is not a slow convergence, it is a Coder
+                    # that cannot act on what it was told. Burning the rest of
+                    # the retry cap re-reading the same tree buys nothing; a
+                    # human reading the reason is worth more than three more
+                    # identical rounds.
+                    if self._noop_coder_turns >= 2:
+                        raise _EscalateNow(
+                            "coder_made_no_change: two consecutive fix turns "
+                            "changed no file, so the gates would return the "
+                            "verdict they already returned"
+                        )
+                    input.coder_retry_count += 1
+                    await self._set_status(
+                        WorkItemStatus.implementing,
+                        audit_action="coder_turn_made_no_change",
+                        details={"attempt": input.coder_retry_count,
+                                 "consecutive": self._noop_coder_turns},
+                    )
+                    continue  # straight back to the Coder, gates untouched
+                self._noop_coder_turns = 0
 
             # WSB-E2-T3 — Tester session (writes/adjusts tests BEFORE L1).
             #

@@ -41,6 +41,33 @@ SUITE_GROUPS: dict[str, tuple[str, ...]] = {
     "validation": ("services/validation",),
     "security": ("services/egress-proxy", "services/model-gateway"),
     "platform": ("services/platform",),
+    # A shard of control-plane; see SUITE_SHARDS.
+    "control-plane-slow": ("services/orchestrator",),
+}
+
+# Sharding by FILE. A group whose wall clock dominates the matrix is carved into
+# two groups that run as separate CI jobs, in parallel.
+#
+# Why by file and not by directory: `control-plane` is 275s of suite time and
+# `services/orchestrator` alone is 270s of it, so peeling off the other two
+# components saves ~11s. Inside the orchestrator, one FILE —
+# test_plan_approval_timeout.py — is 119s: 16 tests that each stand up a real
+# Temporal time-skipping server and drive a whole work-item lifecycle through
+# it. Nothing coarser than a file can split that.
+#
+# The complement is DERIVED, never enumerated: the shard group runs exactly the
+# files below, and the parent group runs the suite with exactly those files
+# ignored. A test file added tomorrow therefore lands in the parent group
+# automatically and cannot fall through the gap between the two.
+SUITE_SHARDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "control-plane-slow": (
+        "services/orchestrator",
+        (
+            "tests/test_plan_approval_timeout.py",
+            "tests/test_phase4_merge_base_and_learning.py",
+            "tests/test_iteration_caps_debounce.py",
+        ),
+    ),
 }
 
 SUITE_COVERAGE_TARGETS: dict[str, str] = {
@@ -108,6 +135,7 @@ def _discovered_suites() -> set[str]:
 
 
 def _validate_manifest() -> None:
+    _validate_shards()
     registered = set(_registered_suites(SUITE_GROUPS))
     discovered = _discovered_suites()
     missing = sorted(discovered - registered)
@@ -125,6 +153,39 @@ def _validate_manifest() -> None:
         if coverage_stale:
             details.append(f"stale coverage targets: {', '.join(coverage_stale)}")
         raise SystemExit("invalid test matrix: " + "; ".join(details))
+
+
+def pytest_targets(shard, suite: str) -> tuple[list[str], list[str]]:
+    """What this invocation runs for `suite`, and what it must leave out.
+
+    A pure function so the partition can be TESTED. Returning the pair from the
+    middle of `main` meant a test could only re-derive the split itself and
+    would have stayed green with the exclusions deleted."""
+    if shard is not None and shard[0] == suite:
+        return [f"{suite}/{rel}" for rel in shard[1]], []
+    return [suite], [
+        f"--ignore={suite}/{rel}"
+        for shard_suite, files in SUITE_SHARDS.values()
+        if shard_suite == suite
+        for rel in files
+    ]
+
+
+def _validate_shards() -> None:
+    """A renamed or deleted sharded file must fail loudly.
+
+    Silence here is the one way this mechanism could lose coverage: the shard
+    group would run fewer files, the parent would ignore a path that no longer
+    exists, and both would stay green."""
+    problems: list[str] = []
+    for group, (suite, files) in SUITE_SHARDS.items():
+        if suite not in SUITE_GROUPS.get(group, ()):
+            problems.append(f"{group} does not contain {suite}")
+        for rel in files:
+            if not (ROOT / suite / rel).is_file():
+                problems.append(f"{group}: {suite}/{rel} does not exist")
+    if problems:
+        raise SystemExit("invalid test shards: " + "; ".join(problems))
 
 
 def _report_name(suite: str) -> str:
@@ -168,11 +229,18 @@ def main() -> int:
     _validate_manifest()
     if args.suite:
         suites = list(dict.fromkeys(args.suite))
+        selected_groups = []
     else:
         selected_groups = args.group or ["all"]
         if "all" in selected_groups:
             selected_groups = list(SUITE_GROUPS)
         suites = _registered_suites(selected_groups)
+    # Which shard, if any, this invocation is. `--group all` runs both sides, so
+    # it must behave exactly as before: parent takes everything, no carve.
+    shard = next(
+        (SUITE_SHARDS[g] for g in selected_groups if g in SUITE_SHARDS),
+        None,
+    ) if len(selected_groups) == 1 else None
 
     if args.list:
         for suite in suites:
@@ -186,12 +254,17 @@ def main() -> int:
     failures: list[str] = []
     for suite in suites:
         report = args.reports_dir / _report_name(suite)
+        # The shard runs its files; the parent runs the suite minus them. The
+        # parent's exclusion is by --ignore so it never has to know what else
+        # exists.
+        targets, carved = pytest_targets(shard, suite)
         command = [
             sys.executable,
             "-m",
             "pytest",
             "-q",
-            suite,
+            *targets,
+            *carved,
             f"--junitxml={report}",
             # Per-test ceiling (plan 09 F4): a stuck test becomes a NAMED
             # failure with a traceback at the hang point, instead of killing the
