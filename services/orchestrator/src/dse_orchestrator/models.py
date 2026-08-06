@@ -31,6 +31,10 @@ class WorkItemLifecycleInput:
     requester: str
     repo: str | None = None
     base_branch: str | None = None
+    #: This request was routed to more than one repository. CARRIED, never
+    #: recomputed, so it survives continue_as_new deterministically and an old
+    #: history — which has no such key — replays as False.
+    cross_repo: bool = False
     data_class: str = "internal"
     acceptance_criteria: str | None = None
     # S1 (Phase 5): issue title+body (already sanitized) — WHAT to build.

@@ -66,6 +66,11 @@ LOCAL_ACTIVITY_RECORD_RUN_EPISODE = "record_run_episode"
 # at the far end, where nothing knows what it cut.
 _RUN_DIGEST_MAX_CHARS = 800
 LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC = "emit_pr_quality_metric"
+# Multi-repo. A request that genuinely touches two repositories becomes two work
+# items, one per repo, sharing a group — because everything downstream is keyed
+# by work_item_id, and three tables enforce that as a PRIMARY KEY.
+LOCAL_ACTIVITY_ROUTE_REPOS = "route_repos"
+LOCAL_ACTIVITY_FAN_OUT_SIBLINGS = "fan_out_sibling_work_items"
 # Plan 08 §D — resolves the repo's deploys_preview gate (repo_bindings) to
 # decide whether the preview environment applies (P1, deterministic, fail-safe).
 LOCAL_ACTIVITY_PREVIEW_ENABLED = "preview_enabled_for_repo"
@@ -1028,6 +1033,205 @@ async def post_status_transition(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "target_status": target_status}
 
 
+_ROUTER_PROMPT = """You route one engineering request to the repositories it needs.
+
+Repositories available:
+{catalogue}
+
+The request:
+{instruction}
+
+Reply with JSON only: {{"repos": ["owner/name", ...], "reason": "one sentence"}}
+
+Rules:
+- Choose only from the repositories listed above, by their exact full name.
+- Include a repository if the change PLAUSIBLY touches it. An unnecessary pull
+  request is cheap and a human closes it; a missed repository ships half a
+  feature that looks finished, and nobody notices until it is in front of a
+  customer. When the two are in tension, include.
+- A change to an API's response shape, a new field, a new endpoint, or anything
+  the other side must read or display, needs BOTH.
+- If you are not confident, return every repository rather than guessing one.
+"""
+
+
+def _route_repos_sync(tenant_id: str, instruction: str) -> dict[str, Any]:
+    """Ask the model which repositories a request needs. Never raises.
+
+    The intelligence lives HERE, in the orchestrator, and not in
+    `ingest_gateway.repo_resolver` — which stays deterministic and LLM-free, as
+    its own docstring requires. Two reasons beyond respecting that rule: the
+    Slack events endpoint answers inline against a 3-second acknowledgement
+    budget, so a model call there makes Slack retry the webhook; and the gateway
+    has no virtual key and no budget path, while every other model call in the
+    system already goes through the gateway from here, under the audit ledger.
+
+    Everything the model returns is CLAMPED to the repositories this tenant
+    actually has. A hallucinated name cannot become a work item. An empty answer
+    is not an error — it falls through to the human repo picker that exists
+    today, so the worst case is exactly the current behaviour."""
+    import json as _json
+
+    conn = _get_connection()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT b.repo,
+                       COALESCE(p.role, ''), COALESCE(p.language, ''), COALESCE(p.description, '')
+                  FROM repo_bindings b
+                  LEFT JOIN repo_profiles p
+                         ON p.tenant_id = b.tenant_id AND p.repo = b.repo
+                 WHERE b.tenant_id = %s AND b.repo IS NOT NULL
+                 ORDER BY 1
+                """,
+                (tenant_id,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    candidates = [r[0] for r in rows]
+    if len(candidates) < 2:
+        # Nothing to route between. Say so rather than spending a model call.
+        return {"repos": candidates, "reason": "the tenant has a single repository"}
+
+    catalogue = "\n".join(
+        f"- {repo} — {role or 'unknown role'}, {lang or 'unknown stack'}: {desc or 'no description'}"
+        for repo, role, lang, desc in rows
+    )
+    prompt = _ROUTER_PROMPT.format(catalogue=catalogue, instruction=(instruction or "")[:4000])
+
+    try:
+        import httpx
+
+        base = os.environ.get("DSE_MODEL_GATEWAY_URL", "http://dse-dse-model-gateway:4000")
+        key = os.environ.get("DSE_MODEL_GATEWAY_MASTER_KEY", "")
+        resp = httpx.post(
+            f"{base.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": os.environ.get("DSE_ROUTER_MODEL", "anthropic/claude-haiku"),
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 400,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        start, end = content.find("{"), content.rfind("}")
+        parsed = _json.loads(content[start : end + 1])
+        chosen = [r for r in (parsed.get("repos") or []) if r in candidates]
+        return {"repos": chosen, "reason": str(parsed.get("reason", ""))[:400]}
+    except Exception as exc:  # noqa: BLE001 — a router that raises blocks the item
+        logger.warning("route_repos: falling back to the human picker: %s", exc)
+        return {"repos": [], "reason": f"router unavailable: {type(exc).__name__}"}
+
+
+@activity.defn(name=LOCAL_ACTIVITY_ROUTE_REPOS)
+async def route_repos(payload: dict[str, Any]) -> dict[str, Any]:
+    import asyncio
+
+    return await asyncio.to_thread(
+        _route_repos_sync, payload["tenant_id"], payload.get("instruction") or ""
+    )
+
+
+def sibling_work_item_id(event_id: str, repo: str) -> str:
+    """The id of the work item that will carry `repo` for this request.
+
+    HASHED, not suffixed, and that is not a style choice. `pod_name_for` is
+    `f"dse-sbx-{slug}"[:63]` (k8s_driver.py:138-140) while a work_item_id is
+    already 67 characters — so the last twelve are ALREADY discarded today.
+    `wi_<sha>__fe` and `wi_<sha>__be` would truncate to the same Pod name, and
+    two sandboxes would fight over one Pod. Three other call sites truncate the
+    same way: the preview namespace (`argocd.py:79`), its labels (`:175`), and
+    the preview image tag (`pr_image.py:133`).
+
+    Hashing `event_id:repo` keeps the exact shape and length of a normal id and
+    diverges at character 4, so every one of those truncations stays distinct.
+    It is also deterministic, which is what makes the fan-out safe to retry:
+    the same request always derives the same sibling ids, so the UNIQUE
+    constraints on `work_items.idempotency_key` and `ingest_events.event_id`
+    turn a replay into a no-op instead of a duplicate."""
+    return "wi_" + hashlib.sha256(f"{event_id}:{repo}".encode()).hexdigest()
+
+
+@activity.defn(name=LOCAL_ACTIVITY_FAN_OUT_SIBLINGS)
+async def fan_out_sibling_work_items(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create one sibling work item per extra repository, in the outbox.
+
+    Deliberately NOT a Temporal child workflow. `dispatcher._dispatch_row`
+    already turns (a `work_items` row + an `ingest_events` row of kind
+    `task_request`) into a started workflow, idempotently — so writing those two
+    rows buys a top-level workflow with the outbox's crash-safety for free. A
+    child workflow would drag ParentClosePolicy into a parent that calls
+    `continue_as_new` at every phase boundary, for no gain.
+
+    The siblings share `source_ref` with the primary, so a human replying in the
+    same Slack thread still reaches the conversation. They share `group_id` so
+    the surface can render them as one thing."""
+    primary = payload["work_item_id"]
+    repos = [r for r in (payload.get("repos") or []) if r]
+    if not repos:
+        return {"created": [], "group_id": primary}
+
+    created: list[str] = []
+    conn = _get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT idempotency_key FROM work_items WHERE id = %s", (primary,)
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise RuntimeError(f"primary work item {primary!r} not found")
+                event_id = row[0]
+
+                # The primary joins its own group, so COALESCE(group_id, id)
+                # names the group for every member without a special case.
+                cur.execute(
+                    "UPDATE work_items SET group_id = %s WHERE id = %s", (primary, primary)
+                )
+
+                for repo in repos:
+                    sib = sibling_work_item_id(event_id, repo)
+                    cur.execute(
+                        """
+                        INSERT INTO work_items (
+                            id, tenant_id, source, source_ref, repo, base_branch,
+                            requester, data_class, task_class, idempotency_key,
+                            group_id, status
+                        )
+                        SELECT %s, tenant_id, source, source_ref, %s, base_branch,
+                               requester, data_class, task_class, %s, %s, 'new'
+                          FROM work_items WHERE id = %s
+                        ON CONFLICT (idempotency_key) DO NOTHING
+                        """,
+                        (sib, repo, sib, primary, primary),
+                    )
+                    # The payload is copied verbatim so the sibling's
+                    # `load_work_item` reads the same task_content the primary
+                    # did — the request was one sentence, not two.
+                    cur.execute(
+                        """
+                        INSERT INTO ingest_events (work_item_id, event_id, kind, payload)
+                        SELECT %s, %s, 'task_request', payload
+                          FROM ingest_events
+                         WHERE work_item_id = %s AND kind = 'task_request'
+                         ORDER BY id ASC LIMIT 1
+                        ON CONFLICT (event_id) DO NOTHING
+                        """,
+                        (sib, sib, primary),
+                    )
+                    created.append(sib)
+    finally:
+        conn.close()
+    logger.info("fan-out: %d sibling work item(s) for group %s", len(created), primary)
+    return {"created": created, "group_id": primary}
+
+
 LOCAL_ACTIVITIES = [
     update_work_item_status,
     post_status_transition,
@@ -1044,4 +1248,6 @@ LOCAL_ACTIVITIES = [
     post_tracking_comment,
     preview_enabled_for_repo,
     resolve_budget_cap,
+    fan_out_sibling_work_items,
+    route_repos,
 ]
