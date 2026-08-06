@@ -92,6 +92,12 @@ jobs:
           - packages
           - adapters
           - control-plane
+          # A shard of control-plane. services/orchestrator is 270s of that
+          # group's 275s of suite time, which made this job the wall clock of
+          # the whole matrix at 375s. The file list lives in SUITE_SHARDS in
+          # scripts/test_matrix.py, and the two groups together run every file
+          # exactly once — enforced there by _validate_shards().
+          - control-plane-slow
           - runtime
           - validation
           - security

@@ -316,8 +316,18 @@ def test_both_runners_are_wrapped_not_just_node():
     import inspect
 
     body = inspect.getsource(activities._tester_pod_sync)
-    assert re.search(r"timeout -k \d+ \{clocks\.suite\} npm test", body), \
+    # The npm command is now assembled above the exec as `npm_suite` — scoped to
+    # the files the Tester authored, or the whole suite when it authored none.
+    # What this pins is unchanged: whatever was assembled still runs under the
+    # suite budget, and both branches are still `npm test`.
+    assert re.search(r"timeout -k \d+ \{clocks\.suite\} \{npm_suite\}", body), \
         "the npm path must run under the configured suite budget"
+    assert '"npm test --silent"' in body, "the unscoped branch is not npm test"
+    assert "npm test --silent -- --coverage=false" in body, (
+        "the scoped branch must disable coverage: this repo's jest declares "
+        "global thresholds, so ANY subset fails them with every test passing — "
+        "scoping without it turns a fast check into a guaranteed red one"
+    )
     assert re.search(r"timeout -k \d+ \{clocks\.suite\} python3 -m pytest", body), \
         "the pytest path must run under it too — it hangs the same way"
 
