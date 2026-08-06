@@ -99,9 +99,9 @@ def run_l1_pipeline_core(
     step("typecheck")
     findings.append(quality_checks.typecheck_check(executor, cfg, changed_files))
     step("test")
-    findings.append(quality_checks.test_check(executor, cfg))
+    findings.append(quality_checks.test_check(executor, cfg, changed_files))
     step("build")
-    findings.append(quality_checks.build_check(executor, cfg))
+    findings.append(quality_checks.build_check(executor, cfg, changed_files))
     step("sast")
     findings.append(
         sast.sast_check(

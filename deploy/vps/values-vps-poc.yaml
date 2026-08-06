@@ -262,7 +262,12 @@ runtime:
   # core, and how many run at once follows from what the node has left. On 4
   # vCPU with ~1.2 of them reserved, several fit — the 2-core node was what made
   # this read like "one task at a time".
-  sandboxCpuLimit: "1"
+  # One core starved every parallel tool in the gate: jest spawned six workers
+  # to timeshare a single CPU, and `tsc`/`ng build` are parallel too. Measured
+  # on the testbed with the node at load 2.26 of 4 — there was nothing to
+  # protect. The limit is a ceiling, not a reservation (`requests` stays at
+  # 250m), so a sandbox only takes what is idle.
+  sandboxCpuLimit: "3"
   # 1536Mi is under what an Angular `ng build --configuration production`
   # needs, and V8 sizes its heap from the NODE (16 GB here), not the cgroup —
   # so it happily allocates past the limit and the kernel kills it. The node

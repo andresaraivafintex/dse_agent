@@ -112,6 +112,57 @@ def _only_in_changed_files(lines: list[str], changed_files: set[str] | None) -> 
     return [ln for ln in lines if _path_of(ln) in changed_files]
 
 
+#: A change that touches nothing but documentation cannot break a linter, a
+#: type checker, a test suite or a build. That is not a judgement call, and it
+#: is the one skip that is safe to make without enumerating anything.
+#:
+#: Measured on the Angular testbed: ~30 minutes of `npm ci`, `tsc`, `jest` and
+#: `ng build` over 1030 files, to judge a change that added one CONTRIBUTING.md.
+#: The findings are already scoped to the changed files, so every finding those
+#: gates produced was discarded on arrival — the work was provably wasted.
+#:
+#: An extension-per-gate domain was tried first and thrown away: `tsconfig.json`
+#: is not a `.ts` file but decides what typechecks, `.eslintrc` is not source
+#: but decides what lints, `package.json` moves all four. Getting that list
+#: wrong is a FALSE GREEN, and the list can only ever be incomplete. Skipping a
+#: gate that could have found something is the one error that matters here;
+#: running one that could not is merely slow.
+_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
+
+
+def _gate_is_unreachable(check: str, changed_files: set[str] | None) -> str | None:
+    """Why this gate needs no run, or None if it does.
+
+    Conservative in one direction on purpose: an unknown scope (`None`), an
+    empty change, a file with no extension, or anything that is not plainly
+    documentation all mean RUN IT."""
+    if not changed_files:
+        return None
+    for f in changed_files:
+        name = f.rsplit("/", 1)[-1]
+        if "." not in name:
+            # Dockerfile, Makefile, an entrypoint script — no suffix to reason
+            # about and able to affect anything.
+            return None
+        if ("." + name.rsplit(".", 1)[1].lower()) not in _DOC_EXTENSIONS:
+            return None
+    n = len(changed_files)
+    return f"the change touches documentation only ({n} file(s))"
+
+
+def _not_applicable(check: str, why: str) -> L1Finding:
+    """A gate that did not need to run, recorded as such rather than silently
+    absent. It PASSES because its answer is known, and the summary says why —
+    an operator must never have to guess whether a gate ran."""
+    return L1Finding(
+        check=check,
+        passed=True,
+        status=GateStatus.PASS,
+        detail=f"not run: {why}",
+        summary=f"not run: {why}",
+    )
+
+
 def _not_configured(check: str, cfg: L1Config) -> L1Finding:
     # `cfg.source` stays out of `summary`: it interpolates the manifest path and
     # base sha, and `summary` is the one field that reaches the append-only
@@ -130,6 +181,8 @@ def lint_check(
 ) -> L1Finding:
     if not cfg.lint_cmd:
         return _not_configured("lint", cfg)
+    if (why := _gate_is_unreachable("lint", changed_files)) is not None:
+        return _not_applicable("lint", why)
     # `timeout_for`, not `timeout_seconds`: the manifest's per-stage `timeouts`
     # block is the clock that was validated against the activity's budget, and
     # the number in the message below has to be the one that actually ran.
@@ -203,6 +256,8 @@ def typecheck_check(
 ) -> L1Finding:
     if not cfg.typecheck_cmd:
         return _not_configured("typecheck", cfg)
+    if (why := _gate_is_unreachable("typecheck", changed_files)) is not None:
+        return _not_applicable("typecheck", why)
     timeout = cfg.timeout_for("typecheck")
     result = _run(executor, cfg.typecheck_cmd, timeout)
     # `: error:` is mypy. `tsc` writes `path(line,col): error TS2345: ...`, so
@@ -273,9 +328,13 @@ _PYTEST_SUMMARY_RE = re.compile(
 )
 
 
-def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def test_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.test_cmd:
         return _not_configured("test", cfg)
+    if (why := _gate_is_unreachable("test", changed_files)) is not None:
+        return _not_applicable("test", why)
     timeout = cfg.timeout_for("test")
     result = _run(executor, cfg.test_cmd, timeout)
     if (infra := _infra_failure(result)) is not None:
@@ -318,9 +377,13 @@ def test_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
     )
 
 
-def build_check(executor: SandboxExecutor, cfg: L1Config) -> L1Finding:
+def build_check(
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+) -> L1Finding:
     if not cfg.build_cmd:
         return _not_configured("build", cfg)
+    if (why := _gate_is_unreachable("build", changed_files)) is not None:
+        return _not_applicable("build", why)
     timeout = cfg.timeout_for("build")
     result = _run(executor, cfg.build_cmd, timeout)
     if (infra := _infra_failure(result)) is not None:
