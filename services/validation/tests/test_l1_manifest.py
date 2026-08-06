@@ -132,9 +132,25 @@ def test_stage_timeout_above_the_platform_ceiling_is_refused(sandbox, git_repo, 
     assert f"ceiling of {ceiling}s" in cfg.manifest_detail
 
 
-def test_stage_timeouts_that_do_not_fit_the_activity_are_refused(sandbox, git_repo, git_sha):
-    """Every value is legal on its own; what does not fit is the sum, which is
-    what shares the activity's start_to_close."""
+def test_stage_timeouts_that_do_not_fit_the_activity_are_scaled_not_refused(
+    sandbox, git_repo, git_sha
+):
+    """This asserted REFUSAL until it cost a work item, and the reversal is
+    deliberate.
+
+    `bmo-fee-calculator-be-dse` declared 900+900+900+900+120+120 = 3840s against
+    a 3330s budget. The manifest was refused whole, so every command read
+    NOT_CONFIGURED and the item escalated with ZERO stages run — after the
+    Tester had already passed with a real Java test. A repository asking for too
+    much time got no time at all.
+
+    "Clamped, never refused" is this module's rule for every other input (the
+    scalar, the scans, the legacy cap). Declared per-stage values were the one
+    exception, and `_resolve_stage_timeouts` carried a comment predicting this
+    exact 3240->3840-against-3330 outage before it happened.
+
+    Scaling is proportional, so a manifest that says "test is the long one"
+    still says it."""
 
     ceiling = stage_timeout_ceiling_seconds()
     stages = ("lint", "typecheck", "test", "build", "sast", "secret_scan")
@@ -144,10 +160,107 @@ def test_stage_timeouts_that_do_not_fit_the_activity_are_refused(sandbox, git_re
 
     cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
 
-    assert cfg.manifest_status == GateStatus.ERROR
-    assert f"add up to {ceiling * len(stages)}s" in cfg.manifest_detail
-    assert f"over the {stage_budget_seconds()}s" in cfg.manifest_detail
-    assert f"test={ceiling}s" in cfg.manifest_detail
+    assert cfg.manifest_status == GateStatus.PASS, cfg.manifest_detail
+    assert sum(cfg.timeouts.values()) <= stage_budget_seconds()
+    assert all(v > 0 for v in cfg.timeouts.values())
+    # and it SAYS so, rather than silently running on a clock nobody asked for
+    assert "scaled to fit rather than refused" in cfg.manifest_detail
+    assert f"summed to {ceiling * len(stages)}s" in cfg.manifest_detail
+
+
+def test_a_manifest_that_fits_is_left_exactly_as_declared(sandbox, git_repo, git_sha):
+    """The scaling must not touch a manifest that was already inside the budget
+    — otherwise every repository silently loses time to a fix for one that was
+    not."""
+
+    declared = {"lint": 120, "typecheck": 120, "test": 600, "build": 120}
+    _rewrite_manifest(git_repo, "within budget", timeouts=declared)
+
+    cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
+
+    assert cfg.manifest_status == GateStatus.PASS
+    for name, seconds in declared.items():
+        assert cfg.timeouts[name] == seconds
+    assert "scaled to fit" not in cfg.manifest_detail
+
+
+def test_the_backend_testbeds_real_numbers_now_load(sandbox, git_repo, git_sha):
+    """The exact manifest that escalated `wi_t2-53ea7c73`, verbatim."""
+
+    _rewrite_manifest(
+        git_repo,
+        "bmo backend",
+        timeouts={"lint": 900, "typecheck": 900, "test": 900, "build": 900,
+                  "sast": 120, "secret_scan": 120},
+    )
+
+    cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
+
+    assert cfg.manifest_status == GateStatus.PASS, cfg.manifest_detail
+    assert sum(cfg.timeouts.values()) <= stage_budget_seconds()
+    # proportional: the four commands were equal and stay equal
+    assert cfg.timeouts["lint"] == cfg.timeouts["test"] == cfg.timeouts["build"]
+
+
+def test_scaling_preserves_what_the_manifest_said_was_the_long_stage(
+    sandbox, git_repo, git_sha
+):
+    """The point of scaling rather than truncating: a repository that said
+    "test is the long one" must still be saying it afterwards.
+
+    This test exists because mutation testing caught its absence — flattening
+    every stage to the floor satisfied every other assertion in this file,
+    including an equality check that only held because the values it compared
+    were equal before AND after. A test that cannot fail when the feature is
+    replaced by a constant pins nothing."""
+
+    _rewrite_manifest(
+        git_repo,
+        "uneven",
+        timeouts={"lint": 600, "typecheck": 600, "test": 2400, "build": 600,
+                  "sast": 300, "secret_scan": 300},
+    )
+
+    cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
+
+    assert cfg.manifest_status == GateStatus.PASS, cfg.manifest_detail
+    assert sum(cfg.timeouts.values()) <= stage_budget_seconds()
+    razao = cfg.timeouts["test"] / cfg.timeouts["lint"]
+    assert 3.5 < razao < 4.5, (
+        f"test was declared 4x lint and came out {razao:.2f}x — the scaling "
+        f"flattened the manifest instead of shrinking it: {cfg.timeouts}"
+    )
+    assert cfg.timeouts["test"] > cfg.timeouts["sast"]
+
+
+def test_refusal_survives_for_a_budget_that_not_even_the_floors_fit(
+    sandbox, git_repo, git_sha, monkeypatch
+):
+    """Scaling replaced refusal as the FIRST response, not as the only one. If
+    the activity is so short that six stages cannot each get the minimum, there
+    is nothing honest to run and the manifest must still be refused rather than
+    scaled into a clock that guarantees timeouts."""
+
+    from dse_validation import config as cfgmod
+
+    from dse_validation.config import _MIN_STAGE_TIMEOUT_SECONDS
+
+    floor = _MIN_STAGE_TIMEOUT_SECONDS
+    # Below six floors, so nothing can be scaled into it. Every declared value
+    # is AT the floor, so the per-stage ceiling guard (which fires earlier) has
+    # nothing to object to and the sum guard is what we actually exercise.
+    monkeypatch.setattr(cfgmod, "stage_budget_seconds", lambda: floor * 6 - 1)
+    _rewrite_manifest(
+        git_repo,
+        "impossible",
+        timeouts={n: floor for n in
+                  ("lint", "typecheck", "test", "build", "sast", "secret_scan")},
+    )
+
+    cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
+
+    assert cfg.manifest_status == GateStatus.ERROR, cfg.manifest_detail
+    assert "add up to" in cfg.manifest_detail
 
 
 def test_scalar_above_what_the_activity_has_is_clamped_not_refused(sandbox, git_repo, git_sha):
@@ -299,13 +412,14 @@ def test_l1_never_cuts_a_suite_the_tester_already_let_run(sandbox, git_sha):
     assert cfg.timeout_for("test") > activities._DEFAULT_SUITE_TIMEOUT_SECONDS
 
 
-def test_four_commands_at_the_ceiling_are_refused_with_readable_numbers(
+def test_four_commands_at_the_ceiling_are_scaled_with_readable_numbers(
     sandbox, git_repo, git_sha
 ):
     """The ceiling bounds ONE stage; nothing about it says four of them fit.
-    What refuses them is the sum, and the message has to carry the three numbers
-    a human needs to fix the manifest: what was asked for, what it adds up to,
-    and what there was."""
+    What no longer happens is a refusal — see
+    `test_stage_timeouts_that_do_not_fit_the_activity_are_scaled_not_refused`.
+    The message still has to carry the three numbers a human needs: what was
+    asked for, what it added up to, and what there was."""
 
     ceiling = stage_timeout_ceiling_seconds()
     commands = ("lint", "typecheck", "test", "build")
@@ -313,10 +427,13 @@ def test_four_commands_at_the_ceiling_are_refused_with_readable_numbers(
 
     cfg = L1Config.from_trusted_manifest(sandbox, git_sha())
 
-    assert cfg.manifest_status == GateStatus.ERROR
-    assert f"test={ceiling}s" in cfg.manifest_detail
-    assert f"add up to {4 * ceiling + _scan_reserve()}s" in cfg.manifest_detail
+    assert cfg.manifest_status == GateStatus.PASS, cfg.manifest_detail
+    assert sum(cfg.timeouts.values()) <= stage_budget_seconds()
+    # the three numbers a human needs to understand what happened to their
+    # manifest, now describing a SCALING instead of a rejection
+    assert f"summed to {4 * ceiling + _scan_reserve()}s" in cfg.manifest_detail
     assert f"over the {stage_budget_seconds()}s" in cfg.manifest_detail
+    assert "scaled to fit rather than refused" in cfg.manifest_detail
 
 
 def test_a_scalar_only_manifest_is_never_refused_whatever_the_platform_is_set_to(monkeypatch):
