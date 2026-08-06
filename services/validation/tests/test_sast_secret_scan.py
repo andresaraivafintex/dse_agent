@@ -16,11 +16,21 @@ class _RecordingSandbox:
 
     def __init__(self, stdout: str):
         self.stdout = stdout
-        self.timeouts: list[int] = []
+        self.calls: list[tuple[list[str], int]] = []
 
     def run(self, argv, cwd=None, timeout: int = 300) -> ExecResult:
-        self.timeouts.append(timeout)
+        self.calls.append((argv, timeout))
         return ExecResult(argv=argv, returncode=0, stdout=self.stdout, stderr="")
+
+    @property
+    def timeouts(self) -> list[int]:
+        """The timeouts of the SCAN calls.
+
+        `sast_check` asks a cheap question first — does this repository contain
+        any Python at all — before pointing bandit at it, so the executor now
+        sees a `find` ahead of the scanner. That probe carries its own short
+        clock and is not what these tests are about."""
+        return [t for argv, t in self.calls if argv and argv[0] != "sh"]
 
 
 def test_sast_passes_on_clean_code(sandbox):
