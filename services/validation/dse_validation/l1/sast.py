@@ -13,6 +13,10 @@ from dse_validation.sandbox_exec import SandboxExecutor
 _SEVERITY_ORDER = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
+#: The probe is one pruned `find` that stops at the first hit.
+_PY_PROBE_TIMEOUT_SECONDS = 30
+
+
 def sast_check(
     executor: SandboxExecutor,
     target_dir: str = ".",
@@ -26,6 +30,31 @@ def sast_check(
     # the sandbox pod, 120 s stops covering a repository at ~2.400 `.py`.
     if timeout is None:
         timeout = default_scan_timeout_seconds("sast")
+
+    # bandit reads PYTHON. Pointed at a repository that has none it finds no
+    # targets, exits 1 and prints no JSON — which this gate then reported as
+    # "bandit did not produce valid JSON", failing the work item on the
+    # Angular testbed for the crime of not being a Python project.
+    #
+    # Asking first is cheap and unambiguous: a tree with no `.py` in it has
+    # nothing for a Python scanner to say. `find -prune` keeps the question
+    # from walking node_modules to answer it.
+    probe = executor.run(
+        [
+            "sh", "-c",
+            "find . \\( -name node_modules -o -name .git -o -name .venv -o -name venv "
+            "-o -name __pycache__ \\) -prune -o -name '*.py' -print -quit",
+        ],
+        timeout=_PY_PROBE_TIMEOUT_SECONDS,
+    )
+    if probe.returncode == 0 and not (probe.stdout or "").strip():
+        return L1Finding(
+            check="sast",
+            passed=True,
+            detail="not run: bandit scans Python and this repository has none",
+            summary="not run: bandit scans Python and this repository has none",
+        )
+
     result = executor.run(["bandit", "-r", target_dir, "-f", "json", "-q"], timeout=timeout)
 
     if result.returncode == 127:

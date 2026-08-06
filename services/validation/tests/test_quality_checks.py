@@ -299,7 +299,11 @@ _TSC_262 = (
 
 def test_pre_existing_type_errors_are_not_this_change_s_fault():
     cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
-    finding = typecheck_check(_canned(_TSC_262, 2), cfg, {"CONTRIBUTING.md"})
+    # A source file the diagnostics do not mention: the gate RUNS (this is not
+    # a documentation-only change) and then filters. Using a .md here would
+    # exercise the skip instead, which is a different property with its own
+    # test.
+    finding = typecheck_check(_canned(_TSC_262, 2), cfg, {"src/app/fee.service.ts"})
     assert finding.passed is True, "the customer's pre-existing debt failed the work item"
     assert "3 elsewhere in the repository" in finding.summary
 
@@ -316,7 +320,7 @@ def test_a_type_error_the_change_DID_introduce_still_fails():
 def test_pre_existing_lint_issues_are_not_this_change_s_fault():
     cfg = L1Config(lint_cmd=["npm", "run", "lint"])
     out = "src/old/a.ts:1:1: no-unused-vars msg\nsrc/old/b.ts:2:2: eqeqeq msg\n"
-    finding = lint_check(_canned(out, 1), cfg, {"CONTRIBUTING.md"})
+    finding = lint_check(_canned(out, 1), cfg, {"src/app/fee.service.ts"})
     assert finding.passed is True
     assert "2 elsewhere in the repository" in finding.summary
 
@@ -345,3 +349,86 @@ def test_an_empty_diff_is_not_the_same_as_no_diff():
     finding = typecheck_check(_canned(_TSC_262, 2), cfg, set())
     assert finding.passed is True, "an empty diff genuinely touches no file"
     assert "3 elsewhere" in finding.summary
+
+
+# ---------------------------------------------------------------------------
+# The gate does not run what it cannot judge.
+#
+# Measured on the Angular testbed: ~30 minutes of `npm ci`, `tsc`, `jest` and
+# `ng build` over 1030 files, to judge a change that added one CONTRIBUTING.md.
+# The findings are already scoped to the changed files, so every one of those
+# findings was discarded on arrival — the work was provably wasted.
+#
+# The asymmetry is deliberate and tested in both directions: skipping a gate
+# that could have found something is a FALSE GREEN; running one that could not
+# is merely slow.
+# ---------------------------------------------------------------------------
+class _NeverRuns:
+    def run(self, argv, timeout=None):  # noqa: ARG002
+        raise AssertionError(f"the gate ran when it did not need to: {argv}")
+
+
+DOC_ONLY = {"CONTRIBUTING.md", "docs/guide.rst"}
+
+
+def test_a_documentation_change_does_not_run_the_type_checker():
+    cfg = L1Config(typecheck_cmd=["npx", "tsc", "--noEmit"])
+    finding = typecheck_check(_NeverRuns(), cfg, DOC_ONLY)
+    assert finding.passed is True
+    assert "not run" in finding.summary
+
+
+def test_a_documentation_change_does_not_run_the_linter():
+    cfg = L1Config(lint_cmd=["npm", "run", "lint"])
+    assert lint_check(_NeverRuns(), cfg, DOC_ONLY).passed is True
+
+
+def test_a_documentation_change_does_not_run_the_suite_or_the_build():
+    assert run_test_check(_NeverRuns(), L1Config(test_cmd=["npm", "test"]), DOC_ONLY).passed
+    assert build_check(_NeverRuns(), L1Config(build_cmd=["npm", "run", "build"]), DOC_ONLY).passed
+
+
+def test_a_source_change_still_runs_every_gate():
+    """The skip must never become the default."""
+    src = {"src/app/fee.service.ts"}
+    cfg = L1Config(typecheck_cmd=["npx", "tsc"], lint_cmd=["npm", "run", "lint"],
+                   test_cmd=["npm", "test"], build_cmd=["npm", "run", "build"])
+    out = _canned("", 0)
+    for finding in (typecheck_check(out, cfg, src), lint_check(out, cfg, src),
+                    run_test_check(out, cfg, src), build_check(out, cfg, src)):
+        assert "not run" not in finding.summary, finding.check
+
+
+def test_a_lockfile_change_still_runs_the_suite_and_the_build():
+    """A build or a suite is not scoped by file: a dependency bump breaks both
+    without touching a single source file."""
+    lock = {"package-lock.json"}
+    out = _canned("", 0)
+    assert "not run" not in run_test_check(out, L1Config(test_cmd=["npm", "test"]), lock).summary
+    assert "not run" not in build_check(out, L1Config(build_cmd=["npm", "run", "build"]), lock).summary
+
+
+def test_a_config_change_still_runs_the_type_checker():
+    """tsconfig.json is not a .ts file, but it decides what typechecks."""
+    out = _canned("", 0)
+    finding = typecheck_check(out, L1Config(typecheck_cmd=["npx", "tsc"]), {"tsconfig.json"})
+    assert "not run" not in finding.summary
+
+
+def test_a_file_with_no_extension_runs_everything():
+    """A Dockerfile, a Makefile, an entrypoint script — any of them can affect
+    any gate, and none carries a suffix to reason about."""
+    out = _canned("", 0)
+    for check, cfg in (
+        (lint_check, L1Config(lint_cmd=["x"])),
+        (typecheck_check, L1Config(typecheck_cmd=["x"])),
+        (run_test_check, L1Config(test_cmd=["x"])),
+        (build_check, L1Config(build_cmd=["x"])),
+    ):
+        assert "not run" not in check(out, cfg, {"Dockerfile"}).summary
+
+
+def test_an_unknown_scope_runs_everything():
+    out = _canned("", 0)
+    assert "not run" not in typecheck_check(out, L1Config(typecheck_cmd=["x"]), None).summary
+    assert "not run" not in build_check(out, L1Config(build_cmd=["x"]), None).summary
