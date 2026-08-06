@@ -107,3 +107,38 @@ def test_a_single_repo_tenant_short_circuits():
     src = inspect.getsource(local_activities._route_repos_sync)
     assert "the tenant has a single repository" in src
     assert "len(candidates) < 2" in src
+
+
+# ---------------------------------------------------------------------------
+# The prompt decides by "what must I EDIT", not by "what is involved".
+#
+# The first version told the model to include a repository when in doubt, and
+# leaned on the asymmetry between a needless PR and a missed one. Measured
+# against the real gateway, all three demo sentences routed to BOTH repos — the
+# model simply wrote a justification for including each time. "Show a badge for
+# data the API already returns" came back as "the frontend displays it and the
+# backend must supply it", which is true and is not an edit.
+# ---------------------------------------------------------------------------
+def test_the_prompt_asks_what_must_be_edited():
+    from dse_orchestrator.local_activities import _ROUTER_PROMPT
+
+    assert "EDITING A FILE" in _ROUTER_PROMPT
+    assert "cannot name the edit" in _ROUTER_PROMPT, (
+        "without this the model includes a repo it merely reasoned about"
+    )
+
+
+def test_the_prompt_names_the_two_ways_of_over_including():
+    """Both were observed, not imagined: adding the backend because the data
+    comes from it, and adding the frontend because a user eventually sees the
+    result."""
+    from dse_orchestrator.local_activities import _ROUTER_PROMPT
+
+    assert "Do not add the backend because the data comes from it" in _ROUTER_PROMPT
+    assert "Do not add the frontend because a user will eventually see" in _ROUTER_PROMPT
+
+
+def test_the_bias_is_a_tiebreak_and_not_a_default():
+    from dse_orchestrator.local_activities import _ROUTER_PROMPT
+
+    assert "Do not use it as a default" in _ROUTER_PROMPT
