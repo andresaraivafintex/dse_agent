@@ -2012,6 +2012,19 @@ def _sh_quote(path: str) -> str:
     return "'" + path.replace("'", "'\\''") + "'"
 
 
+def _suite_verdict_deferred() -> bool:
+    """Whether the Tester's suite run is informational rather than a gate.
+
+    On by default. It is a flag rather than a deletion because the Tester's own
+    run is still the only thing that can tell a hung suite from a slow one
+    (`suite_hung`, rc=124) before L1's much longer clock — so a repository where
+    that matters can turn the gate back on with
+    `DSE_TESTER_SUITE_IS_A_GATE=1`."""
+    return os.environ.get("DSE_TESTER_SUITE_IS_A_GATE", "").strip().lower() not in {
+        "1", "true", "yes",
+    }
+
+
 def _tester_repo_context(workspace_dir: str) -> tuple[str, str, set[str]]:
     """Deterministic context so authoring imitates the REAL repo (found in the
     real run: the model wrote Jest in a node:test repo with no deps and also
@@ -2937,9 +2950,35 @@ def _tester_pod_sync(
         timeout=clocks.pod_exec,
     )
     tests_ran = bool(test_files)
-    tests_passed = tests_ran and run.returncode == 0
+    # The suite result is INFORMATION here, not a verdict.
+    #
+    # L1's `test` gate runs the same command, in the same Pod, over the same
+    # workspace, minutes later — and it judges the COMMITTED state, which is
+    # what a pull request contains. Two gates over one suite is not twice the
+    # safety: the first one fires earlier and spends the SHARED
+    # `coder_retry_count`, so the second never runs at all.
+    #
+    # Measured across four work items: every single one died at
+    # `tester_retry_cap_exhausted` with `l1_completed` = 0. The real gate never
+    # saw the code. The one item that got past the Tester reached L1 on its
+    # first attempt, and L1 immediately did its job — 4 type errors and a
+    # failing build in the generated code.
+    #
+    # `suite_deferred` rather than `tests_passed=True`: a forced green is
+    # indistinguishable from a suite that really passed, and would be a lie the
+    # ledger keeps. This says no verdict was taken here, which is true.
     returncode = run.returncode
     outcome = _suite_outcome(tests_ran=tests_ran, returncode=returncode)
+    # Deferral covers ONLY a plain test failure — the tests disagreeing with the
+    # code, which is precisely what L1 will re-judge over the committed state.
+    #
+    # An infrastructure ending is not deferred and never was: `suite_hung`
+    # (rc=124), `resource_kill` (rc=137) and `exec_timeout` mean the runtime
+    # died, and the Tester's clock is the only one that catches a hang before
+    # L1's much longer one. Those still escalate, and `tests_passed` still
+    # reads False, because writing True there would put a lie in the ledger.
+    suite_deferred = _suite_verdict_deferred() and outcome == "tests_failed"
+    tests_passed = tests_ran and (suite_deferred or returncode == 0)
     suite_hung = outcome == "suite_hung"
     # Kept, not just logged. The workflow feeds this back to the Coder on the
     # next attempt; without it the retry repeats the original instruction
@@ -2949,7 +2988,11 @@ def _tester_pod_sync(
     # An infra kill is reported even with no authored test: it is the process
     # that died, and "no tests ran" on its own would read like the model simply
     # produced nothing.
-    if not tests_passed and (tests_ran or outcome in _SUITE_OUTCOME_INFRA):
+    # `suite_deferred` is in the condition because a deferred run reports
+    # tests_passed=True — and the output is still what an operator reads to see
+    # what the suite actually said. Deferring the VERDICT must not delete the
+    # EVIDENCE.
+    if (not tests_passed or suite_deferred) and (tests_ran or outcome in _SUITE_OUTCOME_INFRA):
         failure_output = ((run.stdout or "") + (run.stderr or ""))[-_FAILURE_OUTPUT_CHARS:]
         # Say it in words the next round will act on. The raw output of a killed
         # suite ends mid-run and reads like a pass, which is precisely how six
@@ -3002,6 +3045,7 @@ def _tester_pod_sync(
         test_files=test_files,
         tests_ran=tests_ran,
         tests_passed=tests_passed,
+        suite_deferred=suite_deferred,
         returncode=returncode,
         head_sha=head_sha,
         cost_usd=authoring_cost_usd,
