@@ -232,3 +232,45 @@ def test_a_multiline_summary_is_flattened_to_its_first_line():
 def test_an_absent_summary_is_the_empty_string():
     assert _audit_safe_summary(None) == ""
     assert _audit_safe_summary("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Where the time went.
+#
+# `run_l1_pipeline` measured 638 seconds on the Angular testbed, of which 55
+# were explainable — `npm ci` printed its own duration — and 583 were not. The
+# heartbeat says which stage is RUNNING, but nothing durable said how long any
+# of them took, so every proposal to make the gate faster was a guess about
+# which stage to attack.
+# ---------------------------------------------------------------------------
+def test_every_finding_carries_what_it_cost(audit_rows, findings_are):
+    findings_are(
+        L1Finding(check="typecheck", passed=False, status=GateStatus.FAIL,
+                  summary="12 type error(s)")
+    )
+    details = _failures(audit_rows)
+    assert "durations" in details, "the ledger cannot say where the time went"
+    assert set(details["durations"]) == set(details["checks"]), (
+        "a stage reported a status but no duration"
+    )
+    assert all(isinstance(v, (int, float)) for v in details["durations"].values())
+
+
+def test_a_slow_stage_is_visible_in_the_ledger(audit_rows, findings_are, monkeypatch):
+    """The number has to come from the clock, not from a default that would
+    make every stage look free."""
+    import time as _t
+
+    real = _t.monotonic
+    ticks = iter([0.0, 4.0] + [0.0] * 40)
+
+    def fake():
+        try:
+            return next(ticks)
+        except StopIteration:
+            return real()
+
+    findings_are()
+    monkeypatch.setattr(_t, "monotonic", fake)
+    details = _failures(audit_rows)
+    assert details["durations"]["lint"] == 4.0, details["durations"]

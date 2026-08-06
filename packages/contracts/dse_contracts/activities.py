@@ -298,6 +298,13 @@ class L1Finding(BaseModel):
     #: exempt from retention by design, and copied verbatim into the console
     #: read model — a value written there can be rotated, never scrubbed.
     #:
+    #: How long this check took, in seconds. Without it 583 of the L1 gate's 638
+    #: seconds were unattributable — the pipeline knew which stage was running
+    #: (the heartbeat carries that) but nothing durable recorded how long any of
+    #: them took, so every proposal to make the gate faster was a guess about
+    #: which stage to attack.
+    duration_seconds: float = 0.0
+
     #: This is an ALLOWLIST, and it replaced a denylist of check names that was
     #: wrong in both directions: it dropped `sast`'s ERROR reason (the very
     #: incident this field exists for) while still letting `lint`'s exit-127

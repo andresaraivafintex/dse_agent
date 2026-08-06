@@ -21,6 +21,28 @@ except ImportError:  # pragma: no cover - defensive, dse_audit is always install
     audit_emit = None
 
 
+def _timed(step, name: str, produce):
+    """Run one gate, and record what it cost.
+
+    The pipeline reported which stage was running — the heartbeat carries that —
+    but nothing durable said how long any of them took. So `run_l1_pipeline`
+    was 638 seconds of which 55 were explainable (`npm ci` said so itself in its
+    own output) and 583 were not, and every proposal to speed the gate up was a
+    guess about which stage to attack."""
+    import time as _time
+
+    step(name)
+    t0 = _time.monotonic()
+    finding = produce()
+    elapsed = _time.monotonic() - t0
+    if isinstance(finding, list):
+        for f in finding:
+            f.duration_seconds = round(elapsed / max(len(finding), 1), 2)
+        return finding
+    finding.duration_seconds = round(elapsed, 2)
+    return finding
+
+
 def _ignore_step(_name: str) -> None:
     """Default `on_step`: the core stays a plain synchronous function for the
     tests and for any caller that has nothing to report progress to."""
@@ -94,28 +116,19 @@ def run_l1_pipeline_core(
     step("diff")
     changed_files = plan_compliance.changed_files_or_none(executor, base_sha, head_sha)
 
-    step("lint")
-    findings.append(quality_checks.lint_check(executor, cfg, changed_files))
-    step("typecheck")
-    findings.append(quality_checks.typecheck_check(executor, cfg, changed_files))
-    step("test")
-    findings.append(quality_checks.test_check(executor, cfg, changed_files))
-    step("build")
-    findings.append(quality_checks.build_check(executor, cfg, changed_files))
-    step("sast")
-    findings.append(
-        sast.sast_check(
-            executor, target_dir, cfg.sast_severity_gate, cfg.timeout_for("sast")
-        )
-    )
-    step("secret_scan")
-    findings.append(
-        secret_scan.secret_scan_check(executor, target_dir, cfg.timeout_for("secret_scan"))
-    )
-    step("plan_compliance")
-    findings.extend(
-        plan_compliance.plan_compliance_findings(executor, plan, base_sha, head_sha)
-    )
+    findings.append(_timed(step, "lint", lambda: quality_checks.lint_check(executor, cfg, changed_files)))
+    findings.append(_timed(step, "typecheck", lambda: quality_checks.typecheck_check(executor, cfg, changed_files)))
+    findings.append(_timed(step, "test", lambda: quality_checks.test_check(executor, cfg, changed_files)))
+    findings.append(_timed(step, "build", lambda: quality_checks.build_check(executor, cfg, changed_files)))
+    findings.append(_timed(step, "sast", lambda: sast.sast_check(
+        executor, target_dir, cfg.sast_severity_gate, cfg.timeout_for("sast")
+    )))
+    findings.append(_timed(step, "secret_scan", lambda: secret_scan.secret_scan_check(
+        executor, target_dir, cfg.timeout_for("secret_scan")
+    )))
+    findings.extend(_timed(step, "plan_compliance", lambda: plan_compliance.plan_compliance_findings(
+        executor, plan, base_sha, head_sha
+    )))
 
     passed = all(f.passed for f in findings)
     result = L1Result(
@@ -145,6 +158,10 @@ def run_l1_pipeline_core(
                 "checks": {
                     f.check: f.status.value if f.status else None for f in findings
                 },
+                # Durations in the ledger, not only in the logs: "which stage is
+                # slow" has to be answerable from a run that already finished,
+                # by whoever asks next, without a live heartbeat.
+                "durations": {f.check: f.duration_seconds for f in findings},
                 # WHY, not just WHICH — from `summary` and never from `detail`.
                 #
                 # A gate reading ERROR with no reason anywhere is a gate nobody

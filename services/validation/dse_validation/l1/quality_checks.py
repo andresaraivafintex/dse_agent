@@ -112,42 +112,21 @@ def _only_in_changed_files(lines: list[str], changed_files: set[str] | None) -> 
     return [ln for ln in lines if _path_of(ln) in changed_files]
 
 
-#: A change that touches nothing but documentation cannot break a linter, a
-#: type checker, a test suite or a build. That is not a judgement call, and it
-#: is the one skip that is safe to make without enumerating anything.
-#:
-#: Measured on the Angular testbed: ~30 minutes of `npm ci`, `tsc`, `jest` and
-#: `ng build` over 1030 files, to judge a change that added one CONTRIBUTING.md.
-#: The findings are already scoped to the changed files, so every finding those
-#: gates produced was discarded on arrival — the work was provably wasted.
-#:
-#: An extension-per-gate domain was tried first and thrown away: `tsconfig.json`
-#: is not a `.ts` file but decides what typechecks, `.eslintrc` is not source
-#: but decides what lints, `package.json` moves all four. Getting that list
-#: wrong is a FALSE GREEN, and the list can only ever be incomplete. Skipping a
-#: gate that could have found something is the one error that matters here;
-#: running one that could not is merely slow.
-_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
-
-
 def _gate_is_unreachable(check: str, changed_files: set[str] | None) -> str | None:
     """Why this gate needs no run, or None if it does.
 
-    Conservative in one direction on purpose: an unknown scope (`None`), an
-    empty change, a file with no extension, or anything that is not plainly
-    documentation all mean RUN IT."""
-    if not changed_files:
+    The predicate itself lives in `dse_contracts.paths` because the workflow
+    needs the SAME answer to decide whether the Tester has anything to test —
+    and it turned out to be load-bearing that they agree. The Tester used to
+    run unconditionally, author a spec, and have that spec committed into the
+    diff, which made the change non-documentation-only and re-armed all four
+    gates. This skip could therefore never fire while the Tester ran; the two
+    decisions have to be taken from one list."""
+    from dse_contracts.paths import is_documentation_only
+
+    if not is_documentation_only(changed_files):
         return None
-    for f in changed_files:
-        name = f.rsplit("/", 1)[-1]
-        if "." not in name:
-            # Dockerfile, Makefile, an entrypoint script — no suffix to reason
-            # about and able to affect anything.
-            return None
-        if ("." + name.rsplit(".", 1)[1].lower()) not in _DOC_EXTENSIONS:
-            return None
-    n = len(changed_files)
-    return f"the change touches documentation only ({n} file(s))"
+    return f"the change touches documentation only ({len(changed_files)} file(s))"
 
 
 def _not_applicable(check: str, why: str) -> L1Finding:
