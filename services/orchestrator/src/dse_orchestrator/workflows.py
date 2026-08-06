@@ -73,6 +73,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_CHECK_CLARIFICATION,
         LOCAL_ACTIVITY_EMIT_HISTORY_METRIC,
         LOCAL_ACTIVITY_EMIT_PR_QUALITY_METRIC,
+        LOCAL_ACTIVITY_FAN_OUT_SIBLINGS,
         LOCAL_ACTIVITY_LOAD_WORK_ITEM,
         LOCAL_ACTIVITY_POST_STATUS_TRANSITION,
         LOCAL_ACTIVITY_PREVIEW_ENABLED,
@@ -82,6 +83,7 @@ with workflow.unsafe.imports_passed_through():
         LOCAL_ACTIVITY_RECORD_SKILL_EPISODE,
         LOCAL_ACTIVITY_RESOLVE_APPROVER,
         LOCAL_ACTIVITY_RESOLVE_BUDGET_CAP,
+        LOCAL_ACTIVITY_ROUTE_REPOS,
         LOCAL_ACTIVITY_UPDATE_STATUS,
     )
     from dse_orchestrator.models import (
@@ -1487,6 +1489,54 @@ class WorkItemLifecycleWorkflow:
         if input.status == WorkItemStatus.new.value:
             await self._audit("intake_started")
 
+        # Which repositories does this request actually need?
+        #
+        # Runs BEFORE the completeness loop on purpose: that loop's job is to
+        # ask a human for what is missing, and "which repo" is the question we
+        # are answering here. When the router declines — no answer, an error,
+        # a single-repo tenant — nothing changes and the loop asks exactly as it
+        # does today. That is the fallback, not an error path.
+        if input.repo is None and workflow.patched("multi-repo-routing-v1"):
+            routed = await workflow.execute_activity(
+                LOCAL_ACTIVITY_ROUTE_REPOS,
+                {
+                    "work_item_id": input.work_item_id,
+                    "tenant_id": input.tenant_id,
+                    "instruction": input.task_content,
+                },
+                start_to_close_timeout=timedelta(seconds=45),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            repos = list(routed.get("repos") or [])
+            await self._audit(
+                "repo_routing_decided",
+                {"repos": repos, "reason": routed.get("reason", "")},
+            )
+            if repos:
+                input.repo = repos[0]
+                input.base_branch = input.base_branch or "main"
+                if len(repos) > 1:
+                    input.cross_repo = True
+                    # Posted BEFORE the fan-out so the group's comment row
+                    # exists before any sibling writes: every sibling's first
+                    # upsert is then an edit, and the surface never shows two
+                    # messages for one request.
+                    await self._post_status_comment(
+                        "implementing",
+                        detail="Routing to " + str(len(repos)) + " repositories: "
+                        + ", ".join(repos),
+                    )
+                    await workflow.execute_activity(
+                        LOCAL_ACTIVITY_FAN_OUT_SIBLINGS,
+                        {
+                            "work_item_id": input.work_item_id,
+                            "tenant_id": input.tenant_id,
+                            "repos": repos[1:],
+                        },
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    )
+
         while True:
             await self._boundary_gate()
 
@@ -2247,7 +2297,14 @@ class WorkItemLifecycleWorkflow:
 
         # P1: EFFECTIVE risk classification by deterministic POLICY (outside the
         # model) — a Planner that under-classifies does NOT weaken the gate.
-        effective_risk = policy.classify_risk(plan.expected_files, plan.risk_class)
+        # `cross_repo` forces "high", which parks the plan on human approval.
+        # The hook has been in policy.py since the beginning and nothing ever
+        # passed it. A request spanning two repositories is exactly what it was
+        # written for: the model chose the repositories, so a human confirms the
+        # plan before either sandbox writes a line.
+        effective_risk = policy.classify_risk(
+            plan.expected_files, plan.risk_class, cross_repo=input.cross_repo
+        )
         input.risk_class = effective_risk
 
         if workflow.patched("reject-empty-expected-files-v1"):
