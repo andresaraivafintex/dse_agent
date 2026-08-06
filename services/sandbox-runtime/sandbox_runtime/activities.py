@@ -2282,7 +2282,19 @@ def _model_authored_test_script(
         if not (path and content and is_test_path(path)):
             logger.warning("test path refused (outside the allowed test paths): %r", path)
             continue
-        if path in ctx.existing_tests:
+        # A file THIS work item already authored is overwritten, not renamed.
+        #
+        # The rename exists so the Tester never destroys a test the CUSTOMER
+        # wrote. Against its own previous attempt it does the opposite of what
+        # is wanted: the fix loop re-authors the same test, the path is taken,
+        # so it lands as `...-dse-dse.spec.ts` beside the broken original —
+        # and the next round adds a third. Observed on the testbed: four
+        # accumulated files, the suite failing harder each round, and the item
+        # burning its whole retry budget getting worse.
+        #
+        # `_dse` in the stem is the platform's own marker (see below), so a
+        # path carrying it is ours by construction and safe to replace.
+        if path in ctx.existing_tests and not _is_dse_authored(path):
             # Instead of discarding it (which left the script empty whenever the
             # model insisted on the existing test), RENAME deterministically to a
             # new file in the SAME directory — relative imports stay intact.
@@ -2294,6 +2306,19 @@ def _model_authored_test_script(
         return None, cost_usd
     script.append({"tool": "run_tests"})
     return script, cost_usd
+
+
+def _is_dse_authored(path: str) -> bool:
+    """True when this path is one the DSE itself created.
+
+    `_dedupe_test_path` marks its renames with `-dse`/`_dse` before the
+    extension, so the marker is the platform's signature. A customer file
+    cannot carry it unless they chose the same convention, and if they did,
+    overwriting it is still the lesser harm than stacking a broken copy beside
+    it every retry."""
+    name = path.rsplit("/", 1)[-1]
+    stem = name.split(".", 1)[0]
+    return stem.endswith("-dse") or stem.endswith("_dse") or "-dse" in name or "_dse" in name
 
 
 def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str | None = None) -> str:
