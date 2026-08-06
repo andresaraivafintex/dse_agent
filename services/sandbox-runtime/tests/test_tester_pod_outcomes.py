@@ -368,3 +368,21 @@ def test_a_maven_repository_runs_maven_not_pytest(monkeypatch, audits):
     assert script.index("pom.xml") < script.index("pytest"), (
         "pytest must remain the LAST fallback, not the one a Java repo hits"
     )
+
+
+def test_the_tester_overwrites_its_own_previous_attempt():
+    """The fix loop re-authors the same test. Renaming it instead of replacing
+    it stacks a second broken copy beside the first, and the round after that a
+    third: observed on the Angular testbed as `-dse.spec.ts`,
+    `-dse-dse.spec.ts` and `-dse-dse2.spec.ts` all failing together, the suite
+    getting worse each round while the item burned its whole retry budget.
+
+    The rename exists so the Tester never destroys a test the CUSTOMER wrote.
+    Its own marker is how the two are told apart."""
+    from sandbox_runtime.activities import _is_dse_authored
+
+    assert _is_dse_authored("src/a/b.component-dse.spec.ts")
+    assert _is_dse_authored("src/a/b.component-dse-dse.spec.ts")
+    assert _is_dse_authored("src/a/b.integration_dse.spec.ts")
+    assert not _is_dse_authored("src/a/b.component.spec.ts"), "a customer test must never be overwritten"
+    assert not _is_dse_authored("tests/api.test.js")
