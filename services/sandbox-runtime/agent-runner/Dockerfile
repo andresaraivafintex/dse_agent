@@ -35,6 +35,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
 
+# JDK 17: the customer's backend is Spring Boot 3.4 with <java.version>17</java.version>
+# (pom.xml), and without a JDK in the Pod every L1 gate on that repo lands
+# NOT_CONFIGURED — which SCORES AS FAILURE. The DSE would clone a Java repo,
+# edit it, and be structurally unable to validate a line of it.
+#
+# Only the JDK, not Maven: the repo ships `mvnw` and
+# `.mvn/wrapper/maven-wrapper.properties` pins Maven 3.9.9, so the wrapper
+# fetches its own. Adding Maven to the image would just pick a fight with the
+# version the repo already decided on.
+#
+# headless: no AWT, no fonts. Roughly half the size of the full JDK and nothing
+# here draws.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openjdk-17-jdk-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && java -version && javac -version
+
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
