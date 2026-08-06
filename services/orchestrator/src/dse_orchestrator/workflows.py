@@ -25,6 +25,10 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
 
 with workflow.unsafe.imports_passed_through():
+    # Pure path predicates. The Tester skip and the L1 gates must reach
+    # the SAME answer about what counts as documentation, so the list has
+    # one home rather than a copy on each side.
+    from dse_contracts.paths import is_documentation_only
     from dse_contracts.activities import (
         ACTIVITY_CHECKPOINT_SANDBOX,
         ACTIVITY_CONSUME_CI_STATUS,
@@ -1858,111 +1862,141 @@ class WorkItemLifecycleWorkflow:
                 )
 
             # WSB-E2-T3 — Tester session (writes/adjusts tests BEFORE L1).
-            await self._boundary_gate()
-            await self._budget_boundary("tester_turn")
-            tester_result: TesterTurnResult = await self._run_model_activity(
-                ACTIVITY_RUN_TESTER_TURN,
-                {
-                    "sandbox_id": input.sandbox_id,
-                    "work_item_id": input.work_item_id,
-                    "tenant_id": input.tenant_id,
-                    "plan": input.plan_json,
-                    "model_override": self._model_override,
-                    "runtime_override": self._runtime_override,
-                },
-                TesterTurnResult,
+            #
+            # Unless the Coder changed nothing but documentation. A markdown
+            # file cannot break a suite, so a test asserting one exists proves
+            # nothing — and writing it is not free: on the Angular testbed the
+            # Tester turn cost 555s and the L1 gates it re-armed cost another
+            # 583s, against a change that added one CONTRIBUTING.md.
+            #
+            # Re-armed is the word. L1 already skips its four heavy gates for a
+            # documentation-only change, but that skip could NEVER fire while
+            # the Tester ran: the Tester's own `.spec.ts` gets committed by the
+            # checkpoint, lands in `base_sha..head_sha`, and makes the change
+            # non-documentation-only. The optimisation was disabling itself.
+            #
+            # `is_documentation_only` is the SAME predicate the gates use, from
+            # the contracts package, deliberately not a second copy — two lists
+            # that drift is how a skip becomes a false green.
+            skip_tester = (
+                workflow.patched("skip-tester-on-doc-only-v1")
+                and is_documentation_only(getattr(coder_result, "files_changed", None))
             )
-            await self._consume_cost(tester_result.cost_usd, source="tester")
-            await self._audit(
-                "tester_turn_completed",
-                {
-                    "files_changed": tester_result.files_changed,
-                    "tests_ran": tester_result.tests_ran,
-                    "tests_passed": tester_result.tests_passed,
-                    "status": tester_result.status.value,
-                },
-            )
+            if skip_tester:
+                await self._audit(
+                    "tester_turn_skipped",
+                    details={
+                        "reason": "the coder's change touches documentation only",
+                        "files_changed": list(coder_result.files_changed)[:20],
+                    },
+                )
+            tester_result: TesterTurnResult | None = None
+            if not skip_tester:
+                await self._boundary_gate()
+                await self._budget_boundary("tester_turn")
+                tester_result = await self._run_model_activity(
+                    ACTIVITY_RUN_TESTER_TURN,
+                    {
+                        "sandbox_id": input.sandbox_id,
+                        "work_item_id": input.work_item_id,
+                        "tenant_id": input.tenant_id,
+                        "plan": input.plan_json,
+                        "model_override": self._model_override,
+                        "runtime_override": self._runtime_override,
+                    },
+                    TesterTurnResult,
+                )
+                await self._consume_cost(tester_result.cost_usd, source="tester")
+                await self._audit(
+                    "tester_turn_completed",
+                    {
+                        "files_changed": tester_result.files_changed,
+                        "tests_ran": tester_result.tests_ran,
+                        "tests_passed": tester_result.tests_passed,
+                        "status": tester_result.status.value,
+                    },
+                )
 
-            if workflow.patched("enforce-tester-result-v1"):
-                # An ending the RUNTIME imposed is not a verdict on the code, and
-                # until now this gate could not tell the two apart: an OOM-killed
-                # Pod took the same branch as a failing assertion and bought up to
-                # three more Coder turns at a measured US$1.03 each, after which
-                # the item died with a reason that never named the cause.
-                #
-                # Classified BEFORE the `tests_ran` contract check below because
-                # an OOM or an exec deadline can land with no test file authored
-                # at all, and `tester_contract_failed:tests_ran=false` blames the
-                # model for a Pod that died. The classification itself is pure, so
-                # `workflow.patched` is only reached when there IS an infra ending
-                # to decide about — a passing turn records no marker.
-                infra_outcome = self._tester_infra_outcome(tester_result)
-                if infra_outcome and workflow.patched("tester-infra-outcome-escalates-v1"):
-                    # None of these endings is something a Coder turn can act on
-                    # — EXCEPT a suite that hangs, which may be a handle a test
-                    # the Tester itself just authored left open (observed live:
-                    # six non-terminating files in a row). That one gets ONE turn
-                    # to close it. Not three: the second attempt would face the
-                    # identical input, and a suite that is merely slower than the
-                    # runtime's budget cannot be fixed from inside the repo at
-                    # all, so the remaining turns would buy nothing.
-                    retry_the_hang = (
-                        infra_outcome == "suite_hung"
-                        and self._suite_hung_retries == 0
-                        and input.coder_retry_count < input.coder_retry_cap
-                    )
-                    reason = self._tester_infra_reason(infra_outcome, tester_result)
-                    await self._audit(
-                        "tester_infra_outcome",
-                        # `reason` is the one details key the console renders
-                        # (console_projector.mappers._DETAIL_KEYS); `outcome` is
-                        # the one a query groups by, matching the key the
-                        # runtime's own `tester_turn_completed` row writes.
-                        {"reason": reason,
-                         "outcome": infra_outcome,
-                         "returncode": tester_result.returncode,
-                         "decision": "retry_once" if retry_the_hang else "escalate",
-                         "attempt": input.coder_retry_count},
-                    )
-                    if not retry_the_hang:
-                        raise _EscalateNow(reason)
-                    self._suite_hung_retries += 1
-                    # This retry buys a Coder turn like any other, so it counts
-                    # against the same cap and carries the runtime's explanation
-                    # of the hang into the next instruction. No second guard on
-                    # `fix_context`: no closed history reaches this branch at all.
-                    input.coder_retry_count += 1
-                    input.fix_context = self._tester_failure_context(tester_result)
-                    await self._set_status(
-                        WorkItemStatus.implementing,
-                        audit_action="tester_failed_retrying",
-                        details={"attempt": input.coder_retry_count,
-                                 "returncode": tester_result.returncode,
-                                 "outcome": infra_outcome},
-                    )
-                    continue
-
-                if not tester_result.tests_ran:
-                    return await self._finish_failed(
-                        "tester_contract_failed:tests_ran=false",
-                        audit_action="tester_tests_not_run",
-                    )
-                if tester_result.status != GateStatus.PASS:
-                    input.coder_retry_count += 1
-                    if input.coder_retry_count > input.coder_retry_cap:
-                        return await self._finish_failed(
-                            "tester_failed_after_retry_cap",
-                            audit_action="tester_retry_cap_exhausted",
+                if workflow.patched("enforce-tester-result-v1"):
+                    # An ending the RUNTIME imposed is not a verdict on the code, and
+                    # until now this gate could not tell the two apart: an OOM-killed
+                    # Pod took the same branch as a failing assertion and bought up to
+                    # three more Coder turns at a measured US$1.03 each, after which
+                    # the item died with a reason that never named the cause.
+                    #
+                    # Classified BEFORE the `tests_ran` contract check below because
+                    # an OOM or an exec deadline can land with no test file authored
+                    # at all, and `tester_contract_failed:tests_ran=false` blames the
+                    # model for a Pod that died. The classification itself is pure, so
+                    # `workflow.patched` is only reached when there IS an infra ending
+                    # to decide about — a passing turn records no marker.
+                    infra_outcome = self._tester_infra_outcome(tester_result)
+                    if infra_outcome and workflow.patched("tester-infra-outcome-escalates-v1"):
+                        # None of these endings is something a Coder turn can act on
+                        # — EXCEPT a suite that hangs, which may be a handle a test
+                        # the Tester itself just authored left open (observed live:
+                        # six non-terminating files in a row). That one gets ONE turn
+                        # to close it. Not three: the second attempt would face the
+                        # identical input, and a suite that is merely slower than the
+                        # runtime's budget cannot be fixed from inside the repo at
+                        # all, so the remaining turns would buy nothing.
+                        retry_the_hang = (
+                            infra_outcome == "suite_hung"
+                            and self._suite_hung_retries == 0
+                            and input.coder_retry_count < input.coder_retry_cap
                         )
-                    if workflow.patched("fix-loop-carries-the-failure-v1"):
+                        reason = self._tester_infra_reason(infra_outcome, tester_result)
+                        await self._audit(
+                            "tester_infra_outcome",
+                            # `reason` is the one details key the console renders
+                            # (console_projector.mappers._DETAIL_KEYS); `outcome` is
+                            # the one a query groups by, matching the key the
+                            # runtime's own `tester_turn_completed` row writes.
+                            {"reason": reason,
+                             "outcome": infra_outcome,
+                             "returncode": tester_result.returncode,
+                             "decision": "retry_once" if retry_the_hang else "escalate",
+                             "attempt": input.coder_retry_count},
+                        )
+                        if not retry_the_hang:
+                            raise _EscalateNow(reason)
+                        self._suite_hung_retries += 1
+                        # This retry buys a Coder turn like any other, so it counts
+                        # against the same cap and carries the runtime's explanation
+                        # of the hang into the next instruction. No second guard on
+                        # `fix_context`: no closed history reaches this branch at all.
+                        input.coder_retry_count += 1
                         input.fix_context = self._tester_failure_context(tester_result)
-                    await self._set_status(
-                        WorkItemStatus.implementing,
-                        audit_action="tester_failed_retrying",
-                        details={"attempt": input.coder_retry_count,
-                                 "returncode": tester_result.returncode},
-                    )
-                    continue
+                        await self._set_status(
+                            WorkItemStatus.implementing,
+                            audit_action="tester_failed_retrying",
+                            details={"attempt": input.coder_retry_count,
+                                     "returncode": tester_result.returncode,
+                                     "outcome": infra_outcome},
+                        )
+                        continue
+
+                    if not tester_result.tests_ran:
+                        return await self._finish_failed(
+                            "tester_contract_failed:tests_ran=false",
+                            audit_action="tester_tests_not_run",
+                        )
+                    if tester_result.status != GateStatus.PASS:
+                        input.coder_retry_count += 1
+                        if input.coder_retry_count > input.coder_retry_cap:
+                            return await self._finish_failed(
+                                "tester_failed_after_retry_cap",
+                                audit_action="tester_retry_cap_exhausted",
+                            )
+                        if workflow.patched("fix-loop-carries-the-failure-v1"):
+                            input.fix_context = self._tester_failure_context(tester_result)
+                        await self._set_status(
+                            WorkItemStatus.implementing,
+                            audit_action="tester_failed_retrying",
+                            details={"attempt": input.coder_retry_count,
+                                     "returncode": tester_result.returncode},
+                        )
+                        continue
 
             await self._boundary_gate()
             await self._checkpoint_or_rebuild("implementing")

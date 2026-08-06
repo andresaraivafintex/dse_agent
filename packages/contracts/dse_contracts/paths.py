@@ -133,3 +133,35 @@ def is_lockfile_churn(path: str, files_changed: list[str] | set[str]) -> bool:
         return False
     changed = {f.replace("\\", "/") for f in files_changed}
     return manifest not in changed
+
+# ---------------------------------------------------------------------------
+# Documentation-only changes
+# ---------------------------------------------------------------------------
+#: A change touching nothing but these cannot break a linter, a type checker, a
+#: test suite or a build. That is not a judgement call, and it is the one skip
+#: that is safe without enumerating every config file that governs every tool.
+DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".txt", ".adoc"})
+
+
+def is_documentation_only(changed_files) -> bool:
+    """True when every changed file is plainly documentation.
+
+    Conservative in one direction on purpose: an empty change, an unknown
+    scope, or a file with no extension (Dockerfile, Makefile, an entrypoint
+    script — able to affect anything) all return False, i.e. DO THE WORK.
+    Skipping something that could have found a defect is the error that
+    matters; doing work that could not is merely slow.
+
+    This lives in the contracts package because two very different consumers
+    need the SAME answer: the L1 gates decide whether to run at all, and the
+    workflow decides whether the Tester has anything to test. Two copies of the
+    extension list would drift, and a drifted list is a false green."""
+    if not changed_files:
+        return False
+    for f in changed_files:
+        name = str(f).replace("\\", "/").rsplit("/", 1)[-1]
+        if "." not in name:
+            return False
+        if ("." + name.rsplit(".", 1)[1].lower()) not in DOC_EXTENSIONS:
+            return False
+    return True
