@@ -18,6 +18,11 @@ from dse_validation.sandbox_exec import ExecResult, SandboxExecutor
 
 _MAX_DETAIL_LINES = 40
 
+#: How many of the lines a gate ACTUALLY COUNTED are reproduced in `detail`.
+#: These are the evidence for the verdict, so they get their own budget ahead of
+#: the raw tail rather than competing with it.
+_MAX_ATTRIBUTED_LINES = 60
+
 
 def _tail(text: str, max_lines: int = _MAX_DETAIL_LINES) -> str:
     lines = text.splitlines()
@@ -25,6 +30,55 @@ def _tail(text: str, max_lines: int = _MAX_DETAIL_LINES) -> str:
         return text
     omitted = len(lines) - max_lines
     return "\n".join(lines[-max_lines:]) + f"\n... ({omitted} earlier line(s) omitted)"
+
+
+def _output(result: ExecResult) -> str:
+    """Both streams, because the diagnosis is rarely on the one `or` picks.
+
+    This was `result.stdout or result.stderr`, which discards stderr entirely
+    whenever stdout is non-empty — and for a Node toolchain stdout is NEVER
+    empty. Measured on the Angular testbed for one `npx jest --ci` run:
+
+        stdout  24,610 lines  — captured console.* from tests, coverage table
+        stderr   7,074 lines  — the PASS/FAIL headers, the `-` failure blocks,
+                                and the "Test Suites: 2 failed, 275 passed" line
+
+    So every `detail` ever written for that gate was 40 lines of the coverage
+    table, and the failure blocks naming the broken suite were thrown away at
+    write time. Raising `_MAX_DETAIL_LINES` could not have fixed it at any
+    value: the answer was never in the stream being tailed. The same `or` sent
+    `build`'s detail the `ng build` bundle-size table while the compiler error
+    went to stderr.
+    """
+    return "\n".join(part for part in (result.stdout, result.stderr) if part)
+
+
+def _detail_with(summary: str, attributed: list[str], result: ExecResult) -> str:
+    """Lead with the lines the gate counted; keep the raw tail behind them.
+
+    `detail` used to be `summary + _tail(output)`, so the only evidence anyone
+    received was the END of the tool's output. On the Angular testbed that meant
+    an operator reading a `typecheck` failure saw the alphabetical tail of a
+    262-error dump — pre-existing errors in files the change never opened — with
+    24,569 lines omitted, while the three errors that actually failed the gate
+    sat in the omitted head.
+
+    That is not a cosmetic problem. `workflows.py::_l1_failure_context` feeds
+    this exact string to the NEXT Coder turn. Handed other people's errors, the
+    Coder produced a byte-identical diff across four paid rounds — a measured
+    delta of zero. The gate has to show its own evidence for the fix loop to be
+    a loop at all.
+    """
+    parts = [summary]
+    if attributed:
+        shown = attributed[:_MAX_ATTRIBUTED_LINES]
+        parts.append(f"--- the {len(attributed)} line(s) this gate counted ---")
+        parts.extend(shown)
+        if len(attributed) > len(shown):
+            parts.append(f"... ({len(attributed) - len(shown)} more not shown)")
+        parts.append("--- raw output (tail) ---")
+    parts.append(_tail(_output(result)))
+    return "\n".join(parts)
 
 
 def _run(executor: SandboxExecutor, argv: list[str], timeout: int) -> ExecResult:
@@ -180,7 +234,7 @@ def lint_check(
         summary = f"timed out after {timeout}s"
         status = GateStatus.ERROR
     elif (infra := _infra_failure(result)) is not None:
-        detail = f"lint: {infra}\n" + _tail(result.stdout or result.stderr)
+        detail = f"lint: {infra}\n" + _tail(_output(result))
         summary = f"lint could not run: {infra}"
         passed = False
         status = GateStatus.ERROR
@@ -219,7 +273,7 @@ def lint_check(
                 f"lint failed (exit={result.returncode}); no issue line matched "
                 "the expected 'path:line:col: CODE msg' format — see the detail"
             )
-        detail = summary + "\n" + _tail(result.stdout or result.stderr)
+        detail = _detail_with(summary, issue_lines, result)
         status = GateStatus.PASS if passed else GateStatus.FAIL
     return L1Finding(
         check="lint", passed=passed, status=status, detail=detail, summary=summary
@@ -253,7 +307,7 @@ def typecheck_check(
             check="typecheck",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"typecheck: {infra}\n" + _tail(result.stdout or result.stderr),
+            detail=f"typecheck: {infra}\n" + _tail(_output(result)),
             summary=f"typecheck could not run: {infra}",
         )
     if result.returncode == 127:
@@ -294,17 +348,64 @@ def typecheck_check(
         status = GateStatus.ERROR
     else:
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    detail = summary + "\n" + _tail(result.stdout or result.stderr)
+    detail = _detail_with(summary, error_lines, result)
     return L1Finding(
         check="typecheck", passed=passed, status=status, detail=detail, summary=summary
     )
 
 
-_PYTEST_SUMMARY_RE = re.compile(
-    r"(?P<passed>\d+) passed"
-    r"(?:, (?P<failed>\d+) failed)?"
-    r"(?:, (?P<errors>\d+) error)?",
-)
+#: One "<n> <word>" pair from a runner's count line. The alternation is closed,
+#: so only digits and these fixed words can ever leave this parser — which is
+#: what keeps the result safe for `summary` and therefore for the append-only
+#: ledger (see `L1Finding.summary`).
+_COUNT_RE = re.compile(r"(?P<n>\d+) (?P<word>passed|failed|errors?|skipped|todo)\b")
+
+#: Words that mean the run has something wrong in it.
+_BAD_WORDS = ("failed", "error", "errors")
+
+
+def _test_counts(text: str) -> str | None:
+    """The counts a test runner printed, in whatever order it printed them.
+
+    This replaced a pattern that required `passed` FIRST with `failed` optional
+    after it — pytest's order (`272 passed, 3 failed`). Jest writes the opposite
+    (`Test Suites: 2 failed, 275 passed, 277 total`), so the optional group
+    never matched and the failure count was silently dropped. A jest run with
+    two broken suites published the byte-identical summary to a green one:
+
+        'Test Suites: 2 failed, 275 passed, 277 total'  ->  '275 passed'
+
+    That string is the only thing that propagates. It goes into the append-only
+    `audit_log`, and `workflows.py::_l1_failure_context` hands it to the next
+    Coder turn — so the fix loop was told to repair a suite it was told passed.
+    Two days of debugging went into the gate before anyone read this regex.
+
+    A line naming a non-zero failure wins outright; otherwise the first line
+    carrying counts is used, so a green run still reads the way it always did.
+    """
+    fallback: str | None = None
+    for line in text.splitlines():
+        pairs = _COUNT_RE.findall(line)
+        if not pairs:
+            continue
+        rendered = ", ".join(f"{n} {word}" for n, word in pairs)
+        if any(word.startswith(_BAD_WORDS) and int(n) > 0 for n, word in pairs):
+            return rendered
+        if fallback is None:
+            fallback = rendered
+    return fallback
+
+
+def _names_a_failure(counts: str) -> bool:
+    return any(
+        word.startswith(_BAD_WORDS) and int(n) > 0 for n, word in _COUNT_RE.findall(counts)
+    )
+
+
+#: Lines a runner uses to head a broken suite. These carry file paths, which is
+#: why they are only ever used for `detail` (which lives in `validation_runs`
+#: and is subject to retention) and never for `summary`.
+_FAILING_SUITE_RE = re.compile(r"^\s*(?:FAIL|FAILED|ERROR)\b.*$")
 
 
 def test_check(
@@ -321,7 +422,7 @@ def test_check(
             check="test",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"test: {infra}\n" + _tail(result.stdout or result.stderr),
+            detail=f"test: {infra}\n" + _tail(_output(result)),
             summary=f"the test suite could not run: {infra}",
         )
     if result.returncode == 127:
@@ -332,11 +433,10 @@ def test_check(
             detail=f"test command not found: {' '.join(cfg.test_cmd)}",
             summary="test command not found (exit 127)",
         )
-    m = _PYTEST_SUMMARY_RE.search(result.stdout) or _PYTEST_SUMMARY_RE.search(result.stderr)
-    # `m.group(0)` comes from the test output, but the pattern admits only
-    # digits and the fixed words "passed"/"failed"/"error" — it cannot carry
-    # arbitrary text out of the run, which is what makes it safe for `summary`.
-    counts = m.group(0) if m else None
+    output = _output(result)
+    # Both streams: jest prints its counts and its failure blocks to STDERR,
+    # and the old `stdout or stderr` never reached stderr at all.
+    counts = _test_counts(output)
     passed = result.ok
     if result.timed_out:
         summary = f"timed out after {timeout}s running tests — L1 fails clean (P6)"
@@ -344,13 +444,25 @@ def test_check(
         status = GateStatus.ERROR
     elif counts:
         summary = f"summary: {counts}"
-        detail = summary
+        if not passed and not _names_a_failure(counts):
+            # Every test passed and the command still failed. That is not a
+            # contradiction and it is not ours to hide: the runner is enforcing
+            # something besides the tests — a global coverage threshold, a
+            # lint-in-test step, `errorOnDeprecated`. Saying only "275 passed"
+            # beside a FAIL is the ledger asserting the opposite of the verdict
+            # next to it, and it sends the fix loop hunting a broken test that
+            # does not exist.
+            summary += (
+                f" — no test failed, but the command exited {result.returncode}: "
+                "the suite's own policy rejected the run (coverage threshold or "
+                "similar), not a failing test — see the detail"
+            )
         status = GateStatus.PASS if passed else GateStatus.FAIL
     else:
-        summary = f"exit code {result.returncode} (no pytest summary found in the output)"
-        detail = summary
+        summary = f"exit code {result.returncode} (no test count found in the output)"
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    detail += "\n" + _tail(result.stdout or result.stderr)
+    failing = [ln for ln in output.splitlines() if _FAILING_SUITE_RE.match(ln)]
+    detail = _detail_with(summary, [] if passed else failing, result)
     return L1Finding(
         check="test", passed=passed, status=status, detail=detail, summary=summary
     )
@@ -370,7 +482,7 @@ def build_check(
             check="build",
             passed=False,
             status=GateStatus.ERROR,
-            detail=f"build: {infra}\n" + _tail(result.stdout or result.stderr),
+            detail=f"build: {infra}\n" + _tail(_output(result)),
             summary=f"the build could not run: {infra}",
         )
     if result.returncode == 127:
@@ -388,7 +500,7 @@ def build_check(
         status = GateStatus.ERROR
     else:
         status = GateStatus.PASS if passed else GateStatus.FAIL
-    detail = summary + "\n" + _tail(result.stdout or result.stderr)
+    detail = _detail_with(summary, [], result)
     return L1Finding(
         check="build", passed=passed, status=status, detail=detail, summary=summary
     )
