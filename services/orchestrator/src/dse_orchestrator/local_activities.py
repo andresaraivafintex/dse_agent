@@ -1077,15 +1077,30 @@ def _route_repos_sync(tenant_id: str, instruction: str) -> dict[str, Any]:
         with conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT b.repo,
-                       COALESCE(p.role, ''), COALESCE(p.language, ''), COALESCE(p.description, '')
-                  FROM repo_bindings b
-                  LEFT JOIN repo_profiles p
-                         ON p.tenant_id = b.tenant_id AND p.repo = b.repo
-                 WHERE b.tenant_id = %s AND b.repo IS NOT NULL
-                 ORDER BY 1
+                -- The candidate set is every repository this tenant HAS, and
+                -- `repo_bindings` is not that: it has one row per BINDING, so a
+                -- repository nobody has bound to a channel is invisible there.
+                -- Removing one Slack channel binding took the frontend out of
+                -- the candidate list entirely, and the router then answered
+                -- "the tenant has a single repository" and sent every request
+                -- to the backend. `repo_profiles` is the table that means
+                -- "these are the repositories, and this is what they are", so
+                -- the union is the honest source.
+                SELECT repo,
+                       MAX(role) AS role, MAX(language) AS language, MAX(description) AS description
+                  FROM (
+                        SELECT repo, '' AS role, '' AS language, '' AS description
+                          FROM repo_bindings
+                         WHERE tenant_id = %(t)s AND repo IS NOT NULL
+                        UNION ALL
+                        SELECT repo, role, language, description
+                          FROM repo_profiles
+                         WHERE tenant_id = %(t)s
+                       ) AS all_repos
+                 GROUP BY repo
+                 ORDER BY repo
                 """,
-                (tenant_id,),
+                {"t": tenant_id},
             )
             rows = cur.fetchall()
     finally:

@@ -2893,6 +2893,21 @@ def _tester_pod_sync(
         f'rc=124 means the install alone outlived its own {clocks.install}s budget. '
         'install tail: $(tail -c 800 /tmp/dse-npm-install.log)" >&2; '
         f'timeout -k 10 {clocks.suite} npm test --silent; '
+        # Maven, before falling through to pytest. Without this a Java
+        # repository ran `python3 -m pytest` — which finds no tests, exits
+        # non-zero, and reports as "the tests you wrote fail". Measured: the
+        # backend work items died at `tester_retry_cap_exhausted` having never
+        # run a single Java test, and the Coder was sent to fix an assertion
+        # that never existed.
+        #
+        # `./mvnw` rather than `mvn`: the repo pins its own Maven in
+        # .mvn/wrapper, and the image deliberately ships only a JDK so it
+        # cannot disagree with that pin. `-o` is NOT used — the wrapper has to
+        # fetch Maven on the first run.
+        'elif [ -f pom.xml ] && [ -x ./mvnw ]; then '
+        f'timeout -k 10 {clocks.suite} ./mvnw -B -q test; '
+        'elif [ -f pom.xml ]; then '
+        f'timeout -k 10 {clocks.suite} mvn -B -q test; '
         f'else timeout -k 10 {clocks.suite} python3 -m pytest -q; fi',
         timeout=clocks.pod_exec,
     )
