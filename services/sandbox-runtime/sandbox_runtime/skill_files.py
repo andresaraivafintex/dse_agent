@@ -279,7 +279,7 @@ def materialize_skills_in_pod(skills: list[Skill], *, run) -> list[str]:
     return written
 
 
-def workspace_skills_note_in_pod(run, *, limit: int = 2_000) -> str:
+def workspace_skills_note_in_pod(run, *, limit: int = 32_000) -> str:
     """The same note as `workspace_skills_note`, read INSIDE the sandbox Pod.
 
     On the K8s runtime the host reader above sees a workspace directory that
@@ -292,12 +292,22 @@ def workspace_skills_note_in_pod(run, *, limit: int = 2_000) -> str:
     as `materialize_skills_in_pod` — testable without a cluster. Any failure
     degrades to "" (a prompt without guidance, never a failed turn); the entry
     format and header are shared with the host reader so the two runtimes can
-    not drift apart."""
+    not drift apart.
+
+    `limit` is a guard against pathology, NOT the Tester's 2 kB prompt budget:
+    the Coder's host-path note is uncapped, and a production pod carries the
+    21 registry skills plus the repo's committed ones (~9 kB of entries) — a
+    2 kB cut lands mid-alphabet and silently drops exactly the late-alphabet
+    skill this channel existed to deliver."""
+    # LC_ALL=C: the glob's order is the locale's collation — byte order under C,
+    # which is what Python's sorted() gives the host reader. The sed strips both
+    # ends of the description for the same reason: the host does .strip().
     script = (
+        "LC_ALL=C; export LC_ALL; "
         f"cd {_POD_WORKSPACE} 2>/dev/null || exit 0; "
         'for d in .claude/skills/*/; do [ -f "$d/SKILL.md" ] || continue; '
         'desc=$(grep -m1 "^description:" "$d/SKILL.md" | cut -d: -f2- | '
-        "sed 's/^ *//'); n=$(basename \"$d\"); "
+        "sed 's/^ *//; s/ *$//'); n=$(basename \"$d\"); "
         'echo "- .claude/skills/$n/SKILL.md — ${desc:-$n}"; '
         f"done 2>/dev/null | head -c {limit}"
     )

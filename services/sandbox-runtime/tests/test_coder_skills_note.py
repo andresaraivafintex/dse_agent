@@ -164,6 +164,29 @@ def test_host_and_pod_readers_produce_the_same_note(tmp_path):
     assert workspace_skills_note_in_pod(_run_against(ws)).startswith(_NOTE_HEADER)
 
 
+def test_a_production_sized_pod_does_not_truncate_the_late_alphabet_skill(tmp_path):
+    """The real pod carries the 21 registry skills (long, sentence-sized
+    descriptions) plus the repo's committed ones — ~9 kB of entries. A note
+    capped at the Tester's 2 kB prompt budget cuts mid-alphabet and silently
+    drops `primeng-typing`, the very skill H3 was about delivering. The host
+    reader ships everything; the pod reader must keep matching it at this
+    size."""
+    ws = tmp_path / "workspace"
+    keys = [f"skill-{c}{i:02d}" for i, c in enumerate("abcdefghijklmnopqrst")]
+    keys += ["angular-testbed", "primeng-typing"]
+    for key in keys:
+        d = ws / ".claude" / "skills" / key
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {key}\ndescription: {key} — " + "guidance " * 40 + "\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+    pod_note = workspace_skills_note_in_pod(_run_against(str(ws)))
+    assert pod_note == workspace_skills_note(str(ws))
+    assert ".claude/skills/primeng-typing/SKILL.md" in pod_note
+    assert len(pod_note) > 2_000  # the size class the old cap silently cut
+
+
 def test_pod_note_degrades_to_empty_never_to_a_failed_turn(tmp_path):
     # exec failure (pod gone, kubectl refused) → no note, not an exception
     assert workspace_skills_note_in_pod(lambda argv, stdin: (1, "pod gone")) == ""
