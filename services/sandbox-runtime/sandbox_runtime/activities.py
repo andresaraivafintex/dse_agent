@@ -2750,6 +2750,44 @@ _RC_POD_EXEC_TIMEOUT = -1001
 # handed all of them as failing assertions.
 _SUITE_OUTCOME_INFRA = frozenset({"suite_hung", "resource_kill", "exec_timeout"})
 
+#: Teto do typecheck quando o manifesto do repo não declara o seu.
+_TYPECHECK_TIMEOUT_DEFAULT_SECONDS = 300
+
+
+def _tail_both(proc: Any) -> str:
+    """Cauda de stdout+stderr. Os DOIS: o tsc escreve diagnóstico em stdout e o
+    runner de outro dialeto escreve em stderr — ler um só foi como todo gate L1
+    publicou a evidência errada por dois dias (#60)."""
+    return ((getattr(proc, "stdout", "") or "") + (getattr(proc, "stderr", "") or ""))[
+        -_FAILURE_OUTPUT_CHARS:
+    ]
+
+
+def _pod_manifest_typecheck(_pod_sh) -> tuple[list[str] | None, int]:
+    """O comando de typecheck DECLARADO pelo repo em `.dse/validation.json`, que
+    é a régua que o L1 aplica depois — a do build, nunca a das specs.
+
+    Devolve `(None, _)` quando não há manifesto ou não há comando: ausência
+    declarada não vira veredito, e um repo que nunca declarou typecheck segue
+    com o turno que sempre teve."""
+    r = _pod_sh("cat /workspace/.dse/validation.json 2>/dev/null")
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None, _TYPECHECK_TIMEOUT_DEFAULT_SECONDS
+    try:
+        manifest = json.loads(r.stdout)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("tester: .dse/validation.json ilegível; typecheck do turno pulado")
+        return None, _TYPECHECK_TIMEOUT_DEFAULT_SECONDS
+    cmd = ((manifest.get("commands") or {}).get("typecheck")) or []
+    if not isinstance(cmd, list) or not cmd:
+        return None, _TYPECHECK_TIMEOUT_DEFAULT_SECONDS
+    timeout = (manifest.get("timeouts") or {}).get("typecheck")
+    try:
+        timeout = int(timeout)
+    except (TypeError, ValueError):
+        timeout = _TYPECHECK_TIMEOUT_DEFAULT_SECONDS
+    return [str(c) for c in cmd], max(30, timeout)
+
 
 def _suite_outcome(*, tests_ran: bool, returncode: int) -> str:
     """Name what ended the suite. The infra codes are read FIRST: they are facts
@@ -3053,7 +3091,27 @@ def _tester_pod_sync(
         timeout=clocks.pod_exec,
     )
 
-    run = _run_suite()
+    # ---- A régua do REPO, aplicada dentro do turno ------------------------
+    # As specs são transpiladas pelo jest com a config DELAS
+    # (`tsconfig.spec.json`: strict:false), então um erro de tipo no que o
+    # Tester acabou de escrever passa aqui e só aparece um round de L1 depois —
+    # ao custo de um turno de Coder para descobrir. O comando vem do
+    # `.dse/validation.json`, que é a mesma régua que o L1 aplica (a do build,
+    # nunca a das specs), e ausência declarada não vira veredito: repo sem
+    # manifesto ou sem `typecheck` segue exatamente como antes.
+    typecheck_output = ""
+    tc_cmd, tc_timeout = _pod_manifest_typecheck(_pod_sh)
+    if tc_cmd:
+        tc = _pod_sh(f"cd /workspace && {_shlex.join(tc_cmd)}", timeout=tc_timeout)
+        if tc.returncode != 0:
+            typecheck_output = _tail_both(tc)
+
+    if typecheck_output:
+        # Falha-rápido: uma suíte inteira depois de um erro de tipo custa
+        # minutos para dizer o que o compilador já disse em segundos.
+        run = tc
+    else:
+        run = _run_suite()
 
     # ---- Porta 5: o alvo fixo vale apenas para alvo que produz VEREDITO ----
     # O racional do reuso fica de pé (alvo estável para o Coder convergir; ver
@@ -3151,7 +3209,14 @@ def _tester_pod_sync(
     # indistinguishable from a suite that really passed, and would be a lie the
     # ledger keeps. This says no verdict was taken here, which is true.
     returncode = run.returncode
-    outcome = _suite_outcome(tests_ran=tests_ran, returncode=returncode)
+    # `typecheck_failed` é veredito sobre o CÓDIGO (compilador), não sobre a
+    # suíte: não entra em _SUITE_OUTCOME_INFRA (não é o runtime morrendo) e não
+    # é deferível (o deferral cobre só `tests_failed`, o desacordo entre teste e
+    # código que o L1 re-julga sobre o estado commitado).
+    outcome = (
+        "typecheck_failed" if typecheck_output
+        else _suite_outcome(tests_ran=tests_ran, returncode=returncode)
+    )
     # Deferral covers ONLY a plain test failure — the tests disagreeing with the
     # code, which is precisely what L1 will re-judge over the committed state.
     #
