@@ -1,0 +1,127 @@
+"""A régua que o turno do Tester nunca aplicou.
+
+Medido no testbed Angular (2026-08-07): as specs são transpiladas pelo jest com
+`tsconfig.spec.json` (`strict: false`, `strictNullChecks: false`), o gate
+`typecheck` do repo roda `tsc -p tsconfig.dse.json` — que EXCLUI `*.spec.ts` —
+e o `build` também não olha spec. Resultado: um erro de tipo no que o Tester
+acabou de escrever não é visto por ninguém dentro do turno, e o item só
+descobre um round de L1 depois, gastando um turno de Coder para saber.
+
+Este arquivo pina duas coisas:
+  - o turno roda o typecheck DECLARADO PELO REPO (`.dse/validation.json`, a
+    mesma régua do L1 — a do build, não a das specs) e uma falha entra no
+    RESULTADO do Tester (vermelho antes do fix);
+  - o run parcial da suíte continua carregando `--coverage=false`, sem o qual
+    qualquer subconjunto reprova por cobertura global e não por teste (isso já
+    era verdade; aqui vira regressão pinada).
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+
+from dse_contracts import GateStatus, RunTesterTurnInput
+from sandbox_runtime import activities
+
+_MANIFEST = {
+    "version": 1,
+    "timeouts": {"typecheck": 300},
+    "commands": {
+        "typecheck": ["sh", "-c", "npx tsc --noEmit -p tsconfig.dse.json"],
+        "test": ["sh", "-c", "npx jest --ci"],
+    },
+}
+
+_TSC_ERROR = (
+    "src/app/components/homepage/components/dashboard-list/"
+    "dashboard-list.component-dse.spec.ts(42,7): error TS2322: "
+    "Type 'string' is not assignable to type 'TagSeverity'.\n"
+)
+
+
+def _done(argv, returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+
+def _cluster(*, typecheck, manifest=_MANIFEST, suite=None, seen=None):
+    """Fake do cluster: manifesto, typecheck e suíte respondidos por argv."""
+
+    def fake_run(argv, **kwargs):
+        if seen is not None:
+            seen.append((argv, kwargs))
+        joined = " ".join(argv)
+        if "head -c" in joined:
+            if "find ." in joined:
+                return _done(argv, 0, stdout="./src/app.spec.ts\n")
+            if "cat package.json" in joined:
+                return _done(argv, 0, stdout='{"name":"fe","scripts":{"test":"jest"}}')
+            return _done(argv, 0, stdout="")
+        if ".dse/validation.json" in joined:
+            if manifest is None:
+                return _done(argv, 1, stdout="")
+            return _done(argv, 0, stdout=json.dumps(manifest))
+        if "tsc --noEmit" in joined:
+            return typecheck
+        if "--grep='^tester('" in joined:
+            return _done(argv, 0, stdout="tests/app-dse.spec.ts\n")
+        if "git log --format=%s" in joined:
+            return _done(argv, 0, stdout="tester(wi): authored\n")
+        if any(m in joined for m in ("npm test", "python3 -m pytest")):
+            return suite if suite is not None else _done(argv, 0, stdout="Tests: 1 passed, 1 total\n")
+        return _done(argv, 0, stdout="deadbeef\n")
+
+    return fake_run
+
+
+def _run(monkeypatch, **cluster):
+    seen: list = []
+    monkeypatch.setattr(subprocess, "run", _cluster(seen=seen, **cluster))
+    monkeypatch.setattr(activities, "audit_emit", lambda **kw: None)
+    result = activities._tester_pod_sync(
+        RunTesterTurnInput(work_item_id="wi-tc", tenant_id="t", instruction="cover"),
+        "dse-sbx-wi-tc", None, "vk", False,
+    )
+    return result, seen
+
+
+def _suite_ran(seen) -> bool:
+    return any("npm test" in " ".join(a) for a, _k in seen)
+
+
+def test_a_type_error_in_the_authored_spec_fails_the_turn(monkeypatch):
+    """Vermelho hoje: o turno nunca roda typecheck, então devolve PASS sobre uma
+    spec que não compila com a régua do repo."""
+    result, seen = _run(monkeypatch, typecheck=_done([], 2, stdout=_TSC_ERROR))
+
+    assert result.status is GateStatus.FAIL
+    assert result.tests_passed is False
+    assert result.suite_deferred is False, "erro de tipo não é veredito de suíte para deferir"
+    assert "TS2322" in result.failure_output
+    assert not _suite_ran(seen), "typecheck reprovado: não gasta a suíte inteira depois"
+
+
+def test_a_clean_typecheck_lets_the_suite_decide(monkeypatch):
+    result, seen = _run(monkeypatch, typecheck=_done([], 0, stdout=""))
+
+    assert _suite_ran(seen)
+    assert result.status is GateStatus.PASS
+
+
+def test_a_repo_without_a_declared_typecheck_is_unchanged(monkeypatch):
+    """Ausência declarada não vira veredito: sem manifesto, o turno é o de sempre."""
+    result, seen = _run(monkeypatch, typecheck=_done([], 0), manifest=None)
+
+    assert _suite_ran(seen)
+    assert result.status is GateStatus.PASS
+
+
+def test_the_scoped_suite_run_still_disables_coverage(monkeypatch):
+    """Regressão pinada: `collectCoverage: true` com thresholds globais reprova
+    QUALQUER subconjunto (medido: 9,83% contra um piso de 80%), então o run
+    parcial do Tester tem de carregar --coverage=false — senão o Coder é mandado
+    consertar um teste que passou."""
+    _result, seen = _run(monkeypatch, typecheck=_done([], 0))
+
+    npm = [" ".join(a) for a, _k in seen if "npm test" in " ".join(a)]
+    assert npm, "a suíte tem de rodar"
+    assert "--coverage=false" in npm[0]
