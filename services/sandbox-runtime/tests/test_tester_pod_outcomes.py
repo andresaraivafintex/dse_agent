@@ -188,6 +188,23 @@ def test_a_passing_suite_stays_a_pass(monkeypatch, audits):
     assert _completed_row(audits)["details"]["outcome"] == "passed"
 
 
+def test_the_deferral_is_written_to_the_ledger_row(monkeypatch, audits):
+    """`suite_deferred` is the fact that reconciles `tests_passed=True` with
+    `outcome=tests_failed, returncode=1` in the SAME row. It existed in the
+    in-memory result and was dropped from the audit payload — so the ledger
+    read as a contradiction, 7 events out of 7 across two production runs."""
+    result = _run_bridge(monkeypatch, suite=_done([], 1, stdout="AssertionError: 1 != 2\n"))
+
+    assert result.suite_deferred is True
+    assert _completed_row(audits)["details"]["suite_deferred"] is True
+
+
+def test_a_plain_pass_reads_not_deferred_in_the_ledger(monkeypatch, audits):
+    _run_bridge(monkeypatch, suite=_done([], 0, stdout="1 passed\n"))
+
+    assert _completed_row(audits)["details"]["suite_deferred"] is False
+
+
 # ---------------------------------------------------------------------------
 # 0.3 — the timeout message may only claim what the timeout measured
 # ---------------------------------------------------------------------------

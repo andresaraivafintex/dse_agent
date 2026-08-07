@@ -18,12 +18,27 @@ from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
 from dse_orchestrator.workflows import WorkItemLifecycleWorkflow
 
-from conftest import insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
+import psycopg2
+
+from conftest import DSN, insert_work_item, new_work_item_id, read_audit_actions, wait_for_status
 from fakes import FakeControlPlane, build_fake_activities
 
 
 def _order(log: list[str], name: str) -> int:
     return log.index(name)
+
+
+def _audit_details(work_item_id: str, action: str) -> list[dict]:
+    conn = psycopg2.connect(DSN)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT details FROM audit_log WHERE work_item_id = %s AND action = %s ORDER BY id",
+                (work_item_id, action),
+            )
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
 
 
 @pytest.mark.asyncio
@@ -61,6 +76,12 @@ async def test_session_sequence_planner_gate_coder_tester_l1_l2_pr(time_skipping
     actions = read_audit_actions(work_item_id)
     for a in ("planner_completed", "tester_turn_completed", "l1_completed", "l2_review_completed"):
         assert a in actions
+
+    # `suite_deferred` must be IN the row, not only in the in-memory result:
+    # without it the ledger shows tests_passed=True beside outcome=tests_failed
+    # with nothing to reconcile them (7/7 events in two production runs).
+    tester_rows = _audit_details(work_item_id, "tester_turn_completed")
+    assert tester_rows and all("suite_deferred" in d for d in tester_rows)
 
 
 @pytest.mark.asyncio
