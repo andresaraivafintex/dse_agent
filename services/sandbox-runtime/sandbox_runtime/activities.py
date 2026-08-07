@@ -3102,7 +3102,20 @@ def _tester_pod_sync(
     typecheck_output = ""
     tc_cmd, tc_timeout = _pod_manifest_typecheck(_pod_sh)
     if tc_cmd:
-        tc = _pod_sh(f"cd /workspace && {_shlex.join(tc_cmd)}", timeout=tc_timeout)
+        # A instalação vem ANTES, e não é detalhe: quem instala `node_modules` é
+        # o script da suíte, que roda depois daqui. Sem dependência, `npx tsc`
+        # não acha o compilador local, BAIXA um pacote homônimo do npm
+        # ("This is not the tsc command you are looking for") e sai != 0 — que o
+        # turno reportava como erro de tipo. Medido em produção (wi_aa119e7c):
+        # todo item de repo npm morreu no teto do Tester por isto.
+        tc = _pod_sh(
+            "cd /workspace && "
+            "if [ -f package.json ] && [ ! -d node_modules ]; then "
+            f"timeout -k 10 {clocks.install} npm install --no-audit --no-fund "
+            ">/tmp/dse-npm-install.log 2>&1 || true; fi; "
+            + _shlex.join(tc_cmd),
+            timeout=tc_timeout + clocks.install,
+        )
         if tc.returncode != 0:
             typecheck_output = _tail_both(tc)
 
