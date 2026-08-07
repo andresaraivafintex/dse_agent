@@ -26,12 +26,14 @@ from dse_contracts import (
 
 try:  # dev/test: worker package in the venv
     from sandbox_runtime.scoped_git import (
+        NO_CUSTOMER_HOOKS,
         ScopedGitSession,
         install_pre_receive_guard,
         write_task_branch_marker,
     )
 except ImportError:  # image: copy vendored at build time (Dockerfile)
     from ._scoped_git import (  # type: ignore[no-redef]
+        NO_CUSTOMER_HOOKS,
         ScopedGitSession,
         install_pre_receive_guard,
         write_task_branch_marker,
@@ -39,7 +41,12 @@ except ImportError:  # image: copy vendored at build time (Dockerfile)
 
 
 def _git(args: list[str], cwd: str | None = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120)
+    """`NO_CUSTOMER_HOOKS` na frente de tudo: este wrapper recebe o subcomando de
+    fora, e roda DENTRO do sandbox, onde o repositório do cliente e os hooks que
+    o `npm ci` dele instalou estão a um `core.hooksPath` de distância."""
+    proc = subprocess.run(
+        ["git", *NO_CUSTOMER_HOOKS, *args], cwd=cwd, capture_output=True, text=True, timeout=120
+    )
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()[:300]}")
     return proc

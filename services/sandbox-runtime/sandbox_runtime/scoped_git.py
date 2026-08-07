@@ -35,6 +35,26 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+#: Hooks do repositório do cliente desligados NA LINHA DE COMANDO, em todo
+#: comando que esta sessão executa.
+#:
+#: `_disable_repo_hooks()` já escreve `core.hooksPath` na config do workspace, e
+#: isso continua ali de propósito (é o que a suíte de escopo verifica). Só que
+#: config é reversível por quem vier depois: o gate L1 roda `npm ci`, o
+#: `prepare` do cliente é `husky`, husky reaponta `core.hooksPath` para
+#: `.husky/`, e a partir daí todo `git commit` desta sessão executa o `ng lint`
+#: do cliente dentro do sandbox. Foi assim que o turno morreu em OOM a cada ~45s
+#: em `wi_pr21`. `-c` vence config de repositório e não é desarmável por código
+#: não confiável — é a diferença entre uma convenção e um controle.
+#:
+#: Não enfraquece a guarda `pre-receive` do bare repo de checkpoint: aquele hook
+#: roda em `git-receive-pack`, que lê a config do PRÓPRIO bare repo. Medido —
+#: um push com `-c core.hooksPath=/nonexistent` continua sendo rejeitado pela
+#: guarda de escopo.
+#:
+#: Um caminho inexistente é no-op para o git; nada precisa existir no disco.
+NO_CUSTOMER_HOOKS = ("-c", "core.hooksPath=/nonexistent/dse-no-hooks")
+
 PRE_RECEIVE_HOOK_TEMPLATE = """#!/usr/bin/env python3
 import sys
 
@@ -158,9 +178,13 @@ class ScopedGitSession:
         captured and then thrown away. A real failure on the VPS surfaced as
         exactly that string, fourteen times, and the diagnosis had to be guessed
         from it. It was guessed wrong. Whatever git actually printed is the
-        cheapest evidence in the system and it was being discarded."""
+        cheapest evidence in the system and it was being discarded.
+
+        Todo comando sai com `NO_CUSTOMER_HOOKS` na frente: este wrapper recebe
+        o subcomando de fora, então um `commit`/`push`/`checkout` novo chega aqui
+        sem passar por revisão de segurança nenhuma."""
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *NO_CUSTOMER_HOOKS, *args],
             cwd=self.workspace_dir,
             capture_output=True,
             text=True,

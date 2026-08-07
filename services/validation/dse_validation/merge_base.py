@@ -65,11 +65,20 @@ class GitError(RuntimeError):
         super().__init__(f"git {' '.join(argv)} failed (exit={returncode}): {stderr.strip()}")
 
 
+#: Mesma guarda, e mesmo motivo, do `_GIT` em `github/pr_finalizer.py`: hooks do
+#: cliente desligados na LINHA DE COMANDO, porque `git config core.hooksPath` é
+#: reapontado para `.husky/` assim que o gate L1 roda o `npm ci` do repositório.
+#: Aqui pesa em dobro — este módulo faz `merge` e `checkout` no workspace do
+#: cliente, depois do gate, que é exatamente a janela em que a config já está
+#: desarmada.
+NO_CUSTOMER_HOOKS = ("-c", "core.hooksPath=/nonexistent/dse-no-hooks")
+
+
 def _git(
     workspace_dir: str, *args: str, check: bool = True, timeout: int = 120
 ) -> subprocess.CompletedProcess:
     proc = subprocess.run(
-        ["git", *args],
+        ["git", *NO_CUSTOMER_HOOKS, *args],
         cwd=str(workspace_dir),
         capture_output=True,
         text=True,
