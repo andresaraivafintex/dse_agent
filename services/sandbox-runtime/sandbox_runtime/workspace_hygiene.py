@@ -26,7 +26,10 @@ import subprocess
 
 from dse_contracts.paths import is_disposable_artifact, is_test_path, lockfile_manifest_for
 
-from .scoped_git import NO_CUSTOMER_HOOKS
+try:
+    from .scoped_git import NO_CUSTOMER_HOOKS
+except ImportError:  # vendorizado na imagem do agent-runner: scoped_git vira _scoped_git
+    from ._scoped_git import NO_CUSTOMER_HOOKS  # type: ignore[no-redef]
 
 logger = logging.getLogger("sandbox_runtime.workspace_hygiene")
 

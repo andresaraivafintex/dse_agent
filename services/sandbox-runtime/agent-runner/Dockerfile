@@ -97,6 +97,10 @@ COPY services/sandbox-runtime/agent-runner/agent_runner /app/agent_runner
 # this copy)
 COPY services/sandbox-runtime/sandbox_runtime/scoped_git.py /app/agent_runner/_scoped_git.py
 COPY services/sandbox-runtime/sandbox_runtime/workspace_hygiene.py /app/agent_runner/_workspace_hygiene.py
+# The gate rc.39 lacked: the vendored modules must IMPORT in this layout. A
+# relative import that resolves in the worker package and not here is exactly
+# how `--op post_turn` died in production with ModuleNotFoundError.
+RUN python -c "import agent_runner._scoped_git, agent_runner._workspace_hygiene"
 
 USER 10001:10001
 # /workspace and /tmp come from writable emptyDirs (the Pod rootfs is read-only)
