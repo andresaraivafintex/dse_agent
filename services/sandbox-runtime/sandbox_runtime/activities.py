@@ -88,7 +88,11 @@ from .runtime_profile import (
     validate_runtime_startup,
 )
 from .scoped_git import GitScopeViolation, ScopedGitSession
-from .skill_files import materialize_skills, workspace_skills_note
+from .skill_files import (
+    materialize_skills,
+    workspace_skills_note,
+    workspace_skills_note_in_pod,
+)
 from .sessions import (
     FreshReviewerSession,
     PlannerContext,
@@ -781,14 +785,25 @@ async def _run_coder_turn_impl(
             "CHANGELOG…) — the change and the tests speak for themselves."
         )
 
-    # Repo skills (console ticks materialized during the Planner turn + skills
-    # committed in the target repo): ClaudeAgentSubstrate loads them via
-    # setting_sources=["project"]; the note covers the other substrates.
-    inp.instruction += workspace_skills_note(workspace_dir)
-
     pod_git = isinstance(agent, RemoteSubstrate) and not getattr(
         agent.driver, "workspace_is_host_visible", True
     )
+
+    # Repo skills (console ticks materialized at provision + skills committed in
+    # the target repo): ClaudeAgentSubstrate loads them via
+    # setting_sources=["project"]; the note covers the other substrates. The
+    # note is read WHERE THE WORKSPACE IS: on K8s that is the Pod volume — the
+    # host read below sees a directory that does not exist on the worker and
+    # shipped "" on every production Coder turn, while the Tester (whose note is
+    # built by a command run inside the Pod) listed the same skills (H3).
+    if pod_git:
+        run_in_pod = getattr(agent.driver, "run_in_pod", None)
+        if run_in_pod is not None:
+            inp.instruction += workspace_skills_note_in_pod(
+                lambda argv, stdin: run_in_pod(agent.sandbox_id, argv, stdin)
+            )
+    else:
+        inp.instruction += workspace_skills_note(workspace_dir)
     if pod_git:
         # K8s runtime: the workspace lives in the Pod volume — the turn's start
         # sha comes from a no-op checkpoint INSIDE the sandbox.

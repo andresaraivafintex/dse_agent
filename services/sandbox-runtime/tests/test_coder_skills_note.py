@@ -26,9 +26,14 @@ from dse_contracts import (
     RunCoderTurnInput,
 )
 
-from sandbox_runtime.activities import _run_coder_turn_impl
+from sandbox_runtime.activities import _pod_tester_context, _run_coder_turn_impl
 from sandbox_runtime.driver import StageExecutionResult
 from sandbox_runtime.remote_substrate import RemoteSubstrate
+from sandbox_runtime.skill_files import (
+    _NOTE_HEADER,
+    workspace_skills_note,
+    workspace_skills_note_in_pod,
+)
 
 # The three real skills written on 2026-08-06 — the PrimeNG one was authored
 # specifically for the Coder and reached nobody.
@@ -125,3 +130,69 @@ def test_coder_instruction_lists_the_skills_that_live_in_the_pod(tmp_path, work_
     for key, description in THE_SKILLS.items():
         assert f".claude/skills/{key}/SKILL.md" in instruction
         assert description in instruction
+
+
+def _pod_workspace_with_skills(tmp_path) -> str:
+    ws = tmp_path / "workspace"
+    for key, description in THE_SKILLS.items():
+        d = ws / ".claude" / "skills" / key
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {key}\ndescription: {description}\n---\n\nrule body\n",
+            encoding="utf-8",
+        )
+    return str(ws)
+
+
+def _run_against(ws: str):
+    """`run` in the injected shape, really executing the script — the same
+    path-swap the driver stub above does."""
+    def run(argv: list[str], stdin: str | None) -> tuple[int, str]:
+        script = argv[-1].replace("/workspace", ws)
+        proc = subprocess.run([*argv[:-1], script], input=stdin,
+                              capture_output=True, text=True, timeout=30)
+        return proc.returncode, proc.stdout or ""
+    return run
+
+
+def test_host_and_pod_readers_produce_the_same_note(tmp_path):
+    """The two runtimes must hand the Coder the SAME note for the same
+    workspace — a formatting drift would not fail anything, it would quietly
+    hand different guidance depending on where the work item happened to run."""
+    ws = _pod_workspace_with_skills(tmp_path)
+    assert workspace_skills_note_in_pod(_run_against(ws)) == workspace_skills_note(ws)
+    assert workspace_skills_note_in_pod(_run_against(ws)).startswith(_NOTE_HEADER)
+
+
+def test_pod_note_degrades_to_empty_never_to_a_failed_turn(tmp_path):
+    # exec failure (pod gone, kubectl refused) → no note, not an exception
+    assert workspace_skills_note_in_pod(lambda argv, stdin: (1, "pod gone")) == ""
+    # workspace without skills → no noise in the prompt
+    empty = tmp_path / "workspace"
+    empty.mkdir()
+    assert workspace_skills_note_in_pod(_run_against(str(empty))) == ""
+
+
+def test_tester_and_coder_notes_share_the_header(tmp_path):
+    """The Tester's note is built inline in activities.py with its own copy of
+    the header ("Same shape as workspace_skills_note", says the comment). Pin
+    that claim: the Coder reading the header from skill_files and the Tester
+    drifting away from it would split the vocabulary the two prompts use for
+    the same skills."""
+    ws = _pod_workspace_with_skills(tmp_path)
+    run = _run_against(ws)
+
+    def pod_sh(script: str, *, timeout: int = 30, input_text: str | None = None):
+        rc, out = run(["sh", "-c", script], input_text)
+        return subprocess.CompletedProcess(args=["sh", "-c", script],
+                                           returncode=rc, stdout=out, stderr="")
+
+    # the git probe the required listing makes has to succeed inside "the Pod"
+    subprocess.run(["git", "init", "-q"], cwd=ws, check=True)
+    tester = _pod_tester_context(pod_sh)
+    coder_note = workspace_skills_note_in_pod(run)
+    assert tester.skills_note.startswith(_NOTE_HEADER)
+    assert coder_note.startswith(_NOTE_HEADER)
+    for key in THE_SKILLS:
+        assert f".claude/skills/{key}/SKILL.md" in tester.skills_note
+        assert f".claude/skills/{key}/SKILL.md" in coder_note

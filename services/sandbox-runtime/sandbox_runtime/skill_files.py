@@ -140,6 +140,15 @@ def _write_materialized_marker(ws: Path, rels: list[str]) -> None:
     _git_exclude(ws, [_MARKER])
 
 
+# One header for every reader of the note — the host one below, the in-Pod one
+# further down. The Tester's copy in activities.py is asserted equal by test;
+# a drifted header would not fail anything, it would quietly weaken the prompt.
+_NOTE_HEADER = (
+    "\n\n## Repository skills (MANDATORY guidance)\n"
+    "Before writing code, read each SKILL.md below and follow its rules:\n"
+)
+
+
 def workspace_skills_note(workspace_dir: str) -> str:
     """Instruction section pointing at the skills present in the workspace (both
     the ones materialized from the registry AND the ones committed in the repo).
@@ -163,11 +172,7 @@ def workspace_skills_note(workspace_dir: str) -> str:
         entries.append(f"- .claude/skills/{skill_dir.name}/SKILL.md — {description or skill_dir.name}")
     if not entries:
         return ""
-    return (
-        "\n\n## Repository skills (MANDATORY guidance)\n"
-        "Before writing code, read each SKILL.md below and follow its rules:\n"
-        + "\n".join(entries)
-    )
+    return _NOTE_HEADER + "\n".join(entries)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +277,37 @@ def materialize_skills_in_pod(skills: list[Skill], *, run) -> list[str]:
     if rc != 0 or "OK" not in (out or ""):
         return []
     return written
+
+
+def workspace_skills_note_in_pod(run, *, limit: int = 2_000) -> str:
+    """The same note as `workspace_skills_note`, read INSIDE the sandbox Pod.
+
+    On the K8s runtime the host reader above sees a workspace directory that
+    does not exist on the worker, so it returned "" for every production Coder
+    turn — with the skills sitting materialized in the Pod the whole time. The
+    listing therefore runs where the workspace is real, exactly like the
+    Tester's context read (`_pod_tester_context`).
+
+    `run(argv, input_text) -> (returncode, stdout)` is the same injected shape
+    as `materialize_skills_in_pod` — testable without a cluster. Any failure
+    degrades to "" (a prompt without guidance, never a failed turn); the entry
+    format and header are shared with the host reader so the two runtimes can
+    not drift apart."""
+    script = (
+        f"cd {_POD_WORKSPACE} 2>/dev/null || exit 0; "
+        'for d in .claude/skills/*/; do [ -f "$d/SKILL.md" ] || continue; '
+        'desc=$(grep -m1 "^description:" "$d/SKILL.md" | cut -d: -f2- | '
+        "sed 's/^ *//'); n=$(basename \"$d\"); "
+        'echo "- .claude/skills/$n/SKILL.md — ${desc:-$n}"; '
+        f"done 2>/dev/null | head -c {limit}"
+    )
+    rc, out = run(["sh", "-c", script], None)
+    if rc != 0:
+        return ""
+    entries = (out or "").strip()
+    if not entries:
+        return ""
+    return _NOTE_HEADER + entries
 
 
 def _sh_quote(value: str) -> str:
