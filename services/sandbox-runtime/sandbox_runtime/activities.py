@@ -2878,6 +2878,29 @@ def _timed_out_process(argv: list[str], exc: Any, limit: int) -> Any:
     )
 
 
+def _pod_reauthor_partition(pod_sh, ordered: list[str]) -> tuple[list[str], list[str]]:
+    """Posse no git DO POD para uma ordem humana de re-autoria (beco 1,
+    veredito `reauthor`): um arquivo só é reescrevível se TODA a história dele
+    tem sujeito DSE. Mais estrito que a porta 5 em um ponto: história VAZIA
+    recusa — um arquivo ordenado atravessou um parque, logo foi commitado por
+    `tester(...)`; sem história, não é o arquivo que o humano julgou. Nenhuma
+    ordem atravessa esta guarda: R2 vale contra ordem também."""
+    import shlex as _shlex
+    owned: list[str] = []
+    refused: list[str] = []
+    for p in ordered:
+        subjects = [
+            s.strip() for s in pod_sh(
+                f"cd /workspace && git log --format=%s -- {_shlex.quote(p)}"
+            ).stdout.splitlines() if s.strip()
+        ]
+        if subjects and all(s.startswith(_DSE_COMMIT_PREFIXES) for s in subjects):
+            owned.append(p)
+        else:
+            refused.append(p)
+    return owned, refused
+
+
 def _tester_pod_sync(
     inp: "RunTesterTurnInput",
     sandbox_id: str,
@@ -3091,6 +3114,72 @@ def _tester_pod_sync(
         timeout=clocks.pod_exec,
     )
 
+    # ---- Reauthor por ordem humana (beco 1, veredito `reauthor`) ----------
+    # O parque de exaustão entregou o dossiê; o HUMANO julgou que a asserção
+    # está errada e o código está certo — o julgamento nunca é daqui (a
+    # indecidibilidade das portas 2/5). Aqui só se executa a ordem, com as
+    # guardas da porta 5: in-place nos caminhos EXATOS, posse re-confirmada no
+    # git do Pod, filtro determinístico descartando qualquer caminho novo.
+    # Roda ANTES do typecheck/suíte: a régua e o veredito valem para o estado
+    # já reescrito — rodar a spec velha primeiro seria pagar minutos para
+    # reouvir o que o humano acabou de julgar.
+    reauthored_files: list[str] = []
+    reauthor_ordered = [p for p in (inp.reauthor_specs or []) if p in test_files]
+    if reauthor_ordered:
+        owned_ordered, refused_ordered = _pod_reauthor_partition(_pod_sh, reauthor_ordered)
+        if refused_ordered:
+            audit_emit(
+                actor="system:sandbox-runtime",
+                action="tester_reauthor_refused",
+                tenant_id=inp.tenant_id,
+                work_item_id=inp.work_item_id,
+                details={"files": refused_ordered,
+                         "reason": "not_dse_authored_in_pod_git"},
+            )
+        if owned_ordered:
+            order_feedback = (
+                "A human reviewed the repeated failure of your OWN spec file(s) "
+                "and ORDERED them re-authored: the failing assertions are wrong, "
+                "the production code is right. Rewrite EXACTLY these files, at "
+                "these exact paths, asserting the behaviour the production code "
+                f"actually has: {', '.join(owned_ordered)}\n"
+                + (inp.reauthor_context or "")[-1500:]
+            )
+            try:
+                order_ctx = _pod_tester_context(_pod_sh)
+            except _TesterContextUnavailable as exc:
+                order_ctx = None
+                logger.warning(
+                    "reauthor: contexto indisponível para executar a ordem: %.200s",
+                    str(exc)[:200],
+                )
+            if order_ctx is not None:
+                order_script, order_cost = _model_authored_test_script(
+                    inp, order_ctx, headers, virtual_key, error_feedback=order_feedback
+                )
+                authoring_cost_usd += order_cost
+                for s in (order_script or []):
+                    if s.get("tool") != "write_file":
+                        continue
+                    path, content = str(s.get("path") or ""), str(s.get("content") or "")
+                    if path not in owned_ordered or not content:
+                        continue
+                    w = _pod_sh(
+                        f'cd /workspace && cat > {_shlex.quote(path)}',
+                        input_text=content,
+                    )
+                    if w.returncode == 0:
+                        reauthored_files.append(path)
+                if reauthored_files:
+                    audit_emit(
+                        actor="system:sandbox-runtime",
+                        action="tester_spec_reauthored",
+                        tenant_id=inp.tenant_id,
+                        work_item_id=inp.work_item_id,
+                        details={"files": reauthored_files, "reason": "human_order",
+                                 "cost_usd": order_cost},
+                    )
+
     # ---- A régua do REPO, aplicada dentro do turno ------------------------
     # As specs são transpiladas pelo jest com a config DELAS
     # (`tsconfig.spec.json`: strict:false), então um erro de tipo no que o
@@ -3271,7 +3360,8 @@ def _tester_pod_sync(
     head_sha = None
     # Reparo (porta 5) também commita: o L1 julga o estado COMMITADO — um
     # reparo só no working tree passaria no re-run do Tester e reprovaria no L1.
-    if (authored_new or repaired_files) and test_files:
+    # Re-autoria por ordem humana idem, pela mesma razão.
+    if (authored_new or repaired_files or reauthored_files) and test_files:
         files_arg = " ".join(_shlex.quote(p) for p in test_files)
         msg = f"tester({inp.work_item_id}): {(inp.instruction or '')[:60]}"
         _pod_sh(
@@ -3352,6 +3442,18 @@ async def _run_tester_turn_impl(
     deterministic (`ScopedGitSession`), never done by the LLM (P1)."""
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare = _paths_for(inp.work_item_id)
+
+    # Beco 1: a ordem de re-autoria só é executada no runtime K8s (produção).
+    # Aqui ela seria descartada em silêncio — o ledger tem que dizer por que a
+    # spec voltou intacta e o item re-parqueou.
+    if getattr(inp, "reauthor_specs", None):
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="tester_reauthor_unsupported",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={"runtime": "local", "files": list(inp.reauthor_specs)[:10]},
+        )
 
     headers = GatewayCallHeaders(
         tenant_id=inp.tenant_id,

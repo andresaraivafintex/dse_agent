@@ -126,6 +126,14 @@ class WorkItemLifecycleInput:
     # o re-flag. Sobrevive a continue_as_new por estar no input.
     cumulative_files_changed: list[str] = field(default_factory=list)
 
+    # Beco 1, veredito `reauthor`: ordem humana pendente de re-autoria da spec
+    # PRÓPRIA do Tester (caminhos exatos + evidência da falha). No INPUT — não
+    # em atributo de instância — para sobreviver a um continue_as_new entre o
+    # veredito e o turno que o executa; uma ordem perdida em silêncio seria o
+    # humano mandando e ninguém obedecendo. Consumida (zerada) no despacho.
+    reauthor_specs: list[str] = field(default_factory=list)
+    reauthor_context: str | None = None
+
     # ------------------------------------------------------------------
     # Phase 2 — budgets (WSB-E4-T1). `budget_max_usd` comes from the JSONB
     # `work_items.budget` (key "max_usd") read at admission; `spent_usd`

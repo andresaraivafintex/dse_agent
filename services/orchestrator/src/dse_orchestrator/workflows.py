@@ -1240,13 +1240,14 @@ class WorkItemLifecycleWorkflow:
     async def _park_spec_conflict(
         self, specs: list[str], test_finding, diff_files: list[str],
         *, reason: str = "preexisting_spec_broken_by_diff",
-    ) -> bool:
+    ) -> str | bool:
         """Porta 1 do deadlock de posse de spec: para o item em `spec_conflict`
         na primitiva de espera durável do plan approval, com TUDO que o humano
         precisa para decidir — qual spec, quais asserções, o diff que a
-        invalidou. Retorna True quando o veredito é "retry" (o laço volta);
-        levanta _EscalateNow para qualquer outro veredito; retorna False se um
-        cancel chegou durante a espera (o chamador finaliza cancelado)."""
+        invalidou. Retorna o veredito que resume o laço ("retry" sempre;
+        "reauthor" só no parque de exaustão de spec própria); levanta
+        _EscalateNow para qualquer outro; retorna False se um cancel chegou
+        durante a espera (o chamador finaliza cancelado)."""
         assertions = (test_finding.detail or "")[:2000]
         diff_files = list(diff_files or [])
         # O par Expected/Received quando o runner o imprime — é o que resolve o
@@ -1307,7 +1308,17 @@ class WorkItemLifecycleWorkflow:
              "comment": payload.get("comment")},
         )
         if verdict == "retry":
-            return True
+            return "retry"
+        # `reauthor` é ordem humana de reescrever spec PRÓPRIA do Tester — só
+        # existe no parque de exaustão. Num parque de spec do CLIENTE (porta 1)
+        # não autoriza ninguém: o DSE não reescreve spec de cliente nem por
+        # ordem, e o veredito cai no escalate abaixo.
+        if (
+            verdict == "reauthor"
+            and reason == "tester_spec_exhaustion"
+            and workflow.patched("tester-reauthor-verdict-v1")
+        ):
+            return "reauthor"
         raise _EscalateNow(
             f"spec_conflict_{verdict or 'unresolved'}: human declined to resume after "
             f"pre-existing specs broke ({', '.join(specs)})"
@@ -2086,100 +2097,116 @@ class WorkItemLifecycleWorkflow:
 
         while True:
             await self._boundary_gate()
-            await self._budget_boundary("coder_turn")
-            await self._maybe_retry_from_checkpoint()
+            # Beco 1, veredito `reauthor`: ordem humana pendente → a rodada é
+            # do TESTER, sem turno de Coder — o código está certo por
+            # julgamento humano; o Coder só teria a asserção recém-julgada-
+            # errada para perseguir. Lida AQUI (topo do laço, via input) para
+            # sobreviver a um continue_as_new entre o veredito e a execução.
+            reauthor_order: list[str] = []
+            if getattr(input, "reauthor_specs", None) and workflow.patched(
+                "tester-reauthor-verdict-v1"
+            ):
+                reauthor_order = list(input.reauthor_specs)
+            if not reauthor_order:
+                await self._budget_boundary("coder_turn")
+                await self._maybe_retry_from_checkpoint()
 
-            coder_result: CoderTurnResult = await self._run_model_activity(
-                ACTIVITY_RUN_CODER_TURN,
-                {
-                    "sandbox_id": input.sandbox_id,
-                    "work_item_id": input.work_item_id,
-                    "tenant_id": input.tenant_id,
-                    # S1: RunCoderTurnInput requires `instruction` (singular).
-                    # The workflow used to send `instructions`/`objections`
-                    # (fields the model does not have — dropped at decode); now
-                    # the real task + L2 objections are folded into the
-                    # instruction.
-                    "instruction": self._agent_instruction(include_objections=True),
-                    "branch": input.branch,
-                    "model_override": self._model_override,
-                    "runtime_override": self._runtime_override,
-                    # plan anchor: new files outside it are pruned post-turn
-                    # (the CLI creates spontaneous reports — real finding)
-                    "expected_files": list((input.plan_json or {}).get("expected_files", [])),
-                },
-                CoderTurnResult,
-            )
-            await self._consume_cost(coder_result.cost_usd, source="coder")
-            # Porta 1 v2: acumula o diff do item (união por turno). Ordenado
-            # para ser determinístico no replay; ver o campo em models.py.
-            input.cumulative_files_changed = sorted(
-                set(input.cumulative_files_changed) | set(coder_result.files_changed or [])
-            )
-            # The projector filters audit-derived runs to system:orchestrator
-            # rows, so the ledger marker the Activity writes into its OWN audit
-            # copy is invisible to it and has to be carried up here. Without it
-            # the projector would create a second run for a turn already in the
-            # ledger and double the cost it reports.
-            if workflow.patched("coder-cost-ledger-id-v1"):
-                await self._audit(
-                    "coder_turn_completed",
-                    {"files_changed": coder_result.files_changed,
-                     "cost_usd": coder_result.cost_usd,
-                     "ledger_id": coder_result.ledger_id},
+                coder_result: CoderTurnResult = await self._run_model_activity(
+                    ACTIVITY_RUN_CODER_TURN,
+                    {
+                        "sandbox_id": input.sandbox_id,
+                        "work_item_id": input.work_item_id,
+                        "tenant_id": input.tenant_id,
+                        # S1: RunCoderTurnInput requires `instruction` (singular).
+                        # The workflow used to send `instructions`/`objections`
+                        # (fields the model does not have — dropped at decode); now
+                        # the real task + L2 objections are folded into the
+                        # instruction.
+                        "instruction": self._agent_instruction(include_objections=True),
+                        "branch": input.branch,
+                        "model_override": self._model_override,
+                        "runtime_override": self._runtime_override,
+                        # plan anchor: new files outside it are pruned post-turn
+                        # (the CLI creates spontaneous reports — real finding)
+                        "expected_files": list((input.plan_json or {}).get("expected_files", [])),
+                    },
+                    CoderTurnResult,
                 )
-            else:
-                await self._audit(
-                    "coder_turn_completed",
-                    {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
+                await self._consume_cost(coder_result.cost_usd, source="coder")
+                # Porta 1 v2: acumula o diff do item (união por turno). Ordenado
+                # para ser determinístico no replay; ver o campo em models.py.
+                input.cumulative_files_changed = sorted(
+                    set(input.cumulative_files_changed) | set(coder_result.files_changed or [])
                 )
-
-            # A fix turn that moved no file leaves the tree byte-identical, so
-            # the Tester and L1 can only return the verdict they already
-            # returned — for the price they already charged.
-            #
-            # Measured on `wi_t1-f0a824a0`: three consecutive turns reported
-            # `files_changed=[]`, the checkpoint after each wrote the SAME
-            # git_ref, and L1 answered `{typecheck, build}` all three times.
-            # Those three rounds spent 1041s + 1023s + 1014s of Tester and L1 —
-            # fifty-one minutes — re-deciding a tree nothing had touched.
-            #
-            # `files_changed` is not the model's claim about its own work: the
-            # Activity computes it from git against the turn's base_sha and only
-            # falls back to the agent's list when git found something. Empty
-            # means HEAD did not move, and `commit()` runs under `has_changes()`,
-            # so even an uncommitted edit would have moved it.
-            #
-            # Gated on a non-empty `fix_context`, because only then does a
-            # verdict for this exact tree already exist to reuse. A FIRST turn
-            # that writes nothing is a different failure and still goes through
-            # the gates.
-            if workflow.patched("skip-gates-on-noop-coder-turn-v1"):
-                noop = bool(input.fix_context) and not getattr(
-                    coder_result, "files_changed", None
-                )
-                if noop:
-                    self._noop_coder_turns += 1
-                    # Twice in a row is not a slow convergence, it is a Coder
-                    # that cannot act on what it was told. Burning the rest of
-                    # the retry cap re-reading the same tree buys nothing; a
-                    # human reading the reason is worth more than three more
-                    # identical rounds.
-                    if self._noop_coder_turns >= 2:
-                        raise _EscalateNow(
-                            "coder_made_no_change: two consecutive fix turns "
-                            "changed no file, so the gates would return the "
-                            "verdict they already returned"
-                        )
-                    input.coder_retry_count += 1
-                    await self._set_status(
-                        WorkItemStatus.implementing,
-                        audit_action="coder_turn_made_no_change",
-                        details={"attempt": input.coder_retry_count,
-                                 "consecutive": self._noop_coder_turns},
+                # The projector filters audit-derived runs to system:orchestrator
+                # rows, so the ledger marker the Activity writes into its OWN audit
+                # copy is invisible to it and has to be carried up here. Without it
+                # the projector would create a second run for a turn already in the
+                # ledger and double the cost it reports.
+                if workflow.patched("coder-cost-ledger-id-v1"):
+                    await self._audit(
+                        "coder_turn_completed",
+                        {"files_changed": coder_result.files_changed,
+                         "cost_usd": coder_result.cost_usd,
+                         "ledger_id": coder_result.ledger_id},
                     )
-                    continue  # straight back to the Coder, gates untouched
-                self._noop_coder_turns = 0
+                else:
+                    await self._audit(
+                        "coder_turn_completed",
+                        {"files_changed": coder_result.files_changed, "cost_usd": coder_result.cost_usd},
+                    )
+
+                # A fix turn that moved no file leaves the tree byte-identical, so
+                # the Tester and L1 can only return the verdict they already
+                # returned — for the price they already charged.
+                #
+                # Measured on `wi_t1-f0a824a0`: three consecutive turns reported
+                # `files_changed=[]`, the checkpoint after each wrote the SAME
+                # git_ref, and L1 answered `{typecheck, build}` all three times.
+                # Those three rounds spent 1041s + 1023s + 1014s of Tester and L1 —
+                # fifty-one minutes — re-deciding a tree nothing had touched.
+                #
+                # `files_changed` is not the model's claim about its own work: the
+                # Activity computes it from git against the turn's base_sha and only
+                # falls back to the agent's list when git found something. Empty
+                # means HEAD did not move, and `commit()` runs under `has_changes()`,
+                # so even an uncommitted edit would have moved it.
+                #
+                # Gated on a non-empty `fix_context`, because only then does a
+                # verdict for this exact tree already exist to reuse. A FIRST turn
+                # that writes nothing is a different failure and still goes through
+                # the gates.
+                if workflow.patched("skip-gates-on-noop-coder-turn-v1"):
+                    noop = bool(input.fix_context) and not getattr(
+                        coder_result, "files_changed", None
+                    )
+                    if noop:
+                        self._noop_coder_turns += 1
+                        # Twice in a row is not a slow convergence, it is a Coder
+                        # that cannot act on what it was told. Burning the rest of
+                        # the retry cap re-reading the same tree buys nothing; a
+                        # human reading the reason is worth more than three more
+                        # identical rounds.
+                        if self._noop_coder_turns >= 2:
+                            raise _EscalateNow(
+                                "coder_made_no_change: two consecutive fix turns "
+                                "changed no file, so the gates would return the "
+                                "verdict they already returned"
+                            )
+                        input.coder_retry_count += 1
+                        await self._set_status(
+                            WorkItemStatus.implementing,
+                            audit_action="coder_turn_made_no_change",
+                            details={"attempt": input.coder_retry_count,
+                                     "consecutive": self._noop_coder_turns},
+                        )
+                        continue  # straight back to the Coder, gates untouched
+                    self._noop_coder_turns = 0
+            # else: `coder_result` mantém o valor da última rodada REAL do
+            # Coder — o diff de produção não mudou desde então (só a spec vai
+            # mudar), e é sobre esse diff que doc-only e L2 raciocinam. A
+            # primeira rodada nunca é de reauthor (o parque exige duas
+            # falhas), então o nome está sempre ligado.
 
             # WSB-E2-T3 — Tester session (writes/adjusts tests BEFORE L1).
             #
@@ -2199,7 +2226,11 @@ class WorkItemLifecycleWorkflow:
             # the contracts package, deliberately not a second copy — two lists
             # that drift is how a skip becomes a false green.
             skip_tester = (
-                workflow.patched("skip-tester-on-doc-only-v1")
+                # Nunca com ordem pendente: pular o Tester aqui descartaria a
+                # ordem humana em silêncio (o doc-only olha o diff da rodada
+                # ANTERIOR do Coder, não o trabalho desta rodada).
+                not reauthor_order
+                and workflow.patched("skip-tester-on-doc-only-v1")
                 and is_documentation_only(getattr(coder_result, "files_changed", None))
             )
             if skip_tester:
@@ -2223,10 +2254,23 @@ class WorkItemLifecycleWorkflow:
                         "plan": input.plan_json,
                         "model_override": self._model_override,
                         "runtime_override": self._runtime_override,
+                        # Beco 1: a ordem humana de re-autoria ([] em turno
+                        # normal); a posse é re-verificada no git do Pod.
+                        "reauthor_specs": reauthor_order,
+                        "reauthor_context": (
+                            input.reauthor_context if reauthor_order else None
+                        ),
                     },
                     TesterTurnResult,
                 )
                 await self._consume_cost(tester_result.cost_usd, source="tester")
+                if reauthor_order:
+                    # One-shot: executada (ou recusada e auditada) no turno que
+                    # acabou de rodar — nunca um estado que vaza para os
+                    # próximos. Consumo APÓS o turno: se a activity morrer no
+                    # meio, o retry dela ainda carrega a ordem.
+                    input.reauthor_specs = []
+                    input.reauthor_context = None
                 await self._audit(
                     "tester_turn_completed",
                     {
@@ -2514,6 +2558,21 @@ class WorkItemLifecycleWorkflow:
                             )
                             if self._cancelled:
                                 return await self._finish_cancelled()
+                            if resumed == "reauthor":
+                                # Julgamento humano, execução do sistema: a
+                                # próxima rodada é do TESTER (re-autoria in-
+                                # place). Nada de fix_context — um turno de
+                                # Coder aqui perseguiria a asserção que o
+                                # humano acabou de julgar errada.
+                                input.reauthor_specs = list(own_specs)
+                                input.reauthor_context = (exh_finding.detail or "")[-1500:]
+                                await self._set_status(
+                                    WorkItemStatus.implementing,
+                                    audit_action="tester_reauthor_ordered",
+                                    details={"specs": own_specs,
+                                             "reason": "tester_spec_exhaustion"},
+                                )
+                                continue
                             if resumed:
                                 input.fix_context = self._l1_failure_context(failed_checks)
                                 await self._set_status(
