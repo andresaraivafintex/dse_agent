@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import re
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -291,6 +292,48 @@ class _PlanRejected(Exception):
         self.justification = justification
 
 
+#: As linhas "FAIL <suite>" que o quality_checks conta no detail do gate `test`.
+_FAILING_SUITE_LINE = re.compile(r"^FAIL\s+(\S+)", re.MULTILINE)
+_TS_SPEC_SUFFIX = re.compile(r"\.(?:spec|test)\.(?:ts|tsx|js|jsx)$")
+
+
+def _spec_subject_prefixes(spec_path: str) -> list[str]:
+    """Caminhos candidatos do SUJEITO de uma spec, pelas duas convenções dos
+    testbeds: lado a lado (Angular — `foo.component.spec.ts` testa
+    `foo.component.*` no mesmo diretório) e árvore espelhada (Surefire —
+    `src/test/java/.../FooTest.java` testa `src/main/java/.../Foo.*`).
+    Determinístico, sem acesso ao repositório."""
+    if _TS_SPEC_SUFFIX.search(spec_path):
+        return [_TS_SPEC_SUFFIX.sub("", spec_path)]
+    if spec_path.endswith("Test.java") and "src/test/" in spec_path:
+        base = spec_path[: -len("Test.java")]
+        return [base.replace("src/test/", "src/main/", 1)]
+    return []
+
+
+def preexisting_spec_conflicts(
+    test_detail: str, *, tester_owned: list[str], diff_files: list[str]
+) -> list[str]:
+    """As specs que o L1 contou como falhando e que NENHUM ator deste item pode
+    consertar: não são do Tester do item (que repara as próprias) e testam um
+    sujeito que o diff tocou (o Coder as quebrou mas tem edição de teste
+    revertida). Porta 1 é escalar, não editar: isto DETECTA o impasse — julgar
+    "asserção obsoleta vs lógica errada" é semântico e pertence ao humano para
+    quem o workflow vai parar (não há sinal confiável no fix_context; medido)."""
+    owned = set(tester_owned or [])
+    diffs = list(diff_files or [])
+    out: list[str] = []
+    for m in _FAILING_SUITE_LINE.finditer(test_detail or ""):
+        spec = m.group(1)
+        if spec in owned or spec in out:
+            continue
+        for prefix in _spec_subject_prefixes(spec):
+            if any(d == prefix or d.startswith(prefix + ".") for d in diffs):
+                out.append(spec)
+                break
+    return out
+
+
 class _BlockNow(Exception):
     """WSB-E3-T2 — EMPTY approver cascade: Blocked + escalation, it never
     auto-approves on absence (P1/P3)."""
@@ -344,6 +387,9 @@ class WorkItemLifecycleWorkflow:
         # --- Phase 2: plan approval gate (WSB-E3-T2/T3) ---
         self._plan_approval_received = False
         self._plan_approval_payload: dict[str, Any] | None = None
+        # --- Porta 1: deadlock de posse de spec (espera durável) ---
+        self._spec_conflict_received = False
+        self._spec_conflict_payload: dict[str, Any] | None = None
         # --- Phase 2: operator-driven budget retry (WSB-E4-T1) ---
         self._budget_raise_requested = False
         self._budget_new_max: float | None = None
@@ -431,6 +477,16 @@ class WorkItemLifecycleWorkflow:
         anti-clobber discipline as the other signals)."""
         self._plan_approval_payload = payload
         self._plan_approval_received = True
+
+    @workflow.signal(name="spec_conflict_resolution")
+    def spec_conflict_resolution(self, payload: dict[str, Any]) -> None:
+        """Porta 1 — veredito humano para um item parado em `spec_conflict`.
+        O nome casa `dse_contracts.SIGNAL_SPEC_CONFLICT_RESOLUTION`. Payload:
+        {"verdict": "retry"|outro, "actor": principal, "comment": str}.
+        Mesma disciplina anti-clobber dos outros signals: a flag não é
+        resetada aqui."""
+        self._spec_conflict_payload = payload
+        self._spec_conflict_received = True
 
     @workflow.signal
     def raise_budget(self, new_max_usd: float) -> None:
@@ -1137,6 +1193,57 @@ class WorkItemLifecycleWorkflow:
             status=WorkItemStatus.failed.value,
             detail=detail,
             pr_number=self._input.pr_number,
+        )
+
+    async def _park_spec_conflict(self, specs: list[str], test_finding, coder_result) -> bool:
+        """Porta 1 do deadlock de posse de spec: para o item em `spec_conflict`
+        na primitiva de espera durável do plan approval, com TUDO que o humano
+        precisa para decidir — qual spec, quais asserções, o diff que a
+        invalidou. Retorna True quando o veredito é "retry" (o laço volta);
+        levanta _EscalateNow para qualquer outro veredito; retorna False se um
+        cancel chegou durante a espera (o chamador finaliza cancelado)."""
+        assertions = (test_finding.detail or "")[:2000]
+        diff_files = list(coder_result.files_changed or [])
+        await self._audit(
+            "spec_conflict_detected",
+            {"specs": specs, "assertions": assertions, "diff_files": diff_files},
+        )
+        await self._set_status(
+            WorkItemStatus.spec_conflict, audit_action="spec_conflict",
+            details={"specs": specs},
+        )
+        await self._post_status_comment(
+            "spec_conflict",
+            detail=(
+                "Pre-existing spec(s) broken by this change's diff — no actor in "
+                "the loop may edit them (Coder: test edits revert; Tester: own "
+                "specs only). Specs: " + ", ".join(specs)
+                + ". Diff files: " + ", ".join(diff_files)
+                + ". Failing assertions:\n" + assertions[:900]
+            ),
+        )
+
+        def decided() -> bool:
+            return (self._spec_conflict_received or self._cancelled
+                    or self._operator_escalate_requested)
+
+        await workflow.wait_condition(decided)
+        if self._cancelled:
+            return False
+        if self._operator_escalate_requested:
+            raise _EscalateNow("operator_escalate_during_spec_conflict")
+        payload = self._spec_conflict_payload or {}
+        verdict = str(payload.get("verdict") or "").strip().lower()
+        await self._audit(
+            "spec_conflict_resolved",
+            {"verdict": verdict, "actor": payload.get("actor"),
+             "comment": payload.get("comment")},
+        )
+        if verdict == "retry":
+            return True
+        raise _EscalateNow(
+            f"spec_conflict_{verdict or 'unresolved'}: human declined to resume after "
+            f"pre-existing specs broke ({', '.join(specs)})"
         )
 
     async def _finish_blocked(self, reason: str, *, audit_action: str) -> WorkItemLifecycleResult:
@@ -2223,6 +2330,37 @@ class WorkItemLifecycleWorkflow:
                             )
                             + f" ({manifest_bad.detail[:400]})"
                         )
+                # Porta 1 (escalar, não editar) ANTES de comprar retry: uma spec
+                # PRÉ-EXISTENTE quebrada pelo diff não é consertável por nenhum
+                # ator do laço — cada turno a mais repete a falha (medido:
+                # wi_1a5f9e3d queimou o teto inteiro em falhas byte-idênticas).
+                if workflow.patched("spec-conflict-escalates-v1"):
+                    test_bad = next(
+                        (f for f in l1_result.findings if f.check == "test" and not f.passed),
+                        None,
+                    )
+                    if test_bad is not None:
+                        conflicts = preexisting_spec_conflicts(
+                            test_bad.detail or "",
+                            tester_owned=list(getattr(tester_result, "test_files", None) or []),
+                            diff_files=list(getattr(coder_result, "files_changed", None) or []),
+                        )
+                        if conflicts:
+                            resumed = await self._park_spec_conflict(
+                                conflicts, test_bad, coder_result
+                            )
+                            if self._cancelled:
+                                return await self._finish_cancelled()
+                            if resumed:
+                                input.fix_context = self._l1_failure_context(
+                                    [f for f in l1_result.findings if not f.passed]
+                                )
+                                await self._set_status(
+                                    WorkItemStatus.implementing,
+                                    audit_action="spec_conflict_retry",
+                                    details={"specs": conflicts},
+                                )
+                                continue
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     self._input.terminal_detail = (
