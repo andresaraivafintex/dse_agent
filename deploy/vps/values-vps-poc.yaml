@@ -87,6 +87,7 @@ egressProxy:
     # OIDC discovery + JWKS. Fetched at start and again on every key
     # rotation, so blocking it does not fail once — it fails forever.
     - { host: "login.microsoftonline.com", port: 443, purpose: "Entra ID OIDC (discovery + JWKS)" }
+    - { host: "repo.maven.apache.org", port: 443, purpose: "Maven Central (toolchain + dependencias dos gates do testbed Java)" }
 modelGateway:
   image: { repository: ghcr.io/fintexinc/dse_agent/model-gateway, tag: *ghcrTag, digest: "" }
   allowFixture: true           # POC: no real provider required
