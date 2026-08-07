@@ -119,7 +119,8 @@ def run_l1_pipeline_core(
 
     findings.append(_timed(step, "lint", lambda: quality_checks.lint_check(executor, cfg, changed_files)))
     findings.append(_timed(step, "typecheck", lambda: quality_checks.typecheck_check(executor, cfg, changed_files)))
-    findings.append(_timed(step, "test", lambda: quality_checks.test_check(executor, cfg, changed_files)))
+    findings.append(_timed(step, "test", lambda: quality_checks.test_check(
+        executor, cfg, changed_files, base_sha=base_sha)))
     findings.append(_timed(step, "build", lambda: quality_checks.build_check(executor, cfg, changed_files)))
     findings.append(_timed(step, "sast", lambda: sast.sast_check(
         executor, target_dir, cfg.sast_severity_gate, cfg.timeout_for("sast")
@@ -191,6 +192,16 @@ def run_l1_pipeline_core(
                     f.check: _audit_safe_summary(f.summary) or _NO_SUMMARY
                     for f in findings
                     if not f.passed
+                },
+                # Vermelho HERDADO do repositório, em CONTAGEM (os nomes são
+                # caminhos de arquivo e ficam no `detail`/validation_runs, pela
+                # mesma razão da nota acima: audit_log não se limpa). Sem esta
+                # linha um gate que passou por NOT_OUR_FAILURE seria
+                # indistinguível de um verde legítimo no ledger.
+                "inherited_red": {
+                    f.check: len(f.inherited_failures)
+                    for f in findings
+                    if f.inherited_failures
                 },
             },
         )

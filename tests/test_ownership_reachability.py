@@ -29,6 +29,10 @@ As regras e onde vivem:
   R6 forbidden_paths               — validation (plan_compliance): gate sobre o diff do
                                      Coder; o próprio Coder pode remover o que criou.
   R7 diff_budget                   — validation: idem — o Coder pode encolher o diff.
+  R8 baseline check                — l1/quality_checks.py:_baseline_failing_suites +
+                                     test_check(base_sha=): suite já vermelha no base
+                                     vira NOT_OUR_FAILURE e o item SEGUE (promoveu os
+                                     becos 2 e 3 deste mapa).
 """
 from __future__ import annotations
 
@@ -77,6 +81,12 @@ def saidas(c: Celula) -> set[str]:
     if c.arquivo == SPEC_CLIENTE and c.sujeito_no_diff and c.modo in {ASSERCAO, ZERO_VEREDITO}:
         s.add("humano:spec_conflict")
 
+    # R8 — o vermelho que o item ENCONTROU: a suite já falhava no base_sha, então
+    # não é reprovação dele. Não precisa de ator nem de humano: o gate classifica
+    # NOT_OUR_FAILURE (nomes no detail, contagem no ledger) e o item segue.
+    if c.quem == "cliente" and c.arquivo == SPEC_CLIENTE:
+        s.add("baseline:not_our_failure")
+
     # R2: célula (tester quebrou spec do cliente) é estruturalmente impossível —
     # o rename guard desvia a escrita para um caminho -dse próprio. Modelada
     # fora da matriz (ver test_r2_torna_a_celula_impossivel).
@@ -104,6 +114,12 @@ VIVAS: list[Celula] = [
            nota="run 1: Dockerfile fora do plano — o Coder pode deletar o que criou"),
     Celula("coder", PRODUCAO, DIFF_BUDGET,
            nota="run 2: 451 linhas — o Coder pode encolher o próprio diff"),
+    # Promovidas de beco por R8 (baseline check): o item não morre mais no teto
+    # por um vermelho que o repositório já tinha.
+    Celula("cliente", SPEC_CLIENTE, ASSERCAO, sujeito_no_diff=False,
+           nota="baseline vermelha do repo: classificada NOT_OUR_FAILURE, o item segue"),
+    Celula("cliente", SPEC_CLIENTE, ZERO_VEREDITO, sujeito_no_diff=False,
+           nota="mesma baseline morrendo na carga: idem — comparada suite a suite"),
 ]
 
 #: BECOS CONHECIDOS — células hoje SEM ator e SEM escalada desenhada. A saída
@@ -112,14 +128,9 @@ VIVAS: list[Celula] = [
 BECOS: list[Celula] = [
     Celula("tester", SPEC_TESTER, ASSERCAO,
            nota="spec própria com asserção ERRADA e código certo: Coder revertido (R1), "
-                "Tester não re-autora com veredito presente (R3), porta 1 exclui por posse (R5). "
+                "Tester não re-autora com veredito presente (R3), porta 1 exclui por posse (R5), "
+                "e R8 não alcança (a spec nasceu neste item, não existe no base). "
                 "Resíduo indecidível da porta 2 — hoje só exaustão."),
-    Celula("cliente", SPEC_CLIENTE, ASSERCAO, sujeito_no_diff=False,
-           nota="baseline vermelha do repo (spec já quebrada antes do item, sujeito fora do "
-                "diff): nenhum ator, nenhum parque — L1 vermelho até o teto. Não há "
-                "comparação com o estado base em lugar nenhum."),
-    Celula("cliente", SPEC_CLIENTE, ZERO_VEREDITO, sujeito_no_diff=False,
-           nota="mesma baseline, morrendo na carga — idem."),
 ]
 
 

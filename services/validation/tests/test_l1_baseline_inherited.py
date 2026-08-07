@@ -115,7 +115,11 @@ def test_suite_that_already_failed_at_base_is_not_our_failure():
     assert finding.passed is True, "o item não quebrou esta suite"
     assert finding.status == GateStatus.PASS
     assert "NOT_OUR_FAILURE" in finding.summary
-    assert _SPEC_A in finding.summary, "o herdado tem que ser nomeado, nunca silencioso"
+    # `summary` CONTA, `detail` NOMEIA: summary vai para o audit_log
+    # append-only (retenção não limpa), caminho de arquivo fica no detail.
+    assert "1 suite" in finding.summary
+    assert _SPEC_A not in finding.summary, "caminho não entra no ledger imutável"
+    assert _SPEC_A in finding.detail, "o herdado tem que ser nomeado, nunca silencioso"
     assert finding.inherited_failures == [_SPEC_A]
 
 

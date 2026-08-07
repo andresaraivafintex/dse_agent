@@ -9,7 +9,9 @@ many problems" nor gives readable evidence for `L1Finding.detail`
 """
 from __future__ import annotations
 
+import json
 import re
+import shlex
 from dataclasses import dataclass
 
 from dse_contracts import GateStatus, L1Finding
@@ -439,8 +441,95 @@ def _test_counts(text: str) -> TestCounts | None:
 _FAILING_SUITE_RE = re.compile(r"^\s*(?:FAIL|FAILED|ERROR)\b.*$")
 
 
+#: Identificadores de suite que os runners imprimem ao reprovar: o caminho, no
+#: jest (`FAIL src/...spec.ts`), e a CLASSE, no surefire (`... -- in com.x.Y`).
+#: São a chave da comparação com o base — arquivo a arquivo, nunca em bloco.
+_JEST_SUITE_ID_RE = re.compile(r"^\s*FAIL\s+(\S+)", re.MULTILINE)
+_SUREFIRE_SUITE_ID_RE = re.compile(r"^\[ERROR\].*?--\s+in\s+(\S+)\s*$", re.MULTILINE)
+
+_BASELINE_CACHE_VERSION = 1
+#: A mesma guarda de hooks de todo comando git do DSE: a worktree faz checkout,
+#: e um `post-checkout` do repositório do cliente rodaria aqui.
+_NO_CUSTOMER_HOOKS_PATH = "/nonexistent/dse-no-hooks"
+
+
+def _failing_suite_ids(output: str) -> list[str]:
+    ids: list[str] = []
+    for rx in (_JEST_SUITE_ID_RE, _SUREFIRE_SUITE_ID_RE):
+        for m in rx.finditer(output or ""):
+            sid = m.group(1)
+            if sid not in ids:
+                ids.append(sid)
+    return ids
+
+
+def _baseline_failing_suites(
+    executor: SandboxExecutor, cfg: L1Config, base_sha: str, timeout: int
+) -> list[str] | None:
+    """As suites que JÁ falhavam em `base_sha`.
+
+    `None` = DESCONHECIDO, e é fail-closed: sem resposta confiável nada é
+    herdado e a reprovação fica exatamente como estava.
+
+    Três decisões que o comentário tem que sobreviver a mim:
+
+    - **worktree destacada, nunca o workspace.** O L1 julga o estado COMMITADO;
+      um `checkout base_sha` no lugar deixaria a árvore suja para o
+      `finalize_pr` e trocaria um falso-negativo por corrupção.
+    - **comando do manifesto VERBATIM.** Comparar saídas exige o mesmo comando;
+      escopar por suite mudaria o que o runner imprime e a comparação passaria
+      a medir o escopo, não o repositório.
+    - **cache no /tmp do Pod.** O emptyDir vive enquanto o sandbox viver, que é
+      exatamente o alcance do laço de retentativa: o custo é uma vez por item,
+      não uma vez por rodada (era a objeção de custo).
+    """
+    tag = base_sha[:12]
+    cache_path = f"/tmp/.dse-baseline-{tag}.json"
+    cached = executor.run(["sh", "-c", f"cat {cache_path} 2>/dev/null"], timeout=30)
+    if cached.returncode == 0 and (cached.stdout or "").strip():
+        try:
+            payload = json.loads(cached.stdout)
+            if int(payload.get("v") or 0) == _BASELINE_CACHE_VERSION:
+                return [str(s) for s in (payload.get("suites") or [])]
+        except (ValueError, TypeError, AttributeError):
+            pass  # cache ilegível: refaz em vez de confiar
+
+    wt = f"/tmp/dse-baseline-{tag}"
+    script = (
+        f"rm -rf {wt}; "
+        f"git -c core.hooksPath={_NO_CUSTOMER_HOOKS_PATH} worktree add --detach "
+        f"{wt} {base_sha} >/dev/null 2>&1 || exit 90; "
+        # node_modules por symlink: reinstalar no baseline custaria mais que o
+        # próprio gate, e a instalação é a mesma do HEAD por construção.
+        f'if [ -d node_modules ]; then ln -s "$PWD/node_modules" {wt}/node_modules 2>/dev/null || true; fi; '
+        f"cd {wt} && {shlex.join(cfg.test_cmd)}"
+    )
+    run = executor.run(["sh", "-c", script], timeout=timeout)
+    executor.run(
+        ["sh", "-c",
+         f"git -c core.hooksPath={_NO_CUSTOMER_HOOKS_PATH} worktree remove --force {wt} "
+         f">/dev/null 2>&1; rm -rf {wt}"],
+        timeout=60,
+    )
+    if run.returncode == 90 or _infra_failure(run) is not None or getattr(run, "timed_out", False):
+        # A worktree não subiu, ou o runtime matou o baseline. Um resultado
+        # vazio aqui seria lido como "o base estava verde" e transformaria uma
+        # dúvida em veredito — exatamente o que não pode acontecer.
+        return None
+    suites = _failing_suite_ids(_output(run))
+    executor.run(
+        ["sh", "-c",
+         "printf '%s' "
+         + shlex.quote(json.dumps({"v": _BASELINE_CACHE_VERSION, "suites": suites}))
+         + f" > {cache_path}"],
+        timeout=30,
+    )
+    return suites
+
+
 def test_check(
-    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None
+    executor: SandboxExecutor, cfg: L1Config, changed_files: set[str] | None = None,
+    base_sha: str | None = None,
 ) -> L1Finding:
     if not cfg.test_cmd:
         return _not_configured("test", cfg)
@@ -476,12 +565,51 @@ def test_check(
     # that stays the only escape.
     evidence = counts is not None and counts.executed > 0
     passed = result.ok and evidence
+
+    # --- vermelho HERDADO: o que o item ENCONTROU, não o que trouxe ---------
+    # Becos 2 e 3 do mapa de alcançabilidade: uma suite que já era vermelha no
+    # base não tem ator autorizado (não é do item) nem parque desenhado (a
+    # porta 1 exige o sujeito no diff) — o item morria no teto por algo que não
+    # quebrou. Comparação POR SUITE: a granularidade é o preço, e ela é
+    # honesta — se o item piorar uma suite já vermelha, o arquivo continua na
+    # lista herdada e a piora não aparece aqui (aparece no diff e no L2).
+    inherited: list[str] = []
+    own_failures: list[str] = []
+    if base_sha and not result.ok and not result.timed_out:
+        failing_now = _failing_suite_ids(output)
+        if failing_now:
+            at_base = _baseline_failing_suites(executor, cfg, base_sha, timeout)
+            if at_base is not None:
+                at_base_set = set(at_base)
+                inherited = [s for s in failing_now if s in at_base_set]
+                own_failures = [s for s in failing_now if s not in at_base_set]
+
     if result.timed_out:
         summary = f"timed out after {timeout}s running tests — L1 fails clean (P6)"
         detail = f"timed out after {timeout}s running tests — L1 fails clean (P6), no truncation"
         status = GateStatus.ERROR
+    elif counts is not None and evidence and inherited and not own_failures:
+        # NOT_OUR_FAILURE: TODA suite vermelha aqui já era vermelha no base. O
+        # item segue — não há o que ele conserte, e não há decisão humana sobre
+        # ELE (o repositório vermelho é um problema do repositório, e escalar
+        # aqui pararia todo item atrás dele). Nunca em silêncio: o rótulo vai
+        # no summary, os NOMES no detail, a CONTAGEM no ledger.
+        #
+        # A regra de evidência do defeito B continua acima desta: `evidence` é
+        # condição da branch, então "nada executou" nunca vira NOT_OUR_FAILURE.
+        passed = True
+        status = GateStatus.PASS
+        summary = (
+            f"NOT_OUR_FAILURE: {len(inherited)} suite(s) already red at base "
+            f"{base_sha[:8]} — not broken by this change (summary: {counts.rendered})"
+        )
     elif counts is not None and evidence:
         summary = f"summary: {counts.rendered}"
+        if inherited:
+            summary += (
+                f" — {len(inherited)} of them inherited (already red at base "
+                f"{base_sha[:8]}); the rest is this change's (see detail)"
+            )
         if not result.ok and counts.failed == 0:
             # Every test passed and the command still failed. That is not a
             # contradiction and it is not ours to hide: the runner is enforcing
@@ -504,9 +632,17 @@ def test_check(
         summary = f"exit code {result.returncode} (no test count found in the output)"
         status = GateStatus.FAIL
     failing = [ln for ln in output.splitlines() if _FAILING_SUITE_RE.match(ln)]
-    detail = _detail_with(summary, [] if passed else failing, result)
+    # Os nomes do herdado vão no detail SEMPRE — inclusive quando o gate passa,
+    # onde `_detail_with` descarta as linhas de falha. Um NOT_OUR_FAILURE sem os
+    # nomes seria o gate pedindo confiança em vez de mostrar evidência.
+    inherited_note = (
+        f"INHERITED (already red at base {base_sha[:8]}): {', '.join(inherited)}\n"
+        if inherited else ""
+    )
+    detail = inherited_note + _detail_with(summary, [] if passed else failing, result)
     return L1Finding(
-        check="test", passed=passed, status=status, detail=detail, summary=summary
+        check="test", passed=passed, status=status, detail=detail, summary=summary,
+        inherited_failures=inherited,
     )
 
 

@@ -313,6 +313,11 @@ class L1Finding(BaseModel):
     #: a BRANCH, not of a check name, so the branch declares it. A check that
     #: sets nothing here says nothing to the ledger: fail-closed.
     summary: str = ""
+    #: Suites que JÁ falhavam no `base_sha` — vermelho que o item encontrou, não
+    #: que trouxe. Nomes (caminho/classe) porque `detail`/`validation_runs`
+    #: aguentam nomes; quem for para o `audit_log` publica a CONTAGEM.
+    #: Aditivo e opcional: um worker antigo decodifica igual.
+    inherited_failures: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _normalize_status(self) -> "L1Finding":
