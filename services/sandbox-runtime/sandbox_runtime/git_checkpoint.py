@@ -22,7 +22,12 @@ from pathlib import Path
 
 from dse_contracts import CheckpointRef
 
-from .scoped_git import ScopedGitSession, install_pre_receive_guard, write_task_branch_marker
+from .scoped_git import (
+    NO_CUSTOMER_HOOKS,
+    ScopedGitSession,
+    install_pre_receive_guard,
+    write_task_branch_marker,
+)
 
 
 def provision_checkpoint_repo(bare_repo_path: str, branch: str) -> None:
@@ -37,7 +42,7 @@ def init_task_workspace(workspace_dir: str, bare_repo_path: str, branch: str, ba
     initial empty commit so that a valid HEAD exists."""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init"], cwd=workspace_dir, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "checkout", "-b", branch], cwd=workspace_dir, check=True, capture_output=True, text=True)
+    subprocess.run(["git", *NO_CUSTOMER_HOOKS, "checkout", "-b", branch], cwd=workspace_dir, check=True, capture_output=True, text=True)
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=branch)
     session.ensure_identity()
     write_task_branch_marker(workspace_dir, branch)  # F6: excluded from the commit/PR
@@ -70,13 +75,13 @@ def rebuild_from_checkpoint(
     HEAD (so the chaos test can compare it against `checkpoint_ref.git_ref`)."""
     Path(new_workspace_dir).mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "clone", "--branch", branch, bare_repo_path, new_workspace_dir],
+        ["git", *NO_CUSTOMER_HOOKS, "clone", "--branch", branch, bare_repo_path, new_workspace_dir],
         check=True,
         capture_output=True,
         text=True,
     )
     subprocess.run(
-        ["git", "checkout", checkpoint_ref.git_ref],
+        ["git", *NO_CUSTOMER_HOOKS, "checkout", checkpoint_ref.git_ref],
         cwd=new_workspace_dir,
         check=True,
         capture_output=True,

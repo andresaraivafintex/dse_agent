@@ -26,6 +26,8 @@ import subprocess
 
 from dse_contracts.paths import is_disposable_artifact, is_test_path, lockfile_manifest_for
 
+from .scoped_git import NO_CUSTOMER_HOOKS
+
 logger = logging.getLogger("sandbox_runtime.workspace_hygiene")
 
 
@@ -91,7 +93,7 @@ def restore_lockfile_churn(workspace_dir: str) -> list[str]:
                 restored.append(rel)
             else:
                 proc = subprocess.run(
-                    ["git", "checkout", "--", rel], cwd=workspace_dir,
+                    ["git", *NO_CUSTOMER_HOOKS, "checkout", "--", rel], cwd=workspace_dir,
                     capture_output=True, text=True, timeout=30,
                 )
                 if proc.returncode == 0:
@@ -129,7 +131,7 @@ def revert_test_edits(workspace_dir: str, turn_start_sha: str) -> list[str]:
                 reverted.append(rel)
             else:
                 proc = subprocess.run(
-                    ["git", "checkout", turn_start_sha, "--", rel], cwd=workspace_dir,
+                    ["git", *NO_CUSTOMER_HOOKS, "checkout", turn_start_sha, "--", rel], cwd=workspace_dir,
                     capture_output=True, text=True, timeout=30,
                 )
                 if proc.returncode == 0:

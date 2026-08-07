@@ -88,11 +88,13 @@ def clone_repo_into(
     if host == "github.com":  # api.github.com -> github.com
         host = "github.com"
     clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
-    _run(["git", "clone", "--branch", base_branch, "--depth", "50", clone_url, workspace_dir])
+    from .scoped_git import NO_CUSTOMER_HOOKS  # mesma guarda dos wrappers (#46/hygiene/#52)
+
+    _run(["git", *NO_CUSTOMER_HOOKS, "clone", "--branch", base_branch, "--depth", "50", clone_url, workspace_dir])
     # SCRUB: drop the tokenized URL from the config immediately, pointing origin
     # at the local bare repo (checkpoints). The token persists nowhere.
     _run(["git", "remote", "set-url", "origin", bare_repo_path], cwd=workspace_dir)
-    _run(["git", "checkout", "-b", task_branch], cwd=workspace_dir)
+    _run(["git", *NO_CUSTOMER_HOOKS, "checkout", "-b", task_branch], cwd=workspace_dir)
     from .scoped_git import ScopedGitSession, write_task_branch_marker  # scope-limited git
     session = ScopedGitSession(workspace_dir=workspace_dir, branch=task_branch)
     session.ensure_identity()
