@@ -205,6 +205,142 @@ async def test_the_pagesize_scenario_parks_instead_of_dying(time_skipping_env):
     )
 
 
+# ---------------------------------------------------------------------------
+# O veredito `reauthor`: humano autoriza, agente executa. A spec do Tester
+# vive no Pod (commit sem push até o finalize) — não existe caminho out-of-band
+# para o humano corrigi-la, então `retry` religa um laço em que ninguém pode
+# agir. O veredito novo carrega a ORDEM: o julgamento de "a asserção está
+# errada" é do humano; a reescrita, in-place e gateada por posse, é do Tester.
+# ---------------------------------------------------------------------------
+
+
+async def _wait_until(cond, *, attempts: int = 120, sleep_s: float = 0.25) -> None:
+    """Espelho do wait_for_status para condições fora do status (ex.: linhas de
+    auditoria) — mesmo intervalo de 250ms que preserva a janela do time-skip."""
+    import asyncio
+    for _ in range(attempts):
+        if cond():
+            return
+        await asyncio.sleep(sleep_s)
+    raise AssertionError("condição não alcançada no teto do helper")
+
+
+@pytest.mark.asyncio
+async def test_retry_reparks_because_no_actor_in_the_loop_can_move(time_skipping_env):
+    """A resposta executável de "o retry basta?": não. O retry religa o laço,
+    o Coder não pode tocar a spec (revert determinístico), o Tester reusa o
+    alvo byte-idêntico e a porta 5 não age com veredito presente — o mesmo
+    vermelho volta e o item RE-PARQUEIA, uma rodada inteira mais pobre. Só a
+    ordem de re-autoria sai do ciclo."""
+    work_item_id = new_work_item_id("exh-retry")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_fail_times=3,
+        l1_fail_detail=_WARNING_DETAIL,
+        coder_files_changed=["src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"],
+        tester_test_files=[_BADGE_SPEC, _DSE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "retry", "actor": "usr_test"},
+        )
+        await _wait_until(
+            lambda: len(_audit_details(work_item_id, "spec_conflict_detected")) >= 2
+        )
+        await wait_for_status(handle, {"spec_conflict"})
+        assert state.coder_turn_calls == 3, "o retry comprou exatamente uma rodada, e nada mudou"
+        detected = _audit_details(work_item_id, "spec_conflict_detected")
+        assert [d.get("reason") for d in detected] == ["tester_spec_exhaustion"] * 2
+
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+
+
+@pytest.mark.asyncio
+async def test_reauthor_order_reaches_the_tester_and_the_warning_converges(time_skipping_env):
+    """DoD: o cenário do 'warning' converge com a ordem. O veredito `reauthor`
+    NÃO compra turno de Coder (não há o que codar — o código está certo); o
+    turno seguinte é do Tester, com os caminhos parqueados na ordem, one-shot."""
+    work_item_id = new_work_item_id("exh-reauth")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_fail_times=2,
+        l1_fail_detail=_WARNING_DETAIL,
+        coder_files_changed=["src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"],
+        tester_test_files=[_BADGE_SPEC, _DSE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        coder_turns_at_park = state.coder_turn_calls
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        assert state.coder_turn_calls == coder_turns_at_park, (
+            "a rodada da ordem é do Tester; um turno de Coder aqui perseguiria "
+            "a asserção que o humano acabou de julgar errada"
+        )
+        assert state.tester_reauthor_orders, "o Tester recebeu a ordem"
+        assert state.tester_reauthor_orders[-1] == [_BADGE_SPEC, _DSE_SPEC]
+        assert all(o == [] for o in state.tester_reauthor_orders[:-1]), (
+            "a ordem é one-shot, não um estado que vaza para turnos futuros"
+        )
+        ordered = _audit_details(work_item_id, "tester_reauthor_ordered")
+        assert ordered and ordered[0]["specs"] == [_BADGE_SPEC, _DSE_SPEC]
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+    actions = read_audit_actions(work_item_id)
+    assert "coder_retry_cap_exhausted" not in actions
+
+
+@pytest.mark.asyncio
+async def test_reauthor_is_refused_on_a_client_spec_park(time_skipping_env):
+    """`reauthor` só existe para o parque de exaustão de spec PRÓPRIA. Num
+    parque da porta 1 (spec do CLIENTE quebrada pelo diff), a ordem não
+    autoriza ninguém — o DSE nunca reescreve spec de cliente, nem por ordem —
+    e o item escala para humano em vez de resumir."""
+    client_subject = "src/app/components/homepage/homepage.component.ts"
+    detail = (
+        "summary: 5 errors\n"
+        "--- the 1 line(s) this gate counted ---\n"
+        f"FAIL {_CLIENT_SPEC}\n"
+        "--- raw output (tail) ---\n"
+        "expect(received).toBe(expected)\n"
+    )
+    work_item_id = new_work_item_id("exh-guard")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_fail_times=1,
+        l1_fail_detail=detail,
+        coder_files_changed=[client_subject],
+        tester_test_files=[_DSE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"escalated"})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.escalated.value
+    assert "tester_reauthor_ordered" not in read_audit_actions(work_item_id)
+
+
 @pytest.mark.asyncio
 async def test_a_mixed_failure_stays_in_the_normal_flow(time_skipping_env):
     """DoD 3: FAIL que inclui spec fora da posse do Tester não é o beco 1 —

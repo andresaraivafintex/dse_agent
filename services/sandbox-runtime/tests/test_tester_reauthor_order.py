@@ -1,0 +1,59 @@
+"""Veredito `reauthor` (beco 1): o humano julgou que a asserção da spec
+PRÓPRIA do Tester está errada e o código está certo — indecidível por dentro
+do laço (portas 2/5) — e ORDENOU a reescrita. Aqui vive só a EXECUÇÃO da
+ordem, e a guarda que nenhuma ordem atravessa: posse confirmada no git DO POD.
+Um arquivo com qualquer sujeito humano na história é do cliente e é recusado
+(R2 vale contra ordem também); história vazia idem — um arquivo que atravessou
+um parque foi commitado por `tester(...)`, história nenhuma = não é ele.
+Vermelho antes do fix.
+"""
+from __future__ import annotations
+
+import shlex
+import subprocess
+
+from sandbox_runtime import activities
+
+_DSE_SPEC = "src/app/components/dashboard-list/dashboard-list.component-dse.spec.ts"
+_CLIENT_SPEC = "src/app/components/homepage/homepage.component.spec.ts"
+_GHOST_SPEC = "src/app/components/ghost/ghost.component-dse.spec.ts"
+
+
+class _FakePodSh:
+    """Espelho mínimo do `_pod_sh`: responde `git log --format=%s -- <path>`
+    com os sujeitos configurados por arquivo."""
+
+    def __init__(self, subjects_by_path: dict[str, list[str]]):
+        self._subjects = subjects_by_path
+        self.scripts: list[str] = []
+
+    def __call__(self, script: str, **_kw) -> subprocess.CompletedProcess:
+        self.scripts.append(script)
+        path = shlex.split(script.split(" -- ", 1)[1])[0] if " -- " in script else ""
+        return subprocess.CompletedProcess(
+            args=script, returncode=0,
+            stdout="\n".join(self._subjects.get(path, [])), stderr="",
+        )
+
+
+def test_order_is_executed_only_on_dse_authored_files():
+    pod = _FakePodSh({
+        _DSE_SPEC: ["tester(wi_x): badge spec", "tester(wi_x): adjust"],
+        _CLIENT_SPEC: ["Add homepage spec", "tester(wi_x): touched later"],
+        _GHOST_SPEC: [],
+    })
+    owned, refused = activities._pod_reauthor_partition(
+        pod, [_DSE_SPEC, _CLIENT_SPEC, _GHOST_SPEC]
+    )
+    assert owned == [_DSE_SPEC]
+    assert refused == [_CLIENT_SPEC, _GHOST_SPEC], (
+        "sujeito humano na história = cliente; história vazia = não atravessou "
+        "parque nenhum — ambos fora do alcance de qualquer ordem"
+    )
+
+
+def test_every_dse_prefix_counts_as_ownership():
+    subjects = [f"{p}wi_y): housekeeping" for p in activities._DSE_COMMIT_PREFIXES]
+    pod = _FakePodSh({_DSE_SPEC: subjects})
+    owned, refused = activities._pod_reauthor_partition(pod, [_DSE_SPEC])
+    assert owned == [_DSE_SPEC] and refused == []

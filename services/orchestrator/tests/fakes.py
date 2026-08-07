@@ -147,6 +147,9 @@ class FakeControlPlane:
     #: test files the fake Tester reports as ITS OWN (spec-conflict tests set
     #: this to tell tester-owned failures apart from pre-existing specs)
     tester_test_files: list[str] = field(default_factory=lambda: ["test_app.py"])
+    #: what each Tester call received in `reauthor_specs` (beco 1, veredito
+    #: `reauthor`): [] em turno normal, os caminhos ordenados no turno da ordem
+    tester_reauthor_orders: list[list[str]] = field(default_factory=list)
     l2_calls: int = 0
     # risk declared by the Planner (default low -> the gate auto-approves)
     plan_risk_class: str = "low"
@@ -228,6 +231,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
 
     async def run_tester_turn(payload: dict) -> TesterTurnResult:
         state.tester_calls += 1
+        state.tester_reauthor_orders.append(list(payload.get("reauthor_specs") or []))
         state.calls_log.append("run_tester_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
         RunTesterTurnInput(**payload)  # REAL contract decode
