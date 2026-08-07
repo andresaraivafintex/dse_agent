@@ -9,6 +9,8 @@
 # Posture: matches build_pod_manifest (runAsNonRoot=10001, readOnlyRootFs,
 # cap drop ALL). The strong-isolation RuntimeClass (gVisor/Kata) is applied on
 # the Pod, not in the image.
+FROM eclipse-temurin:17-jdk-jammy AS jdk17
+
 FROM python:3.12-slim AS base
 
 # fixed non-root user (same UID as the Pod's securityContext)
@@ -48,19 +50,23 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # headless: no AWT, no fonts. Roughly half the size of the full JDK and nothing
 # here draws.
 #
-# 21, not 17, because the base is Debian trixie and trixie dropped the
-# openjdk-17 packages entirely ("E: Unable to locate package
-# openjdk-17-jdk-headless" — measured, this is what broke the rc.27 build).
-#
-# That is not a compromise. The repo's pom sets `maven.compiler.release=17`,
-# and `--release 17` compiles against the Java 17 API and emits Java 17
-# bytecode whichever JDK runs it — that is precisely what the flag exists for,
-# unlike `source`/`target`, which only set the language level and leave you
-# linking against the newer API. Spring Boot 3.4 supports 21.
+# 21 came first because Debian trixie dropped the openjdk-17 packages entirely
+# ("E: Unable to locate package openjdk-17-jdk-headless" — measured, rc.27),
+# and `--release 17` was believed sufficient. It is not: `--release` fixes the
+# API and the bytecode, but Lombok instruments the COMPILER'S INTERNALS, and
+# JDK 21 renamed JCImport's field — the customer's pinned Lombok 1.18.22 dies
+# with `NoSuchFieldError: JCTree$JCImport ... qualid` on every compile
+# (measured: wi_dc571c08/wi_866b96ce probe, 2026-08-07). The sandbox now
+# REFLECTS THE CUSTOMER'S TOOLCHAIN: Temurin 17 (multi-stage copy, since apt
+# cannot provide it on trixie) is the default java; 21 stays installed for
+# anything that resolves /usr/bin/java through the alternatives system.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openjdk-21-jdk-headless \
-    && rm -rf /var/lib/apt/lists/* \
-    && java -version && javac -version
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=jdk17 /opt/java/openjdk /opt/java/temurin-17
+ENV JAVA_HOME=/opt/java/temurin-17 PATH="/opt/java/temurin-17/bin:${PATH}"
+RUN java -version 2>&1 | grep -q 'version "17' && javac -version \
+    && /usr/lib/jvm/java-21-openjdk-*/bin/java -version
 
 COPY services/sandbox-runtime/agent-runner/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
