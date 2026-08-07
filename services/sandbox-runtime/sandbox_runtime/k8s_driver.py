@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -140,6 +141,27 @@ def pod_name_for(work_item_id: str) -> str:
     return f"dse-sbx-{slug}"[:63].rstrip("-")
 
 
+def maven_proxy_settings_xml(egress_proxy_url: str) -> str:
+    """Maven's resolver honors NEITHER the http(s)_proxy env vars NOR the
+    -Dhttps.proxyHost system properties — a `<proxies>` block in settings.xml is
+    the only channel it respects. Without it every artifact download from a
+    sandbox Pod dies with "Network is unreachable" (default-deny NetworkPolicy).
+    nonProxyHosts mirrors NO_PROXY above."""
+    parsed = urllib.parse.urlparse(egress_proxy_url)
+    host, port = parsed.hostname or "", parsed.port or 8806
+    non_proxy = "localhost|127.0.0.1|*.svc|*.cluster.local"
+    proxies = "".join(
+        f"<proxy><id>dse-egress-{scheme}</id><active>true</active>"
+        f"<protocol>{scheme}</protocol><host>{host}</host><port>{port}</port>"
+        f"<nonProxyHosts>{non_proxy}</nonProxyHosts></proxy>"
+        for scheme in ("https", "http")
+    )
+    return (
+        '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">'
+        f"<proxies>{proxies}</proxies></settings>"
+    )
+
+
 def _label_value(v: str) -> str:
     """K8s label value: at most 63 chars, not ending in -/_/.
 
@@ -221,6 +243,12 @@ def build_pod_manifest(request: SandboxProvisionRequest, cfg: K8sSandboxConfig |
                     {"name": "http_proxy", "value": cfg.egress_proxy_url},
                     {"name": "https_proxy", "value": cfg.egress_proxy_url},
                     {"name": "no_proxy", "value": "localhost,127.0.0.1,.svc,.cluster.local"},
+                    # The JVM resolves user.home from /etc/passwd (/home/dse —
+                    # read-only rootfs), NOT from the image's HOME=/tmp, so bare
+                    # Maven dies creating /home/dse/.m2. /tmp is the writable
+                    # emptyDir; this also makes Maven read the proxies file
+                    # provision() writes to /tmp/.m2/settings.xml.
+                    {"name": "MAVEN_OPTS", "value": "-Duser.home=/tmp"},
                     {"name": "DSE_WORK_ITEM_ID", "value": request.work_item_id},
                     {"name": "DSE_TENANT_ID", "value": request.tenant_id},
                     {"name": "DSE_TASK_BRANCH", "value": request.branch},
@@ -356,6 +384,13 @@ class KubernetesSandboxDriver:
         name = pod_name_for(request.work_item_id)
         self._kubectl(["wait", "--for=condition=Ready", f"pod/{name}", "-n", self._cfg.namespace, "--timeout=120s"])
         self._bootstrap(request)
+        # /tmp/.m2 because MAVEN_OPTS (build_pod_manifest) pins user.home=/tmp;
+        # /tmp is an emptyDir, so this survives exactly as long as the Pod does.
+        self._kubectl(
+            ["exec", "-i", name, "-n", self._cfg.namespace, "--",
+             "sh", "-c", "mkdir -p /tmp/.m2 && cat > /tmp/.m2/settings.xml"],
+            input_text=maven_proxy_settings_xml(self._cfg.egress_proxy_url),
+        )
         return docker_driver.ProvisionedSandbox(
             container_id=name,
             container_name=name,
