@@ -117,6 +117,15 @@ class WorkItemLifecycleInput:
     # a pass so a later attempt is never told about a failure that is fixed.
     fix_context: list[str] = field(default_factory=list)
 
+    # Porta 1 v2 (falso-negativo do wi_8edaef39): a união dos files_changed de
+    # TODOS os turnos de Coder deste item — o proxy determinístico do diff
+    # acumulado base..HEAD (o Coder é o único que escreve código de produção;
+    # edição de teste é revertida). O detector de spec_conflict compara o
+    # sujeito da spec contra ISTO, nunca contra o diff do turno corrente: um
+    # retry que toca outro arquivo tirava o sujeito do diff-por-turno e cegava
+    # o re-flag. Sobrevive a continue_as_new por estar no input.
+    cumulative_files_changed: list[str] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Phase 2 — budgets (WSB-E4-T1). `budget_max_usd` comes from the JSONB
     # `work_items.budget` (key "max_usd") read at admission; `spent_usd`

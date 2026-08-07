@@ -1195,7 +1195,7 @@ class WorkItemLifecycleWorkflow:
             pr_number=self._input.pr_number,
         )
 
-    async def _park_spec_conflict(self, specs: list[str], test_finding, coder_result) -> bool:
+    async def _park_spec_conflict(self, specs: list[str], test_finding, diff_files: list[str]) -> bool:
         """Porta 1 do deadlock de posse de spec: para o item em `spec_conflict`
         na primitiva de espera durável do plan approval, com TUDO que o humano
         precisa para decidir — qual spec, quais asserções, o diff que a
@@ -1203,7 +1203,7 @@ class WorkItemLifecycleWorkflow:
         levanta _EscalateNow para qualquer outro veredito; retorna False se um
         cancel chegou durante a espera (o chamador finaliza cancelado)."""
         assertions = (test_finding.detail or "")[:2000]
-        diff_files = list(coder_result.files_changed or [])
+        diff_files = list(diff_files or [])
         await self._audit(
             "spec_conflict_detected",
             {"specs": specs, "assertions": assertions, "diff_files": diff_files},
@@ -1233,6 +1233,12 @@ class WorkItemLifecycleWorkflow:
         if self._operator_escalate_requested:
             raise _EscalateNow("operator_escalate_during_spec_conflict")
         payload = self._spec_conflict_payload or {}
+        # Consumido AQUI, nunca no handler (anti-clobber): sem este reset, um
+        # SEGUNDO parque no mesmo item encontraria a flag do primeiro ainda
+        # armada e se auto-resolveria com o veredito velho — medido no teste
+        # do cenário wi_8edaef39 (park 2 "resolvido" sem nenhum signal novo).
+        self._spec_conflict_received = False
+        self._spec_conflict_payload = None
         verdict = str(payload.get("verdict") or "").strip().lower()
         await self._audit(
             "spec_conflict_resolved",
@@ -2044,6 +2050,11 @@ class WorkItemLifecycleWorkflow:
                 CoderTurnResult,
             )
             await self._consume_cost(coder_result.cost_usd, source="coder")
+            # Porta 1 v2: acumula o diff do item (união por turno). Ordenado
+            # para ser determinístico no replay; ver o campo em models.py.
+            input.cumulative_files_changed = sorted(
+                set(input.cumulative_files_changed) | set(coder_result.files_changed or [])
+            )
             # The projector filters audit-derived runs to system:orchestrator
             # rows, so the ledger marker the Activity writes into its OWN audit
             # copy is invisible to it and has to be carried up here. Without it
@@ -2340,14 +2351,18 @@ class WorkItemLifecycleWorkflow:
                         None,
                     )
                     if test_bad is not None:
+                        # Diff ACUMULADO base..HEAD, nunca o do turno corrente:
+                        # após um retry que toca outro arquivo, o sujeito sai do
+                        # diff-por-turno e o conflito real fica invisível
+                        # (falso-negativo medido no wi_8edaef39).
                         conflicts = preexisting_spec_conflicts(
                             test_bad.detail or "",
                             tester_owned=list(getattr(tester_result, "test_files", None) or []),
-                            diff_files=list(getattr(coder_result, "files_changed", None) or []),
+                            diff_files=list(input.cumulative_files_changed),
                         )
                         if conflicts:
                             resumed = await self._park_spec_conflict(
-                                conflicts, test_bad, coder_result
+                                conflicts, test_bad, list(input.cumulative_files_changed)
                             )
                             if self._cancelled:
                                 return await self._finish_cancelled()
