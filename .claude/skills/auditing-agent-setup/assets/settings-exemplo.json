@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/verify-edit.sh",
+            "timeout": 60,
+            "statusMessage": "Verificando tipos..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/gate-stop.sh",
+            "timeout": 300,
+            "statusMessage": "Rodando suite antes de encerrar..."
+          }
+        ]
+      }
+    ]
+  }
+}
