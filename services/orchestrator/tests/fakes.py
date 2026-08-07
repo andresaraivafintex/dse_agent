@@ -119,6 +119,9 @@ class FakeControlPlane:
     times before working, etc.)."""
 
     l1_fail_times: int = 0
+    #: detail of the failing `test` finding (spec-conflict tests put real
+    #: "FAIL <path>" lines here, the shape quality_checks emits)
+    l1_fail_detail: str = "simulated failure"
     ci_sequence: list[str] = field(default_factory=lambda: ["green"])
     checkpoint_fail_times: int = 0
     provision_calls: int = 0
@@ -141,6 +144,9 @@ class FakeControlPlane:
     # --- Phase 2: Planner / Tester / Reviewer L2 (WS-C/WS-E boundaries) ---
     planner_calls: int = 0
     tester_calls: int = 0
+    #: test files the fake Tester reports as ITS OWN (spec-conflict tests set
+    #: this to tell tester-owned failures apart from pre-existing specs)
+    tester_test_files: list[str] = field(default_factory=lambda: ["test_app.py"])
     l2_calls: int = 0
     # risk declared by the Planner (default low -> the gate auto-approves)
     plan_risk_class: str = "low"
@@ -227,7 +233,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         RunTesterTurnInput(**payload)  # REAL contract decode
         return TesterTurnResult(
             sandbox_id=payload["sandbox_id"],
-            test_files=["test_app.py"],
+            test_files=list(state.tester_test_files),
             tests_ran=state.tester_tests_ran,
             tests_passed=state.tester_tests_passed,
             returncode=state.tester_returncode,
@@ -327,7 +333,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             return L1Result(
                 work_item_id=wi,
                 passed=False,
-                findings=[L1Finding(check="test", passed=False, detail="simulated failure")],
+                findings=[L1Finding(check="test", passed=False, detail=state.l1_fail_detail)],
             )
         return L1Result(
             work_item_id=wi,
