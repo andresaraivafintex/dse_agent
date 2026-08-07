@@ -33,6 +33,12 @@ As regras e onde vivem:
                                      test_check(base_sha=): suite já vermelha no base
                                      vira NOT_OUR_FAILURE e o item SEGUE (promoveu os
                                      becos 2 e 3 deste mapa).
+  R9 exaustão em spec própria      — workflows.py:exclusively_tester_spec_failures +
+                                     parque na primitiva da porta 1: fingerprint
+                                     repetido apontando SÓ para spec do Tester com
+                                     veredito = nenhum ator autorizado → humano decide
+                                     com dossiê (promoveu o beco 1; medido 2x antes:
+                                     pageSize wi_5eecf486, 'warning' wi_32eb136f).
 """
 from __future__ import annotations
 
@@ -87,6 +93,12 @@ def saidas(c: Celula) -> set[str]:
     if c.quem == "cliente" and c.arquivo == SPEC_CLIENTE:
         s.add("baseline:not_our_failure")
 
+    # R9 — exaustão reconhecida (não classificada): asserção em spec própria
+    # com veredito, repetida, sem ator autorizado → parque para humano com
+    # dossiê, na mesma primitiva da porta 1.
+    if c.arquivo == SPEC_TESTER and c.modo == ASSERCAO:
+        s.add("humano:spec_conflict")
+
     # R2: célula (tester quebrou spec do cliente) é estruturalmente impossível —
     # o rename guard desvia a escrita para um caminho -dse próprio. Modelada
     # fora da matriz (ver test_r2_torna_a_celula_impossivel).
@@ -120,18 +132,17 @@ VIVAS: list[Celula] = [
            nota="baseline vermelha do repo: classificada NOT_OUR_FAILURE, o item segue"),
     Celula("cliente", SPEC_CLIENTE, ZERO_VEREDITO, sujeito_no_diff=False,
            nota="mesma baseline morrendo na carga: idem — comparada suite a suite"),
+    # Promovida de beco por R9: a exaustão em spec própria parqueia com dossiê
+    # (specs, asserções, esperado vs recebido, diff) em vez de morrer no teto.
+    Celula("tester", SPEC_TESTER, ASSERCAO,
+           nota="pageSize (wi_5eecf486) e 'warning' (wi_32eb136f): humano resolve em "
+                "trinta segundos com o dossiê; o laço agora para e pergunta"),
 ]
 
-#: BECOS CONHECIDOS — células hoje SEM ator e SEM escalada desenhada. A saída
-#: real é exaustão (coder_not_converging/teto), que mata o item sem nomear a
-#: causa. xfail ESTRITO: quem abrir uma saída para elas promove a célula.
-BECOS: list[Celula] = [
-    Celula("tester", SPEC_TESTER, ASSERCAO,
-           nota="spec própria com asserção ERRADA e código certo: Coder revertido (R1), "
-                "Tester não re-autora com veredito presente (R3), porta 1 exclui por posse (R5), "
-                "e R8 não alcança (a spec nasceu neste item, não existe no base). "
-                "Resíduo indecidível da porta 2 — hoje só exaustão."),
-]
+#: BECOS CONHECIDOS — vazio hoje: os três medidos foram promovidos (R8, R9).
+#: O mecanismo fica: um beco novo entra aqui com xfail ESTRITO, e quem abrir
+#: uma saída para ele é OBRIGADO pelo teste a promover a célula.
+BECOS: list[Celula] = []
 
 
 @pytest.mark.parametrize("celula", VIVAS, ids=lambda c: f"{c.quem}/{c.arquivo}/{c.modo}")
@@ -141,13 +152,6 @@ def test_toda_celula_viva_tem_saida(celula: Celula):
         f"célula ({celula.quem}, {celula.arquivo}, {celula.modo}) ficou sem ator autorizado "
         f"e sem escalada desenhada — {celula.nota}"
     )
-
-
-@pytest.mark.parametrize("celula", BECOS, ids=lambda c: f"BECO:{c.quem}/{c.arquivo}/{c.modo}")
-@pytest.mark.xfail(strict=True, reason="beco documentado: sem ator e sem escalada desenhada; "
-                                       "a saída real é exaustão no teto")
-def test_becos_documentados_continuam_becos(celula: Celula):
-    assert saidas(celula), celula.nota
 
 
 def test_r2_torna_a_celula_impossivel():
@@ -160,8 +164,8 @@ def test_r2_torna_a_celula_impossivel():
 
 
 def test_deferral_nao_e_saida_e_sim_encaminhamento():
-    """R4: o deferral não autoriza ninguém — só move o veredito para o L1. Uma
-    célula não pode ser considerada 'resolvida' porque o Tester deferiu; a
-    prova é que os becos acima existem COM o deferral ligado."""
-    beco = BECOS[0]
-    assert not saidas(beco)
+    """R4: o deferral não autoriza ninguém — só move o veredito para o L1. A
+    célula que era o beco 1 tem saída HOJE por causa do parque R9, não do
+    deferral: a única saída é o humano, nunca um ator do laço."""
+    celula = Celula("tester", SPEC_TESTER, ASSERCAO)
+    assert saidas(celula) == {"humano:spec_conflict"}

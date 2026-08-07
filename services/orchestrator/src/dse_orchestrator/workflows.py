@@ -334,6 +334,48 @@ def preexisting_spec_conflicts(
     return out
 
 
+#: "Expected:"/"Received:" do jest — o par que resolve o dossiê do beco 1 em
+#: trinta segundos humanos. Ausente em falhas sem esse formato (TypeError):
+#: o excerto de asserções cobre.
+_EXPECTED_RECEIVED_LINE = re.compile(r"^\s*((?:Expected|Received)[:\s][^\n]*)$", re.MULTILINE)
+
+#: Suite que morreu na CARGA (jest) ou compilação (maven) — sem veredito.
+_LOAD_FAILURE_MARK = re.compile(r"●\s+Test suite failed to run|\[ERROR\]\s+/workspace/")
+
+
+def exclusively_tester_spec_failures(
+    failed_check_names: list[str], *, test_detail: str, tester_owned: list[str]
+) -> list[str]:
+    """Beco 1 — reconhecimento de EXAUSTÃO, deliberadamente não um classificador
+    (decidir se a asserção está errada ou o código está é a indecidibilidade da
+    porta 2; aqui ninguém decide isso).
+
+    Devolve as specs falhando SE E SOMENTE SE nenhum ator autorizado pode agir:
+      - o único gate reprovando é `test` (build/typecheck reprovando junto = o
+        Coder ainda tem produção para consertar);
+      - TODA suite FAIL é do próprio Tester (spec do cliente na lista = ou é a
+        porta 1, ou é produção quebrada — nunca este parque);
+      - com VEREDITO presente (carga/compilação morta = zero veredito =
+        território do repair da porta 5, que já rodou no turno).
+    Qualquer outra combinação: lista vazia, fluxo normal."""
+    if set(failed_check_names) != {"test"}:
+        return []
+    detail = test_detail or ""
+    if _LOAD_FAILURE_MARK.search(detail):
+        return []
+    specs: list[str] = []
+    for m in _FAILING_SUITE_LINE.finditer(detail):
+        s = m.group(1)
+        if s not in specs:
+            specs.append(s)
+    if not specs:
+        return []
+    owned = set(tester_owned or [])
+    if any(s not in owned for s in specs):
+        return []
+    return specs
+
+
 class _BlockNow(Exception):
     """WSB-E3-T2 — EMPTY approver cascade: Blocked + escalation, it never
     auto-approves on absence (P1/P3)."""
@@ -1195,7 +1237,10 @@ class WorkItemLifecycleWorkflow:
             pr_number=self._input.pr_number,
         )
 
-    async def _park_spec_conflict(self, specs: list[str], test_finding, diff_files: list[str]) -> bool:
+    async def _park_spec_conflict(
+        self, specs: list[str], test_finding, diff_files: list[str],
+        *, reason: str = "preexisting_spec_broken_by_diff",
+    ) -> bool:
         """Porta 1 do deadlock de posse de spec: para o item em `spec_conflict`
         na primitiva de espera durável do plan approval, com TUDO que o humano
         precisa para decidir — qual spec, quais asserções, o diff que a
@@ -1204,24 +1249,40 @@ class WorkItemLifecycleWorkflow:
         cancel chegou durante a espera (o chamador finaliza cancelado)."""
         assertions = (test_finding.detail or "")[:2000]
         diff_files = list(diff_files or [])
+        # O par Expected/Received quando o runner o imprime — é o que resolve o
+        # dossiê em trinta segundos humanos (medido nos dois casos do beco 1).
+        expected_vs_received = _EXPECTED_RECEIVED_LINE.findall(
+            test_finding.detail or ""
+        )[:12]
         await self._audit(
             "spec_conflict_detected",
-            {"specs": specs, "assertions": assertions, "diff_files": diff_files},
+            {"specs": specs, "assertions": assertions, "diff_files": diff_files,
+             "reason": reason, "expected_vs_received": expected_vs_received},
         )
         await self._set_status(
             WorkItemStatus.spec_conflict, audit_action="spec_conflict",
             details={"specs": specs},
         )
-        await self._post_status_comment(
-            "spec_conflict",
-            detail=(
+        if reason == "tester_spec_exhaustion":
+            comment = (
+                "The Tester's OWN spec(s) keep failing identically and no actor "
+                "in the loop may act — the Coder cannot edit tests, the Tester "
+                "does not re-author a spec that delivered a verdict. A human "
+                "call is needed. Specs: " + ", ".join(specs)
+                + (". Expected vs received: " + " | ".join(expected_vs_received)
+                   if expected_vs_received else "")
+                + ". Diff files: " + ", ".join(diff_files)
+                + ". Failing assertions:\n" + assertions[:900]
+            )
+        else:
+            comment = (
                 "Pre-existing spec(s) broken by this change's diff — no actor in "
                 "the loop may edit them (Coder: test edits revert; Tester: own "
                 "specs only). Specs: " + ", ".join(specs)
                 + ". Diff files: " + ", ".join(diff_files)
                 + ". Failing assertions:\n" + assertions[:900]
-            ),
-        )
+            )
+        await self._post_status_comment("spec_conflict", detail=comment)
 
         def decided() -> bool:
             return (self._spec_conflict_received or self._cancelled
@@ -2422,6 +2483,46 @@ class WorkItemLifecycleWorkflow:
                     else:
                         self._last_repair_fingerprint = fingerprint
                         self._same_repair_count = 0
+                    # Beco 1 (medido 2x: pageSize wi_5eecf486, 'warning'
+                    # wi_32eb136f): fingerprint repetido apontando SÓ para specs
+                    # do próprio Tester com veredito = nenhum ator autorizado.
+                    # Na SEGUNDA falha idêntica, não na terceira: com zero
+                    # atores, a rodada extra não compra nada — e no caso real do
+                    # 'warning' o teto chegava antes da terceira. Parqueia na
+                    # primitiva da porta 1 com o dossiê; retry humano volta ao
+                    # laço, e uma nova falha idêntica re-parqueia em vez de
+                    # queimar até o teto.
+                    if (
+                        self._same_repair_count >= 1
+                        and workflow.patched("tester-spec-exhaustion-parks-v1")
+                    ):
+                        exh_finding = next(
+                            (f for f in failed_checks if f.check == "test"), None
+                        )
+                        own_specs = exclusively_tester_spec_failures(
+                            [f.check for f in failed_checks],
+                            test_detail=(exh_finding.detail if exh_finding else "") or "",
+                            tester_owned=list(
+                                getattr(tester_result, "test_files", None) or []
+                            ),
+                        )
+                        if own_specs and exh_finding is not None:
+                            resumed = await self._park_spec_conflict(
+                                own_specs, exh_finding,
+                                list(input.cumulative_files_changed),
+                                reason="tester_spec_exhaustion",
+                            )
+                            if self._cancelled:
+                                return await self._finish_cancelled()
+                            if resumed:
+                                input.fix_context = self._l1_failure_context(failed_checks)
+                                await self._set_status(
+                                    WorkItemStatus.implementing,
+                                    audit_action="spec_conflict_retry",
+                                    details={"specs": own_specs,
+                                             "reason": "tester_spec_exhaustion"},
+                                )
+                                continue
                     if self._same_repair_count >= 2:
                         raise _EscalateNow(
                             "coder_not_converging: the same gate failure survived "
