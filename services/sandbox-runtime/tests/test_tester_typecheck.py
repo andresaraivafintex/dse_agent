@@ -100,6 +100,24 @@ def test_a_type_error_in_the_authored_spec_fails_the_turn(monkeypatch):
     assert not _suite_ran(seen), "typecheck reprovado: não gasta a suíte inteira depois"
 
 
+def test_the_typecheck_installs_dependencies_before_running(monkeypatch):
+    """Regressão medida em produção (wi_aa119e7c, rc.44): o typecheck roda ANTES
+    da suíte, e é a suíte que instala `node_modules`. Sem dependência, `npx tsc`
+    não acha o compilador local, baixa um pacote homônimo do npm e responde
+
+        This is not the tsc command you are looking for
+
+    com exit != 0 — que o turno reportou como erro de tipo. Todo item de repo
+    npm morreu no teto do Tester por uma dependência ausente."""
+    _result, seen = _run(monkeypatch, typecheck=_done([], 0))
+
+    tc = [" ".join(a) for a, _k in seen if "tsc --noEmit" in " ".join(a)]
+    assert tc, "o typecheck do manifesto tem de rodar"
+    assert "npm install" in tc[0] and "node_modules" in tc[0], (
+        "o typecheck precisa das dependências instaladas antes de julgar tipos"
+    )
+
+
 def test_a_clean_typecheck_lets_the_suite_decide(monkeypatch):
     result, seen = _run(monkeypatch, typecheck=_done([], 0, stdout=""))
 
