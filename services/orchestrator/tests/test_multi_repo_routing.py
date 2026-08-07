@@ -30,8 +30,8 @@ def _require_postgres():
     which is exactly where somebody would change the id shape."""
     yield
 
-FE = "andresaraivafintex/bmo-fee-calculator-fe-dse"
-BE = "andresaraivafintex/bmo-fee-calculator-be-dse"
+FE = "fintexinc/bmo-fee-calculator-fe-dse"
+BE = "fintexinc/bmo-fee-calculator-be-dse"
 EVENT = "slack:C123:1700000000.0001"
 
 

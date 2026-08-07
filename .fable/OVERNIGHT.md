@@ -47,7 +47,7 @@ esses jobs levam 1 e 6 minutos.
 - [x] DONE 04:12 — the Slack channel WAS bound to the frontend repo, so the
       resolver decided deterministically and the router was never consulted.
       Deleted that row. Restore it with:
-      `INSERT INTO repo_bindings (tenant_id,platform,binding_type,binding_value,repo,base_branch) VALUES ('fintex-poc','slack','channel','C0BKA7TMMEY','andresaraivafintex/bmo-fee-calculator-fe-dse','main');`
+      `INSERT INTO repo_bindings (tenant_id,platform,binding_type,binding_value,repo,base_branch) VALUES ('fintex-poc','slack','channel','C0BKA7TMMEY','fintexinc/bmo-fee-calculator-fe-dse','main');`
       The Jira project binding (BD -> backend) is untouched.
 - [x] DONE 07:35 — three root causes found and fixed, all mine (see the Log).
 - [ ] Watch `bzyq6ek2x` (CI #56 -> merge -> rc.28 -> deploy -> the three tests).
