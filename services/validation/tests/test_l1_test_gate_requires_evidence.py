@@ -13,6 +13,8 @@ test_empty_commands_are_not_configured_never_green) stays the only escape.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from dse_contracts import GateStatus
 
 from dse_validation.config import L1Config
@@ -108,3 +110,18 @@ def test_a_red_run_without_counts_still_fails_with_the_exit_code():
     assert finding.passed is False
     assert finding.status == GateStatus.FAIL
     assert "exit code 1" in finding.summary
+
+
+def test_the_full_real_testbed_green_log_yields_evidence_and_pass():
+    """DoD 3 — the ENTIRE captured log of a green `./mvnw ... test` run on the
+    Java testbed (sandbox Pod, 2026-08-07, 1456 lines including the dependency
+    download flood), not a hand-picked excerpt: the legitimate path stays green
+    under the evidence rule, with tests_run > 0 recognized from Surefire."""
+    log = (Path(__file__).parent / "fixtures" / "testbed_java_green_mvnw_test.txt").read_text()
+    counts = _test_counts(log)
+    assert counts is not None
+    assert counts.executed == 1
+    assert counts.failed == 0
+    finding = run_test_check(_canned(log, 0), L1Config(test_cmd=["./mvnw", "test"]))
+    assert finding.passed is True
+    assert finding.status == GateStatus.PASS

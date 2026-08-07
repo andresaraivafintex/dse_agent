@@ -2054,6 +2054,10 @@ class WorkItemLifecycleWorkflow:
                         "files_changed": tester_result.files_changed,
                         "tests_ran": tester_result.tests_ran,
                         "tests_passed": tester_result.tests_passed,
+                        # tests_passed=True with a red returncode is the
+                        # DEFERRAL policy, not a suite verdict — the row has to
+                        # say so or the ledger reads as a contradiction.
+                        "suite_deferred": tester_result.suite_deferred,
                         "status": tester_result.status.value,
                     },
                 )

@@ -10,6 +10,7 @@ many problems" nor gives readable evidence for `L1Finding.detail`
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from dse_contracts import GateStatus, L1Finding
 
@@ -364,42 +365,72 @@ _COUNT_RE = re.compile(r"(?P<n>\d+) (?P<word>passed|failed|errors?|skipped|todo)
 _BAD_WORDS = ("failed", "error", "errors")
 
 
-def _test_counts(text: str) -> str | None:
-    """The counts a test runner printed, in whatever order it printed them.
-
-    This replaced a pattern that required `passed` FIRST with `failed` optional
-    after it — pytest's order (`272 passed, 3 failed`). Jest writes the opposite
-    (`Test Suites: 2 failed, 275 passed, 277 total`), so the optional group
-    never matched and the failure count was silently dropped. A jest run with
-    two broken suites published the byte-identical summary to a green one:
-
-        'Test Suites: 2 failed, 275 passed, 277 total'  ->  '275 passed'
-
-    That string is the only thing that propagates. It goes into the append-only
-    `audit_log`, and `workflows.py::_l1_failure_context` hands it to the next
-    Coder turn — so the fix loop was told to repair a suite it was told passed.
-    Two days of debugging went into the gate before anyone read this regex.
-
-    A line naming a non-zero failure wins outright; otherwise the first line
-    carrying counts is used, so a green run still reads the way it always did.
-    """
-    fallback: str | None = None
-    for line in text.splitlines():
-        pairs = _COUNT_RE.findall(line)
-        if not pairs:
-            continue
-        rendered = ", ".join(f"{n} {word}" for n, word in pairs)
-        if any(word.startswith(_BAD_WORDS) and int(n) > 0 for n, word in pairs):
-            return rendered
-        if fallback is None:
-            fallback = rendered
-    return fallback
+#: Surefire's dialect is the mirror image of pytest/jest's: capitalized words,
+#: the number AFTER the word, comma-separated — `Tests run: 5, Failures: 2,
+#: Errors: 1, Skipped: 1`. The pair pattern above cannot see it at all, so
+#: every Java run — green or red — used to read "no test count found".
+_SUREFIRE_RE = re.compile(
+    r"Tests run: (?P<run>\d+), Failures: (?P<failures>\d+),"
+    r" Errors: (?P<errors>\d+), Skipped: (?P<skipped>\d+)"
+)
 
 
-def _names_a_failure(counts: str) -> bool:
-    return any(
-        word.startswith(_BAD_WORDS) and int(n) > 0 for n, word in _COUNT_RE.findall(counts)
+@dataclass(frozen=True)
+class TestCounts:
+    """What the runner said it did, as NUMBERS. `executed` is the evidence the
+    gate anchors on — tests that actually ran (a skip is not execution)."""
+
+    executed: int
+    failed: int
+    #: Human fragment for `summary`/the ledger, still built only from digits
+    #: and the closed word lists above.
+    rendered: str
+
+
+def _counts_from_line(line: str) -> TestCounts | None:
+    m = _SUREFIRE_RE.search(line)
+    if m:
+        run, failures, errors, skipped = (
+            int(m.group(g)) for g in ("run", "failures", "errors", "skipped")
+        )
+        return TestCounts(executed=run - skipped, failed=failures + errors, rendered=m.group(0))
+    pairs = _COUNT_RE.findall(line)
+    if not pairs:
+        return None
+    executed = sum(int(n) for n, word in pairs if not word.startswith(("skipped", "todo")))
+    failed = sum(int(n) for n, word in pairs if word.startswith(_BAD_WORDS))
+    return TestCounts(
+        executed=executed, failed=failed, rendered=", ".join(f"{n} {word}" for n, word in pairs)
     )
+
+
+def _test_counts(text: str) -> TestCounts | None:
+    """The counts a test runner printed, as numbers — pytest, jest and surefire
+    dialects.
+
+    History that must not regress: the first pattern here required `passed`
+    FIRST with `failed` optional after it — pytest's order (`272 passed,
+    3 failed`). Jest writes the opposite (`Test Suites: 2 failed, 275 passed,
+    277 total`), so the optional group never matched and a jest run with two
+    broken suites published the byte-identical summary to a green one. That
+    string goes into the append-only `audit_log`, and
+    `workflows.py::_l1_failure_context` hands it to the next Coder turn — so
+    the fix loop was told to repair a suite it was told passed.
+
+    A line naming a non-zero failure wins outright; otherwise the line with the
+    most executions wins — surefire prints one line per class and then the
+    totals, and the totals are never smaller than a class line.
+    """
+    fallback: TestCounts | None = None
+    for line in text.splitlines():
+        counts = _counts_from_line(line)
+        if counts is None:
+            continue
+        if counts.failed > 0:
+            return counts
+        if fallback is None or counts.executed > fallback.executed:
+            fallback = counts
+    return fallback
 
 
 #: Lines a runner uses to head a broken suite. These carry file paths, which is
@@ -437,14 +468,21 @@ def test_check(
     # Both streams: jest prints its counts and its failure blocks to STDERR,
     # and the old `stdout or stderr` never reached stderr at all.
     counts = _test_counts(output)
-    passed = result.ok
+    # Exit code alone is not a verdict: the gate demands EVIDENCE that at least
+    # one test executed. On the Java testbed the gate's own command excluded
+    # the repo's only test class, and "exit 0, no count found" passed a
+    # pristine tree — a gate approving the absence of evidence is not a gate.
+    # Declared absence (no test_cmd) already returned NOT_CONFIGURED above;
+    # that stays the only escape.
+    evidence = counts is not None and counts.executed > 0
+    passed = result.ok and evidence
     if result.timed_out:
         summary = f"timed out after {timeout}s running tests — L1 fails clean (P6)"
         detail = f"timed out after {timeout}s running tests — L1 fails clean (P6), no truncation"
         status = GateStatus.ERROR
-    elif counts:
-        summary = f"summary: {counts}"
-        if not passed and not _names_a_failure(counts):
+    elif counts is not None and evidence:
+        summary = f"summary: {counts.rendered}"
+        if not result.ok and counts.failed == 0:
             # Every test passed and the command still failed. That is not a
             # contradiction and it is not ours to hide: the runner is enforcing
             # something besides the tests — a global coverage threshold, a
@@ -458,9 +496,13 @@ def test_check(
                 "similar), not a failing test — see the detail"
             )
         status = GateStatus.PASS if passed else GateStatus.FAIL
+    elif result.ok:
+        rendered = f"({counts.rendered})" if counts is not None else "(no test count found in the output)"
+        summary = f"exit 0 without evidence of test execution {rendered}"
+        status = GateStatus.FAIL
     else:
         summary = f"exit code {result.returncode} (no test count found in the output)"
-        status = GateStatus.PASS if passed else GateStatus.FAIL
+        status = GateStatus.FAIL
     failing = [ln for ln in output.splitlines() if _FAILING_SUITE_RE.match(ln)]
     detail = _detail_with(summary, [] if passed else failing, result)
     return L1Finding(

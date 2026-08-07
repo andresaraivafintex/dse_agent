@@ -3102,6 +3102,10 @@ def _tester_pod_sync(
         details={
             "stage": "tester", "runtime": "k8s", "test_files": test_files,
             "tests_ran": tests_ran, "tests_passed": tests_passed, "returncode": returncode,
+            # The fact that reconciles tests_passed=True with outcome=
+            # tests_failed in the SAME row. Without it the ledger reads as a
+            # contradiction (7/7 events in two production runs did).
+            "suite_deferred": suite_deferred,
             # WHY it failed, not just THAT it failed. Empty on success.
             "failure_output": failure_output[-_FAILURE_OUTPUT_AUDIT_CHARS:],
             "suite_hung": suite_hung,
