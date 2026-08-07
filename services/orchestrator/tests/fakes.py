@@ -150,6 +150,12 @@ class FakeControlPlane:
     #: what each Tester call received in `reauthor_specs` (beco 1, veredito
     #: `reauthor`): [] em turno normal, os caminhos ordenados no turno da ordem
     tester_reauthor_orders: list[list[str]] = field(default_factory=list)
+    #: a instrução completa que cada turno de Coder recebeu (a porta 1 v3
+    #: afirma que as asserções da spec em conflito chegam no fix_context)
+    coder_instructions: list[str] = field(default_factory=list)
+    #: suites que o gate `test` do fake reporta como já vermelhas no base_sha
+    #: (baseline check, rc.43) — entram em L1Finding.inherited_failures
+    l1_inherited_failures: list[str] = field(default_factory=list)
     l2_calls: int = 0
     # risk declared by the Planner (default low -> the gate auto-approves)
     plan_risk_class: str = "low"
@@ -282,6 +288,7 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
 
     async def run_coder_turn(payload: dict) -> CoderTurnResult:
         state.coder_turn_calls += 1
+        state.coder_instructions.append(str(payload.get("instruction") or ""))
         state.calls_log.append("run_coder_turn")
         _maybe_transient_fail(state, ACTIVITY_RUN_CODER_TURN)
         _maybe_fail_closed(state, ACTIVITY_RUN_CODER_TURN)
@@ -337,7 +344,8 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
             return L1Result(
                 work_item_id=wi,
                 passed=False,
-                findings=[L1Finding(check="test", passed=False, detail=state.l1_fail_detail)],
+                findings=[L1Finding(check="test", passed=False, detail=state.l1_fail_detail,
+                                    inherited_failures=list(state.l1_inherited_failures))],
             )
         return L1Result(
             work_item_id=wi,
