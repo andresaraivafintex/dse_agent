@@ -25,7 +25,11 @@ As regras e onde vivem:
                                      suite própria falhando não é gate; L1 julga.
   R5 detector da porta 1           — dse_orchestrator/workflows.py:preexisting_spec_conflicts:
                                      spec FAIL não-do-Tester com SUJEITO no diff
-                                     ACUMULADO (v2) → parque spec_conflict p/ humano.
+                                     ACUMULADO (v2). Em DOIS estágios (v3): verde no
+                                     base + 1ª ocorrência → o CODER ganha uma rodada
+                                     com as asserções (spec_conflict_deferred_to_coder);
+                                     a MESMA spec de novo → parque p/ humano. Vermelha
+                                     no base nunca entra (é achado herdado, R8).
   R6 forbidden_paths               — validation (plan_compliance): gate sobre o diff do
                                      Coder; o próprio Coder pode remover o que criou.
   R7 diff_budget                   — validation: idem — o Coder pode encolher o diff.
@@ -82,9 +86,18 @@ def saidas(c: Celula) -> set[str]:
     if c.arquivo == SPEC_TESTER and c.modo == ZERO_VEREDITO:
         s.add("tester")
 
-    # Humano: R5 — parque spec_conflict quando uma spec do CLIENTE está na
-    # lista FAIL e o sujeito dela está no diff acumulado do item.
-    if c.arquivo == SPEC_CLIENTE and c.sujeito_no_diff and c.modo in {ASSERCAO, ZERO_VEREDITO}:
+    # R5 (v3, dois estágios) — spec do CLIENTE na lista FAIL com sujeito no
+    # diff acumulado E verde no base: 1º estágio, o Coder (uma rodada com as
+    # asserções exatas — medido no wi_c9c7b200: preservar max-w-[200px] era
+    # mudança no próprio HTML dele); 2º estágio, a reincidência parqueia para
+    # humano. Vermelha no base (quem == "cliente") não entra: é herdada (R8).
+    if (
+        c.quem != "cliente"
+        and c.arquivo == SPEC_CLIENTE
+        and c.sujeito_no_diff
+        and c.modo in {ASSERCAO, ZERO_VEREDITO}
+    ):
+        s.add("coder")
         s.add("humano:spec_conflict")
 
     # R8 — o vermelho que o item ENCONTROU: a suite já falhava no base_sha, então
@@ -111,9 +124,11 @@ VIVAS: list[Celula] = [
            nota="fix_context → Coder (medido: wi_1a5f9e3d corrigiu typecheck+build)"),
     Celula("coder", PRODUCAO, ASSERCAO,
            nota="spec do Tester reprovando código: o alvo do conserto é a produção"),
-    # Porta 1 (rc.41 + v2 rc.42): spec do cliente invalidada pelo diff → humano.
+    # Porta 1 (rc.41 + v2 rc.42 + v3): spec do cliente invalidada pelo diff →
+    # Coder primeiro, humano na reincidência.
     Celula("coder", SPEC_CLIENTE, ASSERCAO,
-           nota="parque spec_conflict (medido ao vivo em wi_8edaef39, 2º parque via diff acumulado)"),
+           nota="dois estágios (wi_c9c7b200): 1ª falha vira rodada de Coder com as "
+                "asserções; a mesma spec de novo parqueia (wi_8edaef39, diff acumulado)"),
     Celula("coder", SPEC_CLIENTE, ZERO_VEREDITO,
            nota="carga da spec do cliente quebrada por mudança no sujeito → parque"),
     # Porta 5 (rc.42): instrumento próprio quebrado → o próprio Tester repara.
@@ -132,6 +147,10 @@ VIVAS: list[Celula] = [
            nota="baseline vermelha do repo: classificada NOT_OUR_FAILURE, o item segue"),
     Celula("cliente", SPEC_CLIENTE, ZERO_VEREDITO, sujeito_no_diff=False,
            nota="mesma baseline morrendo na carga: idem — comparada suite a suite"),
+    # v3: herdada MESMO com o sujeito no diff acumulado — o vermelho já existia
+    # no base, então não é conflito deste item nem ganha chance de Coder.
+    Celula("cliente", SPEC_CLIENTE, ASSERCAO, sujeito_no_diff=True,
+           nota="baseline vermelha cujo sujeito o diff tocou: segue NOT_OUR_FAILURE"),
     # Promovida de beco por R9: a exaustão em spec própria parqueia com dossiê
     # (specs, asserções, esperado vs recebido, diff) em vez de morrer no teto.
     Celula("tester", SPEC_TESTER, ASSERCAO,
@@ -161,6 +180,16 @@ def test_r2_torna_a_celula_impossivel():
     nasce sem dono e este teste é o lembrete de modelá-la."""
     protegida = Celula("tester", SPEC_CLIENTE, ASSERCAO)
     assert "tester" not in saidas(protegida), "o Tester nunca é ator em spec do cliente"
+
+
+def test_porta1_v3_da_ao_coder_a_primeira_chance():
+    """v3: o conflito em spec do cliente verde no base tem DOIS estágios — o
+    Coder (retry automático com as asserções) e o humano (parque na
+    reincidência). A herdada não tem nenhum dos dois: baseline resolve."""
+    fresca = Celula("coder", SPEC_CLIENTE, ASSERCAO)
+    assert saidas(fresca) == {"coder", "humano:spec_conflict"}
+    herdada = Celula("cliente", SPEC_CLIENTE, ASSERCAO, sujeito_no_diff=True)
+    assert saidas(herdada) == {"baseline:not_our_failure"}
 
 
 def test_deferral_nao_e_saida_e_sim_encaminhamento():

@@ -126,6 +126,12 @@ class WorkItemLifecycleInput:
     # o re-flag. Sobrevive a continue_as_new por estar no input.
     cumulative_files_changed: list[str] = field(default_factory=list)
 
+    # Porta 1 v3: specs do cliente em conflito que já GANHARAM a primeira
+    # chance do Coder (retry automático com as asserções). A reincidência de
+    # qualquer uma delas parqueia. No input para sobreviver a continue_as_new —
+    # perder isto daria chances infinitas e nunca parquearia.
+    spec_conflict_deferred_specs: list[str] = field(default_factory=list)
+
     # Beco 1, veredito `reauthor`: ordem humana pendente de re-autoria da spec
     # PRÓPRIA do Tester (caminhos exatos + evidência da falha). No INPUT — não
     # em atributo de instância — para sobreviver a um continue_as_new entre o

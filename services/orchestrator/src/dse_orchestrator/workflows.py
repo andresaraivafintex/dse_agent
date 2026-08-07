@@ -2465,6 +2465,34 @@ class WorkItemLifecycleWorkflow:
                             tester_owned=list(getattr(tester_result, "test_files", None) or []),
                             diff_files=list(input.cumulative_files_changed),
                         )
+                        if conflicts and workflow.patched("spec-conflict-coder-first-chance-v1"):
+                            # v3 (medido no wi_c9c7b200: a spec pinava
+                            # max-w-[200px] e preservar a classe era mudança no
+                            # PRÓPRIO HTML do Coder). Sem classificador — dois
+                            # fatos binários já medidos:
+                            #   1. Vermelha no base (baseline check, rc.43) é
+                            #      achado HERDADO: fluxo NOT_OUR_FAILURE, nunca
+                            #      parqueia nem ganha chance.
+                            inherited = set(
+                                getattr(test_bad, "inherited_failures", None) or []
+                            )
+                            conflicts = [s for s in conflicts if s not in inherited]
+                            #   2. Verde no base + PRIMEIRA ocorrência: o Coder
+                            #      ganha UMA rodada com as asserções exatas no
+                            #      fix_context (o fluxo normal abaixo já as
+                            #      carrega). "Obsoleta vs quebrada" continua
+                            #      julgamento humano — na reincidência.
+                            if conflicts:
+                                already = set(input.spec_conflict_deferred_specs or [])
+                                if all(s not in already for s in conflicts):
+                                    input.spec_conflict_deferred_specs = sorted(
+                                        already | set(conflicts)
+                                    )
+                                    await self._audit(
+                                        "spec_conflict_deferred_to_coder",
+                                        {"specs": conflicts},
+                                    )
+                                    conflicts = []
                         if conflicts:
                             resumed = await self._park_spec_conflict(
                                 conflicts, test_bad, list(input.cumulative_files_changed)

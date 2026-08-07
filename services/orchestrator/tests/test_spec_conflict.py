@@ -117,15 +117,16 @@ async def _start(state: FakeControlPlane, work_item_id: str, env):
 
 @pytest.mark.asyncio
 async def test_preexisting_spec_failure_parks_in_spec_conflict_not_retry(time_skipping_env):
-    """DoD 1+3: reprovação em spec pré-existente com sujeito no diff -> o item
-    PARA em spec_conflict (nenhum turno novo de Coder) e o humano recebe qual
-    spec, quais asserções e o diff que a invalidou. DoD 2: com o verdict
+    """DoD 1+3 (v3: o parque vem na REINCIDÊNCIA): a primeira reprovação em
+    spec pré-existente verde no base dá ao Coder UMA rodada com as asserções;
+    a mesma spec falhando de novo PARA o item em spec_conflict e o humano
+    recebe qual spec, quais asserções e o diff que a invalidou. Com o verdict
     "retry" o laço volta e completa."""
     work_item_id = new_work_item_id("specconf")
     insert_work_item(work_item_id)
     state = FakeControlPlane(
         plan_risk_class="low",
-        l1_fail_times=1,
+        l1_fail_times=2,
         l1_fail_detail=_L1_DETAIL,
         coder_files_changed=[_SUBJECT_TS, _SUBJECT_HTML],
         tester_test_files=["test/dashboard-badge-dse.spec.ts"],
@@ -133,11 +134,13 @@ async def test_preexisting_spec_failure_parks_in_spec_conflict_not_retry(time_sk
     worker, handle = await _start(state, work_item_id, time_skipping_env)
     async with worker:
         await wait_for_status(handle, {"spec_conflict"})
-        assert state.coder_turn_calls == 1, "o conflito não pode comprar um turno novo de Coder"
+        assert state.coder_turn_calls == 2, (
+            "uma chance dada (v3); a reincidência não compra terceiro turno"
+        )
 
         actions = read_audit_actions(work_item_id)
         assert "spec_conflict_detected" in actions
-        assert "l1_failed_retrying" not in actions
+        assert "spec_conflict_deferred_to_coder" in actions, "a chance é auditável"
 
         detected = _audit_details(work_item_id, "spec_conflict_detected")[0]
         assert detected["specs"] == [_PREEXISTING_SPEC], "qual spec"
@@ -149,7 +152,7 @@ async def test_preexisting_spec_failure_parks_in_spec_conflict_not_retry(time_sk
             {"verdict": "retry", "actor": "usr_test", "comment": "spec ajustada por mim"},
         )
         await wait_for_status(handle, {"review_ready"})
-        assert state.coder_turn_calls == 2, "o retry autorizado volta ao laço"
+        assert state.coder_turn_calls == 3, "o retry autorizado volta ao laço"
         await handle.signal("review_comment", {"verdict": "approved"})
         await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
         result = await handle.result()
@@ -163,17 +166,20 @@ async def test_conflict_reflags_after_a_retry_that_touches_another_file(time_ski
     da spec pré-existente saiu do diff DO TURNO — mas continua no diff
     ACUMULADO base..HEAD, e a spec continua na lista FAIL. O detector tem que
     comparar contra o acumulado e re-parkear; hoje o item volta ao laço de
-    retry e queima o teto."""
+    retry e queima o teto. (v3: a primeira falha é a chance do Coder, então o
+    primeiro parque vem na 2ª falha e o re-flag na 3ª — o invariante do
+    acumulado é o mesmo.)"""
     badge = "src/app/shared/components/report-status-badge/report-status-badge.component.ts"
     work_item_id = new_work_item_id("speccum")
     insert_work_item(work_item_id)
     state = FakeControlPlane(
         plan_risk_class="low",
-        l1_fail_times=2,
+        l1_fail_times=3,
         l1_fail_detail=_L1_DETAIL,
         coder_files_changed_by_turn=[
             [_SUBJECT_TS, _SUBJECT_HTML, badge],  # turno 1: implementação completa
-            [badge],                              # turno pós-retry: só o badge
+            [badge],                              # turno da chance (v3): só o badge
+            [badge],                              # turno pós-retry humano: só o badge
         ],
         tester_test_files=["test/dashboard-badge-dse.spec.ts"],
     )
@@ -183,9 +189,16 @@ async def test_conflict_reflags_after_a_retry_that_touches_another_file(time_ski
         await handle.signal(
             "spec_conflict_resolution", {"verdict": "retry", "actor": "usr_test"}
         )
-        await wait_for_status(handle, {"implementing", "validating", "spec_conflict"})
         # segundo parque: a spec pré-existente segue FAIL e o sujeito está no
-        # diff acumulado, ainda que fora do diff do turno corrente
+        # diff acumulado, ainda que fora do diff do turno corrente. A espera é
+        # pela LINHA DE AUDITORIA, não pelo status: logo após o signal o status
+        # ainda é o do parque #1 e um poll rápido relia o estado velho como se
+        # fosse o novo (corrida medida sob contenção do time-skipping).
+        import asyncio as _asyncio
+        for _ in range(120):
+            if len(_audit_details(work_item_id, "spec_conflict_detected")) >= 2:
+                break
+            await _asyncio.sleep(0.25)
         await wait_for_status(handle, {"spec_conflict"})
         detected = _audit_details(work_item_id, "spec_conflict_detected")
         assert len(detected) == 2, "o conflito tem que re-flagar após o retry"

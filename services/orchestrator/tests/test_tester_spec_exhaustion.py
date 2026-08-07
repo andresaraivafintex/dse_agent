@@ -324,7 +324,9 @@ async def test_reauthor_is_refused_on_a_client_spec_park(time_skipping_env):
     insert_work_item(work_item_id)
     state = FakeControlPlane(
         plan_risk_class="low",
-        l1_fail_times=1,
+        # v3 da porta 1: a 1ª falha é a chance do Coder; o parque (onde este
+        # guard vive) vem na reincidência.
+        l1_fail_times=2,
         l1_fail_detail=detail,
         coder_files_changed=[client_subject],
         tester_test_files=[_DSE_SPEC],
