@@ -2390,6 +2390,31 @@ def _is_dse_authored(path: str, workspace_dir: str | None = None) -> bool:
     return stem.endswith("-dse") or stem.endswith("_dse") or "-dse" in name or "_dse" in name
 
 
+def _zero_verdict_specs(output: str, owned: list[str]) -> list[str]:
+    """Porta 5 — os arquivos do PRÓPRIO Tester cuja suite falhou SEM produzir
+    veredito: a carga morreu (jest: `Test suite failed to run` — módulo
+    inexistente, import quebrado) ou a compilação (Maven: `[ERROR]
+    /workspace/<path>:` do testCompile). Nenhuma asserção foi avaliada, então
+    não há veredito a proteger — é instrumento quebrado, não teste reprovando.
+
+    POR ARQUIVO, deliberadamente: uma spec quebrada não autoriza reescrever a
+    saudável ao lado. Um arquivo cuja suite EXECUTOU (falha de asserção) nunca
+    entra aqui — re-autorá-lo seria reescrever o teste que reprova o código,
+    e esse veredito pertence ao L1/humano (o racional do deferral, intacto)."""
+    broken: list[str] = []
+    for path in owned:
+        esc = re.escape(path)
+        if re.search(
+            rf"FAIL\s+{esc}[^\n]*\n(?:[^\n]*\n){{0,3}}?\s*●\s+Test suite failed to run",
+            output,
+        ):
+            broken.append(path)
+            continue
+        if re.search(rf"\[ERROR\]\s+/workspace/{esc}[:\[]", output):
+            broken.append(path)
+    return broken
+
+
 def _dedupe_test_path(path: str, existing: set[str], workspace_dir: str | None = None) -> str:
     """A new name in the same directory that still matches is_test_path:
     test/api.test.js → test/api-dse.test.js; tests/test_x.py → tests/test_x_dse.py."""
@@ -2987,7 +3012,9 @@ def _tester_pod_sync(
     npm_suite = (
         f"npm test --silent -- --coverage=false {scoped}" if scoped else "npm test --silent"
     )
-    run = _pod_sh(
+
+    def _run_suite():
+        return _pod_sh(
         'cd /workspace && '
         'if [ -f package.json ] && grep -q \'"test"\' package.json; then '
         # The install's output used to go to /dev/null under `|| true`. A
@@ -3025,6 +3052,86 @@ def _tester_pod_sync(
         f'else timeout -k 10 {clocks.suite} python3 -m pytest -q; fi',
         timeout=clocks.pod_exec,
     )
+
+    run = _run_suite()
+
+    # ---- Porta 5: o alvo fixo vale apenas para alvo que produz VEREDITO ----
+    # O racional do reuso fica de pé (alvo estável para o Coder convergir; ver
+    # o comentário do `reused` acima). Mas um alvo cuja suite morre na CARGA ou
+    # na COMPILAÇÃO — zero asserções avaliadas — não é alvo: reprova `test` e
+    # `build` para sempre, o Coder não pode tocá-lo (revert determinístico) e
+    # cada re-run custa uma rodada inteira (medido: wi_5620d2c1 @MockBean,
+    # wi_8edaef39 @ngx-translate herdado — ambos mortos no teto). Só nesse
+    # caso o Tester re-autora: IN-PLACE, POR ARQUIVO, posse confirmada no git
+    # DO POD, no máximo uma vez por turno. Asserção falhando nunca entra aqui —
+    # é veredito, e veredito é do L1/humano (deferral inalterado).
+    repaired_files: list[str] = []
+    if reused and run.returncode != 0:
+        _suite_out = (run.stdout or "") + (run.stderr or "")
+        broken = _zero_verdict_specs(_suite_out, test_files)
+        # Posse perguntada ao git DO POD (espelho in-pod do _is_dse_authored):
+        # qualquer sujeito humano na história e o arquivo é do cliente.
+        owned_broken: list[str] = []
+        for p in broken:
+            subjects = [
+                s.strip() for s in _pod_sh(
+                    f"cd /workspace && git log --format=%s -- {_shlex.quote(p)}"
+                ).stdout.splitlines() if s.strip()
+            ]
+            if not subjects or all(s.startswith(_DSE_COMMIT_PREFIXES) for s in subjects):
+                owned_broken.append(p)
+        if owned_broken:
+            try:
+                # A primitiva de evidência do defeito B: o "zero veredito" que
+                # autorizou o reparo fica auditável em números, não em adjetivo.
+                from dse_validation.l1.quality_checks import _test_counts
+                _counts = _test_counts(_suite_out)
+                executed_before = _counts.executed if _counts else 0
+            except Exception:  # noqa: BLE001 — evidência é telemetria; nunca decide o reparo
+                executed_before = 0
+            feedback = (
+                "Your OWN spec file(s) fail BEFORE running a single test — a broken "
+                "import or compile error, NOT a failing assertion. Rewrite EXACTLY "
+                f"these files, at these exact paths, fixing the load error: "
+                f"{', '.join(owned_broken)}\n{_suite_out[-1500:]}"
+            )
+            try:
+                repair_ctx = _pod_tester_context(_pod_sh)
+            except _TesterContextUnavailable as exc:
+                repair_ctx = None
+                logger.warning("porta 5: contexto indisponível para o reparo: %.200s", str(exc)[:200])
+            if repair_ctx is not None:
+                repair_script, repair_cost = _model_authored_test_script(
+                    inp, repair_ctx, headers, virtual_key, error_feedback=feedback
+                )
+                authoring_cost_usd += repair_cost
+                for s in (repair_script or []):
+                    if s.get("tool") != "write_file":
+                        continue
+                    path, content = str(s.get("path") or ""), str(s.get("content") or "")
+                    # Filtro determinístico (P1): SÓ os arquivos quebrados, nos
+                    # caminhos exatos — um arquivo novo aqui seria a regressão
+                    # das cópias -dse voltando pela porta da frente.
+                    if path not in owned_broken or not content:
+                        continue
+                    w = _pod_sh(
+                        f'cd /workspace && cat > {_shlex.quote(path)}',
+                        input_text=content,
+                    )
+                    if w.returncode == 0:
+                        repaired_files.append(path)
+                if repaired_files:
+                    audit_emit(
+                        actor="system:sandbox-runtime",
+                        action="tester_spec_repaired",
+                        tenant_id=inp.tenant_id,
+                        work_item_id=inp.work_item_id,
+                        details={"files": repaired_files, "reason": "zero_verdict",
+                                 "executed_before": executed_before,
+                                 "cost_usd": repair_cost},
+                    )
+                    run = _run_suite()
+
     tests_ran = bool(test_files)
     # The suite result is INFORMATION here, not a verdict.
     #
@@ -3084,7 +3191,9 @@ def _tester_pod_sync(
     # commit the test files IN THE POD (current branch; the post-tester checkpoint
     # picks them up and finalize pushes). No push here.
     head_sha = None
-    if authored_new and test_files:
+    # Reparo (porta 5) também commita: o L1 julga o estado COMMITADO — um
+    # reparo só no working tree passaria no re-run do Tester e reprovaria no L1.
+    if (authored_new or repaired_files) and test_files:
         files_arg = " ".join(_shlex.quote(p) for p in test_files)
         msg = f"tester({inp.work_item_id}): {(inp.instruction or '')[:60]}"
         _pod_sh(
