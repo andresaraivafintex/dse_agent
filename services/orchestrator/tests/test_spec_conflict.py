@@ -157,6 +157,51 @@ async def test_preexisting_spec_failure_parks_in_spec_conflict_not_retry(time_sk
 
 
 @pytest.mark.asyncio
+async def test_conflict_reflags_after_a_retry_that_touches_another_file(time_skipping_env):
+    """Porta 1 v2 — o falso-negativo medido no wi_8edaef39 (2026-08-07): depois
+    do retry o Coder tocou SÓ o badge (consertando o próprio import), o sujeito
+    da spec pré-existente saiu do diff DO TURNO — mas continua no diff
+    ACUMULADO base..HEAD, e a spec continua na lista FAIL. O detector tem que
+    comparar contra o acumulado e re-parkear; hoje o item volta ao laço de
+    retry e queima o teto."""
+    badge = "src/app/shared/components/report-status-badge/report-status-badge.component.ts"
+    work_item_id = new_work_item_id("speccum")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_fail_times=2,
+        l1_fail_detail=_L1_DETAIL,
+        coder_files_changed_by_turn=[
+            [_SUBJECT_TS, _SUBJECT_HTML, badge],  # turno 1: implementação completa
+            [badge],                              # turno pós-retry: só o badge
+        ],
+        tester_test_files=["test/dashboard-badge-dse.spec.ts"],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "retry", "actor": "usr_test"}
+        )
+        await wait_for_status(handle, {"implementing", "validating", "spec_conflict"})
+        # segundo parque: a spec pré-existente segue FAIL e o sujeito está no
+        # diff acumulado, ainda que fora do diff do turno corrente
+        await wait_for_status(handle, {"spec_conflict"})
+        detected = _audit_details(work_item_id, "spec_conflict_detected")
+        assert len(detected) == 2, "o conflito tem que re-flagar após o retry"
+        assert _SUBJECT_TS in detected[1]["diff_files"], "diff acumulado, não o do turno"
+
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "retry", "actor": "usr_test"}
+        )
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+
+
+@pytest.mark.asyncio
 async def test_tester_owned_spec_failure_stays_in_the_normal_flow(time_skipping_env):
     """DoD 4: a spec do PRÓPRIO Tester falhando segue no fluxo de sempre
     (l1_failed_retrying -> novo turno de Coder), nunca em spec_conflict — o
