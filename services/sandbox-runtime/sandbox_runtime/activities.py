@@ -2005,6 +2005,9 @@ _EXAMPLE_TEST_CHARS = 3_000
 _TEST_LISTING_CHARS = 64_000
 _TESTER_DIFF_CHARS = 8_000
 _SKILLS_NOTE_CHARS = 2_000
+#: Referência de spec das skills do repo: uma spec completa cabe folgada; o
+#: cap protege o prompt de um arquivo de referência acidental gigante.
+_REFERENCE_SPEC_CHARS = 4_000
 
 
 def _run_pod_command(argv: list[str], *, timeout: int, input_text: str | None = None):
@@ -2103,6 +2106,13 @@ class _TesterContext(NamedTuple):
     #: The local copy of the repository, when one exists. `None` on K8s, where
     #: the repository lives only in the Pod.
     workspace_dir: str | None = None
+    #: Spec de referência declarada pelas SKILLS do repo
+    #: (.claude/skills/*/references/*.spec.*) — CONTEÚDO, não caminho. A nota
+    #: de skills lista arquivos e manda "ler", mas a autoria é one-shot sem
+    #: tools: instrução de leitura para ator sem leitura é prompt vazio.
+    #: Medido 3x (badge 'warning', pageSize, sortField): a resposta estava no
+    #: Pod e o modelo nunca a viu. Vazio quando o repo não declara referência.
+    reference_spec: str = ""
 
 
 def _pod_tester_context(pod_sh) -> _TesterContext:
@@ -2210,12 +2220,23 @@ def _pod_tester_context(pod_sh) -> _TesterContext:
         if skills.strip()
         else ""
     )
+    # A referência declarada pelo REPO nas suas skills — CONTEÚDO inline, não
+    # caminho: a autoria é one-shot sem tools e não pode "ler" nada (a doença
+    # medida 3x: badge 'warning', pageSize, sortField — a forma completa da
+    # store estava em angular-testbed/references/ e o modelo nunca a viu).
+    # Primeiro match por ordem de glob; sem classificador — o repo declara.
+    reference_spec = _read(
+        'for f in .claude/skills/*/references/*.spec.*; do '
+        '[ -f "$f" ] && { echo "// $f"; cat "$f"; break; }; done',
+        _REFERENCE_SPEC_CHARS,
+    )
     return _TesterContext(
         package_json=package_json,
         example_test=example or "(no existing tests — use the ecosystem's default runner)",
         existing_tests=existing,
         diff=diff,
         skills_note=skills_note,
+        reference_spec=reference_spec,
     )
 
 
@@ -2231,6 +2252,18 @@ def _local_tester_context(workspace_dir: str) -> _TesterContext:
     except Exception:  # noqa: BLE001 — the diff is context, not a requirement
         pass
     package_json, example_test, existing_tests = _tester_repo_context(workspace_dir)
+    # Espelho do read de referência do caminho K8s ("the two paths must show
+    # the model the same thing").
+    reference_spec = ""
+    try:
+        import glob as _glob
+        for f in sorted(_glob.glob(os.path.join(workspace_dir, ".claude/skills/*/references/*.spec.*"))):
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                rel = os.path.relpath(f, workspace_dir)
+                reference_spec = f"// {rel}\n" + fh.read()[:_REFERENCE_SPEC_CHARS]
+            break
+    except OSError:
+        pass
     return _TesterContext(
         package_json=package_json,
         example_test=example_test,
@@ -2238,6 +2271,7 @@ def _local_tester_context(workspace_dir: str) -> _TesterContext:
         diff=diff,
         skills_note=workspace_skills_note(workspace_dir)[:_SKILLS_NOTE_CHARS],
         workspace_dir=workspace_dir,
+        reference_spec=reference_spec,
     )
 
 
@@ -2282,6 +2316,16 @@ def _model_authored_test_script(
     # Repo skills (materialized by the Planner + committed in the target repo):
     # the Tester must follow the guidance too (test style, tenant conventions).
     prompt += ctx.skills_note
+    # A referência das skills vai INLINE — este é um one-shot sem tools: um
+    # caminho listado é ilegível por construção, e foi assim que o mock saiu
+    # sem `pagination`/`tableSorting` três runs seguidos com a resposta
+    # committada no repo.
+    if getattr(ctx, "reference_spec", ""):
+        prompt += (
+            "\n\n## Known-good reference spec for THIS repo (declared by its "
+            "skills) — mirror its TestBed/store setup exactly:\n"
+            + ctx.reference_spec
+        )
     try:
         result = chat_completion(
             headers=headers, virtual_key=virtual_key, model=model,
@@ -2901,6 +2945,14 @@ def _pod_reauthor_partition(pod_sh, ordered: list[str]) -> tuple[list[str], list
     return owned, refused
 
 
+def _reauthor_missing(owned_ordered: list[str], reauthored_files: list[str]) -> list[str]:
+    """O delta da ordem: o que foi ordenado COM posse e não foi reescrito.
+    Miss total é caso particular (wi_6f00bf0a); o parcial foi medido no
+    wi_53c820f1 — ordenadas 2 specs, reescrita 1, silêncio sobre a que faltou."""
+    delivered = set(reauthored_files or [])
+    return [p for p in (owned_ordered or []) if p not in delivered]
+
+
 def _reauthor_script_writes(
     order_script: list[dict[str, Any]] | None, owned_ordered: list[str]
 ) -> tuple[list[tuple[str, str]], list[str]]:
@@ -3213,17 +3265,18 @@ def _tester_pod_sync(
                         details={"files": reauthored_files, "reason": "human_order",
                                  "cost_usd": order_cost},
                     )
-            # O miss NUNCA é mudo (wi_6f00bf0a: ordem consumida, spec intacta,
-            # zero evidência, humano no escuro): ordem com posse e sem
-            # reescrita → o ledger diz o que o script trouxe e por quê nada
-            # sobreviveu.
-            if not reauthored_files:
+            # O miss NUNCA é mudo — nem o PARCIAL (wi_53c820f1: ordenadas 2,
+            # reescrita 1, silêncio sobre a que faltou). O evento carrega o
+            # delta ordered − reauthored e o que o script trouxe.
+            missing = _reauthor_missing(owned_ordered, reauthored_files)
+            if missing:
                 audit_emit(
                     actor="system:sandbox-runtime",
                     action="tester_reauthor_missed",
                     tenant_id=inp.tenant_id,
                     work_item_id=inp.work_item_id,
                     details={"ordered": owned_ordered,
+                             "missing": missing,
                              "script_write_paths": script_paths_seen[:10],
                              "context_available": order_ctx is not None},
                 )
