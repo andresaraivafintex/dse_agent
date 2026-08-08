@@ -140,6 +140,15 @@ class WorkItemLifecycleInput:
     # mudo no teto). No input: perder isto num continue_as_new apagaria a
     # memória e re-armaria o teto.
     tester_assertion_failed_specs: list[str] = field(default_factory=list)
+    # A pinça ARMADA (wi_0d95384f): quando a última falha de L1 foi
+    # exclusivamente specs próprias com veredito, o conjunto e o detail ficam
+    # aqui — é a evidência que o parque via NO-OP usa para montar o mesmo
+    # dossiê do parque via L1 (specs, asserções, Expected/Received). Zerada em
+    # qualquer falha não-exclusiva: evidência de duas rodadas atrás não
+    # parqueia ninguém. No input: um continue_as_new entre a falha e o no-op
+    # não pode desarmar a pinça.
+    last_tester_exhaustion_specs: list[str] = field(default_factory=list)
+    last_tester_exhaustion_detail: str | None = None
 
     # Beco 1, veredito `reauthor`: ordem humana pendente de re-autoria da spec
     # PRÓPRIA do Tester (caminhos exatos + evidência da falha). No INPUT — não

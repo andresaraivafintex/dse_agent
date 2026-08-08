@@ -48,6 +48,14 @@ As regras e onde vivem:
                                      com o parque deployado. Medidos: pageSize
                                      wi_5eecf486, 'warning' wi_32eb136f, alternado
                                      wi_c9c7b200.
+  R10 pinça declarada pelo ator     — workflows.py, ramo do coder_made_no_change:
+                                     dois no-ops consecutivos com a pinça ARMADA
+                                     (última falha de L1 exclusivamente spec própria
+                                     com veredito) parqueiam com o MESMO dossiê do
+                                     caminho via L1, em vez da escalada muda — o
+                                     wi_0d95384f escalou sem dossiê porque o no-op
+                                     pula os gates e a memória nunca via a 2ª
+                                     reprovação. No-op sem pinça armada escala.
 """
 from __future__ import annotations
 
@@ -60,6 +68,8 @@ SPEC_TESTER = "spec_tester"
 SPEC_CLIENTE = "spec_cliente"
 
 ASSERCAO = "assercao"              # a suite EXECUTOU e reprovou — existe veredito
+ASSERCAO_CODER_SEM_JOGADA = "assercao_coder_sem_jogada"  # pinça declarada: spec própria
+                                   # reprovada + o Coder no-opa 2x ("não tenho jogada")
 ZERO_VEREDITO = "zero_veredito"    # carga/compilação da spec morreu — sem veredito
 COMPILE_PRODUCAO = "compile_producao"
 FORBIDDEN_PATHS = "forbidden_paths"
@@ -119,6 +129,12 @@ def saidas(c: Celula) -> set[str]:
     if c.arquivo == SPEC_TESTER and c.modo == ASSERCAO:
         s.add("humano:spec_conflict")
 
+    # R10 — a pinça declarada pelo próprio ator: o duplo no-op contra spec
+    # própria reprovada com veredito é reconhecimento de exaustão mais forte
+    # que uma segunda rodada de L1. Mesma saída, mesmo dossiê, sem L1 extra.
+    if c.arquivo == SPEC_TESTER and c.modo == ASSERCAO_CODER_SEM_JOGADA:
+        s.add("humano:spec_conflict")
+
     # R2: célula (tester quebrou spec do cliente) é estruturalmente impossível —
     # o rename guard desvia a escrita para um caminho -dse próprio. Modelada
     # fora da matriz (ver test_r2_torna_a_celula_impossivel).
@@ -165,6 +181,13 @@ VIVAS: list[Celula] = [
                 "test→lint+build→test (wi_c9c7b200, que escapou do gatilho consecutivo "
                 "e morreu no teto): memória por spec parqueia na 2ª reprovação da "
                 "mesma spec, e o humano decide com o dossiê — retry ou reauthor"),
+    # Promovida por R10: o Coder honesto que se recusa a perseguir a asserção
+    # (wi_0d95384f: build → test(badge) → no-op → no-op escalou SEM dossiê,
+    # com a memória armada e sem o L1 re-rodar) agora parqueia pelo ramo do
+    # no-op, com o dossiê completo do caminho via L1.
+    Celula("tester", SPEC_TESTER, ASSERCAO_CODER_SEM_JOGADA,
+           nota="a recusa dupla do Coder é a própria evidência de exaustão; "
+                "parque imediato, sem pagar outra rodada de L1 (wi_0d95384f)"),
 ]
 
 #: BECOS CONHECIDOS — vazio hoje: os três medidos foram promovidos (R8, R9).

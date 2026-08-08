@@ -1260,7 +1260,7 @@ class WorkItemLifecycleWorkflow:
         )
 
     async def _park_spec_conflict(
-        self, specs: list[str], test_finding, diff_files: list[str],
+        self, specs: list[str], detail: str, diff_files: list[str],
         *, reason: str = "preexisting_spec_broken_by_diff",
     ) -> str | bool:
         """Porta 1 do deadlock de posse de spec: para o item em `spec_conflict`
@@ -1270,13 +1270,11 @@ class WorkItemLifecycleWorkflow:
         "reauthor" só no parque de exaustão de spec própria); levanta
         _EscalateNow para qualquer outro; retorna False se um cancel chegou
         durante a espera (o chamador finaliza cancelado)."""
-        assertions = (test_finding.detail or "")[:2000]
+        assertions = (detail or "")[:2000]
         diff_files = list(diff_files or [])
         # O par Expected/Received quando o runner o imprime — é o que resolve o
         # dossiê em trinta segundos humanos (medido nos dois casos do beco 1).
-        expected_vs_received = _EXPECTED_RECEIVED_LINE.findall(
-            test_finding.detail or ""
-        )[:12]
+        expected_vs_received = _EXPECTED_RECEIVED_LINE.findall(detail or "")[:12]
         await self._audit(
             "spec_conflict_detected",
             {"specs": specs, "assertions": assertions, "diff_files": diff_files,
@@ -2210,6 +2208,51 @@ class WorkItemLifecycleWorkflow:
                         # human reading the reason is worth more than three more
                         # identical rounds.
                         if self._noop_coder_turns >= 2:
+                            # Pinça reconhecida pelo PRÓPRIO ator (wi_0d95384f,
+                            # escalado sem dossiê): dois no-ops contra uma
+                            # última falha exclusivamente de spec própria com
+                            # veredito são o Coder declarando "não tenho
+                            # jogada" — evidência de exaustão mais forte que
+                            # uma segunda rodada de L1, e já paga (os gates
+                            # nem precisam re-rodar). O parque leva o MESMO
+                            # dossiê do caminho via L1: a evidência armada na
+                            # falha que iniciou este fix-loop. Sem pinça
+                            # armada, escala como sempre.
+                            if (
+                                workflow.patched("noop-pincer-parks-v1")
+                                and input.last_tester_exhaustion_specs
+                            ):
+                                pincer_specs = list(input.last_tester_exhaustion_specs)
+                                pincer_detail = input.last_tester_exhaustion_detail or ""
+                                resumed = await self._park_spec_conflict(
+                                    pincer_specs, pincer_detail,
+                                    list(input.cumulative_files_changed),
+                                    reason="tester_spec_exhaustion",
+                                )
+                                if self._cancelled:
+                                    return await self._finish_cancelled()
+                                if resumed == "reauthor":
+                                    input.reauthor_specs = pincer_specs
+                                    input.reauthor_context = pincer_detail[-1500:]
+                                    # o humano deu nova direção; o contador de
+                                    # no-ops recomeça com ela
+                                    self._noop_coder_turns = 0
+                                    await self._set_status(
+                                        WorkItemStatus.implementing,
+                                        audit_action="tester_reauthor_ordered",
+                                        details={"specs": pincer_specs,
+                                                 "reason": "tester_spec_exhaustion"},
+                                    )
+                                    continue
+                                if resumed:
+                                    self._noop_coder_turns = 0
+                                    await self._set_status(
+                                        WorkItemStatus.implementing,
+                                        audit_action="spec_conflict_retry",
+                                        details={"specs": pincer_specs,
+                                                 "reason": "tester_spec_exhaustion"},
+                                    )
+                                    continue
                             raise _EscalateNow(
                                 "coder_made_no_change: two consecutive fix turns "
                                 "changed no file, so the gates would return the "
@@ -2517,7 +2560,8 @@ class WorkItemLifecycleWorkflow:
                                     conflicts = []
                         if conflicts:
                             resumed = await self._park_spec_conflict(
-                                conflicts, test_bad, list(input.cumulative_files_changed)
+                                conflicts, test_bad.detail or "",
+                                list(input.cumulative_files_changed),
                             )
                             if self._cancelled:
                                 return await self._finish_cancelled()
@@ -2598,6 +2642,8 @@ class WorkItemLifecycleWorkflow:
                     )
                     own_specs: list[str] = []
                     if workflow.patched("tester-spec-memory-parks-v1"):
+                        recorded_now: list[str] = []
+                        exclusive_now: list[str] = []
                         if exh_finding is not None:
                             recorded_now = tester_spec_assertion_failures(
                                 [f.check for f in failed_checks],
@@ -2613,17 +2659,29 @@ class WorkItemLifecycleWorkflow:
                                     getattr(tester_result, "test_files", None) or []
                                 ),
                             )
-                            seen = set(input.tester_assertion_failed_specs or [])
-                            if exclusive_now and any(s in seen for s in exclusive_now):
-                                own_specs = exclusive_now
-                            if recorded_now:
-                                merged = sorted(seen | set(recorded_now))
-                                if merged != sorted(seen):
-                                    input.tester_assertion_failed_specs = merged
-                                    await self._audit(
-                                        "tester_spec_assertion_recorded",
-                                        {"specs": recorded_now},
-                                    )
+                        # A pinça armada para o parque via NO-OP (wi_0d95384f):
+                        # falha exclusiva → specs+detail ficam no input; QUALQUER
+                        # outra falha desarma — evidência de duas rodadas atrás
+                        # não parqueia ninguém.
+                        if exclusive_now and exh_finding is not None:
+                            input.last_tester_exhaustion_specs = list(exclusive_now)
+                            input.last_tester_exhaustion_detail = (
+                                exh_finding.detail or ""
+                            )[:2000]
+                        else:
+                            input.last_tester_exhaustion_specs = []
+                            input.last_tester_exhaustion_detail = None
+                        seen = set(input.tester_assertion_failed_specs or [])
+                        if exclusive_now and any(s in seen for s in exclusive_now):
+                            own_specs = exclusive_now
+                        if recorded_now:
+                            merged = sorted(seen | set(recorded_now))
+                            if merged != sorted(seen):
+                                input.tester_assertion_failed_specs = merged
+                                await self._audit(
+                                    "tester_spec_assertion_recorded",
+                                    {"specs": recorded_now},
+                                )
                     elif (
                         self._same_repair_count >= 1
                         and workflow.patched("tester-spec-exhaustion-parks-v1")
@@ -2641,7 +2699,7 @@ class WorkItemLifecycleWorkflow:
                             )
                     if own_specs and exh_finding is not None:
                         resumed = await self._park_spec_conflict(
-                            own_specs, exh_finding,
+                            own_specs, exh_finding.detail or "",
                             list(input.cumulative_files_changed),
                             reason="tester_spec_exhaustion",
                         )
