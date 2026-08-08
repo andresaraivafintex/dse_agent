@@ -2901,6 +2901,36 @@ def _pod_reauthor_partition(pod_sh, ordered: list[str]) -> tuple[list[str], list
     return owned, refused
 
 
+def _reauthor_script_writes(
+    order_script: list[dict[str, Any]] | None, owned_ordered: list[str]
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Writes do script aceitos pelo filtro determinístico da ordem de
+    re-autoria, com os prefixos do modelo normalizados: './x' e '/workspace/x'
+    SÃO o caminho exato x — foi por um prefixo assim que a primeira ordem viva
+    executou no vazio (wi_6f00bf0a: spec intacta, ordem consumida, zero
+    evidência). Devolve também os caminhos VISTOS, crus: quando nada
+    sobrevive, eles são a matéria do `tester_reauthor_missed`."""
+    accepted: list[tuple[str, str]] = []
+    seen: list[str] = []
+    owned = set(owned_ordered or [])
+    for s in (order_script or []):
+        if s.get("tool") != "write_file":
+            continue
+        raw = str(s.get("path") or "")
+        if not raw:
+            continue
+        seen.append(raw)
+        path = raw
+        if path.startswith("/workspace/"):
+            path = path[len("/workspace/"):]
+        if path.startswith("./"):
+            path = path[2:]
+        content = str(s.get("content") or "")
+        if path in owned and content:
+            accepted.append((path, content))
+    return accepted, seen
+
+
 def _tester_pod_sync(
     inp: "RunTesterTurnInput",
     sandbox_id: str,
@@ -3153,23 +3183,27 @@ def _tester_pod_sync(
                     "reauthor: contexto indisponível para executar a ordem: %.200s",
                     str(exc)[:200],
                 )
+            script_paths_seen: list[str] = []
             if order_ctx is not None:
                 order_script, order_cost = _model_authored_test_script(
                     inp, order_ctx, headers, virtual_key, error_feedback=order_feedback
                 )
                 authoring_cost_usd += order_cost
-                for s in (order_script or []):
-                    if s.get("tool") != "write_file":
-                        continue
-                    path, content = str(s.get("path") or ""), str(s.get("content") or "")
-                    if path not in owned_ordered or not content:
-                        continue
+                accepted_writes, script_paths_seen = _reauthor_script_writes(
+                    order_script, owned_ordered
+                )
+                for path, content in accepted_writes:
                     w = _pod_sh(
                         f'cd /workspace && cat > {_shlex.quote(path)}',
                         input_text=content,
                     )
                     if w.returncode == 0:
                         reauthored_files.append(path)
+                    else:
+                        logger.warning(
+                            "reauthor: escrita falhou em %s: %.200s",
+                            path, (w.stderr or "")[:200],
+                        )
                 if reauthored_files:
                     audit_emit(
                         actor="system:sandbox-runtime",
@@ -3179,6 +3213,20 @@ def _tester_pod_sync(
                         details={"files": reauthored_files, "reason": "human_order",
                                  "cost_usd": order_cost},
                     )
+            # O miss NUNCA é mudo (wi_6f00bf0a: ordem consumida, spec intacta,
+            # zero evidência, humano no escuro): ordem com posse e sem
+            # reescrita → o ledger diz o que o script trouxe e por quê nada
+            # sobreviveu.
+            if not reauthored_files:
+                audit_emit(
+                    actor="system:sandbox-runtime",
+                    action="tester_reauthor_missed",
+                    tenant_id=inp.tenant_id,
+                    work_item_id=inp.work_item_id,
+                    details={"ordered": owned_ordered,
+                             "script_write_paths": script_paths_seen[:10],
+                             "context_available": order_ctx is not None},
+                )
 
     # ---- A régua do REPO, aplicada dentro do turno ------------------------
     # As specs são transpiladas pelo jest com a config DELAS
@@ -3443,18 +3491,6 @@ async def _run_tester_turn_impl(
     branch = inp.branch or _default_branch(inp.work_item_id)
     workspace_dir, _bare = _paths_for(inp.work_item_id)
 
-    # Beco 1: a ordem de re-autoria só é executada no runtime K8s (produção).
-    # Aqui ela seria descartada em silêncio — o ledger tem que dizer por que a
-    # spec voltou intacta e o item re-parqueou.
-    if getattr(inp, "reauthor_specs", None):
-        audit_emit(
-            actor="system:sandbox-runtime",
-            action="tester_reauthor_unsupported",
-            tenant_id=inp.tenant_id,
-            work_item_id=inp.work_item_id,
-            details={"runtime": "local", "files": list(inp.reauthor_specs)[:10]},
-        )
-
     headers = GatewayCallHeaders(
         tenant_id=inp.tenant_id,
         work_item_id=inp.work_item_id,
@@ -3481,6 +3517,21 @@ async def _run_tester_turn_impl(
             headers=headers,
             virtual_key=vk.virtual_key,
             push=push,
+        )
+
+    # Beco 1: a ordem de re-autoria só é executada no runtime K8s (o parque e
+    # o veredito são de produção). DAQUI para baixo é o caminho genuinamente
+    # local — aqui ela seria descartada em silêncio, e o ledger tem que dizer
+    # por que a spec voltou intacta. (A primeira versão deste guard ficava
+    # ANTES do dispatch e disparava mislabeled em turno K8s — telemetria que
+    # mente custou vinte minutos de caça no wi_6f00bf0a.)
+    if getattr(inp, "reauthor_specs", None):
+        audit_emit(
+            actor="system:sandbox-runtime",
+            action="tester_reauthor_unsupported",
+            tenant_id=inp.tenant_id,
+            work_item_id=inp.work_item_id,
+            details={"runtime": "local", "files": list(inp.reauthor_specs)[:10]},
         )
 
     # REAL authoring (same selector as the planner, P1 by config): with no

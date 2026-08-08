@@ -2575,6 +2575,131 @@ class WorkItemLifecycleWorkflow:
                                     details={"specs": conflicts},
                                 )
                                 continue
+                failed_checks = [f for f in l1_result.findings if not f.passed]
+                # ANTES do incremento e do cap check: parquear É o substituto
+                # do teto quando a exaustão está reconhecida. O wi_6f00bf0a
+                # morreu em coder_retry_cap_exhausted com a memória armada —
+                # o cap executou primeiro o item que o parque existia para
+                # salvar. (Mesma posição estrutural da porta 1, que sempre
+                # parqueou pré-incremento.)
+                # Beco 1 (medido 2x: pageSize wi_5eecf486, 'warning'
+                # wi_32eb136f): specs do próprio Tester reprovando com
+                # veredito = nenhum ator autorizado. Parqueia na primitiva
+                # da porta 1 com o dossiê; retry humano volta ao laço.
+                #
+                # Gatilho v2 (wi_c9c7b200, morto no teto): memória POR
+                # SPEC, não fingerprint consecutivo. A sequência real foi
+                # test(badge) → lint+build → test(badge) idêntico — a
+                # rodada do meio resetava o contador e o parque nunca
+                # disparava. Agora: a mesma spec própria reprovando com
+                # veredito em QUALQUER rodada posterior parqueia,
+                # independente do que falhou entre elas. O registro é
+                # amplo (specs próprias FAIL com veredito, mesmo com
+                # outros gates juntos); o PARQUE continua exigindo a
+                # exclusividade — só dispara quando o Coder não tem mais
+                # nada legítimo para consertar.
+                exh_finding = next(
+                    (f for f in failed_checks if f.check == "test"), None
+                )
+                own_specs: list[str] = []
+                if workflow.patched("tester-spec-memory-parks-v1"):
+                    recorded_now: list[str] = []
+                    exclusive_now: list[str] = []
+                    if exh_finding is not None:
+                        # ERROR é artefato de infra (autópsia wi_32eb136f:
+                        # kill no meio do L1 deixa lint/build em ERROR), não
+                        # veredito — fica FORA da exclusividade e do desarme
+                        # da pinça; FAIL real continua contando. Medido no
+                        # wi_6f00bf0a: lint ERROR na rodada final teria
+                        # bloqueado o parque.
+                        verdict_failed_names = [
+                            f.check for f in failed_checks
+                            if getattr(f, "status", None) != GateStatus.ERROR
+                        ]
+                        recorded_now = tester_spec_assertion_failures(
+                            verdict_failed_names,
+                            test_detail=exh_finding.detail or "",
+                            tester_owned=list(
+                                getattr(tester_result, "test_files", None) or []
+                            ),
+                        )
+                        exclusive_now = exclusively_tester_spec_failures(
+                            verdict_failed_names,
+                            test_detail=exh_finding.detail or "",
+                            tester_owned=list(
+                                getattr(tester_result, "test_files", None) or []
+                            ),
+                        )
+                    # A pinça armada para o parque via NO-OP (wi_0d95384f):
+                    # falha exclusiva → specs+detail ficam no input; QUALQUER
+                    # outra falha desarma — evidência de duas rodadas atrás
+                    # não parqueia ninguém.
+                    if exclusive_now and exh_finding is not None:
+                        input.last_tester_exhaustion_specs = list(exclusive_now)
+                        input.last_tester_exhaustion_detail = (
+                            exh_finding.detail or ""
+                        )[:2000]
+                    else:
+                        input.last_tester_exhaustion_specs = []
+                        input.last_tester_exhaustion_detail = None
+                    seen = set(input.tester_assertion_failed_specs or [])
+                    if exclusive_now and any(s in seen for s in exclusive_now):
+                        own_specs = exclusive_now
+                    if recorded_now:
+                        merged = sorted(seen | set(recorded_now))
+                        if merged != sorted(seen):
+                            input.tester_assertion_failed_specs = merged
+                            await self._audit(
+                                "tester_spec_assertion_recorded",
+                                {"specs": recorded_now},
+                            )
+                elif (
+                    self._same_repair_count >= 1
+                    and workflow.patched("tester-spec-exhaustion-parks-v1")
+                ):
+                    # Gatilho v1 (consecutivo), preservado VERBATIM para o
+                    # replay de histórias rc.46 — nunca alcançado em
+                    # execução nova (o patch novo acima vence).
+                    if exh_finding is not None:
+                        own_specs = exclusively_tester_spec_failures(
+                            [f.check for f in failed_checks],
+                            test_detail=exh_finding.detail or "",
+                            tester_owned=list(
+                                getattr(tester_result, "test_files", None) or []
+                            ),
+                        )
+                if own_specs and exh_finding is not None:
+                    resumed = await self._park_spec_conflict(
+                        own_specs, exh_finding.detail or "",
+                        list(input.cumulative_files_changed),
+                        reason="tester_spec_exhaustion",
+                    )
+                    if self._cancelled:
+                        return await self._finish_cancelled()
+                    if resumed == "reauthor":
+                        # Julgamento humano, execução do sistema: a
+                        # próxima rodada é do TESTER (re-autoria in-
+                        # place). Nada de fix_context — um turno de
+                        # Coder aqui perseguiria a asserção que o
+                        # humano acabou de julgar errada.
+                        input.reauthor_specs = list(own_specs)
+                        input.reauthor_context = (exh_finding.detail or "")[-1500:]
+                        await self._set_status(
+                            WorkItemStatus.implementing,
+                            audit_action="tester_reauthor_ordered",
+                            details={"specs": own_specs,
+                                     "reason": "tester_spec_exhaustion"},
+                        )
+                        continue
+                    if resumed:
+                        input.fix_context = self._l1_failure_context(failed_checks)
+                        await self._set_status(
+                            WorkItemStatus.implementing,
+                            audit_action="spec_conflict_retry",
+                            details={"specs": own_specs,
+                                     "reason": "tester_spec_exhaustion"},
+                        )
+                        continue
                 input.coder_retry_count += 1
                 if input.coder_retry_count > self._input.coder_retry_cap:
                     self._input.terminal_detail = (
@@ -2598,7 +2723,6 @@ class WorkItemLifecycleWorkflow:
                         detail=self._input.terminal_detail,
                         pr_number=input.pr_number,
                     )
-                failed_checks = [f for f in l1_result.findings if not f.passed]
                 # The same complaint, surviving Coder turns that DID edit files,
                 # is a Coder that cannot act on what it was told — and every
                 # further round costs a full Coder+Tester+L1 (~12 minutes and a
@@ -2621,114 +2745,6 @@ class WorkItemLifecycleWorkflow:
                     else:
                         self._last_repair_fingerprint = fingerprint
                         self._same_repair_count = 0
-                    # Beco 1 (medido 2x: pageSize wi_5eecf486, 'warning'
-                    # wi_32eb136f): specs do próprio Tester reprovando com
-                    # veredito = nenhum ator autorizado. Parqueia na primitiva
-                    # da porta 1 com o dossiê; retry humano volta ao laço.
-                    #
-                    # Gatilho v2 (wi_c9c7b200, morto no teto): memória POR
-                    # SPEC, não fingerprint consecutivo. A sequência real foi
-                    # test(badge) → lint+build → test(badge) idêntico — a
-                    # rodada do meio resetava o contador e o parque nunca
-                    # disparava. Agora: a mesma spec própria reprovando com
-                    # veredito em QUALQUER rodada posterior parqueia,
-                    # independente do que falhou entre elas. O registro é
-                    # amplo (specs próprias FAIL com veredito, mesmo com
-                    # outros gates juntos); o PARQUE continua exigindo a
-                    # exclusividade — só dispara quando o Coder não tem mais
-                    # nada legítimo para consertar.
-                    exh_finding = next(
-                        (f for f in failed_checks if f.check == "test"), None
-                    )
-                    own_specs: list[str] = []
-                    if workflow.patched("tester-spec-memory-parks-v1"):
-                        recorded_now: list[str] = []
-                        exclusive_now: list[str] = []
-                        if exh_finding is not None:
-                            recorded_now = tester_spec_assertion_failures(
-                                [f.check for f in failed_checks],
-                                test_detail=exh_finding.detail or "",
-                                tester_owned=list(
-                                    getattr(tester_result, "test_files", None) or []
-                                ),
-                            )
-                            exclusive_now = exclusively_tester_spec_failures(
-                                [f.check for f in failed_checks],
-                                test_detail=exh_finding.detail or "",
-                                tester_owned=list(
-                                    getattr(tester_result, "test_files", None) or []
-                                ),
-                            )
-                        # A pinça armada para o parque via NO-OP (wi_0d95384f):
-                        # falha exclusiva → specs+detail ficam no input; QUALQUER
-                        # outra falha desarma — evidência de duas rodadas atrás
-                        # não parqueia ninguém.
-                        if exclusive_now and exh_finding is not None:
-                            input.last_tester_exhaustion_specs = list(exclusive_now)
-                            input.last_tester_exhaustion_detail = (
-                                exh_finding.detail or ""
-                            )[:2000]
-                        else:
-                            input.last_tester_exhaustion_specs = []
-                            input.last_tester_exhaustion_detail = None
-                        seen = set(input.tester_assertion_failed_specs or [])
-                        if exclusive_now and any(s in seen for s in exclusive_now):
-                            own_specs = exclusive_now
-                        if recorded_now:
-                            merged = sorted(seen | set(recorded_now))
-                            if merged != sorted(seen):
-                                input.tester_assertion_failed_specs = merged
-                                await self._audit(
-                                    "tester_spec_assertion_recorded",
-                                    {"specs": recorded_now},
-                                )
-                    elif (
-                        self._same_repair_count >= 1
-                        and workflow.patched("tester-spec-exhaustion-parks-v1")
-                    ):
-                        # Gatilho v1 (consecutivo), preservado VERBATIM para o
-                        # replay de histórias rc.46 — nunca alcançado em
-                        # execução nova (o patch novo acima vence).
-                        if exh_finding is not None:
-                            own_specs = exclusively_tester_spec_failures(
-                                [f.check for f in failed_checks],
-                                test_detail=exh_finding.detail or "",
-                                tester_owned=list(
-                                    getattr(tester_result, "test_files", None) or []
-                                ),
-                            )
-                    if own_specs and exh_finding is not None:
-                        resumed = await self._park_spec_conflict(
-                            own_specs, exh_finding.detail or "",
-                            list(input.cumulative_files_changed),
-                            reason="tester_spec_exhaustion",
-                        )
-                        if self._cancelled:
-                            return await self._finish_cancelled()
-                        if resumed == "reauthor":
-                            # Julgamento humano, execução do sistema: a
-                            # próxima rodada é do TESTER (re-autoria in-
-                            # place). Nada de fix_context — um turno de
-                            # Coder aqui perseguiria a asserção que o
-                            # humano acabou de julgar errada.
-                            input.reauthor_specs = list(own_specs)
-                            input.reauthor_context = (exh_finding.detail or "")[-1500:]
-                            await self._set_status(
-                                WorkItemStatus.implementing,
-                                audit_action="tester_reauthor_ordered",
-                                details={"specs": own_specs,
-                                         "reason": "tester_spec_exhaustion"},
-                            )
-                            continue
-                        if resumed:
-                            input.fix_context = self._l1_failure_context(failed_checks)
-                            await self._set_status(
-                                WorkItemStatus.implementing,
-                                audit_action="spec_conflict_retry",
-                                details={"specs": own_specs,
-                                         "reason": "tester_spec_exhaustion"},
-                            )
-                            continue
                     if self._same_repair_count >= 2:
                         raise _EscalateNow(
                             "coder_not_converging: the same gate failure survived "
