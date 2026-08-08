@@ -79,3 +79,16 @@ def test_the_order_filter_normalizes_model_path_prefixes():
     assert seen == [
         f"./{_DSE_SPEC}", f"/workspace/{_CLIENT_SPEC}", "src/other-dse.spec.ts", _DSE_SPEC,
     ], "os caminhos vistos alimentam o tester_reauthor_missed"
+
+
+def test_partial_miss_is_the_delta_not_the_absence():
+    """rc.49 fechou o miss TOTAL; o wi_53c820f1 mediu o PARCIAL: ordenadas 2
+    specs, reescrita 1, silêncio sobre a que faltou. O que o evento carrega é
+    o delta ordered − reauthored — miss total vira caso particular."""
+    assert activities._reauthor_missing(
+        [_DSE_SPEC, _CLIENT_SPEC], [_CLIENT_SPEC]
+    ) == [_DSE_SPEC]
+    assert activities._reauthor_missing([_DSE_SPEC], [_DSE_SPEC]) == []
+    assert activities._reauthor_missing([_DSE_SPEC, _CLIENT_SPEC], []) == [
+        _DSE_SPEC, _CLIENT_SPEC,
+    ]
