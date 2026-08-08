@@ -376,6 +376,28 @@ def exclusively_tester_spec_failures(
     return specs
 
 
+def tester_spec_assertion_failures(
+    failed_check_names: list[str], *, test_detail: str, tester_owned: list[str]
+) -> list[str]:
+    """A MEMÓRIA do beco 1 (gatilho por spec, wi_c9c7b200): specs PRÓPRIAS na
+    lista FAIL com veredito presente — independente de outros gates reprovando
+    na mesma rodada. Isto REGISTRA "esta spec já reprovou com asserção neste
+    item"; não decide parque nenhum: parquear continua exigindo a exclusividade
+    de `exclusively_tester_spec_failures` (nenhum ator autorizado AGORA)."""
+    if "test" not in set(failed_check_names):
+        return []
+    detail = test_detail or ""
+    if _LOAD_FAILURE_MARK.search(detail):
+        return []
+    owned = set(tester_owned or [])
+    specs: list[str] = []
+    for m in _FAILING_SUITE_LINE.finditer(detail):
+        s = m.group(1)
+        if s in owned and s not in specs:
+            specs.append(s)
+    return specs
+
+
 class _BlockNow(Exception):
     """WSB-E3-T2 — EMPTY approver cascade: Blocked + escalation, it never
     auto-approves on absence (P1/P3)."""
@@ -2556,60 +2578,99 @@ class WorkItemLifecycleWorkflow:
                         self._last_repair_fingerprint = fingerprint
                         self._same_repair_count = 0
                     # Beco 1 (medido 2x: pageSize wi_5eecf486, 'warning'
-                    # wi_32eb136f): fingerprint repetido apontando SÓ para specs
-                    # do próprio Tester com veredito = nenhum ator autorizado.
-                    # Na SEGUNDA falha idêntica, não na terceira: com zero
-                    # atores, a rodada extra não compra nada — e no caso real do
-                    # 'warning' o teto chegava antes da terceira. Parqueia na
-                    # primitiva da porta 1 com o dossiê; retry humano volta ao
-                    # laço, e uma nova falha idêntica re-parqueia em vez de
-                    # queimar até o teto.
-                    if (
+                    # wi_32eb136f): specs do próprio Tester reprovando com
+                    # veredito = nenhum ator autorizado. Parqueia na primitiva
+                    # da porta 1 com o dossiê; retry humano volta ao laço.
+                    #
+                    # Gatilho v2 (wi_c9c7b200, morto no teto): memória POR
+                    # SPEC, não fingerprint consecutivo. A sequência real foi
+                    # test(badge) → lint+build → test(badge) idêntico — a
+                    # rodada do meio resetava o contador e o parque nunca
+                    # disparava. Agora: a mesma spec própria reprovando com
+                    # veredito em QUALQUER rodada posterior parqueia,
+                    # independente do que falhou entre elas. O registro é
+                    # amplo (specs próprias FAIL com veredito, mesmo com
+                    # outros gates juntos); o PARQUE continua exigindo a
+                    # exclusividade — só dispara quando o Coder não tem mais
+                    # nada legítimo para consertar.
+                    exh_finding = next(
+                        (f for f in failed_checks if f.check == "test"), None
+                    )
+                    own_specs: list[str] = []
+                    if workflow.patched("tester-spec-memory-parks-v1"):
+                        if exh_finding is not None:
+                            recorded_now = tester_spec_assertion_failures(
+                                [f.check for f in failed_checks],
+                                test_detail=exh_finding.detail or "",
+                                tester_owned=list(
+                                    getattr(tester_result, "test_files", None) or []
+                                ),
+                            )
+                            exclusive_now = exclusively_tester_spec_failures(
+                                [f.check for f in failed_checks],
+                                test_detail=exh_finding.detail or "",
+                                tester_owned=list(
+                                    getattr(tester_result, "test_files", None) or []
+                                ),
+                            )
+                            seen = set(input.tester_assertion_failed_specs or [])
+                            if exclusive_now and any(s in seen for s in exclusive_now):
+                                own_specs = exclusive_now
+                            if recorded_now:
+                                merged = sorted(seen | set(recorded_now))
+                                if merged != sorted(seen):
+                                    input.tester_assertion_failed_specs = merged
+                                    await self._audit(
+                                        "tester_spec_assertion_recorded",
+                                        {"specs": recorded_now},
+                                    )
+                    elif (
                         self._same_repair_count >= 1
                         and workflow.patched("tester-spec-exhaustion-parks-v1")
                     ):
-                        exh_finding = next(
-                            (f for f in failed_checks if f.check == "test"), None
-                        )
-                        own_specs = exclusively_tester_spec_failures(
-                            [f.check for f in failed_checks],
-                            test_detail=(exh_finding.detail if exh_finding else "") or "",
-                            tester_owned=list(
-                                getattr(tester_result, "test_files", None) or []
-                            ),
-                        )
-                        if own_specs and exh_finding is not None:
-                            resumed = await self._park_spec_conflict(
-                                own_specs, exh_finding,
-                                list(input.cumulative_files_changed),
-                                reason="tester_spec_exhaustion",
+                        # Gatilho v1 (consecutivo), preservado VERBATIM para o
+                        # replay de histórias rc.46 — nunca alcançado em
+                        # execução nova (o patch novo acima vence).
+                        if exh_finding is not None:
+                            own_specs = exclusively_tester_spec_failures(
+                                [f.check for f in failed_checks],
+                                test_detail=exh_finding.detail or "",
+                                tester_owned=list(
+                                    getattr(tester_result, "test_files", None) or []
+                                ),
                             )
-                            if self._cancelled:
-                                return await self._finish_cancelled()
-                            if resumed == "reauthor":
-                                # Julgamento humano, execução do sistema: a
-                                # próxima rodada é do TESTER (re-autoria in-
-                                # place). Nada de fix_context — um turno de
-                                # Coder aqui perseguiria a asserção que o
-                                # humano acabou de julgar errada.
-                                input.reauthor_specs = list(own_specs)
-                                input.reauthor_context = (exh_finding.detail or "")[-1500:]
-                                await self._set_status(
-                                    WorkItemStatus.implementing,
-                                    audit_action="tester_reauthor_ordered",
-                                    details={"specs": own_specs,
-                                             "reason": "tester_spec_exhaustion"},
-                                )
-                                continue
-                            if resumed:
-                                input.fix_context = self._l1_failure_context(failed_checks)
-                                await self._set_status(
-                                    WorkItemStatus.implementing,
-                                    audit_action="spec_conflict_retry",
-                                    details={"specs": own_specs,
-                                             "reason": "tester_spec_exhaustion"},
-                                )
-                                continue
+                    if own_specs and exh_finding is not None:
+                        resumed = await self._park_spec_conflict(
+                            own_specs, exh_finding,
+                            list(input.cumulative_files_changed),
+                            reason="tester_spec_exhaustion",
+                        )
+                        if self._cancelled:
+                            return await self._finish_cancelled()
+                        if resumed == "reauthor":
+                            # Julgamento humano, execução do sistema: a
+                            # próxima rodada é do TESTER (re-autoria in-
+                            # place). Nada de fix_context — um turno de
+                            # Coder aqui perseguiria a asserção que o
+                            # humano acabou de julgar errada.
+                            input.reauthor_specs = list(own_specs)
+                            input.reauthor_context = (exh_finding.detail or "")[-1500:]
+                            await self._set_status(
+                                WorkItemStatus.implementing,
+                                audit_action="tester_reauthor_ordered",
+                                details={"specs": own_specs,
+                                         "reason": "tester_spec_exhaustion"},
+                            )
+                            continue
+                        if resumed:
+                            input.fix_context = self._l1_failure_context(failed_checks)
+                            await self._set_status(
+                                WorkItemStatus.implementing,
+                                audit_action="spec_conflict_retry",
+                                details={"specs": own_specs,
+                                         "reason": "tester_spec_exhaustion"},
+                            )
+                            continue
                     if self._same_repair_count >= 2:
                         raise _EscalateNow(
                             "coder_not_converging: the same gate failure survived "

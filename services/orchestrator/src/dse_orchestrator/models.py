@@ -132,6 +132,15 @@ class WorkItemLifecycleInput:
     # perder isto daria chances infinitas e nunca parquearia.
     spec_conflict_deferred_specs: list[str] = field(default_factory=list)
 
+    # Beco 1, gatilho por memória de spec (wi_c9c7b200): specs PRÓPRIAS do
+    # Tester que já reprovaram COM VEREDITO neste item, em qualquer rodada. A
+    # mesma spec reprovando de novo — em rodada exclusivamente-de-test —
+    # parqueia, independente do que falhou entre as duas (o fingerprint
+    # consecutivo resetava numa rodada de lint+build no meio e o item morria
+    # mudo no teto). No input: perder isto num continue_as_new apagaria a
+    # memória e re-armaria o teto.
+    tester_assertion_failed_specs: list[str] = field(default_factory=list)
+
     # Beco 1, veredito `reauthor`: ordem humana pendente de re-autoria da spec
     # PRÓPRIA do Tester (caminhos exatos + evidência da falha). No INPUT — não
     # em atributo de instância — para sobreviver a um continue_as_new entre o

@@ -38,11 +38,16 @@ As regras e onde vivem:
                                      vira NOT_OUR_FAILURE e o item SEGUE (promoveu os
                                      becos 2 e 3 deste mapa).
   R9 exaustão em spec própria      — workflows.py:exclusively_tester_spec_failures +
-                                     parque na primitiva da porta 1: fingerprint
-                                     repetido apontando SÓ para spec do Tester com
-                                     veredito = nenhum ator autorizado → humano decide
-                                     com dossiê (promoveu o beco 1; medido 2x antes:
-                                     pageSize wi_5eecf486, 'warning' wi_32eb136f).
+                                     tester_spec_assertion_failures (a MEMÓRIA) +
+                                     parque na primitiva da porta 1. Gatilho v2 por
+                                     MEMÓRIA DE SPEC: a mesma spec própria reprovando
+                                     com veredito em QUALQUER rodada posterior parqueia,
+                                     independente do que falhou entre elas — o
+                                     fingerprint consecutivo resetava numa rodada de
+                                     lint+build no meio e o wi_c9c7b200 morreu no teto
+                                     com o parque deployado. Medidos: pageSize
+                                     wi_5eecf486, 'warning' wi_32eb136f, alternado
+                                     wi_c9c7b200.
 """
 from __future__ import annotations
 
@@ -107,8 +112,10 @@ def saidas(c: Celula) -> set[str]:
         s.add("baseline:not_our_failure")
 
     # R9 — exaustão reconhecida (não classificada): asserção em spec própria
-    # com veredito, repetida, sem ator autorizado → parque para humano com
-    # dossiê, na mesma primitiva da porta 1.
+    # com veredito, REPETIDA EM QUALQUER RODADA POSTERIOR (memória por spec,
+    # não fingerprint consecutivo — rodadas heterogêneas no meio não apagam),
+    # sem ator autorizado → parque para humano com dossiê, na primitiva da
+    # porta 1.
     if c.arquivo == SPEC_TESTER and c.modo == ASSERCAO:
         s.add("humano:spec_conflict")
 
@@ -154,8 +161,10 @@ VIVAS: list[Celula] = [
     # Promovida de beco por R9: a exaustão em spec própria parqueia com dossiê
     # (specs, asserções, esperado vs recebido, diff) em vez de morrer no teto.
     Celula("tester", SPEC_TESTER, ASSERCAO,
-           nota="pageSize (wi_5eecf486) e 'warning' (wi_32eb136f): humano resolve em "
-                "trinta segundos com o dossiê; o laço agora para e pergunta"),
+           nota="pageSize (wi_5eecf486), 'warning' (wi_32eb136f) e o alternado "
+                "test→lint+build→test (wi_c9c7b200, que escapou do gatilho consecutivo "
+                "e morreu no teto): memória por spec parqueia na 2ª reprovação da "
+                "mesma spec, e o humano decide com o dossiê — retry ou reauthor"),
 ]
 
 #: BECOS CONHECIDOS — vazio hoje: os três medidos foram promovidos (R8, R9).
