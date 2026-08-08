@@ -24,6 +24,7 @@ import psycopg2
 import pytest
 from temporalio.worker import Worker
 
+from dse_contracts.activities import L1Finding
 from dse_contracts.work_item import WorkItemStatus
 from dse_orchestrator.local_activities import LOCAL_ACTIVITIES
 from dse_orchestrator.models import WorkItemLifecycleInput
@@ -228,8 +229,6 @@ async def test_the_alternating_sequence_parks_on_the_second_spec_failure(time_sk
     rodada do meio e o beco 1 nunca disparou. O gatilho certo é memória POR
     SPEC: a mesma spec própria reprovando com veredito em QUALQUER rodada
     posterior parqueia, independente do que falhou entre elas."""
-    from dse_contracts.activities import L1Finding
-
     work_item_id = new_work_item_id("exh-alt")
     insert_work_item(work_item_id)
     state = FakeControlPlane(
@@ -262,6 +261,103 @@ async def test_the_alternating_sequence_parks_on_the_second_spec_failure(time_sk
         result = await handle.result()
     assert result.status == WorkItemStatus.done.value
     assert "coder_retry_cap_exhausted" not in read_audit_actions(work_item_id)
+
+
+#: wi_0d95384f, rodada 2 (verbatim, abreviado): a reprovação que armou a pinça
+#: — com o par Expected/Received que o dossiê tem que carregar.
+_NOOP_PINCER_DETAIL = f"""summary: 403 errors
+--- the 1 line(s) this gate counted ---
+FAIL {_BADGE_SPEC}
+--- raw output (tail) ---
+  ● ReportStatusBadgeComponent › should show in-progress for various non-finished pages
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: "in-progress"
+    Received: "in_progress"
+
+      at src/app/components/homepage/components/report-status-badge/report-status-badge.component.spec.ts:76:57
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_honest_coder_noop_parks_with_the_full_dossier(time_skipping_env):
+    """A sequência exata do wi_0d95384f (2026-08-08, escalado sem dossiê):
+    build → test(badge, spec própria, veredito) → no-op → no-op. O Coder
+    honesto declara "não tenho jogada" duas vezes; isso é evidência de
+    exaustão MAIS forte que uma segunda rodada vermelha de L1 — e já paga.
+    O ramo do no-op parqueia com o MESMO dossiê do parque via L1 (specs,
+    asserções, Expected/Received, diff acumulado): dossiê pobre viraria um
+    reauthor às cegas. A escalada genérica fica para no-op sem pinça armada."""
+    work_item_id = new_work_item_id("exh-noop")
+    insert_work_item(work_item_id)
+    component = "src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [L1Finding(check="build", passed=False, detail="NG8001: 'p-tag' is not a known element")],
+            [L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+        ],
+        coder_files_changed_by_turn=[
+            [component],  # implementação
+            [component],  # conserto do build
+            [],           # no-op 1: nada a mudar — o código está certo
+            [],           # no-op 2: o ator declara exaustão
+        ],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        assert state.coder_turn_calls == 4, "parqueia no segundo no-op, sem rodada extra de L1"
+        actions = read_audit_actions(work_item_id)
+        assert "escalated" not in actions, "parque com dossiê, não escalada muda"
+
+        d = _audit_details(work_item_id, "spec_conflict_detected")[0]
+        assert d.get("reason") == "tester_spec_exhaustion"
+        assert d["specs"] == [_BADGE_SPEC], "quais specs"
+        assert "expect(received).toBe(expected)" in d["assertions"], "quais asserções"
+        joined = " ".join(d.get("expected_vs_received") or [])
+        assert "in-progress" in joined and "in_progress" in joined, "esperado vs recebido"
+        assert component in d["diff_files"], "o diff acumulado do Coder"
+
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        assert state.tester_reauthor_orders[-1] == [_BADGE_SPEC]
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+
+
+@pytest.mark.asyncio
+async def test_a_noop_without_an_armed_pincer_still_escalates(time_skipping_env):
+    """O guard: dois no-ops contra uma falha que NÃO é pinça (lint — o Coder
+    tinha jogada e não jogou) seguem escalando como hoje. O parque lateral
+    existe só quando a última falha de L1 foi exclusivamente spec própria com
+    veredito; evidência velha não parqueia ninguém."""
+    work_item_id = new_work_item_id("exh-noop-guard")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [L1Finding(check="lint", passed=False, detail="ESLint: 2 problems (2 errors)")],
+        ],
+        coder_files_changed_by_turn=[
+            ["src/app/app.component.ts"],
+            [],
+            [],
+        ],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"escalated"})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.escalated.value
+    assert "spec_conflict_detected" not in read_audit_actions(work_item_id)
 
 
 # ---------------------------------------------------------------------------
