@@ -360,6 +360,135 @@ async def test_a_noop_without_an_armed_pincer_still_escalates(time_skipping_env)
     assert "spec_conflict_detected" not in read_audit_actions(work_item_id)
 
 
+@pytest.mark.asyncio
+async def test_an_armed_memory_parks_even_at_the_retry_cap(time_skipping_env):
+    """wi_6f00bf0a, morte 2: a 4ª falha de L1 (test exclusivo, spec na memória)
+    bateu no cap check ANTES do parque — o teto executou primeiro exatamente o
+    item que o parque existia para salvar. O parque preempta o teto: parquear
+    É o substituto do teto quando a exaustão está reconhecida."""
+    work_item_id = new_work_item_id("exh-cap")
+    insert_work_item(work_item_id)
+    component = "src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [L1Finding(check="build", passed=False, detail="NG8001: unknown element")],
+            [L1Finding(check="build", passed=False, detail="NG8001: unknown element")],
+            [L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+            [L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+        ],
+        coder_files_changed=[component],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        assert state.coder_turn_calls == 4, "a 4ª falha parqueia; o teto não a alcança"
+        actions = read_audit_actions(work_item_id)
+        assert "coder_retry_cap_exhausted" not in actions
+        d = _audit_details(work_item_id, "spec_conflict_detected")[0]
+        assert d.get("reason") == "tester_spec_exhaustion"
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+
+
+@pytest.mark.asyncio
+async def test_an_error_gate_neither_blocks_the_park_nor_disarms_the_pincer(time_skipping_env):
+    """wi_6f00bf0a, agravante medido: a rodada final veio com lint ERROR —
+    artefato de infra (documentado na autópsia do wi_32eb136f), não veredito.
+    ERROR não entra no teste de exclusividade e não desarma a pinça; FAIL real
+    continua contando."""
+    work_item_id = new_work_item_id("exh-err")
+    insert_work_item(work_item_id)
+    from dse_contracts.activities import GateStatus
+    err = L1Finding(check="lint", passed=False, status=GateStatus.ERROR,
+                    detail="kill artifact — no verdict taken")
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [err, L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+            [L1Finding(check="lint", passed=False, status=GateStatus.ERROR,
+                       detail="kill artifact — no verdict taken"),
+             L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+        ],
+        coder_files_changed=["src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        assert state.coder_turn_calls == 2, "parqueia na 2ª reprovação da spec, ERROR ignorado"
+        d = _audit_details(work_item_id, "spec_conflict_detected")[0]
+        assert d.get("reason") == "tester_spec_exhaustion"
+        assert d["specs"] == [_BADGE_SPEC]
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+
+
+@pytest.mark.asyncio
+async def test_the_full_chain_park_reauthor_rewrite_green_pr_ready(time_skipping_env):
+    """A CADEIA inteira em fake, elo a elo — porque os três últimos vãos foram
+    interações entre mecanismos individualmente corretos: parque (R10, no-op
+    duplo) → veredito reauthor → reescrita executada COM tester_spec_reauthored
+    no ledger → L1 verde → review_ready → done. O elo da reescrita auditada é
+    exatamente o que faltou mudo no wi_6f00bf0a."""
+    work_item_id = new_work_item_id("exh-chain")
+    insert_work_item(work_item_id)
+    component = "src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [L1Finding(check="build", passed=False, detail="NG8001: unknown element")],
+            [L1Finding(check="test", passed=False, detail=_NOOP_PINCER_DETAIL)],
+        ],
+        coder_files_changed_by_turn=[
+            [component],
+            [component],
+            [],
+            [],
+        ],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        d = _audit_details(work_item_id, "spec_conflict_detected")[0]
+        assert d.get("reason") == "tester_spec_exhaustion"
+        assert d["specs"] == [_BADGE_SPEC]
+        joined = " ".join(d.get("expected_vs_received") or [])
+        assert "in-progress" in joined and "in_progress" in joined
+
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        reauthored = _audit_details(work_item_id, "tester_spec_reauthored")
+        assert reauthored, "a reescrita deixa evidência — nunca silêncio"
+        assert reauthored[0]["files"] == [_BADGE_SPEC]
+        assert reauthored[0]["reason"] == "human_order"
+        assert state.tester_reauthor_orders[-1] == [_BADGE_SPEC]
+        assert all(o == [] for o in state.tester_reauthor_orders[:-1])
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+    actions = read_audit_actions(work_item_id)
+    assert "coder_retry_cap_exhausted" not in actions
+    assert "escalated" not in actions
+
+
 # ---------------------------------------------------------------------------
 # O veredito `reauthor`: humano autoriza, agente executa. A spec do Tester
 # vive no Pod (commit sem push até o finalize) — não existe caminho out-of-band

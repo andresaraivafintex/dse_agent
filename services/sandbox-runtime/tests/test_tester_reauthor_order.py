@@ -57,3 +57,25 @@ def test_every_dse_prefix_counts_as_ownership():
     pod = _FakePodSh({_DSE_SPEC: subjects})
     owned, refused = activities._pod_reauthor_partition(pod, [_DSE_SPEC])
     assert owned == [_DSE_SPEC] and refused == []
+
+
+def test_the_order_filter_normalizes_model_path_prefixes():
+    """wi_6f00bf0a: a ordem executou no vazio — o modelo devolveu caminhos que
+    o filtro determinístico descartou EM SILÊNCIO. O filtro normaliza os
+    prefixos que o modelo usa ('./x', '/workspace/x') para o caminho exato do
+    workspace, e devolve também os caminhos VISTOS — a matéria-prima do evento
+    tester_reauthor_missed quando nada sobrevive."""
+    script = [
+        {"tool": "write_file", "path": f"./{_DSE_SPEC}", "content": "rewritten"},
+        {"tool": "write_file", "path": f"/workspace/{_CLIENT_SPEC}", "content": "nope"},
+        {"tool": "write_file", "path": "src/other-dse.spec.ts", "content": "new path"},
+        {"tool": "write_file", "path": _DSE_SPEC, "content": ""},
+        {"tool": "read_file", "path": _DSE_SPEC},
+    ]
+    accepted, seen = activities._reauthor_script_writes(script, [_DSE_SPEC])
+    assert accepted == [(_DSE_SPEC, "rewritten")], (
+        "o './' do modelo é o MESMO caminho exato; conteúdo vazio não escreve"
+    )
+    assert seen == [
+        f"./{_DSE_SPEC}", f"/workspace/{_CLIENT_SPEC}", "src/other-dse.spec.ts", _DSE_SPEC,
+    ], "os caminhos vistos alimentam o tester_reauthor_missed"

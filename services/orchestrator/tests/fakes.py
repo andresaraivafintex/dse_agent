@@ -242,13 +242,43 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
 
     async def run_tester_turn(payload: dict) -> TesterTurnResult:
         state.tester_calls += 1
-        state.tester_reauthor_orders.append(list(payload.get("reauthor_specs") or []))
+        reauthor_specs = list(payload.get("reauthor_specs") or [])
+        state.tester_reauthor_orders.append(reauthor_specs)
         state.calls_log.append("run_tester_turn")
         _maybe_fail_closed(state, ACTIVITY_RUN_TESTER_TURN)
         RunTesterTurnInput(**payload)  # REAL contract decode
+        files_changed: list[str] = []
+        if reauthor_specs:
+            # Espelho do contrato da activity real (pod path): a ordem executa
+            # a reescrita in-place e a EVIDÊNCIA vai ao ledger — o E2E da
+            # cadeia parque → reauthor → reescrita auditada → L1 verde pina
+            # exatamente este elo, que em produção falhou mudo (wi_6f00bf0a).
+            import json as _json
+            import os as _os
+
+            import psycopg2 as _pg
+            conn = _pg.connect(_os.environ.get(
+                "DSE_DATABASE_URL",
+                "postgresql://dse_app:dse_app_dev_only@localhost:5432/dse",
+            ))
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO audit_log (work_item_id, tenant_id, actor, action, details) "
+                        "VALUES (%s, %s, %s, %s, %s)",
+                        (payload["work_item_id"], payload["tenant_id"],
+                         "system:sandbox-runtime", "tester_spec_reauthored",
+                         _json.dumps({"files": reauthor_specs, "reason": "human_order",
+                                      "cost_usd": 0.02})),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            files_changed = reauthor_specs
         return TesterTurnResult(
             sandbox_id=payload["sandbox_id"],
             test_files=list(state.tester_test_files),
+            files_changed=files_changed,
             tests_ran=state.tester_tests_ran,
             tests_passed=state.tester_tests_passed,
             returncode=state.tester_returncode,
