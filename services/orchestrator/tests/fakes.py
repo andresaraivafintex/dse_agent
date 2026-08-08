@@ -156,6 +156,11 @@ class FakeControlPlane:
     #: suites que o gate `test` do fake reporta como já vermelhas no base_sha
     #: (baseline check, rc.43) — entram em L1Finding.inherited_failures
     l1_inherited_failures: list[str] = field(default_factory=list)
+    #: findings POR CHAMADA do L1 (beco 1, gatilho por memória de spec): cada
+    #: chamada consome a próxima lista; esgotadas → PASS. Tem precedência sobre
+    #: l1_fail_times/l1_fail_detail — é o knob das sequências heterogêneas
+    #: (test → lint+build → test) que o contador fixo não expressa.
+    l1_findings_by_call: list[list[Any]] = field(default_factory=list)
     l2_calls: int = 0
     # risk declared by the Planner (default low -> the gate auto-approves)
     plan_risk_class: str = "low"
@@ -339,6 +344,13 @@ def build_fake_activities(state: FakeControlPlane) -> list[Any]:
         state.last_l1_payload = dict(payload)
         inp = RunL1PipelineInput(**payload)  # REAL contract decode (S7)
         wi = inp.sandbox.work_item_id
+        if state.l1_findings_by_call:
+            findings = state.l1_findings_by_call.pop(0)
+            return L1Result(
+                work_item_id=wi,
+                passed=all(f.passed for f in findings),
+                findings=list(findings),
+            )
         if state.l1_fail_times > 0:
             state.l1_fail_times -= 1
             return L1Result(

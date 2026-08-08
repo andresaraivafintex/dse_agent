@@ -205,6 +205,65 @@ async def test_the_pagesize_scenario_parks_instead_of_dying(time_skipping_env):
     )
 
 
+#: wi_c9c7b200, verbatim (abreviado): a mesma spec própria, rodadas 2 e 4 —
+#: com lint+build no meio. A linha FAIL duplicada é como o gate a emitiu.
+_ALTERNATING_BADGE_DETAIL = f"""summary: 403 errors
+--- the 2 line(s) this gate counted ---
+FAIL {_BADGE_SPEC}
+FAIL {_BADGE_SPEC}
+--- raw output (tail) ---
+  ● ReportStatusBadgeComponent › should show in-progress for various non-finished pages
+
+    expect(received).toBe(expected) // Object.is equality
+
+      at src/app/components/homepage/components/report-status-badge/report-status-badge.component.spec.ts:76:57
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_alternating_sequence_parks_on_the_second_spec_failure(time_skipping_env):
+    """A sequência exata que matou o wi_c9c7b200 no teto (2026-08-07): a spec
+    própria reprova, o Coder a persegue e quebra lint+build, conserta ambos, e
+    a spec reprova DE NOVO — idêntica. O fingerprint consecutivo resetou na
+    rodada do meio e o beco 1 nunca disparou. O gatilho certo é memória POR
+    SPEC: a mesma spec própria reprovando com veredito em QUALQUER rodada
+    posterior parqueia, independente do que falhou entre elas."""
+    from dse_contracts.activities import L1Finding
+
+    work_item_id = new_work_item_id("exh-alt")
+    insert_work_item(work_item_id)
+    state = FakeControlPlane(
+        plan_risk_class="low",
+        l1_findings_by_call=[
+            [L1Finding(check="test", passed=False, detail=_ALTERNATING_BADGE_DETAIL)],
+            [L1Finding(check="lint", passed=False, detail="ESLint: 2 problems (2 errors)"),
+             L1Finding(check="build", passed=False, detail="NG8001: 'p-tag' is not a known element")],
+            [L1Finding(check="test", passed=False, detail=_ALTERNATING_BADGE_DETAIL)],
+        ],
+        coder_files_changed=["src/app/components/homepage/components/report-status-badge/report-status-badge.component.ts"],
+        tester_test_files=[_BADGE_SPEC],
+    )
+    worker, handle = await _start(state, work_item_id, time_skipping_env)
+    async with worker:
+        await wait_for_status(handle, {"spec_conflict"})
+        assert state.coder_turn_calls == 3, (
+            "parqueia na SEGUNDA reprovação da spec — a rodada de lint+build no "
+            "meio não apaga a memória"
+        )
+        d = _audit_details(work_item_id, "spec_conflict_detected")[0]
+        assert d.get("reason") == "tester_spec_exhaustion"
+        assert d["specs"] == [_BADGE_SPEC]
+        await handle.signal(
+            "spec_conflict_resolution", {"verdict": "reauthor", "actor": "usr_test"},
+        )
+        await wait_for_status(handle, {"review_ready"})
+        await handle.signal("review_comment", {"verdict": "approved"})
+        await handle.signal("merged_by_human", {"merged_by": "usr_test", "pr_number": 1000})
+        result = await handle.result()
+    assert result.status == WorkItemStatus.done.value
+    assert "coder_retry_cap_exhausted" not in read_audit_actions(work_item_id)
+
+
 # ---------------------------------------------------------------------------
 # O veredito `reauthor`: humano autoriza, agente executa. A spec do Tester
 # vive no Pod (commit sem push até o finalize) — não existe caminho out-of-band
